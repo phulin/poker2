@@ -417,8 +417,13 @@ def _pair_event_lookup(
     return pair_event_all[opponents[left], opponents[right]]
 
 
-def _pair_event_all_from_card(card_all: torch.Tensor, same_all: torch.Tensor) -> torch.Tensor:
-    compact = _p4_pair_event_triton(card_all, same_all)
+def _pair_event_all_from_card(
+    card_all: torch.Tensor,
+    same_all: torch.Tensor,
+    *,
+    finish_only: bool = False,
+) -> torch.Tensor:
+    compact = _p4_pair_event_triton(card_all, same_all, finish_only=finish_only)
     if compact is not None:
         return compact
     pair_event_all = torch.einsum("pmbhc,qnbhc->pqmnbh", card_all, card_all)
@@ -959,6 +964,44 @@ if triton is not None:
                 tl.store(pair_event_out + out_base + h, value, mask=h_mask)
 
     @triton.jit
+    def _p4_pair_event_finish_kernel(
+        card_all,
+        same_all,
+        pair_event_out,
+        B: tl.constexpr,
+        H: tl.constexpr,
+        CARD_COUNT: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        BLOCK_C: tl.constexpr,
+    ):
+        b = tl.program_id(0)
+        pair = tl.program_id(1)
+        h_block = tl.program_id(2)
+        h = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+        card = tl.arange(0, BLOCK_C)
+        h_mask = h < H
+        hc_mask = h_mask[:, None] & (card[None, :] < CARD_COUNT)
+        left = tl.where(pair < 3, 0, tl.where(pair < 5, 1, 2))
+        right = tl.where(pair < 3, pair + 1, tl.where(pair < 5, pair - 1, 3))
+
+        for event in tl.static_range(0, 5):
+            left_mode = tl.where(event == 2, 1, tl.where(event == 4, 2, 0))
+            right_mode = tl.where(event == 1, 1, tl.where(event == 3, 1, tl.where(event == 4, 2, 0)))
+            left_base = (((left * 3 + left_mode) * B + b) * H + h[:, None]) * CARD_COUNT
+            right_base = (((right * 3 + right_mode) * B + b) * H + h[:, None]) * CARD_COUNT
+            left_cards = tl.load(card_all + left_base + card[None, :], mask=hc_mask, other=0.0)
+            right_cards = tl.load(card_all + right_base + card[None, :], mask=hc_mask, other=0.0)
+            value = tl.sum(left_cards * right_cards, axis=1)
+            if event == 0 or event == 3 or event == 4:
+                value -= tl.load(
+                    same_all + (((left * 4 + right) * 3 + left_mode) * B + b) * H + h,
+                    mask=h_mask,
+                    other=0.0,
+                )
+            out_base = ((pair * 5 + event) * B + b) * H
+            tl.store(pair_event_out + out_base + h, value, mask=h_mask)
+
+    @triton.jit
     def _tier2_p4_finish_kernel(
         scalar_all,
         pair_event_all,
@@ -968,6 +1011,7 @@ if triton is not None:
         B: tl.constexpr,
         H: tl.constexpr,
         BLOCK_H: tl.constexpr,
+        FINISH_ONLY_EVENTS: tl.constexpr,
     ):
         b = tl.program_id(0)
         hero = tl.program_id(1)
@@ -1010,13 +1054,17 @@ if triton is not None:
                 right - 1,
                 tl.where(left == 1, right + 1, 5),
             )
-            pair_base = (pair * 9 * B + b) * H + h
+            pair_stride = tl.where(FINISH_ONLY_EVENTS, 5, 9)
+            pair_base = (pair * pair_stride * B + b) * H + h
             pair00 = tl.load(pair_event_all + pair_base, mask=h_mask, other=0.0)
             pair01 = tl.load(pair_event_all + pair_base + B * H, mask=h_mask, other=0.0)
-            pair10 = tl.load(pair_event_all + pair_base + 3 * B * H, mask=h_mask, other=0.0)
-            pair11 = tl.load(pair_event_all + pair_base + 4 * B * H, mask=h_mask, other=0.0)
+            pair10_offset = tl.where(FINISH_ONLY_EVENTS, 2, 3) * B * H
+            pair11_offset = tl.where(FINISH_ONLY_EVENTS, 3, 4) * B * H
+            pair_total_offset = tl.where(FINISH_ONLY_EVENTS, 4, 8) * B * H
+            pair10 = tl.load(pair_event_all + pair_base + pair10_offset, mask=h_mask, other=0.0)
+            pair11 = tl.load(pair_event_all + pair_base + pair11_offset, mask=h_mask, other=0.0)
             pair_total = tl.load(
-                pair_event_all + pair_base + 8 * B * H,
+                pair_event_all + pair_base + pair_total_offset,
                 mask=h_mask,
                 other=0.0,
             )
@@ -1170,12 +1218,36 @@ def _tier3_wedge_p4_triton(
 def _p4_pair_event_triton(
     card_all: torch.Tensor,
     same_all: torch.Tensor,
+    *,
+    finish_only: bool = False,
 ) -> torch.Tensor | None:
     if triton is None or card_all.device.type != "cuda" or card_all.shape[0] != 4:
         return None
     batch_size = card_all.shape[2]
     active_count = card_all.shape[3]
     block_h = 4
+    if finish_only:
+        out = torch.empty(
+            6,
+            5,
+            batch_size,
+            active_count,
+            dtype=card_all.dtype,
+            device=card_all.device,
+        )
+        grid = (batch_size, 6, triton.cdiv(active_count, block_h))
+        _p4_pair_event_finish_kernel[grid](
+            card_all.contiguous(),
+            same_all.contiguous(),
+            out,
+            B=batch_size,
+            H=active_count,
+            CARD_COUNT=47,
+            BLOCK_H=block_h,
+            BLOCK_C=64,
+            num_warps=1,
+        )
+        return out
     out = torch.empty(
         6,
         3,
@@ -1208,7 +1280,7 @@ def _tier2_p4_finish_triton(
         triton is None
         or scalar_all.device.type != "cuda"
         or scalar_all.shape[0] != 4
-        or pair_event_all.dim() != 5
+        or pair_event_all.dim() not in (4, 5)
     ):
         return None
     batch_size = scalar_all.shape[2]
@@ -1233,6 +1305,7 @@ def _tier2_p4_finish_triton(
         B=batch_size,
         H=active_count,
         BLOCK_H=block_h,
+        FINISH_ONLY_EVENTS=pair_event_all.dim() == 4,
         num_warps=1,
     )
     return numerator, denominator, equity
@@ -1517,7 +1590,7 @@ def tier2_first_order_opp_collision_by_hand(
 
     active_count = ctx.active_ids.shape[1]
     scalar_all, card_all, same_all = _tier2_prefix_factors(prepared, ctx, dtype=dtype)
-    pair_event_all = _pair_event_all_from_card(card_all, same_all)
+    pair_event_all = _pair_event_all_from_card(card_all, same_all, finish_only=True)
     p4_finish = _tier2_p4_finish_triton(scalar_all, pair_event_all)
     if p4_finish is not None:
         numerator_active, denominator_active, equity_active = p4_finish
@@ -1740,14 +1813,17 @@ def _tier3_second_order_opp_collision_by_hand_impl(
         dtype=dtype,
         same_num_warps=2,
     )
-    pair_event_all = _pair_event_all_from_card(card_all, same_all)
-
     local_c0, local_c1 = _active_local_combo_cards(ctx)
     use_streaming_wedge = (
         triton is not None
         and players == 4
         and device.type == "cuda"
         and beliefs.shape[0] > 128
+    )
+    pair_event_all = _pair_event_all_from_card(
+        card_all,
+        same_all,
+        finish_only=use_streaming_wedge,
     )
     wedge_p4 = (
         _tier3_wedge_p4_triton(beliefs, ctx.ranks, local_c0, local_c1, card_all)
