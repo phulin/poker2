@@ -1025,9 +1025,17 @@ def _tier2_prefix_factors(
 
     use_compact_p4_pairs = triton is not None and device.type == "cuda" and players == 4
     if use_compact_p4_pairs:
-        pair_left = torch.tensor([0, 0, 0, 1, 1, 2], dtype=torch.long, device=device)
-        pair_right = torch.tensor([1, 2, 3, 2, 3, 3], dtype=torch.long, device=device)
-        pair_values = sorted_beliefs[:, pair_left] * sorted_beliefs[:, pair_right]
+        pair_values = torch.stack(
+            (
+                sorted_beliefs[:, 0] * sorted_beliefs[:, 1],
+                sorted_beliefs[:, 0] * sorted_beliefs[:, 2],
+                sorted_beliefs[:, 0] * sorted_beliefs[:, 3],
+                sorted_beliefs[:, 1] * sorted_beliefs[:, 2],
+                sorted_beliefs[:, 1] * sorted_beliefs[:, 3],
+                sorted_beliefs[:, 2] * sorted_beliefs[:, 3],
+            ),
+            dim=1,
+        )
         zero_pair = torch.zeros(batch_size, 6, 1, dtype=dtype, device=device)
         pair_prefix = torch.cat([zero_pair, pair_values.cumsum(dim=2)], dim=2)
         pair_card_values = pair_values[:, :, :, None] * sorted_contains[:, None, :, :]
