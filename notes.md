@@ -154,6 +154,7 @@
   - `P2_WARMSTART_PROPAGATE_INTO=1`: propagating warm-start beliefs into the existing array avoided an allocation/copy but was flat/slightly slower, 429.5 ms baseline vs 429.6 ms candidate; reverted.
   - `P2_REUSE_BELIEF_NUMERATOR=1`: reusing the belief propagation output as the normalization numerator was output-identical but slower, 482.0 ms baseline vs 496.0 ms candidate; reverted.
   - `P2_ZERO_SUM_SUBGROUP=1`: subgroup zero-sum reduction had noisy positive short runs (up to 1.055x) but a longer run was slower, and the split-checkpoint sparse solve fixture failed on broader public spots; reverted.
+  - `P2_ZERO_SUM_UNROLLED=1`: unrolling the exact-order zero-sum workgroup reduction was output-identical but flat, 460.4 ms baseline vs 460.4 ms candidate; reverted.
   - `P2_CACHE_ALLIN_CONTEXT=1`: caching the resolved all-in table context on sparse tree entries was output-identical and had positive runs, but post-flip confirmation reversed, 494.3 ms old provider lookup path vs 504.5 ms cached path; reverted.
   - `P2_CACHE_MODEL_UNIFORMS=1`: caching repeated BetterFFN uniform buffers was output-identical and had one tiny positive run, 414.0 ms baseline vs 413.7 ms candidate, but repeat confirmation was slower, 414.1 ms baseline vs 414.9 ms candidate; reverted.
 
