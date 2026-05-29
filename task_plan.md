@@ -39,6 +39,7 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Sparse solve CPU scratch-array reuse was output-identical but within timing noise, so it was reverted.
 - Exact-belief zero-sum value-head postprocess specialization was exact-value-safe but slower, so it was reverted.
 - Exact-belief all-in table shader was output-identical but within timing noise, so it was reverted.
+- Batch-3 subgroup value-head selection was output-identical and exact-value-safe but within timing noise, so it was reverted.
 
 ## Status
 **Current pass complete; goal remains active** - Added chunked leaf temporary-buffer release for an additional output-identical speedup. Continue with more leaf/model kernel candidates next.
