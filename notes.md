@@ -42,6 +42,7 @@
 - Tried skipping the initial reach-buffer upload when no average policy is read; it was output-identical but slower, so it was reverted.
 - Tried caching fold-terminal values in a static GPU buffer and copying them into the solve values buffer in the first leaf command buffer; it was output-identical but within noise/slightly slower on confirmation, so it was reverted.
 - Tried the batch-4 subgroup matvec for the biased value-head projection; it was output-identical and exact-value-safe but slightly slower, so it was reverted.
+- Tried using the leaky 1024 batch-2 subgroup shader for hidden 512x1024 linear-out projections as well as the value head; it was output-identical and exact-value-safe but slower in the full CFR benchmark, so it was reverted.
 
 ## Measurements
 - 2026-05-29 short no-op interleaved run, `bench_spots.json`, depth 4, iterations 32, runs 3:
@@ -108,6 +109,7 @@
   - `P2_SKIP_UNUSED_REACH_UPLOAD=1`: 391.1 ms baseline vs 392.0 ms candidate, speedup 0.998x, exact output match.
   - `P2_GPU_FOLD_VALUES=1`: short run was 393.4 ms baseline vs 393.2 ms candidate, but longer confirmation was 392.6 ms baseline vs 392.6 ms candidate, speedup 1.000x/slightly negative; exact output match.
   - `P2_VALUE_HEAD_BATCH4=1`: 393.1 ms baseline vs 393.3 ms candidate, speedup 1.000x/slightly negative; exact output match and exact value fixture pass.
+  - `P2_LEAKY_OUT_BATCH2=1`: 394.0 ms baseline vs 395.3 ms candidate, speedup 0.996x; exact output match and exact value fixture pass.
 
 ## Verification
 - `yarn typecheck`: pass.
