@@ -643,23 +643,25 @@ if triton is not None:
         H1: tl.constexpr,
         FULL_H: tl.constexpr,
         CARD_COUNT: tl.constexpr,
+        BLOCK_H: tl.constexpr,
         BLOCK_C: tl.constexpr,
     ):
-        row = tl.program_id(0)
-        pmode = tl.program_id(1)
-        h = row % H
-        b = row // H
+        b = tl.program_id(0)
+        h_block = tl.program_id(1)
+        pmode = tl.program_id(2)
+        h = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+        h_mask = h < H
         mode = pmode % 3
         player = pmode // 3
 
-        lower = tl.load(lower_end + b * H + h)
-        tie = tl.load(tie_end + b * H + h)
+        lower = tl.load(lower_end + b * H + h, mask=h_mask, other=0)
+        tie = tl.load(tie_end + b * H + h, mask=h_mask, other=0)
         start = tl.where(mode == 1, lower, 0)
         end = tl.where(mode == 0, lower, tl.where(mode == 1, tie, H))
 
-        c0 = tl.load(local_c0 + b * H + h)
-        c1 = tl.load(local_c1 + b * H + h)
-        rank = tl.load(ranks + b * H + h)
+        c0 = tl.load(local_c0 + b * H + h, mask=h_mask, other=0)
+        c1 = tl.load(local_c1 + b * H + h, mask=h_mask, other=0)
+        rank = tl.load(ranks + b * H + h, mask=h_mask, other=0)
 
         scalar_base = (b * P + player) * H1
         scalar = tl.load(scalar_prefix + scalar_base + end) - tl.load(
@@ -672,39 +674,52 @@ if triton is not None:
         hero1 = tl.load(card_prefix + (card_base + end * CARD_COUNT + c1)) - tl.load(
             card_prefix + (card_base + start * CARD_COUNT + c1)
         )
-        edge = tl.load(beliefs + (b * P + player) * H + h)
+        edge = tl.load(beliefs + (b * P + player) * H + h, mask=h_mask, other=0.0)
         edge = tl.where(mode == 0, 0.0, edge)
         scalar = scalar - hero0 - hero1 + edge
-        tl.store(scalar_out + ((player * 3 + mode) * B + b) * H + h, scalar)
+        tl.store(
+            scalar_out + ((player * 3 + mode) * B + b) * H + h,
+            scalar,
+            mask=h_mask,
+        )
 
         card = tl.arange(0, BLOCK_C)
         valid_card = card < CARD_COUNT
         interval = tl.load(
-            card_prefix + card_base + end * CARD_COUNT + card,
-            mask=valid_card,
+            card_prefix + card_base + end[:, None] * CARD_COUNT + card[None, :],
+            mask=h_mask[:, None] & valid_card[None, :],
             other=0.0,
         ) - tl.load(
-            card_prefix + card_base + start * CARD_COUNT + card,
-            mask=valid_card,
+            card_prefix + card_base + start[:, None] * CARD_COUNT + card[None, :],
+            mask=h_mask[:, None] & valid_card[None, :],
             other=0.0,
         )
 
-        pair_base = (b * H + h) * CARD_COUNT + card
-        pair_p = tl.load(pair_p_ids + pair_base, mask=valid_card, other=-1)
-        pair_q = tl.load(pair_q_ids + pair_base, mask=valid_card, other=-1)
-        valid_p = valid_card & (pair_p >= 0)
-        valid_q = valid_card & (pair_q >= 0)
+        pair_base = (b * H + h[:, None]) * CARD_COUNT + card[None, :]
+        hc_mask = h_mask[:, None] & valid_card[None, :]
+        pair_p = tl.load(pair_p_ids + pair_base, mask=hc_mask, other=-1)
+        pair_q = tl.load(pair_q_ids + pair_base, mask=hc_mask, other=-1)
+        valid_p = hc_mask & (pair_p >= 0)
+        valid_q = hc_mask & (pair_q >= 0)
         rank_p = tl.load(hand_ranks + b * FULL_H + pair_p, mask=valid_p, other=-1)
         rank_q = tl.load(hand_ranks + b * FULL_H + pair_q, mask=valid_q, other=-1)
-        row_p = valid_p & tl.where(mode == 0, rank_p < rank, tl.where(mode == 1, rank_p == rank, True))
-        row_q = valid_q & tl.where(mode == 0, rank_q < rank, tl.where(mode == 1, rank_q == rank, True))
+        row_p = valid_p & tl.where(
+            mode == 0,
+            rank_p < rank[:, None],
+            tl.where(mode == 1, rank_p == rank[:, None], True),
+        )
+        row_q = valid_q & tl.where(
+            mode == 0,
+            rank_q < rank[:, None],
+            tl.where(mode == 1, rank_q == rank[:, None], True),
+        )
         weight_base = (b * P + player) * FULL_H
         corr = tl.load(full_beliefs + weight_base + pair_p, mask=row_p, other=0.0)
         corr += tl.load(full_beliefs + weight_base + pair_q, mask=row_q, other=0.0)
         value = interval - corr
-        value = tl.where((card == c0) | (card == c1), 0.0, value)
-        card_out_base = (((player * 3 + mode) * B + b) * H + h) * CARD_COUNT
-        tl.store(card_out + card_out_base + card, value, mask=valid_card)
+        value = tl.where((card[None, :] == c0[:, None]) | (card[None, :] == c1[:, None]), 0.0, value)
+        card_out_base = (((player * 3 + mode) * B + b) * H + h[:, None]) * CARD_COUNT
+        tl.store(card_out + card_out_base + card[None, :], value, mask=hc_mask)
 
     @triton.jit
     def _tier2_prefix_same_kernel(
@@ -967,7 +982,8 @@ def _tier2_prefix_factors_triton(
         dtype=dtype,
         device=device,
     )
-    grid_scalar = (batch_size * active_count, players * 3)
+    scalar_block_h = 2
+    grid_scalar = (batch_size, triton.cdiv(active_count, scalar_block_h), players * 3)
     _tier2_prefix_scalar_card_kernel[grid_scalar](
         scalar_prefix,
         card_prefix,
@@ -989,6 +1005,7 @@ def _tier2_prefix_factors_triton(
         H1=active_count + 1,
         FULL_H=NUM_HANDS,
         CARD_COUNT=47,
+        BLOCK_H=scalar_block_h,
         BLOCK_C=64,
         num_warps=2,
     )
