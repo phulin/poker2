@@ -958,6 +958,80 @@ if triton is not None:
                 out_base = (((pair * 3 + left_mode) * 3 + right_mode) * B + b) * H
                 tl.store(pair_event_out + out_base + h, value, mask=h_mask)
 
+    @triton.jit
+    def _tier2_p4_finish_kernel(
+        scalar_all,
+        pair_event_all,
+        numerator_out,
+        denominator_out,
+        equity_out,
+        B: tl.constexpr,
+        H: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        b = tl.program_id(0)
+        hero = tl.program_id(1)
+        h = tl.program_id(2) * BLOCK_H + tl.arange(0, BLOCK_H)
+        h_mask = h < H
+
+        opp0 = tl.where(0 < hero, 0, 1)
+        opp1 = tl.where(1 < hero, 1, 2)
+        opp2 = tl.where(2 < hero, 2, 3)
+
+        base0 = ((opp0 * 3) * B + b) * H + h
+        base1 = ((opp1 * 3) * B + b) * H + h
+        base2 = ((opp2 * 3) * B + b) * H + h
+        l0 = tl.load(scalar_all + base0, mask=h_mask, other=0.0)
+        t0 = tl.load(scalar_all + base0 + B * H, mask=h_mask, other=0.0)
+        d0 = tl.load(scalar_all + base0 + 2 * B * H, mask=h_mask, other=0.0)
+        l1 = tl.load(scalar_all + base1, mask=h_mask, other=0.0)
+        t1 = tl.load(scalar_all + base1 + B * H, mask=h_mask, other=0.0)
+        d1 = tl.load(scalar_all + base1 + 2 * B * H, mask=h_mask, other=0.0)
+        l2 = tl.load(scalar_all + base2, mask=h_mask, other=0.0)
+        t2 = tl.load(scalar_all + base2 + B * H, mask=h_mask, other=0.0)
+        d2 = tl.load(scalar_all + base2 + 2 * B * H, mask=h_mask, other=0.0)
+
+        numerator = (
+            l0 * l1 * l2
+            + 0.5 * (t0 * l1 * l2 + l0 * t1 * l2 + l0 * l1 * t2)
+            + (1.0 / 3.0) * (t0 * t1 * l2 + t0 * l1 * t2 + l0 * t1 * t2)
+            + 0.25 * t0 * t1 * t2
+        )
+        denominator = d0 * d1 * d2
+
+        for edge in tl.static_range(0, 3):
+            left = tl.where(edge == 0, opp0, tl.where(edge == 1, opp0, opp1))
+            right = tl.where(edge == 0, opp1, tl.where(edge == 1, opp2, opp2))
+            other_l = tl.where(edge == 0, l2, tl.where(edge == 1, l1, l0))
+            other_t = tl.where(edge == 0, t2, tl.where(edge == 1, t1, t0))
+            other_d = tl.where(edge == 0, d2, tl.where(edge == 1, d1, d0))
+            pair = tl.where(
+                left == 0,
+                right - 1,
+                tl.where(left == 1, right + 1, 5),
+            )
+            pair_base = (pair * 9 * B + b) * H + h
+            pair00 = tl.load(pair_event_all + pair_base, mask=h_mask, other=0.0)
+            pair01 = tl.load(pair_event_all + pair_base + B * H, mask=h_mask, other=0.0)
+            pair10 = tl.load(pair_event_all + pair_base + 3 * B * H, mask=h_mask, other=0.0)
+            pair11 = tl.load(pair_event_all + pair_base + 4 * B * H, mask=h_mask, other=0.0)
+            pair_total = tl.load(
+                pair_event_all + pair_base + 8 * B * H,
+                mask=h_mask,
+                other=0.0,
+            )
+            pair10_plus_01 = pair10 + pair01
+            other0 = pair00 + 0.5 * pair10_plus_01 + (1.0 / 3.0) * pair11
+            other1 = 0.5 * pair00 + (1.0 / 3.0) * pair10_plus_01 + 0.25 * pair11
+            numerator -= other0 * other_l + other1 * other_t
+            denominator -= pair_total * other_d
+
+        out_base = (b * 4 + hero) * H + h
+        tl.store(numerator_out + out_base, numerator, mask=h_mask)
+        tl.store(denominator_out + out_base, denominator, mask=h_mask)
+        equity = tl.where(denominator > 0.0, numerator / tl.maximum(denominator, 1.0e-30), 0.0)
+        tl.store(equity_out + out_base, equity, mask=h_mask)
+
 
 def _tier2_prefix_factors_triton(
     *,
@@ -1124,6 +1198,44 @@ def _p4_pair_event_triton(
         num_warps=1,
     )
     return out
+
+
+def _tier2_p4_finish_triton(
+    scalar_all: torch.Tensor,
+    pair_event_all: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    if (
+        triton is None
+        or scalar_all.device.type != "cuda"
+        or scalar_all.shape[0] != 4
+        or pair_event_all.dim() != 5
+    ):
+        return None
+    batch_size = scalar_all.shape[2]
+    active_count = scalar_all.shape[3]
+    numerator = torch.empty(
+        batch_size,
+        4,
+        active_count,
+        dtype=scalar_all.dtype,
+        device=scalar_all.device,
+    )
+    denominator = torch.empty_like(numerator)
+    equity = torch.empty_like(numerator)
+    block_h = 64
+    grid = (batch_size, 4, triton.cdiv(active_count, block_h))
+    _tier2_p4_finish_kernel[grid](
+        scalar_all.contiguous(),
+        pair_event_all.contiguous(),
+        numerator,
+        denominator,
+        equity,
+        B=batch_size,
+        H=active_count,
+        BLOCK_H=block_h,
+        num_warps=1,
+    )
+    return numerator, denominator, equity
 
 
 def _tier2_prefix_factors(
@@ -1406,6 +1518,35 @@ def tier2_first_order_opp_collision_by_hand(
     active_count = ctx.active_ids.shape[1]
     scalar_all, card_all, same_all = _tier2_prefix_factors(prepared, ctx, dtype=dtype)
     pair_event_all = _pair_event_all_from_card(card_all, same_all)
+    p4_finish = _tier2_p4_finish_triton(scalar_all, pair_event_all)
+    if p4_finish is not None:
+        numerator_active, denominator_active, equity_active = p4_finish
+        numerator_by_hand, denominator_by_hand, equity_by_hand = _scatter_active_outputs(
+            ctx,
+            numerator_active,
+            denominator_active,
+            equity_active,
+        )
+        result = torch.stack(
+            [
+                _aggregate_from_num_denom(
+                    beliefs[:, hero],
+                    numerator_active[:, hero],
+                    denominator_active[:, hero],
+                )
+                for hero in range(players)
+            ],
+            dim=1,
+        ).to(torch.float32)
+        if prepared.beliefs.device.type == "cuda":
+            torch.cuda.synchronize(prepared.beliefs.device)
+        return PerHandEquityResult(
+            equity_by_hand=equity_by_hand.to(torch.float32),
+            aggregate_equity=result,
+            denominator_by_hand=denominator_by_hand,
+            numerator_by_hand=numerator_by_hand,
+            seconds=time.perf_counter() - start,
+        )
 
     equities: list[torch.Tensor] = []
     numerator_active = torch.empty(
@@ -1613,6 +1754,39 @@ def _tier3_second_order_opp_collision_by_hand_impl(
         if use_streaming_wedge
         else None
     )
+    p4_finish = _tier2_p4_finish_triton(scalar_all, pair_event_all) if wedge_p4 is not None else None
+    if wedge_p4 is not None and p4_finish is not None:
+        numerator_active, denominator_active, _ = p4_finish
+        wedge_num_all, wedge_den_all = wedge_p4
+        numerator_active = numerator_active + wedge_num_all
+        denominator_active = denominator_active + wedge_den_all
+        equity_active = safe_divide_by_hand(numerator_active, denominator_active)
+        numerator_by_hand, denominator_by_hand, equity_by_hand = _scatter_active_outputs(
+            ctx,
+            numerator_active,
+            denominator_active,
+            equity_active,
+        )
+        result = torch.stack(
+            [
+                _aggregate_from_num_denom(
+                    beliefs[:, hero],
+                    numerator_active[:, hero],
+                    denominator_active[:, hero],
+                )
+                for hero in range(players)
+            ],
+            dim=1,
+        ).to(torch.float32)
+        if prepared.beliefs.device.type == "cuda":
+            torch.cuda.synchronize(prepared.beliefs.device)
+        return PerHandEquityResult(
+            equity_by_hand=equity_by_hand.to(torch.float32),
+            aggregate_equity=result,
+            denominator_by_hand=denominator_by_hand,
+            numerator_by_hand=numerator_by_hand,
+            seconds=time.perf_counter() - start,
+        )
     weighted_rel_all = None
     conflict_response_all = None
     if wedge_p4 is None:
