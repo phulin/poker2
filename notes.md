@@ -14,6 +14,7 @@
 - Batch-4 value-head subgroup selection was tested and reverted because CFR parity drift exceeded current tolerances.
 - Combining each leaf-value/backup command buffer with the next iteration prefix preserves command order, reduces queue submissions, and is now the default. Set `P2_COMBINE_PREFIX_WITH_LEAF=0` to benchmark the old path.
 - Prepared leaf features now cache exact-belief phase-shift GPU buffers per exact player/hand. Set `P2_CACHE_EXACT_PHASE_SHIFT=0` to benchmark the old rebuild/upload behavior.
+- Prepared leaf features now mark all-empty boards so BetterFFN can skip the board-interaction branch when it is mathematically zero. Set `P2_SKIP_EMPTY_BOARD_INTERACTION=0` to benchmark the old explicit-zero path.
 - Tried a two-input add kernel for belief phase shifts; it was output-identical but slightly slower, so it was reverted.
 - Tried caching repeated model uniform buffers; key-building overhead made it slower, so it was reverted.
 - Tried caching the zero input used by the three-input belief phase-shift add; it was output-identical but slower, so it was reverted.
@@ -38,6 +39,9 @@
 - 2026-05-29 current cumulative combined-prefix interleaved run after exact cache, `bench_spots_root.json`, depth 6, iterations 128, warmups 2, runs 7, `--compare-outputs`:
   - old command path (`P2_COMBINE_PREFIX_WITH_LEAF=0`) 562.3 ms, current default 446.6 ms, speedup 1.259x.
   - Output comparison: `policyMaxAbs=0`, `actionProbsMaxAbs=0`.
+- 2026-05-29 empty-board interaction skip interleaved run, `bench_spots_root.json`, depth 6, iterations 128, warmups 2, runs 7, `--compare-outputs`:
+  - explicit zero interaction path (`P2_SKIP_EMPTY_BOARD_INTERACTION=0`) 549.9 ms, skipped path 511.1 ms, speedup 1.076x.
+  - Output comparison: `policyMaxAbs=0`, `actionProbsMaxAbs=0`.
 - 2026-05-29 failed experiments:
   - `P2_ADD2_BELIEF_SHIFT=1`: 503.2 ms baseline vs 504.1 ms candidate, speedup 0.998x, exact output match.
   - `P2_CACHE_MODEL_UNIFORMS=1`: 506.7 ms baseline vs 534.4 ms candidate, speedup 0.948x, exact output match.
@@ -48,3 +52,4 @@
 - `WEBGPU_BACKEND=metal node --test --test-concurrency=1 --import tsx tests/sparse_resolver.test.ts tests/sparse_cfr_kernels.test.ts`: pass, 17 tests.
 - Added `combined sparse prefix command buffers match separate submissions` to compare old and new sparse solver paths with exact policy/action/belief equality.
 - `WEBGPU_BACKEND=metal node --test --test-concurrency=1 --test-name-pattern "shifted exact-belief" --import tsx tests/split_checkpoint_fixture.test.ts`: pass.
+- Added `empty-board interaction skip matches explicit zero interaction` to compare skipped and explicit-zero BetterFFN board-interaction paths exactly.

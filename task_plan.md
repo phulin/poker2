@@ -21,6 +21,7 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Make command-buffer combining the default sparse CFR path; `P2_COMBINE_PREFIX_WITH_LEAF=0` restores the old path for A/B benchmarks.
 - Remove the GPU-resident model warm-start experiment because it was faster but changed CFR parity beyond current tolerances.
 - Cache prepared exact-belief phase-shift buffers by exact player/hand; `P2_CACHE_EXACT_PHASE_SHIFT=0` restores old rebuild behavior for A/B benchmarks.
+- Skip BetterFFN board-interaction work for prepared empty-board batches; `P2_SKIP_EMPTY_BOARD_INTERACTION=0` restores the old explicit-zero path for A/B benchmarks.
 
 ## Errors Encountered
 - `yarn exec tsx ...` consumed benchmark flags before `tsx`; use `./node_modules/.bin/tsx ...` for ad hoc runs.
@@ -33,4 +34,4 @@ Make the `website/` CFR benchmark faster while preserving CFR outputs up to floa
 - Caching the belief-shift zero addend was output-identical but slower, so it was reverted.
 
 ## Status
-**Current pass complete; goal remains active** - Added exact phase-shift caching for a small additional output-identical speedup. Continue with more leaf/model kernel candidates next.
+**Current pass complete; goal remains active** - Added empty-board board-interaction skipping for an additional output-identical speedup. Continue with more leaf/model kernel candidates next.

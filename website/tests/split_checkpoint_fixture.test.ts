@@ -355,6 +355,71 @@ test("rebel_296_4000 shifted exact-belief value path matches dense pre-chance in
   }
 });
 
+test("rebel_296_4000 empty-board interaction skip matches explicit zero interaction", async () => {
+  const device = await createDawnDevice();
+  const model = await loadNodeModel(device, MANIFEST, WEIGHTS);
+  const original = process.env.P2_SKIP_EMPTY_BOARD_INTERACTION;
+  try {
+    const env = PublicHunlEnv.fromManifest(model.manifest, {
+      button: 0,
+      stack: 400,
+      sb: 1,
+      bb: 2,
+      betBins: model.manifest.env.betBins,
+      flopShowdown: model.manifest.env.flopShowdown,
+    });
+    const exactHand = handComboIndex(parseCard("As"), parseCard("Kd"));
+    const beliefs = initialUniformBeliefs();
+    beliefs.fill(0, 0, NUM_HANDS);
+    beliefs[exactHand] = 1;
+    const prepared = model.prepareBatchFeatures([env], [false]);
+    try {
+      process.env.P2_SKIP_EMPTY_BOARD_INTERACTION = "0";
+      const explicit = await model.predictBatchHandValuesGpu(
+        [env],
+        beliefs,
+        prepared,
+        undefined,
+        { player: 0, hand: exactHand },
+      );
+      process.env.P2_SKIP_EMPTY_BOARD_INTERACTION = "1";
+      const skipped = await model.predictBatchHandValuesGpu(
+        [env],
+        beliefs,
+        prepared,
+        undefined,
+        { player: 0, hand: exactHand },
+      );
+      try {
+        const explicitValues = await readFloatBuffer(
+          device,
+          explicit.buffer,
+          explicit.batch * explicit.valuesPerSample,
+        );
+        const skippedValues = await readFloatBuffer(
+          device,
+          skipped.buffer,
+          skipped.batch * skipped.valuesPerSample,
+        );
+        assertCloseArray(skippedValues, explicitValues, 0, "empty-board interaction skip");
+      } finally {
+        explicit.dispose();
+        skipped.dispose();
+      }
+    } finally {
+      prepared.dispose();
+    }
+  } finally {
+    if (original === undefined) {
+      delete process.env.P2_SKIP_EMPTY_BOARD_INTERACTION;
+    } else {
+      process.env.P2_SKIP_EMPTY_BOARD_INTERACTION = original;
+    }
+    model.dispose();
+    device.destroy();
+  }
+});
+
 test("rebel_296_4000 sparse solve matches PyTorch across public PBS spots", async () => {
   const forceDeck = [51, 24, 38, 12, 25, 0, 13, 26, 1];
   const cases = [

@@ -104,6 +104,7 @@ export interface PreparedBatchFeatures {
   exactBeliefPhaseShiftCache?: Map<string, ExactBeliefPhaseShiftBuffers>;
   boardRankLow?: GPUBuffer;
   boardSuitLow?: GPUBuffer;
+  boardInteractionZero?: boolean;
   dispose: () => void;
 }
 
@@ -578,6 +579,7 @@ export class BetterFfnWebGpuModel {
 
       let boardRankLow: GPUBuffer | undefined;
       let boardSuitLow: GPUBuffer | undefined;
+      let boardInteractionZero = true;
       if (interactionDim > 0) {
         const rankCountsCpu = new Float32Array(batch * 13);
         const suitCountsCpu = new Float32Array(batch * 4);
@@ -586,6 +588,7 @@ export class BetterFfnWebGpuModel {
           for (let i = 0; i < 5; i += 1) {
             const card = board[i] ?? -1;
             if (card >= 0) {
+              boardInteractionZero = false;
               const rankOffset = row * 13 + (card % 13);
               const suitOffset = row * 4 + Math.floor(card / 13);
               rankCountsCpu[rankOffset] = rankCountsCpu[rankOffset]! + 1;
@@ -645,6 +648,7 @@ export class BetterFfnWebGpuModel {
         exactBeliefPhaseShiftCache,
         ...(boardRankLow ? { boardRankLow } : {}),
         ...(boardSuitLow ? { boardSuitLow } : {}),
+        ...(interactionDim > 0 && boardInteractionZero ? { boardInteractionZero: true } : {}),
         dispose: () => {
           if (disposed) return;
           disposed = true;
@@ -1948,6 +1952,7 @@ export class BetterFfnWebGpuModel {
       sharedBeliefs?: boolean;
       boardRankLow?: GPUBuffer;
       boardSuitLow?: GPUBuffer;
+      boardInteractionZero?: boolean;
     },
     exactBelief?: ExactBelief,
   ): { rank: GPUBuffer; suit: GPUBuffer } | undefined {
@@ -1962,6 +1967,17 @@ export class BetterFfnWebGpuModel {
       !this.suitPairLowByHandT
     ) {
       throw new Error("board interaction buffers are not initialized");
+    }
+    const skipEmptyBoardInteraction =
+      globalThis.process?.env?.P2_SKIP_EMPTY_BOARD_INTERACTION !== "0";
+    if (skipEmptyBoardInteraction) {
+      if (precomputed?.boardInteractionZero) return undefined;
+      if (
+        !precomputed &&
+        boards?.every((board) => board.every((card) => card < 0))
+      ) {
+        return undefined;
+      }
     }
 
     const rankMass = empty(batch * numPlayers * 91);
