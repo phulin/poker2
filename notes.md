@@ -132,6 +132,7 @@
   - `P2_SKIP_ZERO_SUM=1`: 390.4 ms baseline vs 390.5 ms candidate, speedup 1.000x, policy diff about 0.998 and action-prob diff about 0.290.
   - `P2_DISABLE_WARMSTART=1`: 399.4 ms baseline vs 411.2 ms candidate, speedup 0.971x, policy diff about 0.833 and action-prob diff about 0.478.
   - Retried fusing exact-belief phase-shift addition into the half-RMS norm path with `P2_FUSE_EXACT_SHIFT_NORM=1`; the exact-value fixture still failed with about 0.095 max diff, so it was reverted before full benchmarking.
+  - `P2_SINGLE_MODEL_PASS=1`: keeping one compute pass open across consecutive BetterFFN dispatches was exact-value-safe and CFR output-identical, but slightly slower in the full benchmark, 392.9 ms baseline vs 393.3 ms candidate.
 
 ## Verification
 - `yarn typecheck`: pass.
