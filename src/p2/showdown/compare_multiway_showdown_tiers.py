@@ -44,6 +44,8 @@ class _TierBoardContext:
     local_c0: torch.Tensor
     local_c1: torch.Tensor
     local_pair_ids: torch.Tensor
+    pair_p_ids: torch.Tensor
+    pair_q_ids: torch.Tensor
     allowed: torch.Tensor
     order: torch.Tensor
     sorted_ranks: torch.Tensor
@@ -65,6 +67,8 @@ class _ActiveTierContext:
     local_c0: torch.Tensor
     local_c1: torch.Tensor
     local_pair_ids: torch.Tensor
+    pair_p_ids: torch.Tensor
+    pair_q_ids: torch.Tensor
     allowed: torch.Tensor
     order: torch.Tensor
     sorted_ranks: torch.Tensor
@@ -234,6 +238,14 @@ def _build_tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
     local_c1 = card_to_local.gather(1, active_combos[..., 1])
     pair_lookup = _pair_lookup(prepared.beliefs.device)
     local_pair_ids = pair_lookup[active_cards[:, :, None], active_cards[:, None, :]]
+    pair_p_ids = local_pair_ids.gather(
+        2,
+        local_c0[:, None, :].expand(-1, 47, -1),
+    ).permute(0, 2, 1).contiguous()
+    pair_q_ids = local_pair_ids.gather(
+        2,
+        local_c1[:, None, :].expand(-1, 47, -1),
+    ).permute(0, 2, 1).contiguous()
     order = torch.argsort(ranks, dim=1)
     sorted_ranks = ranks.gather(1, order)
     sorted_c0 = local_c0.gather(1, order)
@@ -260,6 +272,8 @@ def _build_tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
         local_c0=local_c0,
         local_c1=local_c1,
         local_pair_ids=local_pair_ids,
+        pair_p_ids=pair_p_ids,
+        pair_q_ids=pair_q_ids,
         allowed=allowed,
         order=order,
         sorted_ranks=sorted_ranks,
@@ -299,6 +313,8 @@ def _active_context(
         local_c0=board_ctx.local_c0,
         local_c1=board_ctx.local_c1,
         local_pair_ids=board_ctx.local_pair_ids,
+        pair_p_ids=board_ctx.pair_p_ids,
+        pair_q_ids=board_ctx.pair_q_ids,
         allowed=board_ctx.allowed,
         order=board_ctx.order,
         sorted_ranks=board_ctx.sorted_ranks,
@@ -1203,10 +1219,9 @@ def _tier2_prefix_factors(
 
     lower_end = ctx.lower_end
     tie_end = ctx.tie_end
-    pair_ids = ctx.local_pair_ids
     full_beliefs = prepared.beliefs.to(dtype).contiguous()
-    pair_p_ids = pair_ids.gather(2, local_c0[:, None, :].expand(-1, 47, -1)).permute(0, 2, 1)
-    pair_q_ids = pair_ids.gather(2, local_c1[:, None, :].expand(-1, 47, -1)).permute(0, 2, 1)
+    pair_p_ids = ctx.pair_p_ids
+    pair_q_ids = ctx.pair_q_ids
     if triton is not None and device.type == "cuda":
         return _tier2_prefix_factors_triton(
             scalar_prefix=scalar_prefix.contiguous(),
