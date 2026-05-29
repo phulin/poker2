@@ -29,6 +29,7 @@
 - Tried skipping empty-board low-feature precompute kernels; it was output-identical but within noise, so it was reverted.
 - Retested leaf-temp release chunks smaller/larger than 16; chunks 8 and 24 were output-identical but slower, so the default remains 16.
 - Tried reading back only root policy rows after GPU CFR; it was output-identical but slower than the single full-policy readback, so it was reverted.
+- Tried reading back one contiguous root-policy slice after GPU CFR; it was output-identical but slower than the single full-policy readback, so it was reverted.
 
 ## Measurements
 - 2026-05-29 short no-op interleaved run, `bench_spots.json`, depth 4, iterations 32, runs 3:
@@ -78,6 +79,7 @@
   - `P2_RELEASE_LEAF_TEMPS_EVERY=8`: 409.6 ms baseline vs 411.4 ms candidate against chunk 16, speedup 0.995x, exact output match.
   - `P2_RELEASE_LEAF_TEMPS_EVERY=24`: 408.7 ms baseline vs 410.0 ms candidate against chunk 16, speedup 0.997x, exact output match.
   - `P2_ROOT_POLICY_READBACK=1`: 409.2 ms baseline vs 409.7 ms candidate, speedup 0.999x, exact output match.
+  - `P2_ROOT_POLICY_SLICE_READBACK=1`: 408.8 ms baseline vs 409.3 ms candidate, speedup 0.999x, exact output match.
 
 ## Verification
 - `yarn typecheck`: pass.
