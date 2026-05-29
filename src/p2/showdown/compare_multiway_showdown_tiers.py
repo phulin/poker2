@@ -49,6 +49,7 @@ class _TierBoardContext:
     sorted_ranks: torch.Tensor
     sorted_c0: torch.Tensor
     sorted_c1: torch.Tensor
+    sorted_contains: torch.Tensor
     lower_end: torch.Tensor
     tie_end: torch.Tensor
 
@@ -69,6 +70,7 @@ class _ActiveTierContext:
     sorted_ranks: torch.Tensor
     sorted_c0: torch.Tensor
     sorted_c1: torch.Tensor
+    sorted_contains: torch.Tensor
     lower_end: torch.Tensor
     tie_end: torch.Tensor
 
@@ -236,6 +238,17 @@ def _build_tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
     sorted_ranks = ranks.gather(1, order)
     sorted_c0 = local_c0.gather(1, order)
     sorted_c1 = local_c1.gather(1, order)
+    sorted_contains = torch.zeros(
+        batch_size,
+        active_count,
+        47,
+        dtype=torch.float32,
+        device=prepared.beliefs.device,
+    )
+    board_ids = torch.arange(batch_size, device=prepared.beliefs.device)[:, None]
+    hand_ids = torch.arange(active_count, device=prepared.beliefs.device)[None, :]
+    sorted_contains[board_ids, hand_ids, sorted_c0] = 1.0
+    sorted_contains[board_ids, hand_ids, sorted_c1] = 1.0
     lower_end = torch.searchsorted(sorted_ranks, ranks, right=False)
     tie_end = torch.searchsorted(sorted_ranks, ranks, right=True)
     return _TierBoardContext(
@@ -252,6 +265,7 @@ def _build_tier_board_context(prepared: PreparedShowdown) -> _TierBoardContext:
         sorted_ranks=sorted_ranks,
         sorted_c0=sorted_c0,
         sorted_c1=sorted_c1,
+        sorted_contains=sorted_contains,
         lower_end=lower_end,
         tie_end=tie_end,
     )
@@ -290,6 +304,7 @@ def _active_context(
         sorted_ranks=board_ctx.sorted_ranks,
         sorted_c0=board_ctx.sorted_c0,
         sorted_c1=board_ctx.sorted_c1,
+        sorted_contains=board_ctx.sorted_contains,
         lower_end=board_ctx.lower_end,
         tie_end=board_ctx.tie_end,
     )
@@ -1078,17 +1093,11 @@ def _tier2_prefix_factors(
     device = beliefs.device
     local_c0, local_c1 = _active_local_combo_cards(ctx)
     sorted_beliefs = beliefs.gather(2, ctx.order[:, None, :].expand(-1, players, -1))
-    sorted_contains = torch.zeros(
-        batch_size,
-        active_count,
-        47,
-        dtype=dtype,
-        device=device,
+    sorted_contains = (
+        ctx.sorted_contains
+        if ctx.sorted_contains.dtype == dtype
+        else ctx.sorted_contains.to(dtype)
     )
-    board_ids = torch.arange(batch_size, device=device)[:, None]
-    hand_ids = torch.arange(active_count, device=device)[None, :]
-    sorted_contains[board_ids, hand_ids, ctx.sorted_c0] = 1.0
-    sorted_contains[board_ids, hand_ids, ctx.sorted_c1] = 1.0
 
     scalar_prefix = torch.empty(
         batch_size,
