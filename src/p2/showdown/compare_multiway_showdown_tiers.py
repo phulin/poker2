@@ -42,6 +42,8 @@ class _ActiveTierContext:
     combos: torch.Tensor
     active_ids: torch.Tensor
     active_cards: torch.Tensor
+    local_c0: torch.Tensor
+    local_c1: torch.Tensor
     local_pair_ids: torch.Tensor
     allowed: torch.Tensor
 
@@ -182,6 +184,7 @@ def _active_context(
     active_count = 1081
     active_ids = torch.topk(allowed.to(torch.int8), active_count, dim=1).indices
     combos = prepared.combos.long()
+    active_combos = combos[active_ids]
     ranks = prepared.hand_ranks.reshape(batch_size, NUM_HANDS).gather(1, active_ids)
     hand_masks = prepared.hand_masks.reshape(NUM_HANDS)
     masks = hand_masks[active_ids]
@@ -193,15 +196,30 @@ def _active_context(
     board_mask = torch.ones(batch_size, 52, dtype=torch.bool, device=prepared.beliefs.device)
     board_mask.scatter_(1, prepared.board.long(), False)
     active_cards = torch.topk(board_mask.to(torch.int8), 47, dim=1).indices
+    card_to_local = torch.full(
+        (batch_size, 52),
+        -1,
+        dtype=torch.long,
+        device=prepared.beliefs.device,
+    )
+    card_to_local.scatter_(
+        1,
+        active_cards,
+        torch.arange(47, device=prepared.beliefs.device)[None, :].expand(batch_size, -1),
+    )
+    local_c0 = card_to_local.gather(1, active_combos[..., 0])
+    local_c1 = card_to_local.gather(1, active_combos[..., 1])
     pair_lookup = _pair_lookup(prepared.beliefs.device)
     local_pair_ids = pair_lookup[active_cards[:, :, None], active_cards[:, None, :]]
     return _ActiveTierContext(
         beliefs=beliefs,
         ranks=ranks,
         masks=masks,
-        combos=combos[active_ids],
+        combos=active_combos,
         active_ids=active_ids,
         active_cards=active_cards,
+        local_c0=local_c0,
+        local_c1=local_c1,
         local_pair_ids=local_pair_ids,
         allowed=allowed,
     )
@@ -245,23 +263,10 @@ def _active_contains_matrix(
         dtype=dtype,
         device=ctx.beliefs.device,
     )
-    card_to_local = torch.full(
-        (batch_size, 52),
-        -1,
-        dtype=torch.long,
-        device=ctx.beliefs.device,
-    )
-    card_to_local.scatter_(
-        1,
-        ctx.active_cards,
-        torch.arange(47, device=ctx.beliefs.device)[None, :].expand(batch_size, -1),
-    )
-    local0 = card_to_local.gather(1, ctx.combos[..., 0])
-    local1 = card_to_local.gather(1, ctx.combos[..., 1])
     boards = torch.arange(batch_size, device=ctx.beliefs.device)[:, None]
     hands = torch.arange(active_count, device=ctx.beliefs.device)[None, :]
-    contains[boards, hands, local0] = 1.0
-    contains[boards, hands, local1] = 1.0
+    contains[boards, hands, ctx.local_c0] = 1.0
+    contains[boards, hands, ctx.local_c1] = 1.0
     return contains
 
 
@@ -283,22 +288,7 @@ def _scatter_active_outputs(
 
 
 def _active_local_combo_cards(ctx: _ActiveTierContext) -> tuple[torch.Tensor, torch.Tensor]:
-    batch_size = ctx.active_ids.shape[0]
-    card_to_local = torch.full(
-        (batch_size, 52),
-        -1,
-        dtype=torch.long,
-        device=ctx.beliefs.device,
-    )
-    card_to_local.scatter_(
-        1,
-        ctx.active_cards,
-        torch.arange(47, device=ctx.beliefs.device)[None, :].expand(batch_size, -1),
-    )
-    return (
-        card_to_local.gather(1, ctx.combos[..., 0]),
-        card_to_local.gather(1, ctx.combos[..., 1]),
-    )
+    return ctx.local_c0, ctx.local_c1
 
 
 def _build_local_mats_from_indices(
