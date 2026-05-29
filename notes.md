@@ -43,7 +43,7 @@
 - Tried skipping the initial policy-average upload; it was output-identical but slower on confirmation, so it was reverted.
 - Tried skipping all unused average-policy uploads when no average policy is read; it was output-identical but slower on confirmation, so it was reverted.
 - Tried skipping the initial reach-buffer upload when no average policy is read; it was output-identical but slower, so it was reverted.
-- Tried caching fold-terminal values in a static GPU buffer and copying them into the solve values buffer in the first leaf command buffer; it was output-identical but within noise/slightly slower on confirmation, so it was reverted.
+- Tried caching fold-terminal values in a static GPU buffer and copying them into the solve values buffer in the first leaf command buffer; it was output-identical but failed to hold up on later confirmation, so it was reverted.
 - Tried the batch-4 subgroup matvec for the biased value-head projection; it was output-identical and exact-value-safe but slightly slower, so it was reverted.
 - Tried using the leaky 1024 batch-2 subgroup shader for hidden 512x1024 linear-out projections as well as the value head; it was output-identical and exact-value-safe but slower in the full CFR benchmark, so it was reverted.
 - Retested leaf-temp release chunk 12 against the current chunk 16; it was output-identical but within noise, so the default remains 16.
@@ -156,7 +156,7 @@
   - `P2_ZERO_SUM_SUBGROUP=1`: subgroup zero-sum reduction had noisy positive short runs (up to 1.055x) but a longer run was slower, and the split-checkpoint sparse solve fixture failed on broader public spots; reverted.
   - `P2_ZERO_SUM_UNROLLED=1`: unrolling the exact-order zero-sum workgroup reduction was output-identical but flat, 460.4 ms baseline vs 460.4 ms candidate; reverted.
   - `P2_ZERO_SUM_EXACT=1`: using the exact private hand to reduce only the opponent side in zero-sum enforcement was output-identical but slower, 453.1 ms baseline vs 465.0 ms candidate; reverted.
-  - `P2_COPY_STATIC_FOLD_VALUES=1`: cached GPU fold-terminal value initialization had positive early runs, but the post-flip confirmation reversed, 428.0 ms CPU write path vs 440.0 ms cached GPU copy path; reverted.
+  - `P2_COPY_STATIC_FOLD_VALUES=1`: cached GPU fold-terminal value initialization had positive early runs, but a later confirmation reversed, 428.0 ms CPU write path vs 440.0 ms cached GPU copy path; reverted.
   - `P2_CACHE_ALLIN_CONTEXT=1`: caching the resolved all-in table context on sparse tree entries was output-identical and had positive runs, but post-flip confirmation reversed, 494.3 ms old provider lookup path vs 504.5 ms cached path; reverted.
   - `P2_CACHE_MODEL_UNIFORMS=1`: caching repeated BetterFFN uniform buffers was output-identical and had one tiny positive run, 414.0 ms baseline vs 413.7 ms candidate, but repeat confirmation was slower, 414.1 ms baseline vs 414.9 ms candidate; reverted.
 
