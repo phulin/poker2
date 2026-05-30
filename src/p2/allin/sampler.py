@@ -8,7 +8,11 @@ import torch
 from p2.allin.data import PreflopAllInBatch
 from p2.allin.kernels import allin_alias_tuple_score_cuda, triton_available
 from p2.env.card_utils import NUM_HANDS, board_allowed_hands, hand_combos_tensor
-from p2.env.rules import rank_hands
+from p2.env.rules import rank_hands as rank_hands_torch
+from p2.env.rules_triton import (
+    rank_7_cards_single_batch_triton,
+    triton_is_available as rules_triton_available,
+)
 from p2.search.allin_payoff import (
     I16_SCALE,
     allin_values_from_payoff_reference,
@@ -33,6 +37,18 @@ def _sample_full_boards(
 ) -> torch.Tensor:
     scores = torch.rand(count, 52, device=device, generator=generator)
     return torch.topk(scores, 5, dim=1).indices.sort(dim=1).values
+
+
+def _rank_hands(board: torch.Tensor) -> torch.Tensor:
+    if board.device.type == "cuda" and rules_triton_available():
+        combos = hand_combos_tensor(device=board.device)
+        rows = board.shape[0]
+        holes = combos[None, :, :].expand(rows, NUM_HANDS, 2)
+        boards = board[:, None, :].expand(rows, NUM_HANDS, 5)
+        cards = torch.cat((holes, boards), dim=-1).reshape(-1, 7)
+        return rank_7_cards_single_batch_triton(cards).view(rows, NUM_HANDS).contiguous()
+    ranks, _ = rank_hands_torch(board.int())
+    return ranks.to(torch.int32).contiguous()
 
 
 def _side_pot_layers(
@@ -183,8 +199,7 @@ def _estimate_preflop_allin_values_triton(
         row_count = B * cur_boards
         root_ids = torch.arange(B, device=device).repeat_interleave(cur_boards)
         boards = _sample_full_boards(row_count, device=device, generator=generator)
-        ranks, _ = rank_hands(boards.int())
-        ranks = ranks.to(torch.int32).contiguous()
+        ranks = _rank_hands(boards)
         allowed = board_allowed_hands(boards).contiguous()
         board_beliefs = beliefs.index_select(0, root_ids)
         board_beliefs.masked_fill_(~allowed[:, None, :], 0.0)
@@ -349,8 +364,7 @@ def estimate_preflop_allin_values(
         row_count = B * cur_boards
         root_ids = torch.arange(B, device=device).repeat_interleave(cur_boards)
         boards = _sample_full_boards(row_count, device=device, generator=generator)
-        ranks, _ = rank_hands(boards.int())
-        ranks = ranks.to(torch.int32)
+        ranks = _rank_hands(boards)
         allowed = board_allowed_hands(boards)
         board_beliefs = beliefs.index_select(0, root_ids)
         board_beliefs.masked_fill_(~allowed[:, None, :], 0.0)

@@ -14,18 +14,31 @@ import wandb
 from p2.allin.data import make_random_preflop_allin_batch
 from p2.allin.model import PreflopAllInEquityModel
 from p2.allin.sampler import estimate_preflop_allin_values
+from p2.rl.optimizers import TrainOptimizer, build_optimizer
 
 
 @dataclass
 class TrainConfig:
     steps: int = 10_000
     batch_size: int = 64
+    batch_size_schedule: str = ""
     players: int = 4
+    optimizer: str = "muon"
     learning_rate: float = 3.0e-4
+    adamw_learning_rate: float = 3.0e-4
     weight_decay: float = 1.0e-4
+    muon_momentum: float = 0.95
+    muon_nesterov: bool = True
+    muon_eps: float = 1.0e-7
+    muon_ns_steps: int = 5
+    muon_adjust_lr_fn: str | None = None
+    policy_head_muon_learning_rate: float = 3.0e-4
     hidden_dim: int = 512
     hand_dim: int = 128
     layers: int = 4
+    compile_model: bool = True
+    compile_dynamic: bool = True
+    compile_mode: str = ""
     sample_count: int = 50_000
     board_samples: int = 256
     tuple_samples: int = 0
@@ -47,6 +60,7 @@ class TrainConfig:
     log_interval: int = 10
     checkpoint_interval: int = 1000
     checkpoint_dir: str = "outputs/allin_equity"
+    resume_checkpoint: str | None = None
 
 
 def _device(name: str) -> torch.device:
@@ -75,9 +89,11 @@ def _save_checkpoint(
     path: Path,
     *,
     model: PreflopAllInEquityModel,
-    optimizer: torch.optim.Optimizer,
+    optimizer: TrainOptimizer,
+    generator: torch.Generator,
     cfg: TrainConfig,
     step: int,
+    examples_seen: int,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -86,13 +102,82 @@ def _save_checkpoint(
             "config": asdict(cfg),
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "generator_state": generator.get_state(),
+            "examples_seen": int(examples_seen),
         },
         path,
     )
 
 
+def _parse_batch_size_schedule(
+    spec: str,
+    *,
+    default_batch_size: int,
+    total_steps: int,
+) -> list[tuple[int, int]]:
+    if not spec:
+        return [(1, int(default_batch_size))]
+
+    phases = [part.strip() for part in spec.split(",") if part.strip()]
+    if not phases:
+        return [(1, int(default_batch_size))]
+
+    if all("x" in phase for phase in phases):
+        schedule = []
+        start_step = 1
+        for phase in phases:
+            batch_text, duration_text = phase.split("x", 1)
+            batch_size = int(batch_text)
+            duration = int(duration_text)
+            if batch_size <= 0 or duration <= 0:
+                raise ValueError("batch-size schedule entries must be positive")
+            schedule.append((start_step, batch_size))
+            start_step += duration
+        if start_step != total_steps + 1:
+            raise ValueError(
+                "duration batch-size schedule must sum to --steps "
+                f"({start_step - 1} != {total_steps})"
+            )
+        return schedule
+
+    if all(":" in phase for phase in phases):
+        schedule = []
+        for phase in phases:
+            step_text, batch_text = phase.split(":", 1)
+            start_step = int(step_text)
+            batch_size = int(batch_text)
+            if start_step <= 0 or batch_size <= 0:
+                raise ValueError("batch-size schedule entries must be positive")
+            schedule.append((start_step, batch_size))
+        schedule.sort()
+        if len({start for start, _ in schedule}) != len(schedule):
+            raise ValueError("batch-size schedule contains duplicate start steps")
+        if schedule[0][0] != 1:
+            schedule.insert(0, (1, int(default_batch_size)))
+        return schedule
+
+    raise ValueError(
+        "batch-size schedule must use either duration phases like "
+        "'64x100,128x50' or step phases like '1:64,101:128'"
+    )
+
+
+def _batch_size_for_step(schedule: list[tuple[int, int]], step: int) -> int:
+    batch_size = schedule[0][1]
+    for start_step, scheduled_batch_size in schedule:
+        if step < start_step:
+            break
+        batch_size = scheduled_batch_size
+    return batch_size
+
+
 def train(cfg: TrainConfig) -> None:
     device = _device(cfg.device)
+    batch_size_schedule = _parse_batch_size_schedule(
+        cfg.batch_size_schedule,
+        default_batch_size=cfg.batch_size,
+        total_steps=cfg.steps,
+    )
     generator = torch.Generator(device=device).manual_seed(cfg.seed)
     init_generator = torch.Generator(device=device).manual_seed(cfg.seed)
     model = PreflopAllInEquityModel(
@@ -102,11 +187,23 @@ def train(cfg: TrainConfig) -> None:
         num_layers=cfg.layers,
     ).to(device)
     model.init_weights(init_generator)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=cfg.learning_rate,
-        weight_decay=cfg.weight_decay,
-    )
+    optimizer = build_optimizer(model, cfg, device)
+    compiled_model = model
+    if cfg.compile_model:
+        compile_kwargs: dict[str, Any] = {"dynamic": cfg.compile_dynamic}
+        if cfg.compile_mode:
+            compile_kwargs["mode"] = cfg.compile_mode
+        compiled_model = torch.compile(model, **compile_kwargs)
+    start_step = 0
+    examples_seen = 0
+    if cfg.resume_checkpoint is not None:
+        checkpoint = torch.load(cfg.resume_checkpoint, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "generator_state" in checkpoint:
+            generator.set_state(checkpoint["generator_state"].cpu())
+        start_step = int(checkpoint.get("step", 0))
+        examples_seen = int(checkpoint.get("examples_seen", 0))
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -122,10 +219,11 @@ def train(cfg: TrainConfig) -> None:
             run.summary["total_parameters"] = total_params
             run.summary["trainable_parameters"] = trainable_params
 
-        for step in range(1, cfg.steps + 1):
+        for step in range(start_step + 1, cfg.steps + 1):
             step_start = time.perf_counter()
+            batch_size = _batch_size_for_step(batch_size_schedule, step)
             batch = make_random_preflop_allin_batch(
-                cfg.batch_size,
+                batch_size,
                 cfg.players,
                 bb=cfg.bb,
                 min_stack_bb=cfg.min_stack_bb,
@@ -148,7 +246,7 @@ def train(cfg: TrainConfig) -> None:
                 generator=generator,
             )
 
-            pred = model(
+            pred = compiled_model(
                 batch.beliefs,
                 batch.starting_stacks,
                 batch.committed,
@@ -164,6 +262,7 @@ def train(cfg: TrainConfig) -> None:
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            examples_seen += batch_size
 
             elapsed = time.perf_counter() - step_start
             if step % cfg.log_interval == 0 or step == 1:
@@ -173,6 +272,9 @@ def train(cfg: TrainConfig) -> None:
                     "loss/mae": float(mae.detach().item()),
                     "loss/max_abs": float(max_abs.detach().item()),
                     "optim/grad_norm": float(grad_norm.detach().item()),
+                    "optim/learning_rate": float(optimizer.param_groups[0]["lr"]),
+                    "data/batch_size": batch_size,
+                    "data/examples_seen": examples_seen,
                     "data/live_players_mean": float(batch.allin_mask.float().sum(dim=1).mean().item()),
                     "data/stack_mean": float(batch.starting_stacks.mean().item()),
                     "data/committed_mean": float(batch.committed.mean().item()),
@@ -197,6 +299,7 @@ def train(cfg: TrainConfig) -> None:
                     ]
                 print(
                     f"[{step:06d}/{cfg.steps}] "
+                    f"bs={batch_size} "
                     f"mse={metrics['loss/mse']:.6f} "
                     f"mae={metrics['loss/mae']:.5f} "
                     f"target={metrics['perf/target_seconds']:.2f}s "
@@ -210,15 +313,19 @@ def train(cfg: TrainConfig) -> None:
                     checkpoint_dir / f"allin_equity_step_{step}.pt",
                     model=model,
                     optimizer=optimizer,
+                    generator=generator,
                     cfg=cfg,
                     step=step,
+                    examples_seen=examples_seen,
                 )
                 _save_checkpoint(
                     checkpoint_dir / "latest.pt",
                     model=model,
                     optimizer=optimizer,
+                    generator=generator,
                     cfg=cfg,
                     step=step,
+                    examples_seen=examples_seen,
                 )
 
 
@@ -228,7 +335,14 @@ def parse_args() -> TrainConfig:
         default = field_def.default
         arg = "--" + field_name.replace("_", "-")
         if isinstance(default, bool):
-            parser.add_argument(arg, action="store_true", default=default)
+            if field_name.startswith("no_"):
+                parser.add_argument(arg, action="store_true", default=default)
+            else:
+                parser.add_argument(
+                    arg,
+                    action=argparse.BooleanOptionalAction,
+                    default=default,
+                )
         else:
             parser.add_argument(arg, type=type(default) if default is not None else str, default=default)
     ns = parser.parse_args()

@@ -100,7 +100,7 @@ if triton is not None:
         alias_idx_ptr,
         candidates_ptr,
         seed_ptr,
-        sample_count,
+        sample_count: tl.constexpr,
         active_hands: tl.constexpr,
         PLAYERS: tl.constexpr,
         TUPLE_TRIES: tl.constexpr,
@@ -139,32 +139,24 @@ if triton is not None:
                     )
 
     @triton.jit
-    def _allin_tuple_score_candidates_kernel(
+    def _allin_select_hero_samples_kernel(
         candidates_ptr,
         hand_masks_ptr,
         hand_ranks_ptr,
-        board_allowed_ptr,
         live_ptr,
-        layer_amount_ptr,
-        eligible_ptr,
-        payout_ptr,
-        denom_ptr,
-        sample_count,
+        used_out_ptr,
+        ranks_out_ptr,
+        alive_out_ptr,
+        sample_count: tl.constexpr,
         active_hands: tl.constexpr,
         PLAYERS: tl.constexpr,
         TUPLE_TRIES: tl.constexpr,
-        NUM_H_BLOCKS: tl.constexpr,
-        BLOCK_H: tl.constexpr,
         BLOCK_S: tl.constexpr,
     ):
         row = tl.program_id(0)
         hero = tl.program_id(1)
-        work_block = tl.program_id(2)
-        h_block = work_block % NUM_H_BLOCKS
-        s_block = work_block // NUM_H_BLOCKS
-        hand = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+        s_block = tl.program_id(2)
         sample = s_block * BLOCK_S + tl.arange(0, BLOCK_S)
-        h_mask = hand < active_hands
         s_mask = sample < sample_count
         hero_live = tl.load(live_ptr + row * PLAYERS + hero) != 0
 
@@ -232,6 +224,45 @@ if triton is not None:
             r4 = tl.where(take, ar4, r4)
             r5 = tl.where(take, ar5, r5)
 
+        sample_base = (row * PLAYERS + hero) * sample_count + sample
+        tl.store(used_out_ptr + sample_base, final_used, mask=s_mask)
+        tl.store(alive_out_ptr + sample_base, alive.to(tl.int8), mask=s_mask)
+        rank_base = ((row * PLAYERS + hero) * PLAYERS) * sample_count + sample
+        tl.store(ranks_out_ptr + rank_base, r0, mask=s_mask)
+        if PLAYERS > 1:
+            tl.store(ranks_out_ptr + rank_base + sample_count, r1, mask=s_mask)
+        if PLAYERS > 2:
+            tl.store(ranks_out_ptr + rank_base + 2 * sample_count, r2, mask=s_mask)
+        if PLAYERS > 3:
+            tl.store(ranks_out_ptr + rank_base + 3 * sample_count, r3, mask=s_mask)
+        if PLAYERS > 4:
+            tl.store(ranks_out_ptr + rank_base + 4 * sample_count, r4, mask=s_mask)
+        if PLAYERS > 5:
+            tl.store(ranks_out_ptr + rank_base + 5 * sample_count, r5, mask=s_mask)
+
+    @triton.jit
+    def _allin_score_hero_hands_from_samples_kernel(
+        hand_masks_ptr,
+        hand_ranks_ptr,
+        board_allowed_ptr,
+        used_samples_ptr,
+        rank_samples_ptr,
+        alive_samples_ptr,
+        layer_amount_ptr,
+        eligible_ptr,
+        payout_ptr,
+        denom_ptr,
+        sample_count: tl.constexpr,
+        active_hands: tl.constexpr,
+        PLAYERS: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hero = tl.program_id(1)
+        h_block = tl.program_id(2)
+        hand = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+        h_mask = hand < active_hands
         hero_mask = tl.load(hand_masks_ptr + hand, mask=h_mask, other=0)
         hero_rank = tl.load(
             hand_ranks_ptr + row * active_hands + hand,
@@ -239,68 +270,73 @@ if triton is not None:
             other=-1,
         )
         board_ok = tl.load(board_allowed_ptr + row * active_hands + hand, mask=h_mask, other=0) != 0
-        compatible = (
-            h_mask[:, None]
-            & s_mask[None, :]
-            & alive[None, :]
-            & board_ok[:, None]
-            & ((hero_mask[:, None] & final_used[None, :]) == 0)
-        )
-        payout = tl.zeros((BLOCK_H, BLOCK_S), dtype=tl.float32)
+        numerator = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        denominator = tl.zeros((BLOCK_H,), dtype=tl.float32)
 
-        for layer in tl.static_range(0, 6):
-            if layer < PLAYERS:
-                hero_eligible = tl.load(
-                    eligible_ptr + (row * PLAYERS + layer) * PLAYERS + hero
-                ) != 0
-                layer_amount = tl.load(layer_amount_ptr + row * PLAYERS + layer)
-                best_opp = tl.full((BLOCK_S,), -1, tl.int32)
-                tie_count = tl.full((BLOCK_H, BLOCK_S), 1.0, dtype=tl.float32)
+        for sample_start in tl.range(0, sample_count, BLOCK_S):
+            sample = sample_start + tl.arange(0, BLOCK_S)
+            s_mask = sample < sample_count
+            sample_base = (row * PLAYERS + hero) * sample_count + sample
+            used = tl.load(used_samples_ptr + sample_base, mask=s_mask, other=0)
+            alive = tl.load(alive_samples_ptr + sample_base, mask=s_mask, other=0) != 0
+            compatible = (
+                h_mask[:, None]
+                & s_mask[None, :]
+                & alive[None, :]
+                & board_ok[:, None]
+                & ((hero_mask[:, None] & used[None, :]) == 0)
+            )
+            payout = tl.zeros((BLOCK_H, BLOCK_S), dtype=tl.float32)
+            rank_base = ((row * PLAYERS + hero) * PLAYERS) * sample_count + sample
 
-                for player in tl.static_range(0, 6):
-                    if player < PLAYERS:
-                        is_opp = player != hero
-                        player_eligible = tl.load(
-                            eligible_ptr + (row * PLAYERS + layer) * PLAYERS + player
-                        ) != 0
-                        opp_rank = r0
-                        if player == 1:
-                            opp_rank = r1
-                        if player == 2:
-                            opp_rank = r2
-                        if player == 3:
-                            opp_rank = r3
-                        if player == 4:
-                            opp_rank = r4
-                        if player == 5:
-                            opp_rank = r5
-                        use_opp = is_opp & player_eligible
-                        best_opp = tl.maximum(best_opp, tl.where(use_opp, opp_rank, -1))
-                        tie_count += tl.where(
-                            use_opp & (opp_rank[None, :] == hero_rank[:, None]),
-                            1.0,
-                            0.0,
-                        )
+            for layer in tl.static_range(0, 6):
+                if layer < PLAYERS:
+                    hero_eligible = tl.load(
+                        eligible_ptr + (row * PLAYERS + layer) * PLAYERS + hero
+                    ) != 0
+                    layer_amount = tl.load(layer_amount_ptr + row * PLAYERS + layer)
+                    best_opp = tl.full((BLOCK_S,), -1, tl.int32)
+                    tie_count = tl.full((BLOCK_H, BLOCK_S), 1.0, dtype=tl.float32)
 
-                wins = hero_rank[:, None] > best_opp[None, :]
-                ties = hero_rank[:, None] == best_opp[None, :]
-                share = tl.where(
-                    wins,
-                    1.0,
-                    tl.where(ties, 1.0 / tie_count, 0.0),
-                )
-                payout += tl.where(
-                    hero_eligible,
-                    layer_amount * share,
-                    tl.zeros((BLOCK_H, BLOCK_S), dtype=tl.float32),
-                )
+                    for player in tl.static_range(0, 6):
+                        if player < PLAYERS:
+                            is_opp = player != hero
+                            player_eligible = tl.load(
+                                eligible_ptr + (row * PLAYERS + layer) * PLAYERS + player
+                            ) != 0
+                            opp_rank = tl.load(
+                                rank_samples_ptr + rank_base + player * sample_count,
+                                mask=s_mask & is_opp,
+                                other=-1,
+                            )
+                            use_opp = is_opp & player_eligible
+                            best_opp = tl.maximum(best_opp, tl.where(use_opp, opp_rank, -1))
+                            tie_count += tl.where(
+                                use_opp & (opp_rank[None, :] == hero_rank[:, None]),
+                                1.0,
+                                0.0,
+                            )
 
-        comp_f = compatible.to(tl.float32)
-        numer = tl.sum(comp_f * payout, axis=1)
-        denom = tl.sum(comp_f, axis=1)
+                    wins = hero_rank[:, None] > best_opp[None, :]
+                    ties = hero_rank[:, None] == best_opp[None, :]
+                    share = tl.where(
+                        wins,
+                        1.0,
+                        tl.where(ties, 1.0 / tie_count, 0.0),
+                    )
+                    payout += tl.where(
+                        hero_eligible,
+                        layer_amount * share,
+                        tl.zeros((BLOCK_H, BLOCK_S), dtype=tl.float32),
+                    )
+
+            comp_f = compatible.to(tl.float32)
+            numerator += tl.sum(comp_f * payout, axis=1)
+            denominator += tl.sum(comp_f, axis=1)
+
         out_base = (row * PLAYERS + hero) * active_hands + hand
-        tl.atomic_add(payout_ptr + out_base, numer, sem="relaxed", mask=h_mask)
-        tl.atomic_add(denom_ptr + out_base, denom, sem="relaxed", mask=h_mask)
+        tl.store(payout_ptr + out_base, numerator, mask=h_mask)
+        tl.store(denom_ptr + out_base, denominator, mask=h_mask)
 
 
 def triton_available() -> bool:
@@ -354,8 +390,8 @@ def allin_alias_tuple_score_cuda(
     sample_count: int,
     tuple_tries: int,
     seed: int,
-    block_s: int = 128,
-    block_h: int = 16,
+    block_s: int = 32,
+    block_h: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """Score full-board all-in samples with a copied alias tuple-reject kernel.
 
@@ -386,8 +422,30 @@ def allin_alias_tuple_score_cuda(
         dtype=torch.int16,
         device=board_beliefs.device,
     )
-    payout = torch.zeros(rows, players, hands, dtype=torch.float32, device=board_beliefs.device)
-    denom = torch.zeros_like(payout)
+    used_samples = torch.empty(
+        rows,
+        players,
+        sample_count,
+        dtype=torch.int64,
+        device=board_beliefs.device,
+    )
+    rank_samples = torch.empty(
+        rows,
+        players,
+        players,
+        sample_count,
+        dtype=torch.int32,
+        device=board_beliefs.device,
+    )
+    alive_samples = torch.empty(
+        rows,
+        players,
+        sample_count,
+        dtype=torch.int8,
+        device=board_beliefs.device,
+    )
+    payout = torch.empty(rows, players, hands, dtype=torch.float32, device=board_beliefs.device)
+    denom = torch.empty_like(payout)
     seed_tensor = torch.tensor(int(seed), dtype=torch.int64, device=board_beliefs.device)
     sample_grid = (rows, triton.cdiv(sample_count, block_s))
     _allin_alias_sample_candidates_kernel[sample_grid](
@@ -404,13 +462,30 @@ def allin_alias_tuple_score_cuda(
     )
     num_h_blocks = triton.cdiv(hands, block_h)
     num_s_blocks = triton.cdiv(sample_count, block_s)
-    grid = (rows, players, num_h_blocks * num_s_blocks)
-    _allin_tuple_score_candidates_kernel[grid](
+    select_grid = (rows, players, num_s_blocks)
+    _allin_select_hero_samples_kernel[select_grid](
         candidates,
         hand_masks.contiguous(),
         hand_ranks.contiguous(),
-        board_allowed.to(torch.int8).contiguous(),
         live_mask.to(torch.int8).contiguous(),
+        used_samples,
+        rank_samples,
+        alive_samples,
+        sample_count,
+        active_hands=hands,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    score_grid = (rows, players, num_h_blocks)
+    _allin_score_hero_hands_from_samples_kernel[score_grid](
+        hand_masks.contiguous(),
+        hand_ranks.contiguous(),
+        board_allowed.to(torch.int8).contiguous(),
+        used_samples,
+        rank_samples,
+        alive_samples,
         layer_amount.contiguous(),
         eligible.to(torch.int8).contiguous(),
         payout,
@@ -418,8 +493,6 @@ def allin_alias_tuple_score_cuda(
         sample_count,
         active_hands=hands,
         PLAYERS=players,
-        TUPLE_TRIES=tuple_tries,
-        NUM_H_BLOCKS=num_h_blocks,
         BLOCK_H=block_h,
         BLOCK_S=block_s,
         num_warps=4,
