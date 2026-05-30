@@ -171,6 +171,8 @@ class PreflopAllInEquityModel(nn.Module):
         values = torch.einsum("bpd,hd->bph", state_value, hand_value)
         values = values / math.sqrt(float(self.hidden_dim))
         values = values + self.value_bias(state).expand(-1, -1, NUM_HANDS)
+        folded_value = (stacks_after - starting_stacks) / scale
+        values = torch.where(folded_mask[:, :, None], folded_value[:, :, None], values)
         return values.to(beliefs.dtype)
 
     def init_weights(self, generator: torch.Generator | None = None) -> None:

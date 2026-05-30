@@ -67,6 +67,37 @@ def test_preflop_allin_model_shapes_and_prenorm_blocks() -> None:
     assert all(isinstance(block.activation, torch.nn.LeakyReLU) for block in blocks)
 
 
+def test_preflop_allin_model_hard_codes_folded_values() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(457)
+    batch = make_random_preflop_allin_batch(
+        3,
+        players=4,
+        device="cpu",
+        generator=generator,
+        min_allin_players=3,
+    )
+    model = PreflopAllInEquityModel(
+        players=4,
+        hidden_dim=64,
+        hand_dim=32,
+        num_layers=2,
+    )
+    out = model(
+        batch.beliefs,
+        batch.starting_stacks,
+        batch.committed,
+        batch.stacks_after,
+        batch.allin_mask,
+        batch.folded_mask,
+    )
+
+    folded_value = (
+        batch.stacks_after - batch.starting_stacks
+    ) / batch.starting_stacks.mean(dim=1, keepdim=True).clamp_min(1.0)
+    expected = folded_value[:, :, None].expand_as(out)
+    torch.testing.assert_close(out[batch.folded_mask], expected[batch.folded_mask])
+
+
 def test_preflop_allin_sampler_small_smoke() -> None:
     generator = torch.Generator(device="cpu").manual_seed(789)
     batch = make_random_preflop_allin_batch(
