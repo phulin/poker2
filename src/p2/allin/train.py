@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
@@ -24,8 +25,8 @@ class TrainConfig:
     batch_size_schedule: str = ""
     players: int = 4
     optimizer: str = "muon"
-    learning_rate: float = 3.0e-4
-    adamw_learning_rate: float = 3.0e-4
+    learning_rate: float = 2.5e-3
+    adamw_learning_rate: float = 4.0e-3
     weight_decay: float = 1.0e-4
     muon_momentum: float = 0.95
     muon_nesterov: bool = True
@@ -33,10 +34,12 @@ class TrainConfig:
     muon_ns_steps: int = 5
     muon_adjust_lr_fn: str | None = None
     policy_head_muon_learning_rate: float = 3.0e-4
+    cosine_lr_decay_ratio: float = 1.0
+    cosine_lr_decay_steps: int = 0
     hidden_dim: int = 512
     hand_dim: int = 128
     layers: int = 4
-    compile_model: bool = True
+    compile_model: bool = False
     compile_dynamic: bool = True
     compile_mode: str = ""
     sample_count: int = 50_000
@@ -171,6 +174,46 @@ def _batch_size_for_step(schedule: list[tuple[int, int]], step: int) -> int:
     return batch_size
 
 
+def _base_lr_for_group(param_group: dict[str, Any], cfg: TrainConfig) -> float:
+    role = param_group.get("lr_role")
+    if role == "adamw":
+        return float(cfg.adamw_learning_rate)
+    if role == "policy_head_muon":
+        return float(cfg.policy_head_muon_learning_rate)
+    return float(cfg.learning_rate)
+
+
+def _cosine_lr_scale(step: int, *, total_steps: int, ratio: float) -> float:
+    if ratio < 0.0 or ratio > 1.0:
+        raise ValueError("cosine_lr_decay_ratio must be in [0, 1]")
+    if ratio == 1.0:
+        return 1.0
+    if total_steps <= 1:
+        return ratio
+    progress = min(max((step - 1) / float(total_steps - 1), 0.0), 1.0)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return ratio + (1.0 - ratio) * cosine
+
+
+def _set_optimizer_lrs(
+    optimizer: TrainOptimizer,
+    cfg: TrainConfig,
+    *,
+    step: int,
+) -> float:
+    decay_steps = cfg.cosine_lr_decay_steps if cfg.cosine_lr_decay_steps > 0 else cfg.steps
+    scale = _cosine_lr_scale(
+        step,
+        total_steps=decay_steps,
+        ratio=float(cfg.cosine_lr_decay_ratio),
+    )
+    for param_group in optimizer.param_groups:
+        base_lr = _base_lr_for_group(param_group, cfg)
+        param_group["initial_lr"] = base_lr
+        param_group["lr"] = base_lr * scale
+    return scale
+
+
 def train(cfg: TrainConfig) -> None:
     device = _device(cfg.device)
     batch_size_schedule = _parse_batch_size_schedule(
@@ -221,6 +264,7 @@ def train(cfg: TrainConfig) -> None:
 
         for step in range(start_step + 1, cfg.steps + 1):
             step_start = time.perf_counter()
+            lr_scale = _set_optimizer_lrs(optimizer, cfg, step=step)
             batch_size = _batch_size_for_step(batch_size_schedule, step)
             batch = make_random_preflop_allin_batch(
                 batch_size,
@@ -266,6 +310,16 @@ def train(cfg: TrainConfig) -> None:
 
             elapsed = time.perf_counter() - step_start
             if step % cfg.log_interval == 0 or step == 1:
+                muon_lrs = [
+                    group["lr"]
+                    for group in optimizer.param_groups
+                    if group.get("lr_role") != "adamw"
+                ]
+                adamw_lrs = [
+                    group["lr"]
+                    for group in optimizer.param_groups
+                    if group.get("lr_role") == "adamw"
+                ]
                 metrics = {
                     "step": step,
                     "loss/mse": float(loss.detach().item()),
@@ -273,6 +327,13 @@ def train(cfg: TrainConfig) -> None:
                     "loss/max_abs": float(max_abs.detach().item()),
                     "optim/grad_norm": float(grad_norm.detach().item()),
                     "optim/learning_rate": float(optimizer.param_groups[0]["lr"]),
+                    "optim/muon_learning_rate": float(muon_lrs[0])
+                    if muon_lrs
+                    else 0.0,
+                    "optim/adamw_learning_rate": float(adamw_lrs[0])
+                    if adamw_lrs
+                    else 0.0,
+                    "optim/lr_scale": lr_scale,
                     "data/batch_size": batch_size,
                     "data/examples_seen": examples_seen,
                     "data/live_players_mean": float(batch.allin_mask.float().sum(dim=1).mean().item()),
