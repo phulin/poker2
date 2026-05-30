@@ -6,6 +6,7 @@ This is the main Python package for P2. It contains the HUNL environments, neura
 - `K_BEST_README.md`: Design and usage notes for K-best self-play.
 
 ### Subdirectories
+- `allin/`: Preflop all-in equity model, random data generation, Monte Carlo terminal-value target sampler, and standalone training script.
 - `cli/`: Hydra and command-line entry points for training, tuning, sampling, and demos.
 - `core/`: Shared interfaces and structured configuration dataclasses/enums.
 - `encoding/`: Action-bin encoding and legal-action mask helpers.
