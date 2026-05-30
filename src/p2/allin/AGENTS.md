@@ -8,7 +8,7 @@ Preflop all-in equity modeling, random training-batch generation, Monte Carlo ta
 - `training_data.py`: Reusable online/offline all-in training-data generation, sharded dataset writing, manifest loading, sequential/wrapped pregenerated batch reads, and suit-permutation remapping for beliefs and targets.
 - `sampler.py`: Preflop full-board Monte Carlo all-in value target estimator with tuple-reject opponent sampling, side-pot layer accounting, CUDA fast-path dispatch, and CPU reference fallback.
 - `kernels.py`: All-in-specialized Triton CDF tuple-reject sampler that scores by-hand side-pot payouts over sampled full-board rows.
-- `train.py`: Standalone training script with a separate Weights & Biases project, Muon/AdamW split optimization for linear matrices vs. scalar parameters, optional cosine LR decay, opt-in torch.compile support, checkpoint resume support, batch-size phase scheduling, multi-epoch pregenerated train/validation data support with epoch-aware suit permutation augmentation, and detailed throughput/loss/target logging.
+- `train.py`: Hydra-driven standalone training script with a separate Weights & Biases project, Muon/AdamW split optimization for linear matrices vs. scalar parameters, optional cosine LR decay, opt-in torch.compile support, checkpoint resume support, batch-size phase scheduling, multi-epoch pregenerated train/validation data support with epoch-aware suit permutation augmentation, and detailed throughput/loss/target logging.
 - `pregenerate.py`: CLI for pregenerating sharded all-in training datasets containing random features and `allin_values` targets.
 
 ### Subdirectories

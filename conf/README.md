@@ -55,6 +55,12 @@ This directory contains Hydra configuration files for P2 training. Each file is 
 - **Device**: CUDA/CPU (override as needed)
 - **Checkpoint Dir**: `checkpoints-rebel-debug`
 
+### `allin/config.yaml` - All-In Equity Training Configuration
+- **Purpose**: Standalone preflop all-in equity model training
+- **Batch Size**: 64
+- **Optimizer**: Muon with AdamW fallback parameter groups
+- **Wandb**: Enabled by default under `p2-allin-equity`
+
 ## Usage
 
 ### Basic Usage
@@ -73,6 +79,9 @@ python src/p2/cli/train_kbest.py --config-name=config_fast
 
 # ReBeL CFR training
 python src/p2/cli/train_rebel.py --config-name=config_rebel_cfr
+
+# All-in equity training
+python -m p2.allin.train
 ```
 
 ### Parameter Overrides

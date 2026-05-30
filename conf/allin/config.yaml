@@ -1,0 +1,62 @@
+# @package _global_
+# All-in equity model training configuration.
+
+defaults:
+  - /allin/config_schema@_global_
+  - _self_
+
+steps: 10000
+batch_size: 64
+batch_size_schedule: ""
+players: 4
+
+optimizer: muon
+learning_rate: 0.0025
+adamw_learning_rate: 0.004
+weight_decay: 0.0001
+muon_momentum: 0.95
+muon_nesterov: true
+muon_eps: 0.0000001
+muon_ns_steps: 5
+muon_adjust_lr_fn: null
+policy_head_muon_learning_rate: 0.0003
+cosine_lr_decay_ratio: 1.0
+cosine_lr_decay_steps: 0
+
+hidden_dim: 512
+hand_dim: 128
+layers: 4
+film_rank: 64
+compile_model: false
+compile_dynamic: true
+compile_mode: ""
+
+sample_count: 50000
+board_samples: 256
+tuple_samples: 0
+tuple_tries: 4
+board_chunk: 8
+hand_chunk: 128
+
+bb: 100
+min_stack_bb: 10
+mid_stack_bb: 200
+max_stack_bb: 400
+high_stack_mass_ratio: 0.3333333333333333
+concentration: 1.0
+folded_commit_max_frac: 0.35
+
+seed: 0
+device: cuda
+
+wandb_project: p2-allin-equity
+wandb_name: null
+no_wandb: false
+log_interval: 10
+eval_interval: 0
+eval_batch_size: 0
+checkpoint_interval: 1000
+checkpoint_dir: outputs/allin_equity
+resume_checkpoint: null
+pregenerated_data: null
+validation_data: null

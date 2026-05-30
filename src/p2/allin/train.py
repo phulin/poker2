@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import math
 import time
 from contextlib import nullcontext
@@ -8,9 +7,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import hydra
 import torch
 import torch.nn.functional as F
 import wandb
+from hydra.core.config_store import ConfigStore
+from omegaconf import DictConfig, OmegaConf
 
 from p2.allin.model import PreflopAllInEquityModel
 from p2.allin.training_data import (
@@ -24,7 +26,7 @@ from p2.rl.optimizers import TrainOptimizer, build_optimizer
 
 
 @dataclass
-class TrainConfig:
+class AllInTrainConfig:
     steps: int = 10_000
     batch_size: int = 64
     batch_size_schedule: str = ""
@@ -74,6 +76,16 @@ class TrainConfig:
     resume_checkpoint: str | None = None
     pregenerated_data: str | None = None
     validation_data: str | None = None
+
+    @classmethod
+    def from_dict_config(cls, dict_config: DictConfig) -> "AllInTrainConfig":
+        container = OmegaConf.to_container(dict_config, resolve=True)
+        if not isinstance(container, dict):
+            raise TypeError("Hydra config must resolve to a mapping")
+        return cls(**container)
+
+
+TrainConfig = AllInTrainConfig
 
 
 def _device(name: str) -> torch.device:
@@ -621,31 +633,17 @@ def train(cfg: TrainConfig) -> None:
                     examples_seen=examples_seen,
                 )
 
-
-def parse_args() -> TrainConfig:
-    parser = argparse.ArgumentParser(description=__doc__)
-    for field_name, field_def in TrainConfig.__dataclass_fields__.items():
-        default = field_def.default
-        arg = "--" + field_name.replace("_", "-")
-        if isinstance(default, bool):
-            if field_name.startswith("no_"):
-                parser.add_argument(arg, action="store_true", default=default)
-            else:
-                parser.add_argument(
-                    arg,
-                    action=argparse.BooleanOptionalAction,
-                    default=default,
-                )
-        else:
-            parser.add_argument(
-                arg, type=type(default) if default is not None else str, default=default
-            )
-    ns = parser.parse_args()
-    return TrainConfig(**vars(ns))
+cs = ConfigStore.instance()
+cs.store(group="allin", name="config_schema", node=AllInTrainConfig)
 
 
-def main() -> None:
-    train(parse_args())
+@hydra.main(
+    version_base=None,
+    config_path="../../../conf",
+    config_name="allin/config",
+)
+def main(dict_config: DictConfig) -> None:
+    train(AllInTrainConfig.from_dict_config(dict_config))
 
 
 if __name__ == "__main__":

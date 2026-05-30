@@ -13,4 +13,4 @@ Hydra configuration files for PPO/K-best training, transformer variants, and ReB
 - `config_rebel_debug.yaml`: Faster ReBeL debug configuration.
 
 ### Subdirectories
-There are no child source directories.
+- `allin/`: Hydra defaults for standalone preflop all-in equity model training.
