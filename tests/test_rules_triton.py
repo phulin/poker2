@@ -43,6 +43,62 @@ def test_compare_7_single_batch_triton_matches_pytorch() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Triton test")
+def test_rank_7_cards_matches_comparator() -> None:
+    """The batched rank scorer must induce the same ordering as the
+    separately-validated comparator kernel for distinct-card hands."""
+    pytest.importorskip("triton")
+    from p2.env.rules_triton import (
+        compare_7_cards_single_batch_triton,
+        rank_7_cards_single_batch_triton,
+    )
+
+    generator = torch.Generator(device="cuda").manual_seed(2024)
+    n = 4096
+    cards_batch = torch.empty((n, 2, 7), dtype=torch.long, device="cuda")
+    for row in range(n):
+        for player in range(2):
+            cards_batch[row, player] = torch.randperm(52, generator=generator, device="cuda")[:7]
+
+    expected_sign = compare_7_cards_single_batch_triton(cards_batch)  # [n] in {-1,0,1}
+    scores = rank_7_cards_single_batch_triton(cards_batch.reshape(-1, 7)).view(n, 2)
+    diff = scores[:, 0] - scores[:, 1]
+    actual_sign = torch.sign(diff).to(torch.int32)
+    assert torch.equal(expected_sign, actual_sign)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Triton test")
+def test_rank_hands_triton_matches_per_hand_scorer() -> None:
+    """The fused (board+combos gather) path must agree with scoring the
+    explicitly-materialized 7-card hands, on legal (distinct-card) combos."""
+    pytest.importorskip("triton")
+    from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
+    from p2.env.rules_triton import (
+        rank_7_cards_single_batch_triton,
+        rank_hands_triton,
+    )
+
+    generator = torch.Generator(device="cuda").manual_seed(7)
+    m = 64
+    board = torch.empty((m, 5), dtype=torch.long, device="cuda")
+    for i in range(m):
+        board[i] = torch.randperm(52, generator=generator, device="cuda")[:5]
+
+    combos = hand_combos_tensor(device="cuda")  # [1326, 2]
+    holes = combos[None].expand(m, NUM_HANDS, 2)
+    boards_b = board[:, None, :].expand(m, NUM_HANDS, 5)
+    cards = torch.cat([holes, boards_b], dim=-1)  # [m, 1326, 7]
+    cards_flat = cards.reshape(-1, 7)
+
+    ref = rank_7_cards_single_batch_triton(cards_flat).view(m, NUM_HANDS)
+    fused, _ = rank_hands_triton(board)
+
+    # Blocked combos (hole card shares with board) are undefined; exclude them.
+    sorted_cards, _ = cards.sort(dim=-1)
+    legal = (sorted_cards[..., 1:] != sorted_cards[..., :-1]).all(dim=-1)
+    assert torch.equal(ref[legal], fused[legal])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for Triton test")
 def test_compare_7_single_batch_triton_matches_pytorch_edge_cases() -> None:
     pytest.importorskip("triton")
     from p2.env.rules_triton import (
