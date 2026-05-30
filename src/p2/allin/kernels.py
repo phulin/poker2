@@ -462,7 +462,7 @@ def allin_alias_tuple_score_cuda_into(
     layer_amount: torch.Tensor,
     eligible: torch.Tensor,
     seed: int,
-    block_s: int = 32,
+    block_s: int | None = None,
     block_h: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Score one board chunk into ``workspace``; return prefix views of the sums.
@@ -473,6 +473,11 @@ def allin_alias_tuple_score_cuda_into(
     ``board_allowed``/``live_mask``/``eligible`` int8) and be contiguous. The
     returned ``payout``/``denom`` are views into ``workspace`` and are
     overwritten by the next call.
+
+    ``block_s`` tiles the per-row samples. The kernels key their RNG offsets on
+    the absolute sample index, so the value only affects tiling/occupancy, not
+    the result. When ``None`` it defaults to ``min(32, next_pow2(sample_count))``
+    so small sample counts (e.g. 16) don't waste half the lanes of a 32-wide tile.
     """
     if triton is None:
         raise RuntimeError("triton is not available")
@@ -485,6 +490,8 @@ def allin_alias_tuple_score_cuda_into(
         raise ValueError("chunk has more rows than the workspace was sized for")
     sample_count = workspace.sample_count
     tuple_tries = workspace.tuple_tries
+    if block_s is None:
+        block_s = min(32, triton.next_power_of_2(sample_count))
 
     flat_beliefs = board_beliefs.reshape(rows * players, hands).contiguous()
     alias_prob, alias_idx = _build_alias_tables_into(workspace, flat_beliefs)
@@ -562,7 +569,7 @@ def allin_alias_tuple_score_cuda(
     sample_count: int,
     tuple_tries: int,
     seed: int,
-    block_s: int = 32,
+    block_s: int | None = None,
     block_h: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """Score full-board all-in samples with a copied alias tuple-reject kernel.
