@@ -9,7 +9,7 @@ from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
 
 
 HAND_FEATURE_DIM = 8
-PLAYER_FEATURE_DIM = 8
+PLAYER_FEATURE_DIM = 9
 
 
 class _LeakyRMSBlock(nn.Module):
@@ -115,6 +115,19 @@ class PreflopAllInEquityModel(nn.Module):
             dim=-1,
         )
 
+    @staticmethod
+    def _max_eligible_to_win(
+        committed: torch.Tensor,
+        folded_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        levels = committed.sort(dim=1).values
+        previous = torch.cat((torch.zeros_like(levels[:, :1]), levels[:, :-1]), dim=1)
+        widths = (levels - previous).clamp_min(0.0)
+        participants = committed[:, None, :] >= levels[:, :, None]
+        layer_amount = widths * participants.to(committed.dtype).sum(dim=2)
+        eligible = participants & (~folded_mask[:, None, :])
+        return (layer_amount[:, :, None] * eligible.to(committed.dtype)).sum(dim=1)
+
     def forward(
         self,
         beliefs: torch.Tensor,
@@ -138,6 +151,10 @@ class PreflopAllInEquityModel(nn.Module):
             dtype=beliefs.dtype,
         )[None, :].expand(beliefs.shape[0], -1)
         pot = committed.sum(dim=1, keepdim=True) / scale
+        max_eligible_to_win = self._max_eligible_to_win(
+            committed,
+            folded_mask,
+        ) / scale
         player_features = torch.stack(
             (
                 starting_stacks / scale,
@@ -148,6 +165,7 @@ class PreflopAllInEquityModel(nn.Module):
                 live,
                 player_idx,
                 pot.expand(-1, self.players),
+                max_eligible_to_win,
             ),
             dim=-1,
         )

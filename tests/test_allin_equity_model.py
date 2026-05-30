@@ -67,6 +67,34 @@ def test_preflop_allin_model_shapes_and_prenorm_blocks() -> None:
     assert all(isinstance(block.activation, torch.nn.LeakyReLU) for block in blocks)
 
 
+def test_preflop_allin_model_max_eligible_to_win_feature() -> None:
+    committed = torch.tensor(
+        [
+            [100.0, 200.0, 50.0, 0.0],
+            [100.0, 100.0, 100.0, 10.0],
+        ]
+    )
+    folded_mask = torch.tensor(
+        [
+            [False, False, True, True],
+            [False, False, False, True],
+        ]
+    )
+
+    max_eligible = PreflopAllInEquityModel._max_eligible_to_win(
+        committed,
+        folded_mask,
+    )
+
+    expected = torch.tensor(
+        [
+            [250.0, 350.0, 0.0, 0.0],
+            [310.0, 310.0, 310.0, 0.0],
+        ]
+    )
+    torch.testing.assert_close(max_eligible, expected)
+
+
 def test_preflop_allin_model_hard_codes_folded_values() -> None:
     generator = torch.Generator(device="cpu").manual_seed(457)
     batch = make_random_preflop_allin_batch(
