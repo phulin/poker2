@@ -238,8 +238,10 @@ def _estimate_preflop_allin_values_triton(
             seed=(done_boards + 1) * 104_729,
         )
         kernel_launch_seconds += time.perf_counter() - launch_start
-        payout_sum.index_add_(0, root_ids, payout_part)
-        denom_sum.index_add_(0, root_ids, denom_part)
+        # Rows are arange(B).repeat_interleave(cur_boards), so each root's boards
+        # are contiguous: a segmented sum beats an atomic scatter-add here.
+        payout_sum += payout_part.reshape(B, cur_boards, P, H).sum(dim=1)
+        denom_sum += denom_part.reshape(B, cur_boards, P, H).sum(dim=1)
         done_boards += cur_boards
 
     expected_payout = torch.where(
@@ -522,16 +524,14 @@ def estimate_preflop_allin_values(
                     comp_f = compatible.to(torch.float32)
                     payout_part = (comp_f * payout).sum(dim=2)
                     denom_part = comp_f.sum(dim=2)
-                    payout_sum[:, hero, hand_start:hand_end].index_add_(
-                        0,
-                        root_ids,
-                        payout_part,
-                    )
-                    denom_sum[:, hero, hand_start:hand_end].index_add_(
-                        0,
-                        root_ids,
-                        denom_part,
-                    )
+                    # root_ids == arange(B).repeat_interleave(cur_boards), so a
+                    # segmented sum replaces the per-root atomic scatter-add.
+                    payout_sum[:, hero, hand_start:hand_end] += payout_part.reshape(
+                        B, cur_boards, -1
+                    ).sum(dim=1)
+                    denom_sum[:, hero, hand_start:hand_end] += denom_part.reshape(
+                        B, cur_boards, -1
+                    ).sum(dim=1)
 
             processed_samples += cur_samples
 

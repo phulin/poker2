@@ -78,10 +78,10 @@ def test_preflop_allin_sampler_small_smoke() -> None:
     )
     values, diagnostics = estimate_preflop_allin_values(
         batch,
-        board_samples=2,
+        board_samples=4,
         tuple_samples=2,
         tuple_tries=2,
-        board_chunk=1,
+        board_chunk=2,  # cur_boards > 1 exercises the segmented-sum accumulation
         hand_chunk=256,
         generator=generator,
     )
