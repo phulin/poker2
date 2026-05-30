@@ -111,7 +111,7 @@ The multiway value model should predict every seat at arbitrary public states, n
    - Keep action masking outside the model.
 3. Value head:
    - Output `[B, P, 1326]`.
-   - Add a feature bit or enum for target kind: interior same-street, pre-chance boundary, post-chance state.
+   - Add to actions_this_round an additional feature bit for round closed.
    - Keep separate heads only if diagnostics show boundary/interior targets interfere; otherwise prefer one arbitrary-state value head with target-kind conditioning.
 4. Constant-sum handling:
    - Do not reuse the current heads-up zero-sum projection blindly.
