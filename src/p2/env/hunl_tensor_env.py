@@ -30,6 +30,7 @@ class HUNLTensorEnv:
 
     # Type signatures for fields
     N: int
+    num_players: int
     mean_stack: int
     stack_mode: str
     min_stack_bb: int
@@ -91,6 +92,7 @@ class HUNLTensorEnv:
         )
         self.float_dtype = float_dtype
         self.N = num_envs
+        self.num_players = 2
         self.arange_n = torch.arange(self.N, device=self.device)
         if mean_stack is None:
             if starting_stack is None:

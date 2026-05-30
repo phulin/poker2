@@ -51,6 +51,7 @@ def _make_env(
 def test_n1_reset_and_shapes():
     env = _make_env(N=1)
     assert env.N == 1
+    assert env.num_players == 2
     assert env.deck.shape == (1, 9)
     assert env.deck_pos.shape == (1,)
     assert env.stacks.shape == (1, 2)
