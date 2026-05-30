@@ -92,6 +92,36 @@ def test_preflop_allin_sampler_small_smoke() -> None:
     assert diagnostics["target_boards_per_second"] > 0.0
 
 
+def test_preflop_allin_sampler_compute_stats_false_matches_values() -> None:
+    def run(compute_stats: bool):
+        generator = torch.Generator(device="cpu").manual_seed(789)
+        batch = make_random_preflop_allin_batch(
+            2,
+            players=3,
+            bb=100,
+            device="cpu",
+            generator=generator,
+        )
+        return estimate_preflop_allin_values(
+            batch,
+            board_samples=2,
+            tuple_samples=2,
+            tuple_tries=2,
+            board_chunk=1,
+            hand_chunk=256,
+            generator=generator,
+            compute_stats=compute_stats,
+        )
+
+    values, diagnostics = run(True)
+    values_no_stats, diagnostics_no_stats = run(False)
+
+    # Skipping diagnostics must not change the estimated values.
+    torch.testing.assert_close(values_no_stats, values)
+    assert diagnostics_no_stats == {}
+    assert diagnostics["target_seconds"] >= 0.0
+
+
 def test_preflop_allin_sampler_uses_exact_table_for_two_live_players() -> None:
     generator = torch.Generator(device="cpu").manual_seed(987)
     batch = make_random_preflop_allin_batch(

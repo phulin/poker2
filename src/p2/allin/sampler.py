@@ -6,7 +6,11 @@ from pathlib import Path
 import torch
 
 from p2.allin.data import PreflopAllInBatch
-from p2.allin.kernels import allin_alias_tuple_score_cuda, triton_available
+from p2.allin.kernels import (
+    allin_alias_tuple_score_cuda_into,
+    make_allin_alias_workspace,
+    triton_available,
+)
 from p2.env.card_utils import NUM_HANDS, board_allowed_hands, hand_combos_tensor
 from p2.env.rules import rank_hands as rank_hands_torch
 from p2.env.rules_triton import (
@@ -178,6 +182,7 @@ def _estimate_preflop_allin_values_triton(
     tuple_tries: int,
     board_chunk: int,
     generator: torch.Generator | None,
+    compute_stats: bool = True,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     start = time.perf_counter()
     device = batch.beliefs.device
@@ -189,9 +194,22 @@ def _estimate_preflop_allin_values_triton(
     combo_masks = _combo_masks(device)
     live_mask = ~batch.folded_mask
     layer_amount, eligible = _side_pot_layers(batch)
+    # Convert per-root side tensors once; chunks just index_select into int8/f32.
+    live_mask_i8 = live_mask.to(torch.int8)
+    eligible_i8 = eligible.to(torch.int8)
+    layer_amount_f32 = layer_amount.to(torch.float32)
     payout_sum = torch.zeros(B, P, H, dtype=torch.float32, device=device)
     denom_sum = torch.zeros_like(payout_sum)
     kernel_launch_seconds = 0.0
+
+    workspace = make_allin_alias_workspace(
+        max_rows=B * min(board_chunk, board_samples),
+        players=P,
+        sample_count=tuple_samples,
+        tuple_tries=tuple_tries,
+        device=device,
+        hands=H,
+    )
 
     done_boards = 0
     while done_boards < board_samples:
@@ -207,19 +225,19 @@ def _estimate_preflop_allin_values_triton(
             dim=-1,
             keepdim=True,
         ).clamp_min(1.0e-30)
-        payout_part, denom_part, diag = allin_alias_tuple_score_cuda(
+        launch_start = time.perf_counter()
+        payout_part, denom_part = allin_alias_tuple_score_cuda_into(
+            workspace,
             board_beliefs=board_beliefs,
             hand_masks=combo_masks,
             hand_ranks=ranks,
-            board_allowed=allowed,
-            live_mask=live_mask.index_select(0, root_ids),
-            layer_amount=layer_amount.index_select(0, root_ids),
-            eligible=eligible.index_select(0, root_ids),
-            sample_count=tuple_samples,
-            tuple_tries=tuple_tries,
+            board_allowed=allowed.to(torch.int8),
+            live_mask=live_mask_i8.index_select(0, root_ids),
+            layer_amount=layer_amount_f32.index_select(0, root_ids),
+            eligible=eligible_i8.index_select(0, root_ids),
             seed=(done_boards + 1) * 104_729,
         )
-        kernel_launch_seconds += diag["kernel_launch_seconds"]
+        kernel_launch_seconds += time.perf_counter() - launch_start
         payout_sum.index_add_(0, root_ids, payout_part)
         denom_sum.index_add_(0, root_ids, denom_part)
         done_boards += cur_boards
@@ -238,6 +256,8 @@ def _estimate_preflop_allin_values_triton(
         batch.stacks_after - batch.starting_stacks
     ) / batch.scale[:, None].clamp_min(1.0)
     values = torch.where(batch.folded_mask[:, :, None], folded_value[:, :, None], values)
+    if not compute_stats:
+        return values, {}
     torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - start
     total_samples = B * board_samples * tuple_samples
@@ -268,6 +288,7 @@ def estimate_preflop_allin_values(
     generator: torch.Generator | None = None,
     preflop_table_path: str | Path = DEFAULT_PREFLOP_ALLIN_TABLE,
     use_exact_two_player: bool = True,
+    compute_stats: bool = True,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Estimate preflop all-in chip-normalized values by sampling full boards.
 
@@ -275,6 +296,12 @@ def estimate_preflop_allin_values(
     each sampled complete board becomes a river-board row, opponent tuples are
     sampled with rejection to avoid private-card collisions, and every hero hand
     is scored against those tuples. Side-pot payouts are accumulated per layer.
+
+    When ``compute_stats`` is false the returned diagnostics dict is empty and the
+    sampler skips the host-side reductions (``.item()`` D2H copies) and the final
+    ``torch.cuda.synchronize`` used to populate it. This lets the caller's CPU run
+    ahead and overlap the next step's work; pass ``True`` only on steps that
+    actually log the diagnostics.
     """
     board_samples, tuple_samples = _resolve_sample_split(
         sample_count,
@@ -316,8 +343,11 @@ def estimate_preflop_allin_values(
                 generator=generator,
                 preflop_table_path=preflop_table_path,
                 use_exact_two_player=False,
+                compute_stats=compute_stats,
             )
             values.index_copy_(0, mc_rows, mc_values)
+        if not compute_stats:
+            return values, {}
         elapsed = time.perf_counter() - start
         diagnostics = {
             "target_seconds": elapsed,
@@ -345,6 +375,7 @@ def estimate_preflop_allin_values(
             tuple_tries=tuple_tries,
             board_chunk=board_chunk,
             generator=generator,
+            compute_stats=compute_stats,
         )
 
     beliefs = batch.beliefs.to(torch.float32)
@@ -520,6 +551,8 @@ def estimate_preflop_allin_values(
         batch.stacks_after - batch.starting_stacks
     ) / batch.scale[:, None].clamp_min(1.0)
     values = torch.where(batch.folded_mask[:, :, None], folded_value[:, :, None], values)
+    if not compute_stats:
+        return values, {}
     elapsed = time.perf_counter() - start
     diagnostics = {
         "target_seconds": elapsed,

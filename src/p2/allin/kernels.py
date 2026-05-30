@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
 import torch
 
@@ -343,20 +344,92 @@ def triton_available() -> bool:
     return triton is not None
 
 
-def _build_alias_tables(beliefs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+@dataclass
+class AllinAliasWorkspace:
+    """Reusable GPU buffers for repeated all-in alias tuple-reject scoring.
+
+    The buffers are sized for ``max_rows`` board rows; chunks with fewer rows use
+    contiguous prefix views. The inner dims (``players``, ``tuple_tries``,
+    ``sample_count``, ``hands``) are fixed at creation time because the Triton
+    kernels index these buffers with manual flat offsets derived from them.
+    """
+
+    alias_prob: torch.Tensor
+    alias_idx: torch.Tensor
+    small_stack: torch.Tensor
+    large_stack: torch.Tensor
+    counts: torch.Tensor
+    candidates: torch.Tensor
+    used_samples: torch.Tensor
+    rank_samples: torch.Tensor
+    alive_samples: torch.Tensor
+    payout: torch.Tensor
+    denom: torch.Tensor
+    seed: torch.Tensor
+    max_rows: int
+    players: int
+    tuple_tries: int
+    sample_count: int
+    hands: int
+
+
+def make_allin_alias_workspace(
+    *,
+    max_rows: int,
+    players: int,
+    sample_count: int,
+    tuple_tries: int,
+    device: torch.device,
+    hands: int = NUM_HANDS,
+) -> AllinAliasWorkspace:
+    """Preallocate reusable buffers for ``allin_alias_tuple_score_cuda_into``."""
     if triton is None:
         raise RuntimeError("triton is not available")
-    if beliefs.device.type != "cuda":
-        raise ValueError("all-in Triton alias tables require CUDA tensors")
-    rows, active_hands = beliefs.shape
-    alias_prob = torch.empty_like(beliefs, dtype=torch.float32)
-    alias_idx = torch.empty(rows, active_hands, dtype=torch.int16, device=beliefs.device)
-    small_stack = torch.empty(rows, active_hands, dtype=torch.int32, device=beliefs.device)
-    large_stack = torch.empty(rows, active_hands, dtype=torch.int32, device=beliefs.device)
-    counts = torch.empty(rows, 2, dtype=torch.int32, device=beliefs.device)
+    if max_rows <= 0 or players <= 0 or sample_count <= 0 or tuple_tries <= 0:
+        raise ValueError("workspace dimensions must be positive")
+    flat_rows = max_rows * players
+    return AllinAliasWorkspace(
+        alias_prob=torch.empty(flat_rows, hands, dtype=torch.float32, device=device),
+        alias_idx=torch.empty(flat_rows, hands, dtype=torch.int16, device=device),
+        small_stack=torch.empty(flat_rows, hands, dtype=torch.int32, device=device),
+        large_stack=torch.empty(flat_rows, hands, dtype=torch.int32, device=device),
+        counts=torch.empty(flat_rows, 2, dtype=torch.int32, device=device),
+        candidates=torch.empty(
+            max_rows, players, tuple_tries, sample_count, dtype=torch.int16, device=device
+        ),
+        used_samples=torch.empty(
+            max_rows, players, sample_count, dtype=torch.int64, device=device
+        ),
+        rank_samples=torch.empty(
+            max_rows, players, players, sample_count, dtype=torch.int32, device=device
+        ),
+        alive_samples=torch.empty(
+            max_rows, players, sample_count, dtype=torch.int8, device=device
+        ),
+        payout=torch.empty(max_rows, players, hands, dtype=torch.float32, device=device),
+        denom=torch.empty(max_rows, players, hands, dtype=torch.float32, device=device),
+        seed=torch.zeros((), dtype=torch.int64, device=device),
+        max_rows=max_rows,
+        players=players,
+        tuple_tries=tuple_tries,
+        sample_count=sample_count,
+        hands=hands,
+    )
+
+
+def _build_alias_tables_into(
+    workspace: AllinAliasWorkspace,
+    flat_beliefs: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rows_flat, active_hands = flat_beliefs.shape
+    alias_prob = workspace.alias_prob[:rows_flat]
+    alias_idx = workspace.alias_idx[:rows_flat]
+    small_stack = workspace.small_stack[:rows_flat]
+    large_stack = workspace.large_stack[:rows_flat]
+    counts = workspace.counts[:rows_flat]
     block_h = triton.next_power_of_2(active_hands)
-    _alias_partition_kernel[(rows,)](
-        beliefs,
+    _alias_partition_kernel[(rows_flat,)](
+        flat_beliefs,
         alias_prob,
         alias_idx,
         small_stack,
@@ -366,7 +439,7 @@ def _build_alias_tables(beliefs: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
         BLOCK_H=block_h,
         num_warps=2,
     )
-    _alias_resolve_stacks_kernel[(rows,)](
+    _alias_resolve_stacks_kernel[(rows_flat,)](
         alias_prob,
         alias_idx,
         small_stack,
@@ -376,6 +449,105 @@ def _build_alias_tables(beliefs: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
         num_warps=1,
     )
     return alias_prob, alias_idx
+
+
+def allin_alias_tuple_score_cuda_into(
+    workspace: AllinAliasWorkspace,
+    *,
+    board_beliefs: torch.Tensor,
+    hand_masks: torch.Tensor,
+    hand_ranks: torch.Tensor,
+    board_allowed: torch.Tensor,
+    live_mask: torch.Tensor,
+    layer_amount: torch.Tensor,
+    eligible: torch.Tensor,
+    seed: int,
+    block_s: int = 32,
+    block_h: int = 32,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Score one board chunk into ``workspace``; return prefix views of the sums.
+
+    ``board_beliefs`` is ``[rows, players, 1326]`` and must already be
+    board-masked and normalized. The side tensors must already carry the dtypes
+    the kernels expect (``hand_masks`` int64, ``hand_ranks`` int32,
+    ``board_allowed``/``live_mask``/``eligible`` int8) and be contiguous. The
+    returned ``payout``/``denom`` are views into ``workspace`` and are
+    overwritten by the next call.
+    """
+    if triton is None:
+        raise RuntimeError("triton is not available")
+    if board_beliefs.device.type != "cuda":
+        raise ValueError("all-in tuple scorer requires CUDA tensors")
+    rows, players, hands = board_beliefs.shape
+    if players != workspace.players or hands != workspace.hands:
+        raise ValueError("workspace players/hands mismatch")
+    if rows > workspace.max_rows:
+        raise ValueError("chunk has more rows than the workspace was sized for")
+    sample_count = workspace.sample_count
+    tuple_tries = workspace.tuple_tries
+
+    flat_beliefs = board_beliefs.reshape(rows * players, hands).contiguous()
+    alias_prob, alias_idx = _build_alias_tables_into(workspace, flat_beliefs)
+
+    candidates = workspace.candidates[:rows]
+    used_samples = workspace.used_samples[:rows]
+    rank_samples = workspace.rank_samples[:rows]
+    alive_samples = workspace.alive_samples[:rows]
+    payout = workspace.payout[:rows]
+    denom = workspace.denom[:rows]
+    workspace.seed.fill_(int(seed))
+
+    sample_grid = (rows, triton.cdiv(sample_count, block_s))
+    _allin_alias_sample_candidates_kernel[sample_grid](
+        alias_prob,
+        alias_idx,
+        candidates,
+        workspace.seed,
+        sample_count,
+        active_hands=hands,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    num_h_blocks = triton.cdiv(hands, block_h)
+    num_s_blocks = triton.cdiv(sample_count, block_s)
+    select_grid = (rows, players, num_s_blocks)
+    _allin_select_hero_samples_kernel[select_grid](
+        candidates,
+        hand_masks,
+        hand_ranks,
+        live_mask,
+        used_samples,
+        rank_samples,
+        alive_samples,
+        sample_count,
+        active_hands=hands,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    score_grid = (rows, players, num_h_blocks)
+    _allin_score_hero_hands_from_samples_kernel[score_grid](
+        hand_masks,
+        hand_ranks,
+        board_allowed,
+        used_samples,
+        rank_samples,
+        alive_samples,
+        layer_amount,
+        eligible,
+        payout,
+        denom,
+        sample_count,
+        active_hands=hands,
+        PLAYERS=players,
+        BLOCK_H=block_h,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    return payout, denom
 
 
 def allin_alias_tuple_score_cuda(
@@ -398,6 +570,10 @@ def allin_alias_tuple_score_cuda(
     ``board_beliefs`` is ``[rows, players, 1326]`` and is expected to already be
     board-masked and normalized. Outputs are unnormalized payout and denominator
     sums with shape ``[rows, players, 1326]``.
+
+    This is a convenience wrapper that allocates a one-shot workspace; callers
+    that score many chunks should reuse a :func:`make_allin_alias_workspace`
+    workspace via :func:`allin_alias_tuple_score_cuda_into` instead.
     """
     if triton is None:
         raise RuntimeError("triton is not available")
@@ -412,89 +588,25 @@ def allin_alias_tuple_score_cuda(
     rows, players, hands = board_beliefs.shape
     if hands != NUM_HANDS:
         raise ValueError(f"expected {NUM_HANDS} hands, got {hands}")
-    flat_beliefs = board_beliefs.reshape(rows * players, hands).contiguous()
-    alias_prob, alias_idx = _build_alias_tables(flat_beliefs)
-    candidates = torch.empty(
-        rows,
-        players,
-        tuple_tries,
-        sample_count,
-        dtype=torch.int16,
+    workspace = make_allin_alias_workspace(
+        max_rows=rows,
+        players=players,
+        sample_count=sample_count,
+        tuple_tries=tuple_tries,
         device=board_beliefs.device,
+        hands=hands,
     )
-    used_samples = torch.empty(
-        rows,
-        players,
-        sample_count,
-        dtype=torch.int64,
-        device=board_beliefs.device,
-    )
-    rank_samples = torch.empty(
-        rows,
-        players,
-        players,
-        sample_count,
-        dtype=torch.int32,
-        device=board_beliefs.device,
-    )
-    alive_samples = torch.empty(
-        rows,
-        players,
-        sample_count,
-        dtype=torch.int8,
-        device=board_beliefs.device,
-    )
-    payout = torch.empty(rows, players, hands, dtype=torch.float32, device=board_beliefs.device)
-    denom = torch.empty_like(payout)
-    seed_tensor = torch.tensor(int(seed), dtype=torch.int64, device=board_beliefs.device)
-    sample_grid = (rows, triton.cdiv(sample_count, block_s))
-    _allin_alias_sample_candidates_kernel[sample_grid](
-        alias_prob,
-        alias_idx,
-        candidates,
-        seed_tensor,
-        sample_count,
-        active_hands=hands,
-        PLAYERS=players,
-        TUPLE_TRIES=tuple_tries,
-        BLOCK_S=block_s,
-        num_warps=4,
-    )
-    num_h_blocks = triton.cdiv(hands, block_h)
-    num_s_blocks = triton.cdiv(sample_count, block_s)
-    select_grid = (rows, players, num_s_blocks)
-    _allin_select_hero_samples_kernel[select_grid](
-        candidates,
-        hand_masks.contiguous(),
-        hand_ranks.contiguous(),
-        live_mask.to(torch.int8).contiguous(),
-        used_samples,
-        rank_samples,
-        alive_samples,
-        sample_count,
-        active_hands=hands,
-        PLAYERS=players,
-        TUPLE_TRIES=tuple_tries,
-        BLOCK_S=block_s,
-        num_warps=4,
-    )
-    score_grid = (rows, players, num_h_blocks)
-    _allin_score_hero_hands_from_samples_kernel[score_grid](
-        hand_masks.contiguous(),
-        hand_ranks.contiguous(),
-        board_allowed.to(torch.int8).contiguous(),
-        used_samples,
-        rank_samples,
-        alive_samples,
-        layer_amount.contiguous(),
-        eligible.to(torch.int8).contiguous(),
-        payout,
-        denom,
-        sample_count,
-        active_hands=hands,
-        PLAYERS=players,
-        BLOCK_H=block_h,
-        BLOCK_S=block_s,
-        num_warps=4,
+    payout, denom = allin_alias_tuple_score_cuda_into(
+        workspace,
+        board_beliefs=board_beliefs,
+        hand_masks=hand_masks.to(torch.int64).contiguous(),
+        hand_ranks=hand_ranks.to(torch.int32).contiguous(),
+        board_allowed=board_allowed.to(torch.int8).contiguous(),
+        live_mask=live_mask.to(torch.int8).contiguous(),
+        layer_amount=layer_amount.to(torch.float32).contiguous(),
+        eligible=eligible.to(torch.int8).contiguous(),
+        seed=seed,
+        block_s=block_s,
+        block_h=block_h,
     )
     return payout, denom, {"kernel_launch_seconds": time.perf_counter() - start}

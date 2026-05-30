@@ -12,9 +12,13 @@ import torch
 import torch.nn.functional as F
 import wandb
 
-from p2.allin.data import make_random_preflop_allin_batch
 from p2.allin.model import PreflopAllInEquityModel
-from p2.allin.sampler import estimate_preflop_allin_values
+from p2.allin.training_data import (
+    AllInDataGenConfig,
+    PregeneratedAllInDataset,
+    generate_allin_training_chunk,
+    tensors_to_batch,
+)
 from p2.rl.optimizers import TrainOptimizer, build_optimizer
 
 
@@ -61,9 +65,13 @@ class TrainConfig:
     wandb_name: str | None = None
     no_wandb: bool = False
     log_interval: int = 10
+    eval_interval: int = 0
+    eval_batch_size: int = 0
     checkpoint_interval: int = 1000
     checkpoint_dir: str = "outputs/allin_equity"
     resume_checkpoint: str | None = None
+    pregenerated_data: str | None = None
+    validation_data: str | None = None
 
 
 def _device(name: str) -> torch.device:
@@ -174,6 +182,97 @@ def _batch_size_for_step(schedule: list[tuple[int, int]], step: int) -> int:
     return batch_size
 
 
+def _required_examples(
+    schedule: list[tuple[int, int]],
+    *,
+    start_step: int,
+    end_step: int,
+) -> int:
+    return sum(_batch_size_for_step(schedule, step) for step in range(start_step, end_step + 1))
+
+
+def _data_config_from_train(cfg: TrainConfig) -> AllInDataGenConfig:
+    return AllInDataGenConfig(
+        players=cfg.players,
+        sample_count=cfg.sample_count,
+        board_samples=cfg.board_samples,
+        tuple_samples=cfg.tuple_samples,
+        tuple_tries=cfg.tuple_tries,
+        board_chunk=cfg.board_chunk,
+        hand_chunk=cfg.hand_chunk,
+        bb=cfg.bb,
+        min_stack_bb=cfg.min_stack_bb,
+        mid_stack_bb=cfg.mid_stack_bb,
+        max_stack_bb=cfg.max_stack_bb,
+        high_stack_mass_ratio=cfg.high_stack_mass_ratio,
+        concentration=cfg.concentration,
+        folded_commit_max_frac=cfg.folded_commit_max_frac,
+    )
+
+
+def _pregenerated_target_diag(
+    targets: torch.Tensor,
+    *,
+    elapsed: float,
+) -> dict[str, float]:
+    return {
+        "target_seconds": elapsed,
+        "target_boards_per_second": 0.0,
+        "target_samples_per_second": 0.0,
+        "target_zero_denom_frac": 0.0,
+        "target_value_mean": float(targets.mean().item()),
+        "target_value_std": float(targets.std().item()),
+        "target_board_samples": 0.0,
+        "target_tuple_samples": 0.0,
+    }
+
+
+@torch.no_grad()
+def _evaluate_pregenerated_dataset(
+    model: torch.nn.Module,
+    dataset: PregeneratedAllInDataset,
+    *,
+    batch_size: int,
+    device: torch.device,
+) -> dict[str, float]:
+    if batch_size <= 0:
+        raise ValueError("validation batch size must be positive")
+    model_was_training = model.training
+    model.eval()
+    start = time.perf_counter()
+    squared_sum = 0.0
+    abs_sum = 0.0
+    max_abs = 0.0
+    value_count = 0
+    row_start = 0
+    while row_start < len(dataset):
+        cur = min(batch_size, len(dataset) - row_start)
+        batch, targets = dataset.get_batch(row_start, cur, device=device)
+        pred = model(
+            batch.beliefs,
+            batch.starting_stacks,
+            batch.committed,
+            batch.stacks_after,
+            batch.allin_mask,
+            batch.folded_mask,
+        )
+        err = (pred - targets).detach()
+        squared_sum += float(err.square().sum().item())
+        abs_sum += float(err.abs().sum().item())
+        max_abs = max(max_abs, float(err.abs().amax().item()))
+        value_count += err.numel()
+        row_start += cur
+    if model_was_training:
+        model.train()
+    return {
+        "eval/mse": squared_sum / max(value_count, 1),
+        "eval/mae": abs_sum / max(value_count, 1),
+        "eval/max_abs": max_abs,
+        "eval/examples": float(len(dataset)),
+        "eval/seconds": time.perf_counter() - start,
+    }
+
+
 def _base_lr_for_group(param_group: dict[str, Any], cfg: TrainConfig) -> float:
     role = param_group.get("lr_role")
     if role == "adamw":
@@ -248,6 +347,40 @@ def train(cfg: TrainConfig) -> None:
         start_step = int(checkpoint.get("step", 0))
         examples_seen = int(checkpoint.get("examples_seen", 0))
 
+    pregenerated_dataset = (
+        PregeneratedAllInDataset(cfg.pregenerated_data)
+        if cfg.pregenerated_data is not None
+        else None
+    )
+    validation_dataset = (
+        PregeneratedAllInDataset(cfg.validation_data)
+        if cfg.validation_data is not None
+        else None
+    )
+    if pregenerated_dataset is not None:
+        if pregenerated_dataset.players != cfg.players:
+            raise ValueError(
+                f"pregenerated data has {pregenerated_dataset.players} players, "
+                f"trainer expects {cfg.players}"
+            )
+        remaining_examples = _required_examples(
+            batch_size_schedule,
+            start_step=start_step + 1,
+            end_step=cfg.steps,
+        )
+        needed_examples = examples_seen + remaining_examples
+        if needed_examples > len(pregenerated_dataset):
+            raise ValueError(
+                "not enough pregenerated data to use each row at most once: "
+                f"need rows [0, {needed_examples}), dataset has "
+                f"{len(pregenerated_dataset)}"
+            )
+    if validation_dataset is not None and validation_dataset.players != cfg.players:
+        raise ValueError(
+            f"validation data has {validation_dataset.players} players, "
+            f"trainer expects {cfg.players}"
+        )
+
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(
@@ -257,6 +390,7 @@ def train(cfg: TrainConfig) -> None:
     )
 
     checkpoint_dir = Path(cfg.checkpoint_dir)
+    data_cfg = _data_config_from_train(cfg)
     started = time.perf_counter()
     with _init_wandb(cfg) as run:
         if isinstance(run, wandb.Run):
@@ -265,31 +399,33 @@ def train(cfg: TrainConfig) -> None:
 
         for step in range(start_step + 1, cfg.steps + 1):
             step_start = time.perf_counter()
+            is_log_step = step % cfg.log_interval == 0 or step == 1
             lr_scale = _set_optimizer_lrs(optimizer, cfg, step=step)
             batch_size = _batch_size_for_step(batch_size_schedule, step)
-            batch = make_random_preflop_allin_batch(
-                batch_size,
-                cfg.players,
-                bb=cfg.bb,
-                min_stack_bb=cfg.min_stack_bb,
-                mid_stack_bb=cfg.mid_stack_bb,
-                max_stack_bb=cfg.max_stack_bb,
-                high_stack_mass_ratio=cfg.high_stack_mass_ratio,
-                concentration=cfg.concentration,
-                folded_commit_max_frac=cfg.folded_commit_max_frac,
-                device=device,
-                generator=generator,
-            )
-            targets, target_diag = estimate_preflop_allin_values(
-                batch,
-                sample_count=cfg.sample_count,
-                board_samples=cfg.board_samples,
-                tuple_samples=cfg.tuple_samples if cfg.tuple_samples > 0 else None,
-                tuple_tries=cfg.tuple_tries,
-                board_chunk=cfg.board_chunk,
-                hand_chunk=cfg.hand_chunk,
-                generator=generator,
-            )
+            if pregenerated_dataset is None:
+                generated, target_diag = generate_allin_training_chunk(
+                    batch_size,
+                    data_cfg,
+                    device=device,
+                    generator=generator,
+                    compute_stats=is_log_step,
+                )
+                batch, targets = tensors_to_batch(generated, device=device)
+            else:
+                target_start = time.perf_counter()
+                batch, targets = pregenerated_dataset.get_batch(
+                    examples_seen,
+                    batch_size,
+                    device=device,
+                )
+                target_diag = (
+                    _pregenerated_target_diag(
+                        targets,
+                        elapsed=time.perf_counter() - target_start,
+                    )
+                    if is_log_step
+                    else {}
+                )
 
             pred = compiled_model(
                 batch.beliefs,
@@ -310,7 +446,7 @@ def train(cfg: TrainConfig) -> None:
             examples_seen += batch_size
 
             elapsed = time.perf_counter() - step_start
-            if step % cfg.log_interval == 0 or step == 1:
+            if is_log_step:
                 muon_lrs = [
                     group["lr"]
                     for group in optimizer.param_groups
@@ -370,6 +506,29 @@ def train(cfg: TrainConfig) -> None:
                 )
                 if isinstance(run, wandb.Run):
                     run.log(metrics, step=step)
+
+            if (
+                validation_dataset is not None
+                and cfg.eval_interval > 0
+                and (step % cfg.eval_interval == 0 or step == cfg.steps)
+            ):
+                eval_batch_size = cfg.eval_batch_size if cfg.eval_batch_size > 0 else batch_size
+                eval_metrics = _evaluate_pregenerated_dataset(
+                    compiled_model,
+                    validation_dataset,
+                    batch_size=eval_batch_size,
+                    device=device,
+                )
+                print(
+                    f"[eval {step:06d}/{cfg.steps}] "
+                    f"mse={eval_metrics['eval/mse']:.6f} "
+                    f"mae={eval_metrics['eval/mae']:.5f} "
+                    f"max_abs={eval_metrics['eval/max_abs']:.5f} "
+                    f"seconds={eval_metrics['eval/seconds']:.2f}s",
+                    flush=True,
+                )
+                if isinstance(run, wandb.Run):
+                    run.log(eval_metrics, step=step)
 
             if step % cfg.checkpoint_interval == 0 or step == cfg.steps:
                 _save_checkpoint(
