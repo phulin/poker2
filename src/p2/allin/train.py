@@ -252,7 +252,8 @@ def train(cfg: TrainConfig) -> None:
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(
         f"Training all-in model on {device}: "
-        f"params={total_params:,} trainable={trainable_params:,}"
+        f"params={total_params:,} trainable={trainable_params:,}",
+        flush=True,
     )
 
     checkpoint_dir = Path(cfg.checkpoint_dir)
@@ -364,7 +365,8 @@ def train(cfg: TrainConfig) -> None:
                     f"mse={metrics['loss/mse']:.6f} "
                     f"mae={metrics['loss/mae']:.5f} "
                     f"target={metrics['perf/target_seconds']:.2f}s "
-                    f"step={elapsed:.2f}s"
+                    f"step={elapsed:.2f}s",
+                    flush=True,
                 )
                 if isinstance(run, wandb.Run):
                     run.log(metrics, step=step)
