@@ -46,6 +46,8 @@ class AllInTrainConfig:
     muon_ns_steps: int = 5
     muon_adjust_lr_fn: str | None = None
     policy_head_muon_learning_rate: float = 3.0e-4
+    lr_decay: str = "cosine"
+    lr_warmdown_start_step: int = 1
     cosine_lr_decay_ratio: float = 1.0
     cosine_lr_decay_steps: int = 0
     hidden_dim: int = 512
@@ -411,6 +413,75 @@ def _cosine_lr_scale(step: int, *, total_steps: int, ratio: float) -> float:
     return ratio + (1.0 - ratio) * cosine
 
 
+def _linear_lr_scale(step: int, *, total_steps: int, ratio: float) -> float:
+    if ratio < 0.0 or ratio > 1.0:
+        raise ValueError("cosine_lr_decay_ratio must be in [0, 1]")
+    if ratio == 1.0:
+        return 1.0
+    if total_steps <= 1:
+        return ratio
+    progress = min(max((step - 1) / float(total_steps - 1), 0.0), 1.0)
+    return ratio + (1.0 - ratio) * (1.0 - progress)
+
+
+def _warmdown_lr_scale(
+    step: int,
+    *,
+    total_steps: int,
+    ratio: float,
+    start_step: int,
+    shape: str,
+) -> float:
+    if start_step < 1:
+        raise ValueError("lr_warmdown_start_step must be positive")
+    if start_step > total_steps:
+        raise ValueError("lr_warmdown_start_step cannot exceed decay steps")
+    if step < start_step:
+        return 1.0
+    warmdown_steps = total_steps - start_step + 1
+    warmdown_step = step - start_step + 1
+    if shape == "cosine":
+        return _cosine_lr_scale(warmdown_step, total_steps=warmdown_steps, ratio=ratio)
+    if shape == "linear":
+        return _linear_lr_scale(warmdown_step, total_steps=warmdown_steps, ratio=ratio)
+    raise ValueError(f"unsupported warmdown shape {shape!r}")
+
+
+def _lr_scale(
+    step: int,
+    *,
+    total_steps: int,
+    ratio: float,
+    decay: str,
+    warmdown_start_step: int,
+) -> float:
+    decay = decay.strip().lower()
+    if decay == "cosine":
+        return _cosine_lr_scale(step, total_steps=total_steps, ratio=ratio)
+    if decay == "linear":
+        return _linear_lr_scale(step, total_steps=total_steps, ratio=ratio)
+    if decay in {"stable_warmdown", "cosine_warmdown"}:
+        return _warmdown_lr_scale(
+            step,
+            total_steps=total_steps,
+            ratio=ratio,
+            start_step=warmdown_start_step,
+            shape="cosine",
+        )
+    if decay == "linear_warmdown":
+        return _warmdown_lr_scale(
+            step,
+            total_steps=total_steps,
+            ratio=ratio,
+            start_step=warmdown_start_step,
+            shape="linear",
+        )
+    raise ValueError(
+        "lr_decay must be one of: cosine, linear, stable_warmdown, "
+        f"cosine_warmdown, linear_warmdown; got {decay!r}"
+    )
+
+
 def _set_optimizer_lrs(
     optimizer: TrainOptimizer,
     cfg: TrainConfig,
@@ -420,10 +491,12 @@ def _set_optimizer_lrs(
     decay_steps = (
         cfg.cosine_lr_decay_steps if cfg.cosine_lr_decay_steps > 0 else cfg.steps
     )
-    scale = _cosine_lr_scale(
+    scale = _lr_scale(
         step,
         total_steps=decay_steps,
         ratio=float(cfg.cosine_lr_decay_ratio),
+        decay=cfg.lr_decay,
+        warmdown_start_step=cfg.lr_warmdown_start_step,
     )
     for param_group in optimizer.param_groups:
         base_lr = _base_lr_for_group(param_group, cfg)

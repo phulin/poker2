@@ -1,5 +1,8 @@
 import math
 
+import pytest
+
+from p2.allin.train import _lr_scale
 from p2.core.structured_config import LrSchedule
 from p2.rl.exponential_controller import ExponentialController
 from p2.rl.cfr_trainer import _scheduled_learning_rate
@@ -144,6 +147,79 @@ def test_cosine_lr_decay_monotonic_and_endpoints():
         assert b <= a + 1e-12
     for a, b in zip(value_lrs, value_lrs[1:]):
         assert b <= a + 1e-12
+
+
+def test_allin_lr_scale_modes():
+    assert math.isclose(
+        _lr_scale(
+            1,
+            total_steps=5,
+            ratio=0.2,
+            decay="cosine",
+            warmdown_start_step=1,
+        ),
+        1.0,
+    )
+    assert math.isclose(
+        _lr_scale(
+            5,
+            total_steps=5,
+            ratio=0.2,
+            decay="cosine",
+            warmdown_start_step=1,
+        ),
+        0.2,
+    )
+    assert math.isclose(
+        _lr_scale(
+            3,
+            total_steps=5,
+            ratio=0.2,
+            decay="linear",
+            warmdown_start_step=1,
+        ),
+        0.6,
+    )
+
+    assert math.isclose(
+        _lr_scale(
+            3,
+            total_steps=6,
+            ratio=0.1,
+            decay="stable_warmdown",
+            warmdown_start_step=4,
+        ),
+        1.0,
+    )
+    assert math.isclose(
+        _lr_scale(
+            6,
+            total_steps=6,
+            ratio=0.1,
+            decay="stable_warmdown",
+            warmdown_start_step=4,
+        ),
+        0.1,
+    )
+    assert math.isclose(
+        _lr_scale(
+            5,
+            total_steps=6,
+            ratio=0.1,
+            decay="linear_warmdown",
+            warmdown_start_step=4,
+        ),
+        0.55,
+    )
+
+    with pytest.raises(ValueError, match="lr_decay"):
+        _lr_scale(
+            1,
+            total_steps=5,
+            ratio=0.2,
+            decay="unsupported",
+            warmdown_start_step=1,
+        )
 
 
 def test_separate_learning_rates():
