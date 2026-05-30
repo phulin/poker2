@@ -12,6 +12,7 @@ from .exact import (
     tri_weight,
     tri_weight_direct,
 )
+from .monte_carlo import tuple_reject_sis_by_hand
 from .results import PerHandEquityResult
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "tri_identity_smoke_check",
     "tri_weight",
     "tri_weight_direct",
+    "tuple_reject_sis_by_hand",
 ]
