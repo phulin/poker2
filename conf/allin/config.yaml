@@ -5,14 +5,14 @@ defaults:
   - /allin/config_schema@_global_
   - _self_
 
-steps: 10000
-batch_size: 64
+steps: 32000
+batch_size: 128
 batch_size_schedule: ""
 players: 4
 
 optimizer: muon
-learning_rate: 0.0025
-adamw_learning_rate: 0.004
+learning_rate: 0.015
+adamw_learning_rate: 0.024
 weight_decay: 0.0001
 muon_momentum: 0.95
 muon_nesterov: true
@@ -20,14 +20,14 @@ muon_eps: 0.0000001
 muon_ns_steps: 5
 muon_adjust_lr_fn: null
 policy_head_muon_learning_rate: 0.0003
-cosine_lr_decay_ratio: 1.0
-cosine_lr_decay_steps: 0
+cosine_lr_decay_ratio: 0.015
+cosine_lr_decay_steps: 500
 
-hidden_dim: 512
-hand_dim: 128
-layers: 4
+hidden_dim: 1024
+hand_dim: 512
+layers: 6
 film_rank: 64
-compile_model: false
+compile_model: true
 compile_dynamic: true
 compile_mode: ""
 
@@ -53,10 +53,10 @@ wandb_project: p2-allin-equity
 wandb_name: null
 no_wandb: false
 log_interval: 10
-eval_interval: 0
-eval_batch_size: 0
-checkpoint_interval: 1000
-checkpoint_dir: outputs/allin_equity
+eval_interval: 250
+eval_batch_size: 512
+checkpoint_interval: 500
+checkpoint_dir: outputs/allin_equity_h1024_hand512_pregen512k_bs128_compile_lr015_adamw024_cos0015_decay500_steps4000
 resume_checkpoint: null
-pregenerated_data: null
-validation_data: null
+pregenerated_data: outputs/allin_training_data_512k_s65536_b4096_bc64
+validation_data: outputs/allin_validation_data_8192_s1048576_b131072_bc64
