@@ -66,7 +66,7 @@ class PreflopAllInEquityModel(nn.Module):
             nn.RMSNorm(hand_dim),
             nn.LeakyReLU(negative_slope=negative_slope),
         )
-        self.range_proj = nn.Linear(hand_dim, hidden_dim, bias=False)
+        self.range_proj = nn.Linear(hand_dim * 2, hidden_dim, bias=False)
         self.player_proj = nn.Sequential(
             nn.Linear(PLAYER_FEATURE_DIM, hidden_dim),
             nn.RMSNorm(hidden_dim),
@@ -171,7 +171,14 @@ class PreflopAllInEquityModel(nn.Module):
         )
 
         hand_emb = self.hand_encoder(self.hand_features.to(beliefs.device, beliefs.dtype))
-        range_summary = beliefs.to(hand_emb.dtype) @ hand_emb
+        beliefs_f = beliefs.to(hand_emb.dtype)
+        range_summary = torch.cat(
+            (
+                beliefs_f @ hand_emb,
+                beliefs_f @ hand_emb.square(),
+            ),
+            dim=-1,
+        )
         per_player = self.range_proj(range_summary) + self.player_proj(player_features)
         global_state = self.input_proj(per_player.flatten(1))
         global_state = self.trunk(global_state)
