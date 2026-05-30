@@ -32,7 +32,9 @@ def test_random_preflop_allin_batch_shapes_and_stack_distribution() -> None:
     )
     assert torch.all(batch.starting_stacks >= 10 * 100)
     assert torch.all(batch.starting_stacks <= 400 * 100)
-    assert torch.all(batch.allin_mask.sum(dim=1) >= 2)
+    live_mask = ~batch.folded_mask
+    assert torch.all(live_mask.sum(dim=1) >= 2)
+    assert torch.all((live_mask & ~batch.allin_mask).sum(dim=1) <= 1)
     torch.testing.assert_close(batch.scale, batch.starting_stacks.mean(dim=1))
 
 

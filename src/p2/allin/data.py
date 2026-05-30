@@ -85,9 +85,9 @@ def _sample_status_masks(
     ranks = torch.empty_like(order)
     rank_src = torch.arange(players, device=device)[None, :].expand(batch_size, -1)
     ranks.scatter_(1, order, rank_src)
-    allin_mask = ranks < live_count[:, None]
-    folded_mask = ~allin_mask
-    return allin_mask, folded_mask
+    live_mask = ranks < live_count[:, None]
+    folded_mask = ~live_mask
+    return live_mask, folded_mask
 
 
 def make_random_preflop_allin_batch(
@@ -107,9 +107,12 @@ def make_random_preflop_allin_batch(
 ) -> PreflopAllInBatch:
     """Create random preflop all-in training features.
 
-    Live seats are marked all-in; non-live seats are marked folded. All-in seats
-    commit their full starting stack. Folded seats contribute random dead money
-    up to ``folded_commit_max_frac`` of their starting stack.
+    Live seats contain one covering caller with chips behind when there is a
+    unique deepest live stack; every other live seat is all-in. If the deepest
+    live stack is tied, every tied deepest seat is all-in and no covering caller
+    is added. Folded seats contribute random dead money up to
+    ``folded_commit_max_frac`` of their starting stack, capped at the largest
+    live commitment so they cannot create a folded-only side-pot layer.
     """
     if players < 2:
         raise ValueError("players must be at least 2")
@@ -141,7 +144,7 @@ def make_random_preflop_allin_batch(
         device=device,
         generator=generator,
     )
-    allin_mask, folded_mask = _sample_status_masks(
+    live_mask, folded_mask = _sample_status_masks(
         batch_size,
         players,
         min_allin_players=min_allin_players,
@@ -149,12 +152,38 @@ def make_random_preflop_allin_batch(
         generator=generator,
     )
 
+    live_starting = torch.where(
+        live_mask,
+        starting,
+        torch.full_like(starting, -1.0),
+    )
+    deepest_live = live_starting.amax(dim=1, keepdim=True)
+    deepest_mask = live_mask & (starting == deepest_live)
+    unique_deepest = deepest_mask.sum(dim=1, keepdim=True) == 1
+    cover_mask = deepest_mask & unique_deepest
+    allin_mask = live_mask & ~cover_mask
+
     folded_frac = (
         torch.rand(batch_size, players, device=device, generator=generator)
         * folded_commit_max_frac
     )
-    committed = torch.where(allin_mask, starting, starting * folded_frac)
-    committed = torch.where(folded_mask, committed, starting)
+    max_allin_commit = torch.where(
+        allin_mask,
+        starting,
+        torch.zeros_like(starting),
+    ).amax(
+        dim=1,
+        keepdim=True,
+    )
+    live_commit = torch.where(
+        allin_mask,
+        starting,
+        torch.where(
+            cover_mask, max_allin_commit.expand(-1, players), torch.zeros_like(starting)
+        ),
+    )
+    folded_commit = torch.minimum(starting * folded_frac, max_allin_commit)
+    committed = torch.where(folded_mask, folded_commit, live_commit)
     stacks_after = (starting - committed).clamp_min(0.0)
     scale = starting.mean(dim=1).clamp_min(1.0)
 
