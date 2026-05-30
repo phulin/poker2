@@ -3,7 +3,7 @@ Preflop all-in equity modeling, random training-batch generation, Monte Carlo ta
 
 ### Source files
 - `__init__.py`: Public package exports for the preflop all-in model, batch dataclass, random generator, and MC target sampler.
-- `model.py`: Browser-friendly LeakyReLU/RMSNorm preflop all-in equity model that predicts `[batch, players, 1326]` terminal values.
+- `model.py`: Browser-friendly LeakyReLU/RMSNorm preflop all-in equity model with a configurable low-rank FiLM residual output branch that predicts `[batch, players, 1326]` terminal values.
 - `data.py`: Random preflop all-in batch generation with per-player weighted-uniform stack sampling and folded/all-in masks.
 - `training_data.py`: Reusable online/offline all-in training-data generation, sharded dataset writing, manifest loading, and sequential pregenerated batch reads.
 - `sampler.py`: Preflop full-board Monte Carlo all-in value target estimator with tuple-reject opponent sampling, side-pot layer accounting, CUDA fast-path dispatch, and CPU reference fallback.

@@ -43,6 +43,7 @@ class TrainConfig:
     hidden_dim: int = 512
     hand_dim: int = 128
     layers: int = 4
+    film_rank: int = 64
     compile_model: bool = False
     compile_dynamic: bool = True
     compile_mode: str = ""
@@ -327,6 +328,7 @@ def train(cfg: TrainConfig) -> None:
         hidden_dim=cfg.hidden_dim,
         hand_dim=cfg.hand_dim,
         num_layers=cfg.layers,
+        film_rank=cfg.film_rank,
     ).to(device)
     model.init_weights(init_generator)
     optimizer = build_optimizer(model, cfg, device)

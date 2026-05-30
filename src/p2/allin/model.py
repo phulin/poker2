@@ -33,7 +33,9 @@ class PreflopAllInEquityModel(nn.Module):
 
     The model predicts chip-normalized all-in values for every player and every
     private hand. It intentionally uses only Linear, RMSNorm, LeakyReLU, basic
-    tensor ops, and fixed buffers so it can be ported to browser runtimes.
+    tensor ops, and fixed buffers so it can be ported to browser runtimes. The
+    output head includes an optional low-rank FiLM residual controlled by
+    ``film_rank``.
     """
 
     def __init__(
@@ -42,15 +44,19 @@ class PreflopAllInEquityModel(nn.Module):
         hidden_dim: int = 512,
         hand_dim: int = 128,
         num_layers: int = 4,
+        film_rank: int = 64,
         negative_slope: float = 0.01,
     ) -> None:
         super().__init__()
         if players < 2:
             raise ValueError("players must be at least 2")
+        if film_rank < 0:
+            raise ValueError("film_rank must be non-negative")
         self.players = int(players)
         self.hidden_dim = int(hidden_dim)
         self.hand_dim = int(hand_dim)
         self.num_layers = int(num_layers)
+        self.film_rank = int(film_rank)
         self.negative_slope = float(negative_slope)
 
         combos = hand_combos_tensor()
@@ -91,6 +97,9 @@ class PreflopAllInEquityModel(nn.Module):
         self.value_hand_proj = nn.Linear(hand_dim, hidden_dim, bias=False)
         self.value_scale = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.value_bias = nn.Linear(hidden_dim, 1)
+        if self.film_rank > 0:
+            self.value_film_hand_proj = nn.Linear(hand_dim, self.film_rank, bias=False)
+            self.value_film_state = nn.Linear(hidden_dim, self.film_rank, bias=False)
 
     @staticmethod
     def _hand_features(ranks: torch.Tensor, suits: torch.Tensor) -> torch.Tensor:
@@ -195,6 +204,11 @@ class PreflopAllInEquityModel(nn.Module):
         state_value = self.value_scale(state)
         values = torch.einsum("bpd,hd->bph", state_value, hand_value)
         values = values / math.sqrt(float(self.hidden_dim))
+        if self.film_rank > 0:
+            film_hand = self.value_film_hand_proj(hand_emb)
+            film_state = self.value_film_state(state)
+            film_values = torch.einsum("bpr,hr->bph", film_state, film_hand)
+            values = values + film_values / math.sqrt(float(self.film_rank))
         values = values + self.value_bias(state).expand(-1, -1, NUM_HANDS)
         folded_value = (stacks_after - starting_stacks) / scale
         values = torch.where(folded_mask[:, :, None], folded_value[:, :, None], values)
@@ -210,3 +224,5 @@ class PreflopAllInEquityModel(nn.Module):
                 nn.init.ones_(module.weight)
         self.value_scale.weight.data.mul_(0.1)
         self.value_bias.weight.data.mul_(0.1)
+        if self.film_rank > 0:
+            self.value_film_state.weight.data.zero_()

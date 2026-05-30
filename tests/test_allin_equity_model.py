@@ -61,10 +61,61 @@ def test_preflop_allin_model_shapes_and_prenorm_blocks() -> None:
 
     assert out.shape == (3, 4, NUM_HANDS)
     assert torch.isfinite(out).all()
+    assert model.film_rank == 64
+    assert model.value_film_hand_proj.weight.shape == (64, 32)
+    assert model.value_film_state.weight.shape == (64, 64)
     blocks = [m for m in model.modules() if isinstance(m, _LeakyRMSBlock)]
     assert len(blocks) == 2
     assert all(isinstance(block.norm, torch.nn.RMSNorm) for block in blocks)
     assert all(isinstance(block.activation, torch.nn.LeakyReLU) for block in blocks)
+
+
+def test_preflop_allin_model_configurable_film_rank() -> None:
+    batch = make_random_preflop_allin_batch(
+        2,
+        players=4,
+        device="cpu",
+        generator=torch.Generator(device="cpu").manual_seed(458),
+    )
+    model = PreflopAllInEquityModel(
+        players=4,
+        hidden_dim=64,
+        hand_dim=32,
+        num_layers=1,
+        film_rank=7,
+    )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(459))
+
+    out = model(
+        batch.beliefs,
+        batch.starting_stacks,
+        batch.committed,
+        batch.stacks_after,
+        batch.allin_mask,
+        batch.folded_mask,
+    )
+
+    assert out.shape == (2, 4, NUM_HANDS)
+    assert model.value_film_hand_proj.weight.shape == (7, 32)
+    assert model.value_film_state.weight.shape == (7, 64)
+    torch.testing.assert_close(
+        model.value_film_state.weight,
+        torch.zeros_like(model.value_film_state.weight),
+    )
+
+
+def test_preflop_allin_model_can_disable_film_branch() -> None:
+    model = PreflopAllInEquityModel(
+        players=4,
+        hidden_dim=64,
+        hand_dim=32,
+        num_layers=1,
+        film_rank=0,
+    )
+
+    assert model.film_rank == 0
+    assert not hasattr(model, "value_film_hand_proj")
+    assert not hasattr(model, "value_film_state")
 
 
 def test_preflop_allin_model_max_eligible_to_win_feature() -> None:
