@@ -47,6 +47,7 @@ class AllInTrainConfig:
     hand_dim: int = 128
     layers: int = 4
     film_rank: int = 64
+    dense_belief_residual: bool = False
     compile_model: bool = False
     compile_dynamic: bool = True
     compile_mode: str = ""
@@ -382,6 +383,7 @@ def train(cfg: TrainConfig) -> None:
         hand_dim=cfg.hand_dim,
         num_layers=cfg.layers,
         film_rank=cfg.film_rank,
+        dense_belief_residual=cfg.dense_belief_residual,
     ).to(device)
     model.init_weights(init_generator)
     if device == "cuda":
@@ -632,6 +634,7 @@ def train(cfg: TrainConfig) -> None:
                     step=step,
                     examples_seen=examples_seen,
                 )
+
 
 cs = ConfigStore.instance()
 cs.store(group="allin", name="config_schema", node=AllInTrainConfig)

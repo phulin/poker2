@@ -17,7 +17,11 @@ from p2.allin.training_data import (
     batch_to_tensors,
     permute_allin_batch_by_suit,
 )
-from p2.env.card_utils import NUM_HANDS, combo_suit_permutation_inverse_tensor
+from p2.env.card_utils import (
+    NUM_HANDS,
+    combo_index,
+    combo_suit_permutation_inverse_tensor,
+)
 
 
 def test_random_preflop_allin_batch_shapes_and_stack_distribution() -> None:
@@ -332,6 +336,73 @@ def test_preflop_allin_model_can_disable_film_branch() -> None:
     assert model.film_rank == 0
     assert not hasattr(model, "value_film_hand_proj")
     assert not hasattr(model, "value_film_state")
+
+
+def test_preflop_allin_model_dense_belief_residual_is_configurable() -> None:
+    batch = make_random_preflop_allin_batch(
+        2,
+        players=3,
+        device="cpu",
+        generator=torch.Generator(device="cpu").manual_seed(460),
+    )
+    model = PreflopAllInEquityModel(
+        players=3,
+        hidden_dim=64,
+        hand_dim=32,
+        num_layers=1,
+        film_rank=0,
+        dense_belief_residual=True,
+    )
+
+    assert model.dense_belief_residual is True
+    assert hasattr(model, "dense_belief_proj")
+    out = model(
+        batch.beliefs,
+        batch.starting_stacks,
+        batch.committed,
+        batch.stacks_after,
+        batch.allin_mask,
+        batch.folded_mask,
+    )
+
+    assert out.shape == (2, 3, NUM_HANDS)
+    assert torch.isfinite(out).all()
+
+
+def test_preflop_allin_model_card_and_blocker_features_are_combo_exact() -> None:
+    model = PreflopAllInEquityModel(
+        players=2,
+        hidden_dim=64,
+        hand_dim=32,
+        num_layers=1,
+        film_rank=0,
+    )
+    beliefs = torch.zeros(1, 2, NUM_HANDS)
+    hero_combo = combo_index(0, 13)
+    opp_combo = combo_index(0, 1)
+    beliefs[0, 0, hero_combo] = 1.0
+    beliefs[0, 1, opp_combo] = 1.0
+
+    card_mass, bucket_features = model._range_mass_features(beliefs)
+    blocker_features = model._blocker_features(
+        beliefs,
+        card_mass,
+        folded_mask=torch.zeros(1, 2, dtype=torch.bool),
+    )
+
+    torch.testing.assert_close(card_mass[0, 0, 0], torch.tensor(1.0))
+    torch.testing.assert_close(card_mass[0, 0, 13], torch.tensor(1.0))
+    torch.testing.assert_close(card_mass[0, 1, 0], torch.tensor(1.0))
+    torch.testing.assert_close(card_mass[0, 1, 1], torch.tensor(1.0))
+    assert bucket_features.shape == (1, 2, 20)
+    torch.testing.assert_close(
+        blocker_features[0, 0, hero_combo, 1],
+        torch.tensor(0.0),
+    )
+    torch.testing.assert_close(
+        blocker_features[0, 1, opp_combo, 0],
+        torch.tensor(0.0),
+    )
 
 
 def test_preflop_allin_model_max_eligible_to_win_feature() -> None:

@@ -10,6 +10,7 @@ from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
 
 HAND_FEATURE_DIM = 8
 PLAYER_FEATURE_DIM = 9
+RANGE_BUCKET_FEATURE_DIM = 20
 
 
 class _LeakyRMSBlock(nn.Module):
@@ -45,6 +46,7 @@ class PreflopAllInEquityModel(nn.Module):
         hand_dim: int = 128,
         num_layers: int = 4,
         film_rank: int = 64,
+        dense_belief_residual: bool = False,
         negative_slope: float = 0.01,
     ) -> None:
         super().__init__()
@@ -57,12 +59,19 @@ class PreflopAllInEquityModel(nn.Module):
         self.hand_dim = int(hand_dim)
         self.num_layers = int(num_layers)
         self.film_rank = int(film_rank)
+        self.dense_belief_residual = bool(dense_belief_residual)
         self.negative_slope = float(negative_slope)
 
         combos = hand_combos_tensor()
         ranks = combos % 13
         suits = combos // 13
         self.register_buffer("hand_features", self._hand_features(ranks, suits))
+        self.register_buffer("hand_card_a", combos[:, 0].long(), persistent=False)
+        self.register_buffer("hand_card_b", combos[:, 1].long(), persistent=False)
+        self.register_buffer("hand_rank_a", ranks[:, 0].long(), persistent=False)
+        self.register_buffer("hand_rank_b", ranks[:, 1].long(), persistent=False)
+        self.register_buffer("hand_suit_a", suits[:, 0].long(), persistent=False)
+        self.register_buffer("hand_suit_b", suits[:, 1].long(), persistent=False)
 
         self.hand_encoder = nn.Sequential(
             nn.Linear(HAND_FEATURE_DIM, hand_dim),
@@ -73,11 +82,28 @@ class PreflopAllInEquityModel(nn.Module):
             nn.LeakyReLU(negative_slope=negative_slope),
         )
         self.range_proj = nn.Linear(hand_dim * 2, hidden_dim, bias=False)
+        self.card_mass_proj = nn.Sequential(
+            nn.Linear(52, hidden_dim, bias=False),
+            nn.RMSNorm(hidden_dim),
+            nn.LeakyReLU(negative_slope=negative_slope),
+        )
+        self.bucket_mass_proj = nn.Sequential(
+            nn.Linear(RANGE_BUCKET_FEATURE_DIM, hidden_dim, bias=False),
+            nn.RMSNorm(hidden_dim),
+            nn.LeakyReLU(negative_slope=negative_slope),
+        )
         self.player_proj = nn.Sequential(
             nn.Linear(PLAYER_FEATURE_DIM, hidden_dim),
             nn.RMSNorm(hidden_dim),
             nn.LeakyReLU(negative_slope=negative_slope),
         )
+        if self.dense_belief_residual:
+            self.dense_belief_proj = nn.Sequential(
+                nn.Linear(players * NUM_HANDS, hidden_dim, bias=False),
+                nn.RMSNorm(hidden_dim),
+                nn.LeakyReLU(negative_slope=negative_slope),
+                nn.Linear(hidden_dim, hidden_dim, bias=False),
+            )
         self.input_proj = nn.Sequential(
             nn.Linear(players * hidden_dim, hidden_dim),
             nn.RMSNorm(hidden_dim),
@@ -96,6 +122,8 @@ class PreflopAllInEquityModel(nn.Module):
         )
         self.value_hand_proj = nn.Linear(hand_dim, hidden_dim, bias=False)
         self.value_scale = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.blocker_proj = nn.Linear(players, hidden_dim, bias=False)
+        self.blocker_scale = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.value_bias = nn.Linear(hidden_dim, 1)
         if self.film_rank > 0:
             self.value_film_hand_proj = nn.Linear(hand_dim, self.film_rank, bias=False)
@@ -137,6 +165,95 @@ class PreflopAllInEquityModel(nn.Module):
         eligible = participants & (~folded_mask[:, None, :])
         return (layer_amount[:, :, None] * eligible.to(committed.dtype)).sum(dim=1)
 
+    def _range_mass_features(
+        self, beliefs: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, players, _ = beliefs.shape
+        dtype = beliefs.dtype
+        card_mass = torch.zeros(
+            batch_size, players, 52, device=beliefs.device, dtype=dtype
+        )
+        card_a = self.hand_card_a.to(beliefs.device)
+        card_b = self.hand_card_b.to(beliefs.device)
+        card_mass.scatter_add_(
+            2,
+            card_a[None, None, :].expand(batch_size, players, -1),
+            beliefs,
+        )
+        card_mass.scatter_add_(
+            2,
+            card_b[None, None, :].expand(batch_size, players, -1),
+            beliefs,
+        )
+
+        rank_mass = torch.zeros(
+            batch_size, players, 13, device=beliefs.device, dtype=dtype
+        )
+        rank_a = self.hand_rank_a.to(beliefs.device)
+        rank_b = self.hand_rank_b.to(beliefs.device)
+        rank_mass.scatter_add_(
+            2,
+            rank_a[None, None, :].expand(batch_size, players, -1),
+            beliefs,
+        )
+        rank_mass.scatter_add_(
+            2,
+            rank_b[None, None, :].expand(batch_size, players, -1),
+            beliefs,
+        )
+
+        suit_mass = torch.zeros(
+            batch_size, players, 4, device=beliefs.device, dtype=dtype
+        )
+        suit_a = self.hand_suit_a.to(beliefs.device)
+        suit_b = self.hand_suit_b.to(beliefs.device)
+        suit_mass.scatter_add_(
+            2,
+            suit_a[None, None, :].expand(batch_size, players, -1),
+            beliefs,
+        )
+        suit_mass.scatter_add_(
+            2,
+            suit_b[None, None, :].expand(batch_size, players, -1),
+            beliefs,
+        )
+
+        pocket_pair_mass = beliefs[..., self.hand_rank_a == self.hand_rank_b].sum(
+            dim=-1, keepdim=True
+        )
+        suited_mass = beliefs[..., self.hand_suit_a == self.hand_suit_b].sum(
+            dim=-1, keepdim=True
+        )
+        ace_mass = beliefs[
+            ..., (self.hand_rank_a == 12) | (self.hand_rank_b == 12)
+        ].sum(dim=-1, keepdim=True)
+        bucket_features = torch.cat(
+            (rank_mass, suit_mass, pocket_pair_mass, suited_mass, ace_mass),
+            dim=-1,
+        )
+        return card_mass, bucket_features
+
+    def _blocker_features(
+        self,
+        beliefs: torch.Tensor,
+        card_mass: torch.Tensor,
+        folded_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        card_a = self.hand_card_a.to(beliefs.device)
+        card_b = self.hand_card_b.to(beliefs.device)
+        blocked = (
+            1.0 - card_mass[:, :, card_a] - card_mass[:, :, card_b] + beliefs
+        ).clamp_min(0.0)
+        players = beliefs.shape[1]
+        player_ids = torch.arange(players, device=beliefs.device)
+        non_self = player_ids[None, :, None] != player_ids[None, None, :]
+        live_opp = (~folded_mask).to(beliefs.dtype)[:, None, :]
+        return (
+            blocked[:, None, :, :]
+            * non_self[:, :, :, None].to(beliefs.dtype)
+            * live_opp[:, :, :, None]
+        ).permute(0, 1, 3, 2)
+
     def forward(
         self,
         beliefs: torch.Tensor,
@@ -160,10 +277,13 @@ class PreflopAllInEquityModel(nn.Module):
             dtype=beliefs.dtype,
         )[None, :].expand(beliefs.shape[0], -1)
         pot = committed.sum(dim=1, keepdim=True) / scale
-        max_eligible_to_win = self._max_eligible_to_win(
-            committed,
-            folded_mask,
-        ) / scale
+        max_eligible_to_win = (
+            self._max_eligible_to_win(
+                committed,
+                folded_mask,
+            )
+            / scale
+        )
         player_features = torch.stack(
             (
                 starting_stacks / scale,
@@ -179,8 +299,11 @@ class PreflopAllInEquityModel(nn.Module):
             dim=-1,
         )
 
-        hand_emb = self.hand_encoder(self.hand_features.to(beliefs.device, beliefs.dtype))
+        hand_emb = self.hand_encoder(
+            self.hand_features.to(beliefs.device, beliefs.dtype)
+        )
         beliefs_f = beliefs.to(hand_emb.dtype)
+        card_mass, bucket_features = self._range_mass_features(beliefs_f)
         range_summary = torch.cat(
             (
                 beliefs_f @ hand_emb,
@@ -188,8 +311,15 @@ class PreflopAllInEquityModel(nn.Module):
             ),
             dim=-1,
         )
-        per_player = self.range_proj(range_summary) + self.player_proj(player_features)
+        per_player = (
+            self.range_proj(range_summary)
+            + self.card_mass_proj(card_mass)
+            + self.bucket_mass_proj(bucket_features)
+            + self.player_proj(player_features)
+        )
         global_state = self.input_proj(per_player.flatten(1))
+        if self.dense_belief_residual:
+            global_state = global_state + self.dense_belief_proj(beliefs_f.flatten(1))
         global_state = self.trunk(global_state)
         state = self.player_state(
             torch.cat(
@@ -204,6 +334,11 @@ class PreflopAllInEquityModel(nn.Module):
         state_value = self.value_scale(state)
         values = torch.einsum("bpd,hd->bph", state_value, hand_value)
         values = values / math.sqrt(float(self.hidden_dim))
+        blocker_features = self._blocker_features(beliefs_f, card_mass, folded_mask)
+        blocker_state = self.blocker_proj(blocker_features)
+        blocker_scale = self.blocker_scale(state)
+        blocker_values = torch.einsum("bphd,bpd->bph", blocker_state, blocker_scale)
+        values = values + blocker_values / math.sqrt(float(self.hidden_dim))
         if self.film_rank > 0:
             film_hand = self.value_film_hand_proj(hand_emb)
             film_state = self.value_film_state(state)
@@ -223,6 +358,7 @@ class PreflopAllInEquityModel(nn.Module):
             elif isinstance(module, nn.RMSNorm):
                 nn.init.ones_(module.weight)
         self.value_scale.weight.data.mul_(0.1)
+        self.blocker_scale.weight.data.mul_(0.1)
         self.value_bias.weight.data.mul_(0.1)
         if self.film_rank > 0:
             self.value_film_state.weight.data.zero_()
