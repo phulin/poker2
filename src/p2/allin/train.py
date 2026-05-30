@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import itertools
 import math
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +17,13 @@ import wandb
 from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
 
+from p2.allin.data import PreflopAllInBatch
 from p2.allin.model import PreflopAllInEquityModel
 from p2.allin.training_data import (
     AllInDataGenConfig,
     PregeneratedAllInDataset,
     generate_allin_training_chunk,
+    permute_allin_batch_by_players,
     permute_allin_batch_by_suit,
     tensors_to_batch,
 )
@@ -280,6 +285,65 @@ def _pregenerated_suit_permutation_idxs(
     return (base_perm_idxs + epoch_indices.remainder(24)).remainder(24)
 
 
+@lru_cache(maxsize=None)
+def _player_permutation_table(
+    players: int,
+    device_type: str,
+    device_index: int | None,
+) -> torch.Tensor:
+    device = torch.device(device_type, device_index)
+    return torch.tensor(
+        list(itertools.permutations(range(players))),
+        device=device,
+        dtype=torch.long,
+    )
+
+
+def _pregenerated_player_permutations(
+    *,
+    global_start: int,
+    batch_size: int,
+    dataset_examples: int,
+    players: int,
+    seed: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if dataset_examples <= 0:
+        raise ValueError("dataset_examples must be positive")
+    if players <= 0:
+        raise ValueError("players must be positive")
+    permutation_table = _player_permutation_table(
+        players,
+        device.type,
+        device.index,
+    )
+    global_indices = torch.arange(
+        global_start,
+        global_start + batch_size,
+        device=device,
+        dtype=torch.long,
+    )
+    row_indices = global_indices.remainder(dataset_examples)
+    epoch_indices = torch.div(
+        global_indices,
+        dataset_examples,
+        rounding_mode="floor",
+    )
+
+    seed_tensor = torch.full(
+        (), int(seed) & 0x7FFFFFFF, device=device, dtype=torch.long
+    )
+    hashed = row_indices + seed_tensor + 0x9E3779B9
+    hashed = hashed + epoch_indices * 0x85EBCA6B
+    hashed = torch.bitwise_xor(hashed, torch.bitwise_right_shift(hashed, 16))
+    hashed = hashed * 0x45D9F3B
+    hashed = torch.bitwise_xor(hashed, torch.bitwise_right_shift(hashed, 16))
+    hashed = hashed * 0x45D9F3B
+    hashed = torch.bitwise_xor(hashed, torch.bitwise_right_shift(hashed, 16))
+    permutation_idxs = hashed.remainder(permutation_table.shape[0])
+    return permutation_table.index_select(0, permutation_idxs)
+
+
 @torch.no_grad()
 def _evaluate_pregenerated_dataset(
     model: torch.nn.Module,
@@ -368,6 +432,119 @@ def _set_optimizer_lrs(
     return scale
 
 
+@dataclass
+class _PrefetchedPregeneratedBatch:
+    start: int
+    count: int
+    batch: PreflopAllInBatch
+    targets: torch.Tensor
+    stream: torch.cuda.Stream | None
+
+
+def _record_pregenerated_batch_stream(
+    batch: PreflopAllInBatch,
+    targets: torch.Tensor,
+    stream: torch.cuda.Stream,
+) -> None:
+    for field in fields(PreflopAllInBatch):
+        tensor = getattr(batch, field.name)
+        if tensor.device.type == "cuda":
+            tensor.record_stream(stream)
+    if targets.device.type == "cuda":
+        targets.record_stream(stream)
+
+
+class _PregeneratedBatchPrefetcher:
+    def __init__(
+        self,
+        dataset: PregeneratedAllInDataset,
+        *,
+        device: torch.device,
+        enabled: bool,
+    ) -> None:
+        self.dataset = dataset
+        self.device = device
+        self._stream = torch.cuda.Stream(device=device) if enabled else None
+        self._executor = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="allin-batch-prefetch")
+            if enabled
+            else None
+        )
+        self._future: Future[_PrefetchedPregeneratedBatch] | None = None
+        self._future_key: tuple[int, int] | None = None
+
+    def close(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+        self.dataset.close()
+
+    def _load(
+        self,
+        start: int,
+        count: int,
+    ) -> _PrefetchedPregeneratedBatch:
+        if self._stream is None:
+            batch, targets = self.dataset.get_wrapped_batch(
+                start,
+                count,
+                device=self.device,
+            )
+            return _PrefetchedPregeneratedBatch(start, count, batch, targets, None)
+
+        with torch.cuda.device(self.device), torch.cuda.stream(self._stream):
+            batch, targets = self.dataset.get_wrapped_batch(
+                start,
+                count,
+                device=self.device,
+            )
+        self.dataset.prefetch_shard_for_row(start + count)
+        return _PrefetchedPregeneratedBatch(
+            start,
+            count,
+            batch,
+            targets,
+            self._stream,
+        )
+
+    def prefetch(self, start: int, count: int) -> None:
+        if self._executor is None:
+            return
+        key = (int(start), int(count))
+        if self._future_key == key:
+            return
+        if self._future is not None and not self._future.done():
+            self._future.result()
+        self._future_key = key
+        self._future = self._executor.submit(self._load, key[0], key[1])
+
+    def get(
+        self,
+        start: int,
+        count: int,
+    ) -> tuple[PreflopAllInBatch, torch.Tensor]:
+        key = (int(start), int(count))
+        if self._executor is None:
+            prefetched = self._load(key[0], key[1])
+        else:
+            if self._future_key != key or self._future is None:
+                self.prefetch(key[0], key[1])
+            assert self._future is not None
+            prefetched = self._future.result()
+            self._future = None
+            self._future_key = None
+
+        if prefetched.stream is not None:
+            current_stream = torch.cuda.current_stream(self.device)
+            current_stream.wait_stream(prefetched.stream)
+            _record_pregenerated_batch_stream(
+                prefetched.batch,
+                prefetched.targets,
+                current_stream,
+            )
+        return prefetched.batch, prefetched.targets
+
+
 def train(cfg: TrainConfig) -> None:
     device = _device(cfg.device)
     batch_size_schedule = _parse_batch_size_schedule(
@@ -386,7 +563,7 @@ def train(cfg: TrainConfig) -> None:
         dense_belief_residual=cfg.dense_belief_residual,
     ).to(device)
     model.init_weights(init_generator)
-    if device == "cuda":
+    if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
     optimizer = build_optimizer(model, cfg, device)
     compiled_model = model
@@ -407,7 +584,11 @@ def train(cfg: TrainConfig) -> None:
         examples_seen = int(checkpoint.get("examples_seen", 0))
 
     pregenerated_dataset = (
-        PregeneratedAllInDataset(cfg.pregenerated_data)
+        PregeneratedAllInDataset(
+            cfg.pregenerated_data,
+            pin_memory=device.type == "cuda",
+            async_shard_prefetch=device.type == "cuda",
+        )
         if cfg.pregenerated_data is not None
         else None
     )
@@ -435,6 +616,15 @@ def train(cfg: TrainConfig) -> None:
             f"validation data has {validation_dataset.players} players, "
             f"trainer expects {cfg.players}"
         )
+    pregenerated_prefetcher = (
+        _PregeneratedBatchPrefetcher(
+            pregenerated_dataset,
+            device=device,
+            enabled=device.type == "cuda",
+        )
+        if pregenerated_dataset is not None
+        else None
+    )
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -455,185 +645,219 @@ def train(cfg: TrainConfig) -> None:
     checkpoint_dir = Path(cfg.checkpoint_dir)
     data_cfg = _data_config_from_train(cfg)
     started = time.perf_counter()
-    with _init_wandb(cfg) as run:
-        if isinstance(run, wandb.Run):
-            run.summary["total_parameters"] = total_params
-            run.summary["trainable_parameters"] = trainable_params
-
-        for step in range(start_step + 1, cfg.steps + 1):
-            step_start = time.perf_counter()
-            is_log_step = step % cfg.log_interval == 0 or step == 1
-            lr_scale = _set_optimizer_lrs(optimizer, cfg, step=step)
-            batch_size = _batch_size_for_step(batch_size_schedule, step)
-            if pregenerated_dataset is None:
-                generated, target_diag = generate_allin_training_chunk(
-                    batch_size,
-                    data_cfg,
-                    device=device,
-                    generator=generator,
-                    compute_stats=is_log_step,
-                )
-                batch, targets = tensors_to_batch(generated, device=device)
-            else:
-                target_start = time.perf_counter()
-                batch, targets = pregenerated_dataset.get_wrapped_batch(
-                    examples_seen,
-                    batch_size,
-                    device=device,
-                )
-                suit_permutation_idxs = _pregenerated_suit_permutation_idxs(
-                    global_start=examples_seen,
-                    batch_size=batch_size,
-                    dataset_examples=len(pregenerated_dataset),
-                    seed=cfg.seed,
-                    device=device,
-                )
-                batch, targets = permute_allin_batch_by_suit(
-                    batch,
-                    targets,
-                    suit_permutation_idxs=suit_permutation_idxs,
-                )
-                target_diag = (
-                    _pregenerated_target_diag(
-                        targets,
-                        elapsed=time.perf_counter() - target_start,
-                    )
-                    if is_log_step
-                    else {}
-                )
-
-            pred = compiled_model(
-                batch.beliefs,
-                batch.starting_stacks,
-                batch.committed,
-                batch.stacks_after,
-                batch.allin_mask,
-                batch.folded_mask,
+    try:
+        if pregenerated_prefetcher is not None and start_step < cfg.steps:
+            first_step = start_step + 1
+            pregenerated_prefetcher.prefetch(
+                examples_seen,
+                _batch_size_for_step(batch_size_schedule, first_step),
             )
-            loss = F.mse_loss(pred, targets)
-            mae = (pred - targets).abs().mean()
-            max_abs = (pred - targets).abs().amax()
 
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            examples_seen += batch_size
+        with _init_wandb(cfg) as run:
+            if isinstance(run, wandb.Run):
+                run.summary["total_parameters"] = total_params
+                run.summary["trainable_parameters"] = trainable_params
 
-            elapsed = time.perf_counter() - step_start
-            if is_log_step:
-                muon_lrs = [
-                    group["lr"]
-                    for group in optimizer.param_groups
-                    if group.get("lr_role") != "adamw"
-                ]
-                adamw_lrs = [
-                    group["lr"]
-                    for group in optimizer.param_groups
-                    if group.get("lr_role") == "adamw"
-                ]
-                metrics = {
-                    "step": step,
-                    "loss/mse": float(loss.detach().item()),
-                    "loss/mae": float(mae.detach().item()),
-                    "loss/max_abs": float(max_abs.detach().item()),
-                    "optim/grad_norm": float(grad_norm.detach().item()),
-                    "optim/learning_rate": float(optimizer.param_groups[0]["lr"]),
-                    "optim/muon_learning_rate": float(muon_lrs[0]) if muon_lrs else 0.0,
-                    "optim/adamw_learning_rate": float(adamw_lrs[0])
-                    if adamw_lrs
-                    else 0.0,
-                    "optim/lr_scale": lr_scale,
-                    "data/batch_size": batch_size,
-                    "data/examples_seen": examples_seen,
-                    "data/live_players_mean": float(
-                        (~batch.folded_mask).float().sum(dim=1).mean().item()
-                    ),
-                    "data/allin_players_mean": float(
-                        batch.allin_mask.float().sum(dim=1).mean().item()
-                    ),
-                    "data/pregenerated_epoch": (
-                        examples_seen / len(pregenerated_dataset)
-                        if pregenerated_dataset is not None
-                        else 0.0
-                    ),
-                    "data/stack_mean": float(batch.starting_stacks.mean().item()),
-                    "data/committed_mean": float(batch.committed.mean().item()),
-                    "target/value_mean": target_diag["target_value_mean"],
-                    "target/value_std": target_diag["target_value_std"],
-                    "target/zero_denom_frac": target_diag["target_zero_denom_frac"],
-                    "perf/step_seconds": elapsed,
-                    "perf/target_seconds": target_diag["target_seconds"],
-                    "perf/target_boards_per_second": target_diag[
-                        "target_boards_per_second"
-                    ],
-                    "perf/target_samples_per_second": target_diag[
-                        "target_samples_per_second"
-                    ],
-                    "target/board_samples": target_diag["target_board_samples"],
-                    "target/tuple_samples": target_diag["target_tuple_samples"],
-                    "perf/total_minutes": (time.perf_counter() - started) / 60.0,
-                }
-                if "target_kernel_launch_seconds" in target_diag:
-                    metrics["perf/target_kernel_launch_seconds"] = target_diag[
-                        "target_kernel_launch_seconds"
+            for step in range(start_step + 1, cfg.steps + 1):
+                step_start = time.perf_counter()
+                is_log_step = step % cfg.log_interval == 0 or step == 1
+                lr_scale = _set_optimizer_lrs(optimizer, cfg, step=step)
+                batch_size = _batch_size_for_step(batch_size_schedule, step)
+                if pregenerated_dataset is None:
+                    generated, target_diag = generate_allin_training_chunk(
+                        batch_size,
+                        data_cfg,
+                        device=device,
+                        generator=generator,
+                        compute_stats=is_log_step,
+                    )
+                    batch, targets = tensors_to_batch(generated, device=device)
+                else:
+                    target_start = time.perf_counter()
+                    assert pregenerated_prefetcher is not None
+                    batch, targets = pregenerated_prefetcher.get(
+                        examples_seen,
+                        batch_size,
+                    )
+                    next_examples_seen = examples_seen + batch_size
+                    if step < cfg.steps:
+                        pregenerated_prefetcher.prefetch(
+                            next_examples_seen,
+                            _batch_size_for_step(batch_size_schedule, step + 1),
+                        )
+                    suit_permutation_idxs = _pregenerated_suit_permutation_idxs(
+                        global_start=examples_seen,
+                        batch_size=batch_size,
+                        dataset_examples=len(pregenerated_dataset),
+                        seed=cfg.seed,
+                        device=device,
+                    )
+                    batch, targets = permute_allin_batch_by_suit(
+                        batch,
+                        targets,
+                        suit_permutation_idxs=suit_permutation_idxs,
+                    )
+                    player_permutations = _pregenerated_player_permutations(
+                        global_start=examples_seen,
+                        batch_size=batch_size,
+                        dataset_examples=len(pregenerated_dataset),
+                        players=cfg.players,
+                        seed=cfg.seed,
+                        device=device,
+                    )
+                    batch, targets = permute_allin_batch_by_players(
+                        batch,
+                        targets,
+                        player_permutations=player_permutations,
+                    )
+                    target_diag = (
+                        _pregenerated_target_diag(
+                            targets,
+                            elapsed=time.perf_counter() - target_start,
+                        )
+                        if is_log_step
+                        else {}
+                    )
+
+                pred = compiled_model(
+                    batch.beliefs,
+                    batch.starting_stacks,
+                    batch.committed,
+                    batch.stacks_after,
+                    batch.allin_mask,
+                    batch.folded_mask,
+                )
+                loss = F.mse_loss(pred, targets)
+                mae = (pred - targets).abs().mean()
+                max_abs = (pred - targets).abs().amax()
+
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                examples_seen += batch_size
+
+                elapsed = time.perf_counter() - step_start
+                if is_log_step:
+                    muon_lrs = [
+                        group["lr"]
+                        for group in optimizer.param_groups
+                        if group.get("lr_role") != "adamw"
                     ]
-                print(
-                    f"[{step:06d}/{cfg.steps}] "
-                    f"bs={batch_size} "
-                    f"mse={metrics['loss/mse']:.6f} "
-                    f"mae={metrics['loss/mae']:.5f} "
-                    f"target={metrics['perf/target_seconds']:.2f}s "
-                    f"step={elapsed:.2f}s",
-                    flush=True,
-                )
-                if isinstance(run, wandb.Run):
-                    run.log(metrics, step=step)
+                    adamw_lrs = [
+                        group["lr"]
+                        for group in optimizer.param_groups
+                        if group.get("lr_role") == "adamw"
+                    ]
+                    metrics = {
+                        "step": step,
+                        "loss/mse": float(loss.detach().item()),
+                        "loss/mae": float(mae.detach().item()),
+                        "loss/max_abs": float(max_abs.detach().item()),
+                        "optim/grad_norm": float(grad_norm.detach().item()),
+                        "optim/learning_rate": float(optimizer.param_groups[0]["lr"]),
+                        "optim/muon_learning_rate": float(muon_lrs[0])
+                        if muon_lrs
+                        else 0.0,
+                        "optim/adamw_learning_rate": float(adamw_lrs[0])
+                        if adamw_lrs
+                        else 0.0,
+                        "optim/lr_scale": lr_scale,
+                        "data/batch_size": batch_size,
+                        "data/examples_seen": examples_seen,
+                        "data/live_players_mean": float(
+                            (~batch.folded_mask).float().sum(dim=1).mean().item()
+                        ),
+                        "data/allin_players_mean": float(
+                            batch.allin_mask.float().sum(dim=1).mean().item()
+                        ),
+                        "data/pregenerated_epoch": (
+                            examples_seen / len(pregenerated_dataset)
+                            if pregenerated_dataset is not None
+                            else 0.0
+                        ),
+                        "data/stack_mean": float(batch.starting_stacks.mean().item()),
+                        "data/committed_mean": float(batch.committed.mean().item()),
+                        "target/value_mean": target_diag["target_value_mean"],
+                        "target/value_std": target_diag["target_value_std"],
+                        "target/zero_denom_frac": target_diag["target_zero_denom_frac"],
+                        "perf/step_seconds": elapsed,
+                        "perf/target_seconds": target_diag["target_seconds"],
+                        "perf/target_boards_per_second": target_diag[
+                            "target_boards_per_second"
+                        ],
+                        "perf/target_samples_per_second": target_diag[
+                            "target_samples_per_second"
+                        ],
+                        "target/board_samples": target_diag["target_board_samples"],
+                        "target/tuple_samples": target_diag["target_tuple_samples"],
+                        "perf/total_minutes": (time.perf_counter() - started) / 60.0,
+                    }
+                    if "target_kernel_launch_seconds" in target_diag:
+                        metrics["perf/target_kernel_launch_seconds"] = target_diag[
+                            "target_kernel_launch_seconds"
+                        ]
+                    print(
+                        f"[{step:06d}/{cfg.steps}] "
+                        f"bs={batch_size} "
+                        f"mse={metrics['loss/mse']:.6f} "
+                        f"mae={metrics['loss/mae']:.5f} "
+                        f"target={metrics['perf/target_seconds']:.2f}s "
+                        f"step={elapsed:.2f}s",
+                        flush=True,
+                    )
+                    if isinstance(run, wandb.Run):
+                        run.log(metrics, step=step)
 
-            if (
-                validation_dataset is not None
-                and cfg.eval_interval > 0
-                and (step % cfg.eval_interval == 0 or step == cfg.steps)
-            ):
-                eval_batch_size = (
-                    cfg.eval_batch_size if cfg.eval_batch_size > 0 else batch_size
-                )
-                eval_metrics = _evaluate_pregenerated_dataset(
-                    compiled_model,
-                    validation_dataset,
-                    batch_size=eval_batch_size,
-                    device=device,
-                )
-                print(
-                    f"[eval {step:06d}/{cfg.steps}] "
-                    f"mse={eval_metrics['eval/mse']:.6f} "
-                    f"mae={eval_metrics['eval/mae']:.5f} "
-                    f"max_abs={eval_metrics['eval/max_abs']:.5f} "
-                    f"seconds={eval_metrics['eval/seconds']:.2f}s",
-                    flush=True,
-                )
-                if isinstance(run, wandb.Run):
-                    run.log(eval_metrics, step=step)
+                if (
+                    validation_dataset is not None
+                    and cfg.eval_interval > 0
+                    and (step % cfg.eval_interval == 0 or step == cfg.steps)
+                ):
+                    eval_batch_size = (
+                        cfg.eval_batch_size if cfg.eval_batch_size > 0 else batch_size
+                    )
+                    eval_metrics = _evaluate_pregenerated_dataset(
+                        compiled_model,
+                        validation_dataset,
+                        batch_size=eval_batch_size,
+                        device=device,
+                    )
+                    print(
+                        f"[eval {step:06d}/{cfg.steps}] "
+                        f"mse={eval_metrics['eval/mse']:.6f} "
+                        f"mae={eval_metrics['eval/mae']:.5f} "
+                        f"max_abs={eval_metrics['eval/max_abs']:.5f} "
+                        f"seconds={eval_metrics['eval/seconds']:.2f}s",
+                        flush=True,
+                    )
+                    if isinstance(run, wandb.Run):
+                        run.log(eval_metrics, step=step)
 
-            if step % cfg.checkpoint_interval == 0 or step == cfg.steps:
-                _save_checkpoint(
-                    checkpoint_dir / f"allin_equity_step_{step}.pt",
-                    model=model,
-                    optimizer=optimizer,
-                    generator=generator,
-                    cfg=cfg,
-                    step=step,
-                    examples_seen=examples_seen,
-                )
-                _save_checkpoint(
-                    checkpoint_dir / "latest.pt",
-                    model=model,
-                    optimizer=optimizer,
-                    generator=generator,
-                    cfg=cfg,
-                    step=step,
-                    examples_seen=examples_seen,
-                )
+                if step % cfg.checkpoint_interval == 0 or step == cfg.steps:
+                    _save_checkpoint(
+                        checkpoint_dir / f"allin_equity_step_{step}.pt",
+                        model=model,
+                        optimizer=optimizer,
+                        generator=generator,
+                        cfg=cfg,
+                        step=step,
+                        examples_seen=examples_seen,
+                    )
+                    _save_checkpoint(
+                        checkpoint_dir / "latest.pt",
+                        model=model,
+                        optimizer=optimizer,
+                        generator=generator,
+                        cfg=cfg,
+                        step=step,
+                        examples_seen=examples_seen,
+                    )
+    finally:
+        if pregenerated_prefetcher is not None:
+            pregenerated_prefetcher.close()
+        if validation_dataset is not None:
+            validation_dataset.close()
 
 
 cs = ConfigStore.instance()

@@ -9,12 +9,16 @@ from p2.allin import (
     make_random_preflop_allin_batch,
 )
 from p2.allin.model import _LeakyRMSBlock
-from p2.allin.train import _pregenerated_suit_permutation_idxs
+from p2.allin.train import (
+    _pregenerated_player_permutations,
+    _pregenerated_suit_permutation_idxs,
+)
 from p2.allin.training_data import (
     MANIFEST_NAME,
     TARGET_KEY,
     PregeneratedAllInDataset,
     batch_to_tensors,
+    permute_allin_batch_by_players,
     permute_allin_batch_by_suit,
 )
 from p2.env.card_utils import (
@@ -93,6 +97,77 @@ def test_allin_suit_permutation_remaps_beliefs_and_targets() -> None:
     torch.testing.assert_close(permuted_targets, expected_targets)
 
 
+def test_allin_player_permutation_remaps_features_and_targets() -> None:
+    players = 4
+    batch_size = 2
+    beliefs = torch.arange(
+        batch_size * players * NUM_HANDS,
+        dtype=torch.float32,
+    ).view(batch_size, players, NUM_HANDS)
+    targets = beliefs + 10_000.0
+    batch = PreflopAllInBatch(
+        beliefs=beliefs,
+        starting_stacks=torch.arange(batch_size * players, dtype=torch.float32).view(
+            batch_size, players
+        ),
+        committed=torch.arange(
+            100,
+            100 + batch_size * players,
+            dtype=torch.float32,
+        ).view(batch_size, players),
+        stacks_after=torch.arange(
+            200,
+            200 + batch_size * players,
+            dtype=torch.float32,
+        ).view(batch_size, players),
+        allin_mask=torch.tensor(
+            [[True, False, True, False], [False, True, False, True]]
+        ),
+        folded_mask=torch.tensor(
+            [[False, False, True, False], [True, False, False, False]]
+        ),
+        scale=torch.arange(batch_size, dtype=torch.float32) + 1.0,
+    )
+    player_permutations = torch.tensor([[2, 0, 3, 1], [1, 3, 0, 2]])
+
+    permuted_batch, permuted_targets = permute_allin_batch_by_players(
+        batch,
+        targets,
+        player_permutations=player_permutations,
+    )
+
+    hand_index = player_permutations[:, :, None].expand(-1, -1, NUM_HANDS)
+    torch.testing.assert_close(
+        permuted_batch.beliefs,
+        torch.gather(beliefs, 1, hand_index),
+    )
+    torch.testing.assert_close(
+        permuted_targets,
+        torch.gather(targets, 1, hand_index),
+    )
+    torch.testing.assert_close(
+        permuted_batch.starting_stacks,
+        torch.gather(batch.starting_stacks, 1, player_permutations),
+    )
+    torch.testing.assert_close(
+        permuted_batch.committed,
+        torch.gather(batch.committed, 1, player_permutations),
+    )
+    torch.testing.assert_close(
+        permuted_batch.stacks_after,
+        torch.gather(batch.stacks_after, 1, player_permutations),
+    )
+    assert torch.equal(
+        permuted_batch.allin_mask,
+        torch.gather(batch.allin_mask, 1, player_permutations),
+    )
+    assert torch.equal(
+        permuted_batch.folded_mask,
+        torch.gather(batch.folded_mask, 1, player_permutations),
+    )
+    torch.testing.assert_close(permuted_batch.scale, batch.scale)
+
+
 def test_pregenerated_dataset_wraps_batches(tmp_path) -> None:
     players = 2
     examples = 3
@@ -140,12 +215,16 @@ def test_pregenerated_dataset_wraps_batches(tmp_path) -> None:
     }
     (tmp_path / MANIFEST_NAME).write_text(json.dumps(manifest))
 
-    dataset = PregeneratedAllInDataset(tmp_path)
-    wrapped_batch, wrapped_targets = dataset.get_wrapped_batch(
-        2,
-        4,
-        device=torch.device("cpu"),
-    )
+    dataset = PregeneratedAllInDataset(tmp_path, async_shard_prefetch=True)
+    dataset.prefetch_shard_for_row(2)
+    try:
+        wrapped_batch, wrapped_targets = dataset.get_wrapped_batch(
+            2,
+            4,
+            device=torch.device("cpu"),
+        )
+    finally:
+        dataset.close()
 
     expected_rows = torch.tensor([2, 0, 1, 2])
     torch.testing.assert_close(wrapped_batch.beliefs, beliefs[expected_rows])
@@ -170,6 +249,32 @@ def test_pregenerated_suit_permutation_changes_on_second_epoch() -> None:
     )
 
     assert torch.all(first_epoch != second_epoch)
+
+
+def test_pregenerated_player_permutations_are_valid_and_epoch_varying() -> None:
+    examples = 7
+    players = 4
+    first_epoch = _pregenerated_player_permutations(
+        global_start=0,
+        batch_size=examples,
+        dataset_examples=examples,
+        players=players,
+        seed=123,
+        device=torch.device("cpu"),
+    )
+    second_epoch = _pregenerated_player_permutations(
+        global_start=examples,
+        batch_size=examples,
+        dataset_examples=examples,
+        players=players,
+        seed=123,
+        device=torch.device("cpu"),
+    )
+
+    expected_sorted = torch.arange(players).expand(examples, -1)
+    torch.testing.assert_close(first_epoch.sort(dim=1).values, expected_sorted)
+    torch.testing.assert_close(second_epoch.sort(dim=1).values, expected_sorted)
+    assert torch.any(first_epoch != second_epoch)
 
 
 def test_random_preflop_allin_batch_has_covering_caller() -> None:

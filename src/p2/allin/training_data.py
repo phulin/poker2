@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -117,6 +118,46 @@ def permute_allin_batch_by_suit(
             scale=batch.scale,
         ),
         permuted_targets,
+    )
+
+
+def permute_allin_batch_by_players(
+    batch: PreflopAllInBatch,
+    targets: torch.Tensor,
+    *,
+    player_permutations: torch.Tensor,
+) -> tuple[PreflopAllInBatch, torch.Tensor]:
+    if player_permutations.shape != batch.starting_stacks.shape:
+        raise ValueError(
+            f"player_permutations must have shape {tuple(batch.starting_stacks.shape)}"
+        )
+
+    player_permutations = player_permutations.to(
+        device=batch.beliefs.device,
+        dtype=torch.long,
+        non_blocking=True,
+    )
+    belief_index = player_permutations[:, :, None].expand(
+        -1,
+        -1,
+        batch.beliefs.shape[2],
+    )
+    target_index = player_permutations[:, :, None].expand(
+        -1,
+        -1,
+        targets.shape[2],
+    )
+    return (
+        PreflopAllInBatch(
+            beliefs=torch.gather(batch.beliefs, 1, belief_index),
+            starting_stacks=torch.gather(batch.starting_stacks, 1, player_permutations),
+            committed=torch.gather(batch.committed, 1, player_permutations),
+            stacks_after=torch.gather(batch.stacks_after, 1, player_permutations),
+            allin_mask=torch.gather(batch.allin_mask, 1, player_permutations),
+            folded_mask=torch.gather(batch.folded_mask, 1, player_permutations),
+            scale=batch.scale,
+        ),
+        torch.gather(targets, 1, target_index),
     )
 
 
@@ -292,7 +333,13 @@ def save_allin_training_dataset(
 
 
 class PregeneratedAllInDataset:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        pin_memory: bool = False,
+        async_shard_prefetch: bool = False,
+    ) -> None:
         self.path = Path(path)
         manifest_path = self.path / MANIFEST_NAME if self.path.is_dir() else self.path
         self.root = manifest_path.parent
@@ -307,17 +354,75 @@ class PregeneratedAllInDataset:
         self.shards = list(self.manifest["shards"])
         self._loaded_index: int | None = None
         self._loaded_tensors: dict[str, torch.Tensor] | None = None
+        self._pin_memory = bool(pin_memory and torch.cuda.is_available())
+        self._prefetch_executor = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="allin-shard-prefetch")
+            if async_shard_prefetch
+            else None
+        )
+        self._prefetched_index: int | None = None
+        self._prefetched_future: Future[dict[str, torch.Tensor]] | None = None
 
     def __len__(self) -> int:
         return self.examples
 
+    def close(self) -> None:
+        if self._prefetch_executor is not None:
+            self._prefetch_executor.shutdown(wait=True)
+            self._prefetch_executor = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _load_shard_from_disk(self, shard_idx: int) -> dict[str, torch.Tensor]:
+        shard_path = self.root / self.shards[shard_idx]["file"]
+        tensors = torch.load(shard_path, map_location="cpu")
+        if self._pin_memory:
+            tensors = {
+                key: value.pin_memory() if isinstance(value, torch.Tensor) else value
+                for key, value in tensors.items()
+            }
+        return tensors
+
     def _load_shard(self, shard_idx: int) -> dict[str, torch.Tensor]:
         if self._loaded_index != shard_idx:
-            shard_path = self.root / self.shards[shard_idx]["file"]
-            self._loaded_tensors = torch.load(shard_path, map_location="cpu")
+            if (
+                self._prefetched_index == shard_idx
+                and self._prefetched_future is not None
+            ):
+                self._loaded_tensors = self._prefetched_future.result()
+                self._prefetched_index = None
+                self._prefetched_future = None
+            else:
+                self._loaded_tensors = self._load_shard_from_disk(shard_idx)
             self._loaded_index = shard_idx
         assert self._loaded_tensors is not None
         return self._loaded_tensors
+
+    def _shard_index_for_row(self, row: int) -> int:
+        if row < 0 or row >= self.examples:
+            raise IndexError(f"row {row} outside pregenerated dataset")
+        for shard_idx, shard in enumerate(self.shards):
+            if int(shard["start"]) <= row < int(shard["end"]):
+                return shard_idx
+        raise IndexError(f"no shard contains pregenerated row {row}")
+
+    def prefetch_shard_for_row(self, row: int) -> None:
+        if self._prefetch_executor is None:
+            return
+        shard_idx = self._shard_index_for_row(row % self.examples)
+        if self._loaded_index == shard_idx or self._prefetched_index == shard_idx:
+            return
+        if self._prefetched_future is not None and not self._prefetched_future.done():
+            return
+        self._prefetched_index = shard_idx
+        self._prefetched_future = self._prefetch_executor.submit(
+            self._load_shard_from_disk,
+            shard_idx,
+        )
 
     def get_batch(
         self,
@@ -345,7 +450,9 @@ class PregeneratedAllInDataset:
                 break
             local_start = max(start, shard_start) - shard_start
             local_end = min(end, shard_end) - shard_start
-            parts.append(_slice_tensors(self._load_shard(shard_idx), local_start, local_end))
+            parts.append(
+                _slice_tensors(self._load_shard(shard_idx), local_start, local_end)
+            )
 
         if not parts:
             raise IndexError(f"no pregenerated rows found for [{start}, {end})")
