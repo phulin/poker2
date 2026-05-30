@@ -158,6 +158,7 @@ profile_output*.txt
 /task_plan.md
 /checkpoints/
 /checkpoints-*/
+/allin_lr_sweep/checkpoints*/
 /secret*
 /outputs/
 /profiler_logs/

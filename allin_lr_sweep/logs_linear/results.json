@@ -1,0 +1,176 @@
+[
+  {
+    "name": "lr015_linear500_r015",
+    "return_code": 0,
+    "elapsed_seconds": 310.2956475109968,
+    "params": {
+      "lr_decay": "linear",
+      "name": "lr015_linear500_r015",
+      "learning_rate": 0.015,
+      "adamw_learning_rate": 0.024,
+      "cosine_lr_decay_ratio": 0.015,
+      "cosine_lr_decay_steps": 500
+    },
+    "log": "allin_lr_sweep/logs_linear/lr015_linear500_r015.log",
+    "train_last": {
+      "step": 1000,
+      "mse": 0.000218,
+      "mae": 0.00854,
+      "step_seconds": 0.28
+    },
+    "eval_last": {
+      "step": 1000,
+      "mse": 0.00023,
+      "mae": 0.00896,
+      "max_abs": 0.1841,
+      "seconds": 6.0
+    },
+    "eval_rows": [
+      {
+        "step": 250,
+        "mse": 0.000608,
+        "mae": 0.01497,
+        "max_abs": 0.2977,
+        "seconds": 9.82
+      },
+      {
+        "step": 500,
+        "mse": 0.000237,
+        "mae": 0.00916,
+        "max_abs": 0.18587,
+        "seconds": 6.1
+      },
+      {
+        "step": 750,
+        "mse": 0.000233,
+        "mae": 0.00903,
+        "max_abs": 0.18754,
+        "seconds": 5.9
+      },
+      {
+        "step": 1000,
+        "mse": 0.00023,
+        "mae": 0.00896,
+        "max_abs": 0.1841,
+        "seconds": 6.0
+      }
+    ],
+    "mean_logged_step_seconds": 0.262
+  },
+  {
+    "name": "lr015_linear1000_r015",
+    "return_code": 0,
+    "elapsed_seconds": 311.12449676002143,
+    "params": {
+      "lr_decay": "linear",
+      "name": "lr015_linear1000_r015",
+      "learning_rate": 0.015,
+      "adamw_learning_rate": 0.024,
+      "cosine_lr_decay_ratio": 0.015,
+      "cosine_lr_decay_steps": 1000
+    },
+    "log": "allin_lr_sweep/logs_linear/lr015_linear1000_r015.log",
+    "train_last": {
+      "step": 1000,
+      "mse": 0.000213,
+      "mae": 0.0084,
+      "step_seconds": 0.29
+    },
+    "eval_last": {
+      "step": 1000,
+      "mse": 0.000226,
+      "mae": 0.00884,
+      "max_abs": 0.19035,
+      "seconds": 6.11
+    },
+    "eval_rows": [
+      {
+        "step": 250,
+        "mse": 0.000729,
+        "mae": 0.01703,
+        "max_abs": 0.33336,
+        "seconds": 11.03
+      },
+      {
+        "step": 500,
+        "mse": 0.000416,
+        "mae": 0.01262,
+        "max_abs": 0.23975,
+        "seconds": 5.55
+      },
+      {
+        "step": 750,
+        "mse": 0.000257,
+        "mae": 0.00961,
+        "max_abs": 0.20357,
+        "seconds": 6.37
+      },
+      {
+        "step": 1000,
+        "mse": 0.000226,
+        "mae": 0.00884,
+        "max_abs": 0.19035,
+        "seconds": 6.11
+      }
+    ],
+    "mean_logged_step_seconds": 0.28
+  },
+  {
+    "name": "lr015_linear2000_r015",
+    "return_code": 0,
+    "elapsed_seconds": 320.31464038201375,
+    "params": {
+      "lr_decay": "linear",
+      "name": "lr015_linear2000_r015",
+      "learning_rate": 0.015,
+      "adamw_learning_rate": 0.024,
+      "cosine_lr_decay_ratio": 0.015,
+      "cosine_lr_decay_steps": 2000
+    },
+    "log": "allin_lr_sweep/logs_linear/lr015_linear2000_r015.log",
+    "train_last": {
+      "step": 1000,
+      "mse": 0.000283,
+      "mae": 0.01015,
+      "step_seconds": 0.29
+    },
+    "eval_last": {
+      "step": 1000,
+      "mse": 0.000304,
+      "mae": 0.01057,
+      "max_abs": 0.19187,
+      "seconds": 6.14
+    },
+    "eval_rows": [
+      {
+        "step": 250,
+        "mse": 0.000831,
+        "mae": 0.01777,
+        "max_abs": 0.3591,
+        "seconds": 9.78
+      },
+      {
+        "step": 500,
+        "mse": 0.000428,
+        "mae": 0.0131,
+        "max_abs": 0.19982,
+        "seconds": 6.8
+      },
+      {
+        "step": 750,
+        "mse": 0.000332,
+        "mae": 0.01112,
+        "max_abs": 0.21012,
+        "seconds": 6.19
+      },
+      {
+        "step": 1000,
+        "mse": 0.000304,
+        "mae": 0.01057,
+        "max_abs": 0.19187,
+        "seconds": 6.14
+      }
+    ],
+    "mean_logged_step_seconds": 0.28700000000000003
+  }
+]
