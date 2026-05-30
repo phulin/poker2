@@ -3,6 +3,7 @@ Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton ke
 
 ### Source files
 - `bench_advanced_indexing.py`: Advanced indexing benchmark.
+- `bench_allin_datagen.py`: All-in training data-generation microbenchmark; times random batch creation and Monte Carlo target estimation separately and reports boards/samples throughput.
 - `bench_better_ffn_step_hotpath.py`: Benchmarks BetterFFN forward and chance-node value hot paths.
 - `bench_calculate_unblocked_mass.py`: Unblocked-mass calculation benchmark.
 - `bench_combo_mask.py`: Combo masking benchmark.
