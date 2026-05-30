@@ -1,12 +1,23 @@
+import json
+
 import torch
 
 from p2.allin import (
+    PreflopAllInBatch,
     PreflopAllInEquityModel,
     estimate_preflop_allin_values,
     make_random_preflop_allin_batch,
 )
 from p2.allin.model import _LeakyRMSBlock
-from p2.env.card_utils import NUM_HANDS
+from p2.allin.train import _pregenerated_suit_permutation_idxs
+from p2.allin.training_data import (
+    MANIFEST_NAME,
+    TARGET_KEY,
+    PregeneratedAllInDataset,
+    batch_to_tensors,
+    permute_allin_batch_by_suit,
+)
+from p2.env.card_utils import NUM_HANDS, combo_suit_permutation_inverse_tensor
 
 
 def test_random_preflop_allin_batch_shapes_and_stack_distribution() -> None:
@@ -36,6 +47,209 @@ def test_random_preflop_allin_batch_shapes_and_stack_distribution() -> None:
     assert torch.all(live_mask.sum(dim=1) >= 2)
     assert torch.all((live_mask & ~batch.allin_mask).sum(dim=1) <= 1)
     torch.testing.assert_close(batch.scale, batch.starting_stacks.mean(dim=1))
+
+
+def test_allin_suit_permutation_remaps_beliefs_and_targets() -> None:
+    players = 2
+    batch_size = 3
+    beliefs = torch.arange(
+        batch_size * players * NUM_HANDS,
+        dtype=torch.float32,
+    ).view(batch_size, players, NUM_HANDS)
+    targets = beliefs + 10_000.0
+    batch = PreflopAllInBatch(
+        beliefs=beliefs,
+        starting_stacks=torch.ones(batch_size, players),
+        committed=torch.zeros(batch_size, players),
+        stacks_after=torch.ones(batch_size, players),
+        allin_mask=torch.ones(batch_size, players, dtype=torch.bool),
+        folded_mask=torch.zeros(batch_size, players, dtype=torch.bool),
+        scale=torch.ones(batch_size),
+    )
+    perm_idxs = torch.tensor([0, 5, 17], dtype=torch.long)
+
+    permuted_batch, permuted_targets = permute_allin_batch_by_suit(
+        batch,
+        targets,
+        suit_permutation_idxs=perm_idxs,
+    )
+
+    inverse = combo_suit_permutation_inverse_tensor()[perm_idxs]
+    expected_beliefs = torch.gather(
+        beliefs,
+        2,
+        inverse[:, None, :].expand(-1, players, -1),
+    )
+    expected_targets = torch.gather(
+        targets,
+        2,
+        inverse[:, None, :].expand(-1, players, -1),
+    )
+    torch.testing.assert_close(permuted_batch.beliefs, expected_beliefs)
+    torch.testing.assert_close(permuted_targets, expected_targets)
+
+
+def test_pregenerated_dataset_wraps_batches(tmp_path) -> None:
+    players = 2
+    examples = 3
+    beliefs = torch.arange(
+        examples * players * NUM_HANDS,
+        dtype=torch.float32,
+    ).view(examples, players, NUM_HANDS)
+    batch = PreflopAllInBatch(
+        beliefs=beliefs,
+        starting_stacks=torch.arange(examples * players, dtype=torch.float32).view(
+            examples, players
+        ),
+        committed=torch.zeros(examples, players),
+        stacks_after=torch.ones(examples, players),
+        allin_mask=torch.ones(examples, players, dtype=torch.bool),
+        folded_mask=torch.zeros(examples, players, dtype=torch.bool),
+        scale=torch.ones(examples),
+    )
+    targets = beliefs + 20_000.0
+    torch.save(batch_to_tensors(batch, targets), tmp_path / "shard_000000.pt")
+    manifest = {
+        "format": "p2.allin.training_data.v1",
+        "examples": examples,
+        "players": players,
+        "hands": NUM_HANDS,
+        "feature_keys": [
+            "beliefs",
+            "starting_stacks",
+            "committed",
+            "stacks_after",
+            "allin_mask",
+            "folded_mask",
+            "scale",
+        ],
+        "target_key": TARGET_KEY,
+        "config": {},
+        "shards": [
+            {
+                "file": "shard_000000.pt",
+                "examples": examples,
+                "start": 0,
+                "end": examples,
+            }
+        ],
+    }
+    (tmp_path / MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    dataset = PregeneratedAllInDataset(tmp_path)
+    wrapped_batch, wrapped_targets = dataset.get_wrapped_batch(
+        2,
+        4,
+        device=torch.device("cpu"),
+    )
+
+    expected_rows = torch.tensor([2, 0, 1, 2])
+    torch.testing.assert_close(wrapped_batch.beliefs, beliefs[expected_rows])
+    torch.testing.assert_close(wrapped_targets, targets[expected_rows])
+
+
+def test_pregenerated_suit_permutation_changes_on_second_epoch() -> None:
+    examples = 7
+    first_epoch = _pregenerated_suit_permutation_idxs(
+        global_start=0,
+        batch_size=examples,
+        dataset_examples=examples,
+        seed=123,
+        device=torch.device("cpu"),
+    )
+    second_epoch = _pregenerated_suit_permutation_idxs(
+        global_start=examples,
+        batch_size=examples,
+        dataset_examples=examples,
+        seed=123,
+        device=torch.device("cpu"),
+    )
+
+    assert torch.all(first_epoch != second_epoch)
+
+
+def test_random_preflop_allin_batch_has_covering_caller() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(234)
+    batch = make_random_preflop_allin_batch(
+        512,
+        players=4,
+        bb=100,
+        device="cpu",
+        generator=generator,
+    )
+
+    live_mask = ~batch.folded_mask
+    caller_mask = live_mask & ~batch.allin_mask
+    assert not torch.any(batch.folded_mask & batch.allin_mask)
+    assert torch.all(caller_mask.sum(dim=1) <= 1)
+
+    torch.testing.assert_close(
+        batch.committed[batch.allin_mask],
+        batch.starting_stacks[batch.allin_mask],
+    )
+    torch.testing.assert_close(
+        batch.stacks_after[batch.allin_mask],
+        torch.zeros_like(batch.stacks_after[batch.allin_mask]),
+    )
+
+    max_allin_commit = torch.where(
+        batch.allin_mask,
+        batch.committed,
+        torch.zeros_like(batch.committed),
+    ).amax(dim=1, keepdim=True)
+    torch.testing.assert_close(
+        batch.committed[caller_mask],
+        max_allin_commit.expand_as(batch.committed)[caller_mask],
+    )
+    assert torch.all(batch.stacks_after[caller_mask] > 0.0)
+
+
+def test_random_preflop_allin_batch_marks_tied_deepest_live_players_allin() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(235)
+    batch = make_random_preflop_allin_batch(
+        128,
+        players=4,
+        bb=100,
+        min_stack_bb=10,
+        mid_stack_bb=10,
+        max_stack_bb=10,
+        device="cpu",
+        generator=generator,
+    )
+
+    live_mask = ~batch.folded_mask
+    assert torch.all(batch.allin_mask == live_mask)
+    torch.testing.assert_close(
+        batch.committed[live_mask],
+        batch.starting_stacks[live_mask],
+    )
+    torch.testing.assert_close(
+        batch.stacks_after[live_mask],
+        torch.zeros_like(batch.stacks_after[live_mask]),
+    )
+
+
+def test_random_preflop_allin_batch_caps_folded_dead_money() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(321)
+    batch = make_random_preflop_allin_batch(
+        512,
+        players=4,
+        bb=100,
+        folded_commit_max_frac=1.0,
+        device="cpu",
+        generator=generator,
+    )
+
+    live_mask = ~batch.folded_mask
+    max_live_commit = torch.where(
+        live_mask,
+        batch.committed,
+        torch.zeros_like(batch.committed),
+    ).amax(dim=1, keepdim=True)
+    assert torch.all(
+        batch.committed[batch.folded_mask]
+        <= max_live_commit.expand_as(batch.committed)[batch.folded_mask]
+    )
 
 
 def test_preflop_allin_model_shapes_and_prenorm_blocks() -> None:

@@ -10,7 +10,7 @@ import torch
 
 from p2.allin.data import PreflopAllInBatch, make_random_preflop_allin_batch
 from p2.allin.sampler import DEFAULT_PREFLOP_ALLIN_TABLE, estimate_preflop_allin_values
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import NUM_HANDS, combo_suit_permutation_inverse_tensor
 
 
 FEATURE_KEYS = (
@@ -79,6 +79,47 @@ def tensors_to_batch(
     return batch, tensors[TARGET_KEY].to(device, non_blocking=True)
 
 
+def permute_allin_batch_by_suit(
+    batch: PreflopAllInBatch,
+    targets: torch.Tensor,
+    *,
+    suit_permutation_idxs: torch.Tensor,
+) -> tuple[PreflopAllInBatch, torch.Tensor]:
+    combo_permutations_inverse = combo_suit_permutation_inverse_tensor(
+        device=suit_permutation_idxs.device
+    )[suit_permutation_idxs]
+    beliefs = torch.gather(
+        batch.beliefs,
+        2,
+        combo_permutations_inverse[:, None, :].expand(
+            -1,
+            batch.beliefs.shape[1],
+            -1,
+        ),
+    )
+    permuted_targets = torch.gather(
+        targets,
+        2,
+        combo_permutations_inverse[:, None, :].expand(
+            -1,
+            targets.shape[1],
+            -1,
+        ),
+    )
+    return (
+        PreflopAllInBatch(
+            beliefs=beliefs,
+            starting_stacks=batch.starting_stacks,
+            committed=batch.committed,
+            stacks_after=batch.stacks_after,
+            allin_mask=batch.allin_mask,
+            folded_mask=batch.folded_mask,
+            scale=batch.scale,
+        ),
+        permuted_targets,
+    )
+
+
 def _slice_tensors(
     tensors: dict[str, torch.Tensor],
     start: int,
@@ -96,6 +137,36 @@ def _concat_tensor_chunks(
         key: torch.cat([chunk[key] for chunk in chunks], dim=0).contiguous()
         for key in (*FEATURE_KEYS, TARGET_KEY)
     }
+
+
+def _concat_batches(
+    chunks: list[tuple[PreflopAllInBatch, torch.Tensor]],
+) -> tuple[PreflopAllInBatch, torch.Tensor]:
+    if not chunks:
+        raise ValueError("cannot concatenate an empty batch")
+    batches, targets = zip(*chunks, strict=True)
+    return (
+        PreflopAllInBatch(
+            beliefs=torch.cat([batch.beliefs for batch in batches], dim=0).contiguous(),
+            starting_stacks=torch.cat(
+                [batch.starting_stacks for batch in batches], dim=0
+            ).contiguous(),
+            committed=torch.cat(
+                [batch.committed for batch in batches], dim=0
+            ).contiguous(),
+            stacks_after=torch.cat(
+                [batch.stacks_after for batch in batches], dim=0
+            ).contiguous(),
+            allin_mask=torch.cat(
+                [batch.allin_mask for batch in batches], dim=0
+            ).contiguous(),
+            folded_mask=torch.cat(
+                [batch.folded_mask for batch in batches], dim=0
+            ).contiguous(),
+            scale=torch.cat([batch.scale for batch in batches], dim=0).contiguous(),
+        ),
+        torch.cat(targets, dim=0).contiguous(),
+    )
 
 
 def generate_allin_training_chunk(
@@ -280,3 +351,23 @@ class PregeneratedAllInDataset:
             raise IndexError(f"no pregenerated rows found for [{start}, {end})")
         tensors = parts[0] if len(parts) == 1 else _concat_tensor_chunks(parts)
         return tensors_to_batch(tensors, device=device)
+
+    def get_wrapped_batch(
+        self,
+        start: int,
+        count: int,
+        *,
+        device: torch.device,
+    ) -> tuple[PreflopAllInBatch, torch.Tensor]:
+        if start < 0 or count <= 0:
+            raise ValueError("start must be nonnegative and count must be positive")
+
+        chunks: list[tuple[PreflopAllInBatch, torch.Tensor]] = []
+        remaining = count
+        row_start = start % self.examples
+        while remaining > 0:
+            cur = min(remaining, self.examples - row_start)
+            chunks.append(self.get_batch(row_start, cur, device=device))
+            remaining -= cur
+            row_start = 0
+        return chunks[0] if len(chunks) == 1 else _concat_batches(chunks)

@@ -17,6 +17,7 @@ from p2.allin.training_data import (
     AllInDataGenConfig,
     PregeneratedAllInDataset,
     generate_allin_training_chunk,
+    permute_allin_batch_by_suit,
     tensors_to_batch,
 )
 from p2.rl.optimizers import TrainOptimizer, build_optimizer
@@ -189,7 +190,9 @@ def _required_examples(
     start_step: int,
     end_step: int,
 ) -> int:
-    return sum(_batch_size_for_step(schedule, step) for step in range(start_step, end_step + 1))
+    return sum(
+        _batch_size_for_step(schedule, step) for step in range(start_step, end_step + 1)
+    )
 
 
 def _data_config_from_train(cfg: TrainConfig) -> AllInDataGenConfig:
@@ -226,6 +229,42 @@ def _pregenerated_target_diag(
         "target_board_samples": 0.0,
         "target_tuple_samples": 0.0,
     }
+
+
+def _pregenerated_suit_permutation_idxs(
+    *,
+    global_start: int,
+    batch_size: int,
+    dataset_examples: int,
+    seed: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if dataset_examples <= 0:
+        raise ValueError("dataset_examples must be positive")
+    global_indices = torch.arange(
+        global_start,
+        global_start + batch_size,
+        device=device,
+        dtype=torch.long,
+    )
+    row_indices = global_indices.remainder(dataset_examples)
+    epoch_indices = torch.div(
+        global_indices,
+        dataset_examples,
+        rounding_mode="floor",
+    )
+
+    seed_tensor = torch.full(
+        (), int(seed) & 0x7FFFFFFF, device=device, dtype=torch.long
+    )
+    hashed = row_indices + seed_tensor + 0x9E3779B9
+    hashed = torch.bitwise_xor(hashed, torch.bitwise_right_shift(hashed, 16))
+    hashed = hashed * 0x45D9F3B
+    hashed = torch.bitwise_xor(hashed, torch.bitwise_right_shift(hashed, 16))
+    hashed = hashed * 0x45D9F3B
+    hashed = torch.bitwise_xor(hashed, torch.bitwise_right_shift(hashed, 16))
+    base_perm_idxs = hashed.remainder(24)
+    return (base_perm_idxs + epoch_indices.remainder(24)).remainder(24)
 
 
 @torch.no_grad()
@@ -301,7 +340,9 @@ def _set_optimizer_lrs(
     *,
     step: int,
 ) -> float:
-    decay_steps = cfg.cosine_lr_decay_steps if cfg.cosine_lr_decay_steps > 0 else cfg.steps
+    decay_steps = (
+        cfg.cosine_lr_decay_steps if cfg.cosine_lr_decay_steps > 0 else cfg.steps
+    )
     scale = _cosine_lr_scale(
         step,
         total_steps=decay_steps,
@@ -331,6 +372,8 @@ def train(cfg: TrainConfig) -> None:
         film_rank=cfg.film_rank,
     ).to(device)
     model.init_weights(init_generator)
+    if device == "cuda":
+        torch.set_float32_matmul_precision("high")
     optimizer = build_optimizer(model, cfg, device)
     compiled_model = model
     if cfg.compile_model:
@@ -370,13 +413,9 @@ def train(cfg: TrainConfig) -> None:
             start_step=start_step + 1,
             end_step=cfg.steps,
         )
-        needed_examples = examples_seen + remaining_examples
-        if needed_examples > len(pregenerated_dataset):
-            raise ValueError(
-                "not enough pregenerated data to use each row at most once: "
-                f"need rows [0, {needed_examples}), dataset has "
-                f"{len(pregenerated_dataset)}"
-            )
+        planned_examples_seen = examples_seen + remaining_examples
+        planned_pregenerated_epochs = planned_examples_seen / len(pregenerated_dataset)
+        starting_pregenerated_epoch = examples_seen / len(pregenerated_dataset)
     if validation_dataset is not None and validation_dataset.players != cfg.players:
         raise ValueError(
             f"validation data has {validation_dataset.players} players, "
@@ -390,6 +429,14 @@ def train(cfg: TrainConfig) -> None:
         f"params={total_params:,} trainable={trainable_params:,}",
         flush=True,
     )
+    if pregenerated_dataset is not None:
+        print(
+            "Pregenerated training data: "
+            f"rows={len(pregenerated_dataset):,} "
+            f"start_epoch={starting_pregenerated_epoch:.3f} "
+            f"planned_epochs={planned_pregenerated_epochs:.3f}",
+            flush=True,
+        )
 
     checkpoint_dir = Path(cfg.checkpoint_dir)
     data_cfg = _data_config_from_train(cfg)
@@ -415,10 +462,22 @@ def train(cfg: TrainConfig) -> None:
                 batch, targets = tensors_to_batch(generated, device=device)
             else:
                 target_start = time.perf_counter()
-                batch, targets = pregenerated_dataset.get_batch(
+                batch, targets = pregenerated_dataset.get_wrapped_batch(
                     examples_seen,
                     batch_size,
                     device=device,
+                )
+                suit_permutation_idxs = _pregenerated_suit_permutation_idxs(
+                    global_start=examples_seen,
+                    batch_size=batch_size,
+                    dataset_examples=len(pregenerated_dataset),
+                    seed=cfg.seed,
+                    device=device,
+                )
+                batch, targets = permute_allin_batch_by_suit(
+                    batch,
+                    targets,
+                    suit_permutation_idxs=suit_permutation_idxs,
                 )
                 target_diag = (
                     _pregenerated_target_diag(
@@ -466,16 +525,24 @@ def train(cfg: TrainConfig) -> None:
                     "loss/max_abs": float(max_abs.detach().item()),
                     "optim/grad_norm": float(grad_norm.detach().item()),
                     "optim/learning_rate": float(optimizer.param_groups[0]["lr"]),
-                    "optim/muon_learning_rate": float(muon_lrs[0])
-                    if muon_lrs
-                    else 0.0,
+                    "optim/muon_learning_rate": float(muon_lrs[0]) if muon_lrs else 0.0,
                     "optim/adamw_learning_rate": float(adamw_lrs[0])
                     if adamw_lrs
                     else 0.0,
                     "optim/lr_scale": lr_scale,
                     "data/batch_size": batch_size,
                     "data/examples_seen": examples_seen,
-                    "data/live_players_mean": float(batch.allin_mask.float().sum(dim=1).mean().item()),
+                    "data/live_players_mean": float(
+                        (~batch.folded_mask).float().sum(dim=1).mean().item()
+                    ),
+                    "data/allin_players_mean": float(
+                        batch.allin_mask.float().sum(dim=1).mean().item()
+                    ),
+                    "data/pregenerated_epoch": (
+                        examples_seen / len(pregenerated_dataset)
+                        if pregenerated_dataset is not None
+                        else 0.0
+                    ),
                     "data/stack_mean": float(batch.starting_stacks.mean().item()),
                     "data/committed_mean": float(batch.committed.mean().item()),
                     "target/value_mean": target_diag["target_value_mean"],
@@ -514,7 +581,9 @@ def train(cfg: TrainConfig) -> None:
                 and cfg.eval_interval > 0
                 and (step % cfg.eval_interval == 0 or step == cfg.steps)
             ):
-                eval_batch_size = cfg.eval_batch_size if cfg.eval_batch_size > 0 else batch_size
+                eval_batch_size = (
+                    cfg.eval_batch_size if cfg.eval_batch_size > 0 else batch_size
+                )
                 eval_metrics = _evaluate_pregenerated_dataset(
                     compiled_model,
                     validation_dataset,
@@ -568,7 +637,9 @@ def parse_args() -> TrainConfig:
                     default=default,
                 )
         else:
-            parser.add_argument(arg, type=type(default) if default is not None else str, default=default)
+            parser.add_argument(
+                arg, type=type(default) if default is not None else str, default=default
+            )
     ns = parser.parse_args()
     return TrainConfig(**vars(ns))
 
