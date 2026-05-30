@@ -7,14 +7,16 @@ import torch
 
 from p2.allin.data import PreflopAllInBatch
 from p2.allin.kernels import (
-    allin_alias_tuple_score_cuda_into,
-    make_allin_alias_workspace,
+    allin_cdf_tuple_score_cuda_into,
+    allin_cdf_tuple_score_from_roots_accumulate_cuda_,
+    allin_cdf_tuple_score_from_roots_cuda_into,
+    make_allin_cdf_workspace,
     triton_available,
 )
-from p2.env.card_utils import NUM_HANDS, board_allowed_hands, hand_combos_tensor
+from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
 from p2.env.rules import rank_hands as rank_hands_torch
 from p2.env.rules_triton import (
-    rank_7_cards_single_batch_triton,
+    rank_hand_scores_triton,
     triton_is_available as rules_triton_available,
 )
 from p2.search.allin_payoff import (
@@ -33,6 +35,19 @@ def _combo_masks(device: torch.device) -> torch.Tensor:
     return ((1 << combos[:, 0]) | (1 << combos[:, 1])).to(torch.int64)
 
 
+def _board_allowed_from_combo_masks(
+    board: torch.Tensor,
+    combo_masks: torch.Tensor,
+) -> torch.Tensor:
+    valid = board >= 0
+    card_bits = torch.bitwise_left_shift(
+        torch.ones_like(board, dtype=torch.int64),
+        board.to(torch.int64).clamp_min(0),
+    )
+    board_masks = torch.where(valid, card_bits, torch.zeros_like(card_bits)).sum(dim=-1)
+    return (combo_masks[None, :] & board_masks[:, None]) == 0
+
+
 def _sample_full_boards(
     count: int,
     *,
@@ -40,17 +55,12 @@ def _sample_full_boards(
     generator: torch.Generator | None,
 ) -> torch.Tensor:
     scores = torch.rand(count, 52, device=device, generator=generator)
-    return torch.topk(scores, 5, dim=1).indices.sort(dim=1).values
+    return torch.topk(scores, 5, dim=1).indices
 
 
 def _rank_hands(board: torch.Tensor) -> torch.Tensor:
     if board.device.type == "cuda" and rules_triton_available():
-        combos = hand_combos_tensor(device=board.device)
-        rows = board.shape[0]
-        holes = combos[None, :, :].expand(rows, NUM_HANDS, 2)
-        boards = board[:, None, :].expand(rows, NUM_HANDS, 5)
-        cards = torch.cat((holes, boards), dim=-1).reshape(-1, 7)
-        return rank_7_cards_single_batch_triton(cards).view(rows, NUM_HANDS).contiguous()
+        return rank_hand_scores_triton(board).contiguous()
     ranks, _ = rank_hands_torch(board.int())
     return ranks.to(torch.int32).contiguous()
 
@@ -91,11 +101,14 @@ def _estimate_two_player_preflop_exact(
     B, P, H = batch.beliefs.shape
     if H != NUM_HANDS:
         raise ValueError(f"expected {NUM_HANDS} hands, got {H}")
-    live_counts = batch.allin_mask.sum(dim=1)
+    live_mask = ~batch.folded_mask
+    live_counts = live_mask.sum(dim=1)
     if not torch.equal(live_counts, torch.full_like(live_counts, 2)):
-        raise ValueError("exact preflop all-in table requires exactly two live players per row")
+        raise ValueError(
+            "exact preflop all-in table requires exactly two live players per row"
+        )
 
-    live_coords = torch.nonzero(batch.allin_mask, as_tuple=False)
+    live_coords = torch.nonzero(live_mask, as_tuple=False)
     live_indices = live_coords[:, 1].reshape(B, 2)
     pair_beliefs = batch.beliefs.gather(
         1,
@@ -132,9 +145,9 @@ def _estimate_two_player_preflop_exact(
             uncontested[:, None] + contested[:, None] * showdown_share[:, slot]
         )
 
-    folded_value = (
-        batch.stacks_after - batch.starting_stacks
-    ) / batch.scale[:, None].clamp_min(1.0)
+    folded_value = (batch.stacks_after - batch.starting_stacks) / batch.scale[
+        :, None
+    ].clamp_min(1.0)
     values = folded_value[:, :, None].expand(-1, -1, H).clone()
     pair_starting = batch.starting_stacks.gather(1, live_indices)
     pair_after = batch.stacks_after.gather(1, live_indices)
@@ -160,7 +173,9 @@ def _resolve_sample_split(
         raise ValueError("tuple_samples must be positive")
     if sample_count is None:
         if board_samples is None or tuple_samples is None:
-            raise ValueError("board_samples and tuple_samples are required without sample_count")
+            raise ValueError(
+                "board_samples and tuple_samples are required without sample_count"
+            )
         return board_samples, tuple_samples
     if board_samples is None and tuple_samples is None:
         board_samples = min(256, sample_count)
@@ -202,7 +217,7 @@ def _estimate_preflop_allin_values_triton(
     denom_sum = torch.zeros_like(payout_sum)
     kernel_launch_seconds = 0.0
 
-    workspace = make_allin_alias_workspace(
+    workspace = make_allin_cdf_workspace(
         max_rows=B * min(board_chunk, board_samples),
         players=P,
         sample_count=tuple_samples,
@@ -210,38 +225,45 @@ def _estimate_preflop_allin_values_triton(
         device=device,
         hands=H,
     )
+    full_chunk = min(board_chunk, board_samples)
+    full_root_ids = torch.arange(B, device=device).repeat_interleave(full_chunk)
+    full_live_rep = live_mask_i8.index_select(0, full_root_ids)
+    full_layer_amount_rep = layer_amount_f32.index_select(0, full_root_ids)
+    full_eligible_rep = eligible_i8.index_select(0, full_root_ids)
 
     done_boards = 0
     while done_boards < board_samples:
         cur_boards = min(board_chunk, board_samples - done_boards)
         row_count = B * cur_boards
-        root_ids = torch.arange(B, device=device).repeat_interleave(cur_boards)
+        if cur_boards == full_chunk:
+            root_ids = full_root_ids
+            live_rep = full_live_rep
+            layer_amount_rep = full_layer_amount_rep
+            eligible_rep = full_eligible_rep
+        else:
+            root_ids = torch.arange(B, device=device).repeat_interleave(cur_boards)
+            live_rep = live_mask_i8.index_select(0, root_ids)
+            layer_amount_rep = layer_amount_f32.index_select(0, root_ids)
+            eligible_rep = eligible_i8.index_select(0, root_ids)
         boards = _sample_full_boards(row_count, device=device, generator=generator)
         ranks = _rank_hands(boards)
-        allowed = board_allowed_hands(boards).contiguous()
-        board_beliefs = beliefs.index_select(0, root_ids)
-        board_beliefs.masked_fill_(~allowed[:, None, :], 0.0)
-        board_beliefs = board_beliefs / board_beliefs.sum(
-            dim=-1,
-            keepdim=True,
-        ).clamp_min(1.0e-30)
+        allowed = _board_allowed_from_combo_masks(boards, combo_masks).contiguous()
         launch_start = time.perf_counter()
-        payout_part, denom_part = allin_alias_tuple_score_cuda_into(
+        allin_cdf_tuple_score_from_roots_accumulate_cuda_(
             workspace,
-            board_beliefs=board_beliefs,
+            beliefs=beliefs,
+            board_allowed=allowed,
+            boards_per_root=cur_boards,
             hand_masks=combo_masks,
             hand_ranks=ranks,
-            board_allowed=allowed.to(torch.int8),
-            live_mask=live_mask_i8.index_select(0, root_ids),
-            layer_amount=layer_amount_f32.index_select(0, root_ids),
-            eligible=eligible_i8.index_select(0, root_ids),
+            live_mask=live_rep,
+            layer_amount=layer_amount_rep,
+            eligible=eligible_rep,
+            payout_sum=payout_sum,
+            denom_sum=denom_sum,
             seed=(done_boards + 1) * 104_729,
         )
         kernel_launch_seconds += time.perf_counter() - launch_start
-        # Rows are arange(B).repeat_interleave(cur_boards), so each root's boards
-        # are contiguous: a segmented sum beats an atomic scatter-add here.
-        payout_sum += payout_part.reshape(B, cur_boards, P, H).sum(dim=1)
-        denom_sum += denom_part.reshape(B, cur_boards, P, H).sum(dim=1)
         done_boards += cur_boards
 
     expected_payout = torch.where(
@@ -254,10 +276,12 @@ def _estimate_preflop_allin_values_triton(
         + expected_payout
         - batch.starting_stacks[:, :, None].to(torch.float32)
     ) / batch.scale[:, None, None].to(torch.float32).clamp_min(1.0)
-    folded_value = (
-        batch.stacks_after - batch.starting_stacks
-    ) / batch.scale[:, None].clamp_min(1.0)
-    values = torch.where(batch.folded_mask[:, :, None], folded_value[:, :, None], values)
+    folded_value = (batch.stacks_after - batch.starting_stacks) / batch.scale[
+        :, None
+    ].clamp_min(1.0)
+    values = torch.where(
+        batch.folded_mask[:, :, None], folded_value[:, :, None], values
+    )
     if not compute_stats:
         return values, {}
     torch.cuda.synchronize(device)
@@ -317,7 +341,7 @@ def estimate_preflop_allin_values(
 
     start = time.perf_counter()
     device = batch.beliefs.device
-    live_counts = batch.allin_mask.sum(dim=1)
+    live_counts = (~batch.folded_mask).sum(dim=1)
     exact_mask = (
         live_counts == 2
         if use_exact_two_player
@@ -390,15 +414,29 @@ def estimate_preflop_allin_values(
     layer_amount, eligible = _side_pot_layers(batch)
     payout_sum = torch.zeros(B, P, H, dtype=torch.float32, device=device)
     denom_sum = torch.zeros_like(payout_sum)
+    full_chunk = min(board_chunk, board_samples)
+    full_root_ids = torch.arange(B, device=device).repeat_interleave(full_chunk)
+    full_live_rep = live_mask.index_select(0, full_root_ids)
+    full_layer_amount_rep = layer_amount.index_select(0, full_root_ids)
+    full_eligible_rep = eligible.index_select(0, full_root_ids)
 
     done_boards = 0
     while done_boards < board_samples:
         cur_boards = min(board_chunk, board_samples - done_boards)
         row_count = B * cur_boards
-        root_ids = torch.arange(B, device=device).repeat_interleave(cur_boards)
+        if cur_boards == full_chunk:
+            root_ids = full_root_ids
+            live_rep = full_live_rep
+            layer_amount_rep = full_layer_amount_rep
+            eligible_rep = full_eligible_rep
+        else:
+            root_ids = torch.arange(B, device=device).repeat_interleave(cur_boards)
+            live_rep = live_mask.index_select(0, root_ids)
+            layer_amount_rep = layer_amount.index_select(0, root_ids)
+            eligible_rep = eligible.index_select(0, root_ids)
         boards = _sample_full_boards(row_count, device=device, generator=generator)
         ranks = _rank_hands(boards)
-        allowed = board_allowed_hands(boards)
+        allowed = _board_allowed_from_combo_masks(boards, combo_masks)
         board_beliefs = beliefs.index_select(0, root_ids)
         board_beliefs.masked_fill_(~allowed[:, None, :], 0.0)
         board_beliefs = board_beliefs / board_beliefs.sum(
@@ -406,9 +444,6 @@ def estimate_preflop_allin_values(
             keepdim=True,
         ).clamp_min(1.0e-30)
         flat_beliefs = board_beliefs.reshape(row_count * P, H)
-        live_rep = live_mask.index_select(0, root_ids)
-        layer_amount_rep = layer_amount.index_select(0, root_ids)
-        eligible_rep = eligible.index_select(0, root_ids)
 
         processed_samples = 0
         sample_chunk = min(64, tuple_samples)
@@ -420,7 +455,9 @@ def estimate_preflop_allin_values(
                 replacement=True,
                 generator=generator,
             ).reshape(row_count, P, tuple_tries, cur_samples)
-            candidate_masks = combo_masks.index_select(0, candidates.reshape(-1)).reshape(
+            candidate_masks = combo_masks.index_select(
+                0, candidates.reshape(-1)
+            ).reshape(
                 row_count,
                 P,
                 tuple_tries,
@@ -435,8 +472,12 @@ def estimate_preflop_allin_values(
                 hero_live = live_rep[:, hero]
                 opp_live = live_rep.clone()
                 opp_live[:, hero] = False
-                alive = torch.zeros(row_count, cur_samples, dtype=torch.bool, device=device)
-                selected = torch.zeros(row_count, P, cur_samples, dtype=torch.long, device=device)
+                alive = torch.zeros(
+                    row_count, cur_samples, dtype=torch.bool, device=device
+                )
+                selected = torch.zeros(
+                    row_count, P, cur_samples, dtype=torch.long, device=device
+                )
                 selected_ranks = torch.full(
                     (row_count, P, cur_samples),
                     -1,
@@ -462,12 +503,16 @@ def estimate_preflop_allin_values(
                     )
                     alive |= take
 
-                selected_masks = combo_masks.index_select(0, selected.reshape(-1)).reshape(
+                selected_masks = combo_masks.index_select(
+                    0, selected.reshape(-1)
+                ).reshape(
                     row_count,
                     P,
                     cur_samples,
                 )
-                used_mask = torch.zeros(row_count, cur_samples, dtype=torch.int64, device=device)
+                used_mask = torch.zeros(
+                    row_count, cur_samples, dtype=torch.int64, device=device
+                )
                 for player in range(P):
                     used_mask |= torch.where(
                         opp_live[:, player, None],
@@ -547,10 +592,12 @@ def estimate_preflop_allin_values(
         + expected_payout
         - batch.starting_stacks[:, :, None].to(torch.float32)
     ) / batch.scale[:, None, None].to(torch.float32).clamp_min(1.0)
-    folded_value = (
-        batch.stacks_after - batch.starting_stacks
-    ) / batch.scale[:, None].clamp_min(1.0)
-    values = torch.where(batch.folded_mask[:, :, None], folded_value[:, :, None], values)
+    folded_value = (batch.stacks_after - batch.starting_stacks) / batch.scale[
+        :, None
+    ].clamp_min(1.0)
+    values = torch.where(
+        batch.folded_mask[:, :, None], folded_value[:, :, None], values
+    )
     if not compute_stats:
         return values, {}
     elapsed = time.perf_counter() - start

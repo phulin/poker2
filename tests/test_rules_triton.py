@@ -74,6 +74,7 @@ def test_rank_hands_triton_matches_per_hand_scorer() -> None:
     from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
     from p2.env.rules_triton import (
         rank_7_cards_single_batch_triton,
+        rank_hand_scores_triton,
         rank_hands_triton,
     )
 
@@ -90,11 +91,13 @@ def test_rank_hands_triton_matches_per_hand_scorer() -> None:
     cards_flat = cards.reshape(-1, 7)
 
     ref = rank_7_cards_single_batch_triton(cards_flat).view(m, NUM_HANDS)
+    scores_only = rank_hand_scores_triton(board)
     fused, _ = rank_hands_triton(board)
 
     # Blocked combos (hole card shares with board) are undefined; exclude them.
     sorted_cards, _ = cards.sort(dim=-1)
     legal = (sorted_cards[..., 1:] != sorted_cards[..., :-1]).all(dim=-1)
+    assert torch.equal(ref[legal], scores_only[legal])
     assert torch.equal(ref[legal], fused[legal])
 
 

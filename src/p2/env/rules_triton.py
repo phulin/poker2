@@ -117,6 +117,39 @@ def rank_7_cards_single_batch_triton(cards_batch: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def rank_hand_scores_triton(board: torch.Tensor) -> torch.Tensor:
+    """Score every private-hand combo on each board without sorting.
+
+    Args:
+      board: [M, 5] int tensor of board card indices (0..51).
+
+    Returns:
+      hand_ranks: [M, 1326] int32 packed rank integer per (env, combo).
+
+    This is the scores-only part of :func:`rank_hands_triton`; it avoids both
+    the ``[M, 1326, 7]`` card tensor and the argsort needed by callers that want
+    rank order.
+    """
+    from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
+
+    if board.dim() != 2 or board.shape[1] != 5:
+        raise ValueError(f"board must be [M, 5], got {tuple(board.shape)}")
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    if board.device.type != "cuda":
+        raise ValueError("Triton hand evaluator requires a CUDA tensor.")
+    device = board.device
+    rows = board.shape[0]
+    combos = hand_combos_tensor(device=device).to(torch.int16).contiguous()
+    board_i16 = board.to(torch.int16).contiguous()
+
+    n = rows * NUM_HANDS
+    scores_flat = torch.empty((n,), device=device, dtype=torch.int32)
+    grid = lambda meta: (triton.cdiv(n, meta["BLOCK_M"]),)  # noqa: E731
+    _rank_hands_fused_kernel[grid](board_i16, combos, scores_flat, n, NUM_HANDS=NUM_HANDS)
+    return scores_flat.view(rows, NUM_HANDS)
+
+
 def rank_hands_triton(board: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Triton-accelerated drop-in for ``p2.env.rules.rank_hands``.
 
@@ -128,28 +161,9 @@ def rank_hands_triton(board: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
       sorted_indices: [M, 1326] int64 — argsort by (hand_ranks) ascending
                       (weaker → stronger), stable; matches ``rank_hands``.
     """
-    from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
+    from p2.env.card_utils import NUM_HANDS
 
-    if board.dim() != 2 or board.shape[1] != 5:
-        raise ValueError(f"board must be [M, 5], got {tuple(board.shape)}")
-    if not triton_is_available():
-        raise RuntimeError("Triton is not installed.")
-    if board.device.type != "cuda":
-        raise ValueError("Triton hand evaluator requires a CUDA tensor.")
-    device = board.device
-    M = board.shape[0]
-    combos = hand_combos_tensor(device=device).to(torch.int16).contiguous()  # [1326, 2]
-    board_i16 = board.to(torch.int16).contiguous()  # [M, 5]
-
-    # Gather the 7 cards per (board, combo) inside the kernel — no [M, 1326, 7]
-    # intermediate. Scores match ``rank_hands`` for every legal (non-blocked)
-    # combo; combos that share a card with the board are blocked and their
-    # score is undefined (and dropped by the legality mask downstream).
-    n = M * NUM_HANDS
-    scores_flat = torch.empty((n,), device=device, dtype=torch.int32)
-    grid = lambda meta: (triton.cdiv(n, meta["BLOCK_M"]),)  # noqa: E731
-    _rank_hands_fused_kernel[grid](board_i16, combos, scores_flat, n, NUM_HANDS=NUM_HANDS)
-    hand_ranks = scores_flat.view(M, NUM_HANDS)
+    hand_ranks = rank_hand_scores_triton(board)
     sorted_indices = torch.argsort(hand_ranks, dim=1, stable=True)
     return hand_ranks, sorted_indices
 
