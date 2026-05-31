@@ -19,9 +19,11 @@ from p2.allin.model import (
 from p2.allin.train import (
     AllInTrainConfig,
     _build_model,
+    _eligible_pot_share_to_values,
     _evaluate_pregenerated_dataset,
     _pregenerated_player_permutations,
     _pregenerated_suit_permutation_idxs,
+    _values_to_eligible_pot_share,
 )
 from p2.allin.training_data import (
     MANIFEST_NAME,
@@ -690,6 +692,25 @@ def test_preflop_allin_transformer_masks_ineligible_pot_attention() -> None:
     assert torch.isneginf(mask[0, 0, 3, 5:7]).all()
 
 
+def test_preflop_allin_transformer_can_mask_folded_player_tokens() -> None:
+    model = PreflopAllInTransformerModel(
+        players=3,
+        hidden_dim=64,
+        hand_dim=32,
+        num_layers=1,
+        transformer_heads=4,
+        mask_folded_player_tokens=True,
+    )
+    player_pot_eligible = torch.ones(1, 3, 3, dtype=torch.bool)
+    folded_mask = torch.tensor([[False, True, False]])
+
+    mask = model._token_attention_mask(player_pot_eligible, folded_mask)
+
+    assert torch.isfinite(mask[0, 0, :, 1]).all()
+    assert torch.isneginf(mask[0, 0, :, 2]).all()
+    assert torch.isfinite(mask[0, 0, :, 3]).all()
+
+
 def test_preflop_allin_transformer_pot_bitmasks_follow_player_permutation() -> None:
     players = 4
     model = PreflopAllInTransformerModel(
@@ -769,6 +790,7 @@ def test_allin_train_config_builds_transformer_model() -> None:
         layers=1,
         transformer_heads=4,
         dense_output_residual=True,
+        mask_folded_player_tokens=True,
     )
 
     model = _build_model(cfg)
@@ -776,6 +798,34 @@ def test_allin_train_config_builds_transformer_model() -> None:
     assert isinstance(model, PreflopAllInTransformerModel)
     assert model.transformer_heads == 4
     assert model.dense_output_residual is True
+    assert model.mask_folded_player_tokens is True
+
+
+def test_eligible_pot_share_target_round_trips_live_values() -> None:
+    batch = make_random_preflop_allin_batch(
+        8,
+        players=4,
+        device="cpu",
+        generator=torch.Generator(device="cpu").manual_seed(465),
+    )
+    targets = torch.randn(8, 4, NUM_HANDS) * 0.1
+    folded_value = (
+        batch.stacks_after - batch.starting_stacks
+    ) / batch.scale[:, None].clamp_min(1.0)
+    targets = torch.where(
+        batch.folded_mask[:, :, None],
+        folded_value[:, :, None],
+        targets,
+    )
+
+    share = _values_to_eligible_pot_share(targets, batch)
+    round_trip = _eligible_pot_share_to_values(share, batch)
+
+    torch.testing.assert_close(round_trip, targets)
+    torch.testing.assert_close(
+        share[batch.folded_mask],
+        torch.zeros_like(share[batch.folded_mask]),
+    )
 
 
 def test_preflop_allin_model_card_and_blocker_features_are_combo_exact() -> None:

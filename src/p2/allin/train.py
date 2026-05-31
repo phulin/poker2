@@ -59,6 +59,8 @@ class AllInTrainConfig:
     transformer_heads: int = 8
     dense_belief_residual: bool = False
     dense_output_residual: bool = False
+    mask_folded_player_tokens: bool = False
+    target_mode: str = "net_value"
     compile_model: bool = False
     compile_dynamic: bool = True
     compile_mode: str = ""
@@ -168,6 +170,7 @@ def _build_model(cfg: TrainConfig) -> torch.nn.Module:
             transformer_heads=cfg.transformer_heads,
             dense_belief_residual=cfg.dense_belief_residual,
             dense_output_residual=cfg.dense_output_residual,
+            mask_folded_player_tokens=cfg.mask_folded_player_tokens,
         )
     raise ValueError(
         "model_type must be one of: mlp, player_transformer; "
@@ -284,6 +287,80 @@ def _pregenerated_target_diag(
     }
 
 
+def _target_mode(cfg: TrainConfig) -> str:
+    mode = str(cfg.target_mode).strip().lower()
+    if mode not in {"net_value", "eligible_pot_share"}:
+        raise ValueError(
+            "target_mode must be one of: net_value, eligible_pot_share; "
+            f"got {cfg.target_mode!r}"
+        )
+    return mode
+
+
+def _max_eligible_to_win(batch: PreflopAllInBatch) -> torch.Tensor:
+    return PreflopAllInEquityModel._max_eligible_to_win(
+        batch.committed,
+        batch.folded_mask,
+    )
+
+
+def _values_to_eligible_pot_share(
+    values: torch.Tensor,
+    batch: PreflopAllInBatch,
+) -> torch.Tensor:
+    scale = batch.scale[:, None, None].to(values.dtype).clamp_min(1.0)
+    payout = (
+        values * scale
+        + batch.starting_stacks[:, :, None].to(values.dtype)
+        - batch.stacks_after[:, :, None].to(values.dtype)
+    )
+    max_eligible = _max_eligible_to_win(batch).to(values.dtype)
+    share = payout / max_eligible[:, :, None].clamp_min(1.0e-6)
+    return torch.where(batch.folded_mask[:, :, None], torch.zeros_like(share), share)
+
+
+def _eligible_pot_share_to_values(
+    share: torch.Tensor,
+    batch: PreflopAllInBatch,
+) -> torch.Tensor:
+    scale = batch.scale[:, None, None].to(share.dtype).clamp_min(1.0)
+    max_eligible = _max_eligible_to_win(batch).to(share.dtype)
+    values = (
+        batch.stacks_after[:, :, None].to(share.dtype)
+        + share * max_eligible[:, :, None]
+        - batch.starting_stacks[:, :, None].to(share.dtype)
+    ) / scale
+    folded_value = (
+        batch.stacks_after - batch.starting_stacks
+    )[:, :, None].to(share.dtype) / scale
+    return torch.where(batch.folded_mask[:, :, None], folded_value, values)
+
+
+def _masked_mse(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    err = pred - target
+    return err.square().masked_select(mask).mean()
+
+
+def _prediction_and_loss_target(
+    pred: torch.Tensor,
+    targets: torch.Tensor,
+    batch: PreflopAllInBatch,
+    *,
+    target_mode: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if target_mode == "net_value":
+        mask = torch.ones_like(targets, dtype=torch.bool)
+        return pred, targets, pred, mask
+    share_targets = _values_to_eligible_pot_share(targets, batch)
+    pred_values = _eligible_pot_share_to_values(pred, batch)
+    live_mask = (~batch.folded_mask)[:, :, None].expand_as(targets)
+    return pred, share_targets, pred_values, live_mask
+
+
 def _pregenerated_suit_permutation_idxs(
     *,
     global_start: int,
@@ -386,6 +463,7 @@ def _evaluate_pregenerated_dataset(
     *,
     batch_size: int,
     device: torch.device,
+    target_mode: str = "net_value",
 ) -> dict[str, float]:
     if batch_size <= 0:
         raise ValueError("validation batch size must be positive")
@@ -401,6 +479,14 @@ def _evaluate_pregenerated_dataset(
     while row_start < len(dataset):
         cur = min(batch_size, len(dataset) - row_start)
         batch, targets = dataset.get_batch(row_start, cur, device=device)
+        model_kwargs = (
+            {"hardcode_folded_values": target_mode == "net_value"}
+            if isinstance(
+                model,
+                (PreflopAllInEquityModel, PreflopAllInTransformerModel),
+            )
+            else {}
+        )
         pred = model(
             batch.beliefs,
             batch.starting_stacks,
@@ -408,8 +494,15 @@ def _evaluate_pregenerated_dataset(
             batch.stacks_after,
             batch.allin_mask,
             batch.folded_mask,
+            **model_kwargs,
         )
-        err = (pred - targets).detach()
+        _, _, pred_values, _ = _prediction_and_loss_target(
+            pred,
+            targets,
+            batch,
+            target_mode=target_mode,
+        )
+        err = (pred_values - targets).detach()
         live_counts = (~batch.folded_mask).sum(dim=1).long()
         squared_by_live += torch.bincount(
             live_counts,
@@ -687,6 +780,7 @@ class _PregeneratedBatchPrefetcher:
 
 def train(cfg: TrainConfig) -> None:
     device = _device(cfg.device)
+    target_mode = _target_mode(cfg)
     batch_size_schedule = _parse_batch_size_schedule(
         cfg.batch_size_schedule,
         default_batch_size=cfg.batch_size,
@@ -863,10 +957,25 @@ def train(cfg: TrainConfig) -> None:
                     batch.stacks_after,
                     batch.allin_mask,
                     batch.folded_mask,
+                    hardcode_folded_values=(target_mode == "net_value"),
                 )
-                loss = F.mse_loss(pred, targets)
-                mae = (pred - targets).abs().mean()
-                max_abs = (pred - targets).abs().amax()
+                loss_pred, loss_target, pred_values, loss_mask = (
+                    _prediction_and_loss_target(
+                        pred,
+                        targets,
+                        batch,
+                        target_mode=target_mode,
+                    )
+                )
+                loss = (
+                    F.mse_loss(loss_pred, loss_target)
+                    if target_mode == "net_value"
+                    else _masked_mse(loss_pred, loss_target, loss_mask)
+                )
+                value_err = pred_values - targets
+                mae = value_err.abs().mean()
+                max_abs = value_err.abs().amax()
+                value_mse = value_err.square().mean()
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -889,6 +998,7 @@ def train(cfg: TrainConfig) -> None:
                     metrics = {
                         "step": step,
                         "loss/mse": float(loss.detach().item()),
+                        "loss/value_mse": float(value_mse.detach().item()),
                         "loss/mae": float(mae.detach().item()),
                         "loss/max_abs": float(max_abs.detach().item()),
                         "optim/grad_norm": float(grad_norm.detach().item()),
@@ -917,6 +1027,9 @@ def train(cfg: TrainConfig) -> None:
                         "data/committed_mean": float(batch.committed.mean().item()),
                         "target/value_mean": target_diag["target_value_mean"],
                         "target/value_std": target_diag["target_value_std"],
+                        "target/mode_eligible_pot_share": float(
+                            target_mode == "eligible_pot_share"
+                        ),
                         "target/zero_denom_frac": target_diag["target_zero_denom_frac"],
                         "perf/step_seconds": elapsed,
                         "perf/target_seconds": target_diag["target_seconds"],
@@ -938,6 +1051,7 @@ def train(cfg: TrainConfig) -> None:
                         f"[{step:06d}/{cfg.steps}] "
                         f"bs={batch_size} "
                         f"mse={metrics['loss/mse']:.6f} "
+                        f"value_mse={metrics['loss/value_mse']:.6f} "
                         f"mae={metrics['loss/mae']:.5f} "
                         f"target={metrics['perf/target_seconds']:.2f}s "
                         f"step={elapsed:.2f}s",
@@ -959,6 +1073,7 @@ def train(cfg: TrainConfig) -> None:
                         validation_dataset,
                         batch_size=eval_batch_size,
                         device=device,
+                        target_mode=target_mode,
                     )
                     print(
                         f"[eval {step:06d}/{cfg.steps}] "

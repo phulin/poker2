@@ -32,6 +32,8 @@ layers: 6
 film_rank: 64
 transformer_heads: 8
 dense_output_residual: false
+mask_folded_player_tokens: false
+target_mode: net_value
 compile_model: true
 compile_dynamic: true
 compile_mode: ""

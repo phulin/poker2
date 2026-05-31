@@ -353,6 +353,8 @@ class PreflopAllInEquityModel(nn.Module):
         stacks_after: torch.Tensor,
         allin_mask: torch.Tensor,
         folded_mask: torch.Tensor,
+        *,
+        hardcode_folded_values: bool = True,
     ) -> torch.Tensor:
         if beliefs.shape[1] != self.players:
             raise ValueError(f"expected {self.players} players, got {beliefs.shape[1]}")
@@ -414,8 +416,13 @@ class PreflopAllInEquityModel(nn.Module):
         values = values + self.value_bias(state).expand(-1, -1, NUM_HANDS)
         if self.dense_output_residual:
             values = values + self.dense_output_proj(state)
-        folded_value = (stacks_after - starting_stacks) / scale
-        values = torch.where(folded_mask[:, :, None], folded_value[:, :, None], values)
+        if hardcode_folded_values:
+            folded_value = (stacks_after - starting_stacks) / scale
+            values = torch.where(
+                folded_mask[:, :, None],
+                folded_value[:, :, None],
+                values,
+            )
         return values.to(beliefs.dtype)
 
     def init_weights(self, generator: torch.Generator | None = None) -> None:
@@ -455,6 +462,7 @@ class PreflopAllInTransformerModel(PreflopAllInEquityModel):
         transformer_heads: int = 8,
         dense_belief_residual: bool = False,
         dense_output_residual: bool = False,
+        mask_folded_player_tokens: bool = False,
         negative_slope: float = 0.01,
     ) -> None:
         nn.Module.__init__(self)
@@ -474,6 +482,7 @@ class PreflopAllInTransformerModel(PreflopAllInEquityModel):
         self.transformer_heads = int(transformer_heads)
         self.dense_belief_residual = bool(dense_belief_residual)
         self.dense_output_residual = bool(dense_output_residual)
+        self.mask_folded_player_tokens = bool(mask_folded_player_tokens)
         self.negative_slope = float(negative_slope)
 
         combos = hand_combos_tensor()
@@ -592,6 +601,7 @@ class PreflopAllInTransformerModel(PreflopAllInEquityModel):
     def _token_attention_mask(
         self,
         player_pot_eligible: torch.Tensor,
+        folded_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = player_pot_eligible.shape[0]
         token_count = 1 + self.players + self.players
@@ -611,6 +621,14 @@ class PreflopAllInTransformerModel(PreflopAllInEquityModel):
             torch.full((), float("-inf"), device=attn_mask.device),
             torch.zeros((), device=attn_mask.device),
         )
+        if self.mask_folded_player_tokens and folded_mask is not None:
+            player_keys = slice(1, 1 + self.players)
+            folded_penalty = torch.where(
+                folded_mask[:, None, None, :],
+                torch.full((), float("-inf"), device=attn_mask.device),
+                torch.zeros((), device=attn_mask.device),
+            )
+            attn_mask[:, :, :, player_keys] = folded_penalty
         return attn_mask
 
     def forward(
@@ -621,6 +639,8 @@ class PreflopAllInTransformerModel(PreflopAllInEquityModel):
         stacks_after: torch.Tensor,
         allin_mask: torch.Tensor,
         folded_mask: torch.Tensor,
+        *,
+        hardcode_folded_values: bool = True,
     ) -> torch.Tensor:
         if beliefs.shape[1] != self.players:
             raise ValueError(f"expected {self.players} players, got {beliefs.shape[1]}")
@@ -662,7 +682,7 @@ class PreflopAllInTransformerModel(PreflopAllInEquityModel):
         if self.dense_belief_residual:
             context_token = context_token + self.dense_belief_proj(beliefs_f.flatten(1))
         tokens = torch.cat((context_token[:, None, :], player_tokens, pot_tokens), dim=1)
-        attn_mask = self._token_attention_mask(player_pot_eligible)
+        attn_mask = self._token_attention_mask(player_pot_eligible, folded_mask)
         encoded = tokens
         for block in self.encoder:
             encoded = block(encoded, attn_mask)
@@ -695,6 +715,11 @@ class PreflopAllInTransformerModel(PreflopAllInEquityModel):
         values = values + self.value_bias(state).expand(-1, -1, NUM_HANDS)
         if self.dense_output_residual:
             values = values + self.dense_output_proj(state)
-        folded_value = (stacks_after - starting_stacks) / scale
-        values = torch.where(folded_mask[:, :, None], folded_value[:, :, None], values)
+        if hardcode_folded_values:
+            folded_value = (stacks_after - starting_stacks) / scale
+            values = torch.where(
+                folded_mask[:, :, None],
+                folded_value[:, :, None],
+                values,
+            )
         return values.to(beliefs.dtype)
