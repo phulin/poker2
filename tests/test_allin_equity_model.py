@@ -8,7 +8,11 @@ from p2.allin import (
     estimate_preflop_allin_values,
     make_random_preflop_allin_batch,
 )
-from p2.allin.model import _LeakyRMSBlock
+from p2.allin.model import (
+    OUTPUT_HEAD_INIT_BIAS,
+    OUTPUT_HEAD_INIT_SCALE,
+    _LeakyRMSBlock,
+)
 from p2.allin.train import (
     _pregenerated_player_permutations,
     _pregenerated_suit_permutation_idxs,
@@ -427,6 +431,14 @@ def test_preflop_allin_model_configurable_film_rank() -> None:
         model.value_film_state.weight,
         torch.zeros_like(model.value_film_state.weight),
     )
+    torch.testing.assert_close(
+        model.value_bias.bias,
+        torch.full_like(model.value_bias.bias, OUTPUT_HEAD_INIT_BIAS),
+    )
+    torch.testing.assert_close(
+        model.value_scale.weight.norm(dim=1),
+        torch.full((64,), OUTPUT_HEAD_INIT_SCALE),
+    )
 
 
 def test_preflop_allin_model_can_disable_film_branch() -> None:
@@ -655,3 +667,51 @@ def test_preflop_allin_sampler_uses_exact_table_for_two_live_players() -> None:
     assert diagnostics_a["target_mc_rows"] == 0.0
     assert diagnostics_b["target_exact_two_player_rows"] == 2.0
     assert diagnostics_b["target_mc_rows"] == 0.0
+
+
+def test_preflop_allin_targets_award_folded_dead_money_to_live_players() -> None:
+    players = 3
+    beliefs = torch.full((1, players, NUM_HANDS), 1.0 / NUM_HANDS)
+    base = PreflopAllInBatch(
+        beliefs=beliefs,
+        starting_stacks=torch.full((1, players), 100.0),
+        committed=torch.tensor([[100.0, 100.0, 0.0]]),
+        stacks_after=torch.tensor([[0.0, 0.0, 100.0]]),
+        allin_mask=torch.tensor([[True, True, False]]),
+        folded_mask=torch.tensor([[False, False, True]]),
+        scale=torch.tensor([100.0]),
+    )
+    with_dead_money = PreflopAllInBatch(
+        beliefs=beliefs,
+        starting_stacks=base.starting_stacks,
+        committed=torch.tensor([[100.0, 100.0, 20.0]]),
+        stacks_after=torch.tensor([[0.0, 0.0, 80.0]]),
+        allin_mask=base.allin_mask,
+        folded_mask=base.folded_mask,
+        scale=base.scale,
+    )
+
+    base_values, _ = estimate_preflop_allin_values(
+        base,
+        sample_count=1,
+        board_samples=1,
+        tuple_samples=None,
+        compute_stats=False,
+    )
+    dead_money_values, _ = estimate_preflop_allin_values(
+        with_dead_money,
+        sample_count=1,
+        board_samples=1,
+        tuple_samples=None,
+        compute_stats=False,
+    )
+
+    live_delta = (
+        (dead_money_values[:, :2] - base_values[:, :2]) * beliefs[:, :2]
+    ).sum()
+    folded_delta = (
+        (dead_money_values[:, 2] - base_values[:, 2]) * beliefs[:, 2]
+    ).sum()
+    torch.testing.assert_close(live_delta, torch.tensor(0.2), atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(folded_delta, torch.tensor(-0.2), atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(live_delta + folded_delta, torch.tensor(0.0), atol=1e-5, rtol=1e-5)

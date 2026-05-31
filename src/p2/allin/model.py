@@ -11,6 +11,8 @@ from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
 HAND_FEATURE_DIM = 8
 PLAYER_FEATURE_DIM = 9
 RANGE_BUCKET_FEATURE_DIM = 20
+OUTPUT_HEAD_INIT_SCALE = 1.464
+OUTPUT_HEAD_INIT_BIAS = 0.382
 
 
 class _LeakyRMSBlock(nn.Module):
@@ -357,8 +359,9 @@ class PreflopAllInEquityModel(nn.Module):
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.RMSNorm):
                 nn.init.ones_(module.weight)
-        self.value_scale.weight.data.mul_(0.1)
-        self.blocker_scale.weight.data.mul_(0.1)
-        self.value_bias.weight.data.mul_(0.1)
+        self.value_scale.weight.data.mul_(OUTPUT_HEAD_INIT_SCALE)
+        self.blocker_scale.weight.data.mul_(OUTPUT_HEAD_INIT_SCALE)
+        self.value_bias.weight.data.mul_(OUTPUT_HEAD_INIT_SCALE)
+        self.value_bias.bias.data.fill_(OUTPUT_HEAD_INIT_BIAS)
         if self.film_rank > 0:
             self.value_film_state.weight.data.zero_()
