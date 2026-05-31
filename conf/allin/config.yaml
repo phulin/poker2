@@ -25,10 +25,13 @@ lr_warmdown_start_step: 1
 cosine_lr_decay_ratio: 0.015
 cosine_lr_decay_steps: 500
 
+model_type: mlp
 hidden_dim: 1024
 hand_dim: 512
 layers: 6
 film_rank: 64
+transformer_heads: 8
+dense_output_residual: false
 compile_model: true
 compile_dynamic: true
 compile_mode: ""

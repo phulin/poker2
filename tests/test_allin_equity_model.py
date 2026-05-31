@@ -5,15 +5,20 @@ import torch
 from p2.allin import (
     PreflopAllInBatch,
     PreflopAllInEquityModel,
+    PreflopAllInTransformerModel,
     estimate_preflop_allin_values,
     make_random_preflop_allin_batch,
 )
 from p2.allin.model import (
     OUTPUT_HEAD_INIT_BIAS,
     OUTPUT_HEAD_INIT_SCALE,
+    PLAYER_FEATURE_DIM,
+    POT_LAYER_SCALAR_FEATURE_DIM,
     _LeakyRMSBlock,
 )
 from p2.allin.train import (
+    AllInTrainConfig,
+    _build_model,
     _pregenerated_player_permutations,
     _pregenerated_suit_permutation_idxs,
 )
@@ -391,6 +396,8 @@ def test_preflop_allin_model_shapes_and_prenorm_blocks() -> None:
     assert out.shape == (3, 4, NUM_HANDS)
     assert torch.isfinite(out).all()
     assert model.film_rank == 64
+    assert PLAYER_FEATURE_DIM == 8
+    assert model.player_proj[0].in_features == PLAYER_FEATURE_DIM
     assert model.value_film_hand_proj.weight.shape == (64, 32)
     assert model.value_film_state.weight.shape == (64, 64)
     blocks = [m for m in model.modules() if isinstance(m, _LeakyRMSBlock)]
@@ -484,6 +491,203 @@ def test_preflop_allin_model_dense_belief_residual_is_configurable() -> None:
 
     assert out.shape == (2, 3, NUM_HANDS)
     assert torch.isfinite(out).all()
+
+
+def test_preflop_allin_model_dense_output_residual_is_configurable() -> None:
+    batch = make_random_preflop_allin_batch(
+        2,
+        players=3,
+        device="cpu",
+        generator=torch.Generator(device="cpu").manual_seed(463),
+    )
+    model = PreflopAllInEquityModel(
+        players=3,
+        hidden_dim=64,
+        hand_dim=32,
+        num_layers=1,
+        film_rank=0,
+        dense_output_residual=True,
+    )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(464))
+
+    assert model.dense_output_residual is True
+    assert model.dense_output_proj.weight.shape == (NUM_HANDS, 64)
+    torch.testing.assert_close(
+        model.dense_output_proj.weight,
+        torch.zeros_like(model.dense_output_proj.weight),
+    )
+    torch.testing.assert_close(
+        model.dense_output_proj.bias,
+        torch.zeros_like(model.dense_output_proj.bias),
+    )
+    out = model(
+        batch.beliefs,
+        batch.starting_stacks,
+        batch.committed,
+        batch.stacks_after,
+        batch.allin_mask,
+        batch.folded_mask,
+    )
+
+    assert out.shape == (2, 3, NUM_HANDS)
+    assert torch.isfinite(out).all()
+
+
+def test_preflop_allin_transformer_model_shapes_and_tokens() -> None:
+    batch = make_random_preflop_allin_batch(
+        2,
+        players=3,
+        device="cpu",
+        generator=torch.Generator(device="cpu").manual_seed(461),
+    )
+    model = PreflopAllInTransformerModel(
+        players=3,
+        hidden_dim=64,
+        hand_dim=32,
+        num_layers=2,
+        film_rank=7,
+        transformer_heads=4,
+        dense_belief_residual=True,
+        dense_output_residual=True,
+    )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(462))
+
+    out = model(
+        batch.beliefs,
+        batch.starting_stacks,
+        batch.committed,
+        batch.stacks_after,
+        batch.allin_mask,
+        batch.folded_mask,
+    )
+
+    assert out.shape == (2, 3, NUM_HANDS)
+    assert torch.isfinite(out).all()
+    assert model.context_proj[0].in_features == 3 * PLAYER_FEATURE_DIM
+    assert model.pot_layer_proj[0].in_features == POT_LAYER_SCALAR_FEATURE_DIM + 6
+    assert len(model.encoder) == 2
+    assert model.encoder[0].num_heads == 4
+    assert hasattr(model, "dense_belief_proj")
+    assert model.dense_output_proj.weight.shape == (NUM_HANDS, 64)
+    assert not hasattr(model, "player_proj")
+
+
+def test_preflop_allin_transformer_masks_ineligible_pot_attention() -> None:
+    model = PreflopAllInTransformerModel(
+        players=3,
+        hidden_dim=64,
+        hand_dim=32,
+        num_layers=1,
+        transformer_heads=4,
+    )
+    beliefs = torch.full((1, 3, NUM_HANDS), 1.0 / NUM_HANDS)
+    committed = torch.tensor([[100.0, 50.0, 25.0]])
+    folded_mask = torch.zeros(1, 3, dtype=torch.bool)
+    scale = torch.ones(1, 1)
+
+    layer_features, eligible = model._pot_layer_features(
+        beliefs,
+        committed,
+        folded_mask,
+        scale,
+    )
+    mask = model._token_attention_mask(eligible)
+
+    assert layer_features.shape == (1, 3, POT_LAYER_SCALAR_FEATURE_DIM + 6)
+    assert mask.shape == (1, 1, 7, 7)
+    assert torch.isfinite(mask[0, 0, 1, 4:7]).all()
+    assert torch.isfinite(mask[0, 0, 2, 4:6]).all()
+    assert torch.isneginf(mask[0, 0, 2, 6])
+    assert torch.isfinite(mask[0, 0, 3, 4])
+    assert torch.isneginf(mask[0, 0, 3, 5:7]).all()
+
+
+def test_preflop_allin_transformer_pot_bitmasks_follow_player_permutation() -> None:
+    players = 4
+    model = PreflopAllInTransformerModel(
+        players=players,
+        hidden_dim=64,
+        hand_dim=32,
+        num_layers=1,
+        transformer_heads=4,
+    )
+    beliefs = torch.full((1, players, NUM_HANDS), 1.0 / NUM_HANDS)
+    batch = PreflopAllInBatch(
+        beliefs=beliefs,
+        starting_stacks=torch.tensor([[120.0, 90.0, 60.0, 30.0]]),
+        committed=torch.tensor([[100.0, 50.0, 25.0, 10.0]]),
+        stacks_after=torch.tensor([[20.0, 40.0, 35.0, 20.0]]),
+        allin_mask=torch.tensor([[True, True, True, False]]),
+        folded_mask=torch.tensor([[False, False, False, True]]),
+        scale=torch.ones(1),
+    )
+    targets = torch.zeros(1, players, NUM_HANDS)
+    permutation = torch.tensor([[2, 0, 3, 1]])
+
+    permuted_batch, _ = permute_allin_batch_by_players(
+        batch,
+        targets,
+        player_permutations=permutation,
+    )
+    base_features, base_eligible = model._pot_layer_features(
+        batch.beliefs,
+        batch.committed,
+        batch.folded_mask,
+        batch.starting_stacks.mean(dim=1, keepdim=True),
+    )
+    permuted_features, permuted_eligible = model._pot_layer_features(
+        permuted_batch.beliefs,
+        permuted_batch.committed,
+        permuted_batch.folded_mask,
+        permuted_batch.starting_stacks.mean(dim=1, keepdim=True),
+    )
+
+    bit_index = permutation[:, None, :].expand(-1, players, -1)
+    torch.testing.assert_close(
+        permuted_features[..., :POT_LAYER_SCALAR_FEATURE_DIM],
+        base_features[..., :POT_LAYER_SCALAR_FEATURE_DIM],
+    )
+    torch.testing.assert_close(
+        permuted_features[
+            ...,
+            POT_LAYER_SCALAR_FEATURE_DIM : POT_LAYER_SCALAR_FEATURE_DIM + players,
+        ],
+        torch.gather(
+            base_features[
+                ...,
+                POT_LAYER_SCALAR_FEATURE_DIM : POT_LAYER_SCALAR_FEATURE_DIM + players,
+            ],
+            2,
+            bit_index,
+        ),
+    )
+    torch.testing.assert_close(
+        permuted_features[..., POT_LAYER_SCALAR_FEATURE_DIM + players :],
+        torch.gather(
+            base_features[..., POT_LAYER_SCALAR_FEATURE_DIM + players :],
+            2,
+            bit_index,
+        ),
+    )
+    assert torch.equal(permuted_eligible, torch.gather(base_eligible, 2, bit_index))
+
+
+def test_allin_train_config_builds_transformer_model() -> None:
+    cfg = AllInTrainConfig(
+        players=3,
+        model_type="player_transformer",
+        hidden_dim=64,
+        hand_dim=32,
+        layers=1,
+        transformer_heads=4,
+        dense_output_residual=True,
+    )
+
+    model = _build_model(cfg)
+
+    assert isinstance(model, PreflopAllInTransformerModel)
+    assert model.transformer_heads == 4
+    assert model.dense_output_residual is True
 
 
 def test_preflop_allin_model_card_and_blocker_features_are_combo_exact() -> None:

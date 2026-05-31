@@ -18,7 +18,7 @@ from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
 
 from p2.allin.data import PreflopAllInBatch
-from p2.allin.model import PreflopAllInEquityModel
+from p2.allin.model import PreflopAllInEquityModel, PreflopAllInTransformerModel
 from p2.allin.training_data import (
     AllInDataGenConfig,
     PregeneratedAllInDataset,
@@ -51,11 +51,14 @@ class AllInTrainConfig:
     lr_warmdown_start_step: int = 1
     cosine_lr_decay_ratio: float = 1.0
     cosine_lr_decay_steps: int = 0
+    model_type: str = "mlp"
     hidden_dim: int = 512
     hand_dim: int = 128
     layers: int = 4
     film_rank: int = 64
+    transformer_heads: int = 8
     dense_belief_residual: bool = False
+    dense_output_residual: bool = False
     compile_model: bool = False
     compile_dynamic: bool = True
     compile_mode: str = ""
@@ -122,7 +125,7 @@ def _init_wandb(cfg: TrainConfig) -> Any:
 def _save_checkpoint(
     path: Path,
     *,
-    model: PreflopAllInEquityModel,
+    model: torch.nn.Module,
     optimizer: TrainOptimizer,
     generator: torch.Generator,
     cfg: TrainConfig,
@@ -140,6 +143,35 @@ def _save_checkpoint(
             "examples_seen": int(examples_seen),
         },
         path,
+    )
+
+
+def _build_model(cfg: TrainConfig) -> torch.nn.Module:
+    model_type = str(cfg.model_type).strip().lower()
+    if model_type in {"mlp", "ffn"}:
+        return PreflopAllInEquityModel(
+            players=cfg.players,
+            hidden_dim=cfg.hidden_dim,
+            hand_dim=cfg.hand_dim,
+            num_layers=cfg.layers,
+            film_rank=cfg.film_rank,
+            dense_belief_residual=cfg.dense_belief_residual,
+            dense_output_residual=cfg.dense_output_residual,
+        )
+    if model_type in {"player_transformer", "transformer", "tokens"}:
+        return PreflopAllInTransformerModel(
+            players=cfg.players,
+            hidden_dim=cfg.hidden_dim,
+            hand_dim=cfg.hand_dim,
+            num_layers=cfg.layers,
+            film_rank=cfg.film_rank,
+            transformer_heads=cfg.transformer_heads,
+            dense_belief_residual=cfg.dense_belief_residual,
+            dense_output_residual=cfg.dense_output_residual,
+        )
+    raise ValueError(
+        "model_type must be one of: mlp, player_transformer; "
+        f"got {cfg.model_type!r}"
     )
 
 
@@ -628,14 +660,7 @@ def train(cfg: TrainConfig) -> None:
     )
     generator = torch.Generator(device=device).manual_seed(cfg.seed)
     init_generator = torch.Generator(device=device).manual_seed(cfg.seed)
-    model = PreflopAllInEquityModel(
-        players=cfg.players,
-        hidden_dim=cfg.hidden_dim,
-        hand_dim=cfg.hand_dim,
-        num_layers=cfg.layers,
-        film_rank=cfg.film_rank,
-        dense_belief_residual=cfg.dense_belief_residual,
-    ).to(device)
+    model = _build_model(cfg).to(device)
     model.init_weights(init_generator)
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
