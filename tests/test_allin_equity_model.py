@@ -19,6 +19,7 @@ from p2.allin.model import (
 from p2.allin.train import (
     AllInTrainConfig,
     _build_model,
+    _evaluate_pregenerated_dataset,
     _pregenerated_player_permutations,
     _pregenerated_suit_permutation_idxs,
 )
@@ -238,6 +239,93 @@ def test_pregenerated_dataset_wraps_batches(tmp_path) -> None:
     expected_rows = torch.tensor([2, 0, 1, 2])
     torch.testing.assert_close(wrapped_batch.beliefs, beliefs[expected_rows])
     torch.testing.assert_close(wrapped_targets, targets[expected_rows])
+
+
+def test_allin_eval_logs_mse_mae_by_live_player_count(tmp_path) -> None:
+    players = 4
+    examples = 4
+    folded_mask = torch.tensor(
+        [
+            [False, False, True, True],
+            [False, True, False, True],
+            [False, False, False, True],
+            [False, False, False, False],
+        ]
+    )
+    beliefs = torch.full((examples, players, NUM_HANDS), 1.0 / NUM_HANDS)
+    batch = PreflopAllInBatch(
+        beliefs=beliefs,
+        starting_stacks=torch.ones(examples, players),
+        committed=torch.zeros(examples, players),
+        stacks_after=torch.ones(examples, players),
+        allin_mask=~folded_mask,
+        folded_mask=folded_mask,
+        scale=torch.ones(examples),
+    )
+    row_targets = torch.tensor([1.0, 3.0, 2.0, -4.0])
+    targets = row_targets[:, None, None].expand(-1, players, NUM_HANDS).contiguous()
+    torch.save(batch_to_tensors(batch, targets), tmp_path / "shard_000000.pt")
+    manifest = {
+        "format": "p2.allin.training_data.v1",
+        "examples": examples,
+        "players": players,
+        "hands": NUM_HANDS,
+        "feature_keys": [
+            "beliefs",
+            "starting_stacks",
+            "committed",
+            "stacks_after",
+            "allin_mask",
+            "folded_mask",
+            "scale",
+        ],
+        "target_key": TARGET_KEY,
+        "config": {},
+        "shards": [
+            {
+                "file": "shard_000000.pt",
+                "examples": examples,
+                "start": 0,
+                "end": examples,
+            }
+        ],
+    }
+    (tmp_path / MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    class ZeroModel(torch.nn.Module):
+        def forward(
+            self,
+            beliefs,
+            starting_stacks,
+            committed,
+            stacks_after,
+            allin_mask,
+            folded_mask,
+        ):
+            return torch.zeros_like(beliefs)
+
+    dataset = PregeneratedAllInDataset(tmp_path)
+    try:
+        metrics = _evaluate_pregenerated_dataset(
+            ZeroModel(),
+            dataset,
+            batch_size=2,
+            device=torch.device("cpu"),
+        )
+    finally:
+        dataset.close()
+
+    assert metrics["eval/mse"] == 7.5
+    assert metrics["eval/mae"] == 2.5
+    assert metrics["eval/live_players/2/examples"] == 2.0
+    assert metrics["eval/live_players/2/mse"] == 5.0
+    assert metrics["eval/live_players/2/mae"] == 2.0
+    assert metrics["eval/live_players/3/examples"] == 1.0
+    assert metrics["eval/live_players/3/mse"] == 4.0
+    assert metrics["eval/live_players/3/mae"] == 2.0
+    assert metrics["eval/live_players/4/examples"] == 1.0
+    assert metrics["eval/live_players/4/mse"] == 16.0
+    assert metrics["eval/live_players/4/mae"] == 4.0
 
 
 def test_pregenerated_suit_permutation_changes_on_second_epoch() -> None:

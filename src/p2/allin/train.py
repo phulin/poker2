@@ -392,10 +392,11 @@ def _evaluate_pregenerated_dataset(
     model_was_training = model.training
     model.eval()
     start = time.perf_counter()
-    squared_sum = 0.0
-    abs_sum = 0.0
-    max_abs = 0.0
-    value_count = 0
+    players = int(dataset.players)
+    squared_by_live = torch.zeros(players + 1, dtype=torch.float64, device=device)
+    abs_by_live = torch.zeros(players + 1, dtype=torch.float64, device=device)
+    examples_by_live = torch.zeros(players + 1, dtype=torch.float64, device=device)
+    max_abs = torch.zeros((), dtype=torch.float32, device=device)
     row_start = 0
     while row_start < len(dataset):
         cur = min(batch_size, len(dataset) - row_start)
@@ -409,20 +410,53 @@ def _evaluate_pregenerated_dataset(
             batch.folded_mask,
         )
         err = (pred - targets).detach()
-        squared_sum += float(err.square().sum().item())
-        abs_sum += float(err.abs().sum().item())
-        max_abs = max(max_abs, float(err.abs().amax().item()))
-        value_count += err.numel()
+        live_counts = (~batch.folded_mask).sum(dim=1).long()
+        squared_by_live += torch.bincount(
+            live_counts,
+            weights=err.square().sum(dim=(1, 2)).to(torch.float64),
+            minlength=players + 1,
+        )
+        abs_err = err.abs()
+        abs_by_live += torch.bincount(
+            live_counts,
+            weights=abs_err.sum(dim=(1, 2)).to(torch.float64),
+            minlength=players + 1,
+        )
+        examples_by_live += torch.bincount(
+            live_counts,
+            minlength=players + 1,
+        ).to(torch.float64)
+        max_abs = torch.maximum(max_abs, abs_err.amax())
         row_start += cur
     if model_was_training:
         model.train()
-    return {
-        "eval/mse": squared_sum / max(value_count, 1),
-        "eval/mae": abs_sum / max(value_count, 1),
-        "eval/max_abs": max_abs,
+    values_per_example = players * int(dataset.hands)
+    value_count_by_live = examples_by_live * values_per_example
+    squared_by_live_cpu = squared_by_live.cpu()
+    abs_by_live_cpu = abs_by_live.cpu()
+    examples_by_live_cpu = examples_by_live.cpu()
+    value_count_by_live_cpu = value_count_by_live.cpu()
+    total_value_count = max(float(value_count_by_live_cpu.sum().item()), 1.0)
+    metrics = {
+        "eval/mse": float(squared_by_live_cpu.sum().item()) / total_value_count,
+        "eval/mae": float(abs_by_live_cpu.sum().item()) / total_value_count,
+        "eval/max_abs": float(max_abs.cpu().item()),
         "eval/examples": float(len(dataset)),
         "eval/seconds": time.perf_counter() - start,
     }
+    for live_count in range(players + 1):
+        examples = float(examples_by_live_cpu[live_count].item())
+        if examples <= 0.0:
+            continue
+        value_count = float(value_count_by_live_cpu[live_count].item())
+        metrics[f"eval/live_players/{live_count}/mse"] = (
+            float(squared_by_live_cpu[live_count].item()) / value_count
+        )
+        metrics[f"eval/live_players/{live_count}/mae"] = (
+            float(abs_by_live_cpu[live_count].item()) / value_count
+        )
+        metrics[f"eval/live_players/{live_count}/examples"] = examples
+    return metrics
 
 
 def _base_lr_for_group(param_group: dict[str, Any], cfg: TrainConfig) -> float:
