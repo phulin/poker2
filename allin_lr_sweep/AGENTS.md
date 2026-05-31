@@ -6,6 +6,7 @@ Ad hoc all-in learning-rate sweep harnesses, notes, reports, and compact result 
 - `run_linear_sweep.py`: Linear decay comparison using the shared baseline sweep parser and dataset constants.
 - `run_warmdown_sweep.py`: Stable warmdown comparison with flat initial LR and late cosine decay.
 - `run_cosine_2k_sweep.py`: 2,000-step cosine decay comparison for the strongest 1,000-step candidate.
+- `run_8k_hp_sweep.py`: 8,000-step MLP-vs-player-transformer comparison on the regenerated high-quality all-in validation set across cosine and linear LR schedules.
 - `allin_lr_sweep_report.md`: Human-readable sweep setup, results, and recommendation.
 - `notes.md`: Working notes on manifests, smoke tests, schedule variants, and observed results.
 - `task_plan.md`: Completed checklist and decisions for the sweep task.
