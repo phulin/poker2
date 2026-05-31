@@ -15,6 +15,7 @@ Reusable profiling and benchmark scripts that are broader than a single repro bu
 - `bench_cfr_iterator_spots.py`: Profiles eager sparse/fused-sparse CFR iterator segments and isolated CFR components from evenly balanced saved spots across preflop/flop/turn/river roots.
 - `bench_warm_start_spots.py`: Microbenchmarks fused sparse CFR warm-start total time and substeps from evenly balanced saved spots.
 - `precompute_preflop_allin_table.py`: Streams preflop five-card boards to build a zstd-compressed int16 `[1326, 1326]` all-in matchup payoff table for preflop all-in-call terminal abstraction.
+- `analyze_allin_validation_noise.py`: Regenerates independent all-in validation targets for fixed feature rows, saves the alternate target dataset, and reports target-target noise by live-player and side-pot buckets.
 - `probe_cfr_fp_precision.py`: Probes fp32 precision loss in fused sparse CFR average-policy/value updates from saved spots and checkpoints.
 - `test_survey_runner.py`: Runs pytest files or node ids with per-invocation timeouts and records structured audit results.
 
