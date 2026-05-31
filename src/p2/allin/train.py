@@ -22,6 +22,7 @@ from p2.allin.model import PreflopAllInEquityModel
 from p2.allin.training_data import (
     AllInDataGenConfig,
     PregeneratedAllInDataset,
+    PreflopAllInEstimatorWorkspace,
     generate_allin_training_chunk,
     permute_allin_batch_by_players,
     permute_allin_batch_by_suit,
@@ -717,6 +718,9 @@ def train(cfg: TrainConfig) -> None:
 
     checkpoint_dir = Path(cfg.checkpoint_dir)
     data_cfg = _data_config_from_train(cfg)
+    online_target_workspace = (
+        PreflopAllInEstimatorWorkspace() if pregenerated_dataset is None else None
+    )
     started = time.perf_counter()
     try:
         if pregenerated_prefetcher is not None and start_step < cfg.steps:
@@ -743,6 +747,7 @@ def train(cfg: TrainConfig) -> None:
                         device=device,
                         generator=generator,
                         compute_stats=is_log_step,
+                        workspace=online_target_workspace,
                     )
                     batch, targets = tensors_to_batch(generated, device=device)
                 else:

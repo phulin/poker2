@@ -23,7 +23,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from p2.allin.data import make_random_preflop_allin_batch
 from p2.allin.kernels import triton_available
-from p2.allin.sampler import estimate_preflop_allin_values
+from p2.allin.sampler import (
+    PreflopAllInEstimatorWorkspace,
+    estimate_preflop_allin_values,
+)
 
 
 def synchronize(device: torch.device) -> None:
@@ -51,6 +54,21 @@ def main() -> None:
         action="store_true",
         help="Force the MC sampler for every row (skip the exact 2-player table)",
     )
+    parser.add_argument(
+        "--persistent-workspace",
+        action="store_true",
+        help="Reuse the target-estimator workspace across benchmark repeats.",
+    )
+    parser.add_argument(
+        "--legacy-board-allowed",
+        action="store_true",
+        help="Use the legacy materialized [rows, 1326] board-allowed matrix path.",
+    )
+    parser.add_argument(
+        "--no-skip-folded-heroes",
+        action="store_true",
+        help="Do not early-return folded heroes in the compact board-mask scorer.",
+    )
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--seed", type=int, default=7)
@@ -69,7 +87,10 @@ def main() -> None:
         f"players={args.players} sample_count={args.sample_count:,} "
         f"board_samples={args.board_samples:,} tuple_samples={tuple_samples} "
         f"board_chunk={args.board_chunk} tuple_tries={args.tuple_tries} "
-        f"exact_two_player={use_exact}"
+        f"exact_two_player={use_exact} "
+        f"persistent_workspace={args.persistent_workspace} "
+        f"board_masks={not args.legacy_board_allowed} "
+        f"skip_folded_heroes={not args.no_skip_folded_heroes}"
     )
     print(f"Warmup: {args.warmup}, repeats: {args.repeats}")
 
@@ -85,10 +106,16 @@ def main() -> None:
             generator=generator,
             use_exact_two_player=use_exact,
             compute_stats=compute_stats,
+            workspace=workspace,
+            use_board_masks=not args.legacy_board_allowed,
+            skip_folded_heroes=not args.no_skip_folded_heroes,
         )
 
     for batch_size in [int(x) for x in args.batch_sizes.split(",") if x.strip()]:
         generator = torch.Generator(device=device).manual_seed(args.seed + batch_size)
+        workspace = (
+            PreflopAllInEstimatorWorkspace() if args.persistent_workspace else None
+        )
 
         def make_batch():
             return make_random_preflop_allin_batch(

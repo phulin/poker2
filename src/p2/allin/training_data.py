@@ -10,7 +10,11 @@ from typing import Any, Callable
 import torch
 
 from p2.allin.data import PreflopAllInBatch, make_random_preflop_allin_batch
-from p2.allin.sampler import DEFAULT_PREFLOP_ALLIN_TABLE, estimate_preflop_allin_values
+from p2.allin.sampler import (
+    DEFAULT_PREFLOP_ALLIN_TABLE,
+    PreflopAllInEstimatorWorkspace,
+    estimate_preflop_allin_values,
+)
 from p2.env.card_utils import NUM_HANDS, combo_suit_permutation_inverse_tensor
 
 
@@ -217,6 +221,7 @@ def generate_allin_training_chunk(
     device: torch.device,
     generator: torch.Generator | None,
     compute_stats: bool,
+    workspace: PreflopAllInEstimatorWorkspace | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
     batch = make_random_preflop_allin_batch(
         count,
@@ -243,6 +248,7 @@ def generate_allin_training_chunk(
         preflop_table_path=cfg.preflop_table_path,
         use_exact_two_player=cfg.use_exact_two_player,
         compute_stats=compute_stats,
+        workspace=workspace,
     )
     return batch_to_tensors(batch, targets), diag
 
