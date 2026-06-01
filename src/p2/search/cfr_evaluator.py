@@ -2265,9 +2265,10 @@ class CFREvaluator(ABC):
             policy_statistics = {
                 key: statistics[key][:top][valid_top] for key in statistics
             }
-            policy_statistics["policy_node_reach"] = self._compute_policy_node_reach(
-                top
-            )[valid_top]
+            if self._should_record_policy_node_reach():
+                policy_statistics["policy_node_reach"] = (
+                    self._compute_policy_node_reach(top)[valid_top]
+                )
             policy_batch = RebelBatch(
                 features=policy_features[valid_top],
                 policy_targets=policy_targets[valid_top],
