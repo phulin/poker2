@@ -190,12 +190,18 @@ def _stage_config(
 
 
 def _source_checkpoint(
-    substep: CurriculumSubstepConfig, promoted: dict[str, str]
+    substep: CurriculumSubstepConfig,
+    promoted: dict[str, str],
+    resume_metadata: dict[str, Any] | None = None,
 ) -> str:
     if substep.checkpoint is not None:
         return substep.checkpoint
     if substep.from_net is not None and substep.from_net in promoted:
         return promoted[substep.from_net]
+    if resume_metadata is not None:
+        source_checkpoint = resume_metadata.get("curriculum_source_checkpoint")
+        if isinstance(source_checkpoint, str) and source_checkpoint:
+            return source_checkpoint
     raise ValueError(
         "Distill substep requires either `checkpoint` or a promoted `from_net`; "
         f"got net={substep.net!r}, from_net={substep.from_net!r}"
@@ -239,7 +245,17 @@ def _run_train_substep(
         resume_from=resume_from,
         promoted=promoted,
     )
+    if stage_cfg.search.closing_leaf_checkpoint is None and resume_from:
+        resume_metadata = _read_checkpoint_metadata(resume_from, device)
+        closing_checkpoint = resume_metadata.get("curriculum_closing_checkpoint")
+        if isinstance(closing_checkpoint, str) and closing_checkpoint:
+            stage_cfg.search.closing_leaf_checkpoint = closing_checkpoint
     os.makedirs(stage_cfg.checkpoint_dir, exist_ok=True)
+    metadata = _checkpoint_metadata(substep_name, substep)
+    if stage_cfg.search.closing_leaf_checkpoint is not None:
+        metadata["curriculum_closing_checkpoint"] = (
+            stage_cfg.search.closing_leaf_checkpoint
+        )
 
     run_cm = _init_wandb(
         stage_cfg,
@@ -266,7 +282,7 @@ def _run_train_substep(
             start_step=start_step,
             stop_step=stage_cfg.num_steps,
             stage_tag=substep_name,
-            checkpoint_metadata=_checkpoint_metadata(substep_name, substep),
+            checkpoint_metadata=metadata,
         )
 
     final_path = os.path.join(stage_cfg.checkpoint_dir, "rebel_final.pt")
@@ -293,7 +309,14 @@ def _run_distill_substep(
     )
     os.makedirs(stage_cfg.checkpoint_dir, exist_ok=True)
 
-    source_checkpoint = _source_checkpoint(substep, promoted)
+    resume_metadata = (
+        _read_checkpoint_metadata(resume_from, device) if resume_from else {}
+    )
+    source_checkpoint = _source_checkpoint(
+        substep,
+        promoted,
+        resume_metadata=resume_metadata,
+    )
     closed_street = _closed_street_for_end_net(substep.net)
     chance = substep.chance or "auto"
     metadata = _checkpoint_metadata(substep_name, substep)

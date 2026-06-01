@@ -75,6 +75,7 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
         "curriculum_substep": "river",
         "curriculum_kind": "train",
         "curriculum_net": "S_river",
+        "curriculum_closing_checkpoint": "outputs/E_turn.pt",
     }
     promoted_path = tmp_path / "promoted" / "S_river.pt"
     assert promoted_path.exists()
@@ -233,6 +234,79 @@ def test_curriculum_resume_restarts_recorded_substep(monkeypatch, tmp_path) -> N
     curriculum_cli.train_rebel_curriculum(cfg)
 
     assert calls == [("turn", str(resume_path), promoted)]
+
+
+def test_curriculum_train_resume_recovers_closing_checkpoint_from_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+    resume_path = tmp_path / "turn" / "rebel_latest.pt"
+    resume_path.parent.mkdir()
+    torch.save(
+        {
+            "model": {},
+            "metadata": {
+                "curriculum_substep": "turn",
+                "curriculum_closing_checkpoint": "outputs/E_turn.pt",
+            },
+        },
+        resume_path,
+    )
+
+    def fake_run_loop(trainer, cfg, run, **kwargs):
+        calls.append((cfg, kwargs))
+        final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
+        os.makedirs(cfg.checkpoint_dir, exist_ok=True)
+        torch.save({"model": trainer.model.state_dict(), "step": 5}, final_path)
+        return 4
+
+    monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
+    monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
+    monkeypatch.setattr(curriculum_cli, "_init_wandb", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(
+        curriculum_cli, "_log_model_parameter_summary", lambda model, run: None
+    )
+
+    cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
+    substep = CurriculumSubstepConfig(
+        kind="train",
+        net="S_turn",
+        closing_net="E_turn",
+        num_steps=5,
+    )
+
+    curriculum_cli._run_train_substep(
+        cfg,
+        "turn",
+        substep,
+        device=torch.device("cpu"),
+        resume_from=str(resume_path),
+        promoted={},
+    )
+
+    assert len(calls) == 1
+    stage_cfg, kwargs = calls[0]
+    assert stage_cfg.search.closing_leaf_checkpoint == "outputs/E_turn.pt"
+    assert kwargs["checkpoint_metadata"]["curriculum_closing_checkpoint"] == (
+        "outputs/E_turn.pt"
+    )
+
+
+def test_curriculum_distill_resume_recovers_source_checkpoint_from_metadata() -> None:
+    substep = CurriculumSubstepConfig(
+        kind="distill",
+        net="E_turn",
+        from_net="S_river",
+        num_steps=5,
+    )
+
+    source = curriculum_cli._source_checkpoint(
+        substep,
+        promoted={},
+        resume_metadata={"curriculum_source_checkpoint": "outputs/S_river.pt"},
+    )
+
+    assert source == "outputs/S_river.pt"
 
 
 def test_curriculum_resume_rejects_non_curriculum_checkpoint(tmp_path) -> None:
