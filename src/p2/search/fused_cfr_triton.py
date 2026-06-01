@@ -4588,6 +4588,88 @@ if triton is not None:
             tl.store(out_base + hero * NUM_CARDS * MC_K, cum, mask=card_mask)
 
     @triton.jit
+    def _showdown_setup_P_active_full_kernel(
+        beliefs_ptr,  # [M, 2, NUM_HANDS]
+        extra_index_ptr,  # [M]
+        sorted_indices_ptr,  # [E, H_ACTIVE]
+        P_padded_both_ptr,  # [M, 2, H_ACTIVE+1] OUT
+        H_ACTIVE,
+        NUM_HANDS,
+        BLOCK_H: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        hero = tl.program_id(1)
+        villain = 1 - hero
+        extra = tl.load(extra_index_ptr + m)
+        h_offs = tl.arange(0, BLOCK_H)
+        mask_h = h_offs < H_ACTIVE
+        hand_idx = tl.load(
+            sorted_indices_ptr + extra * H_ACTIVE + h_offs, mask=mask_h, other=0
+        )
+        b_at = tl.load(
+            beliefs_ptr + m * 2 * NUM_HANDS + villain * NUM_HANDS + hand_idx,
+            mask=mask_h,
+            other=0.0,
+        )
+        cum = tl.cumsum(b_at, axis=0)
+        tl.store(
+            P_padded_both_ptr
+            + m * 2 * (H_ACTIVE + 1)
+            + hero * (H_ACTIVE + 1)
+            + h_offs
+            + 1,
+            cum,
+            mask=mask_h,
+        )
+        tl.store(
+            P_padded_both_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1),
+            0.0,
+        )
+
+    @triton.jit
+    def _showdown_build_cum_active_full_card_block_kernel(
+        beliefs_ptr,  # [M, 2, NUM_HANDS]
+        extra_index_ptr,  # [M]
+        sorted_indices_ptr,  # [E, H_ACTIVE]
+        card_positions_ptr,  # [E, NUM_CARDS, MC] active positions; pad=H_ACTIVE
+        cum_out_ptr,  # [M, 2, NUM_CARDS, MC] OUT
+        H_ACTIVE,
+        NUM_HANDS,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        CARD_BLOCK: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        card_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        slot_off = tl.arange(0, MC_K)[:, None]
+        card_off = tl.arange(0, CARD_BLOCK)[None, :]
+        cards = card_block * CARD_BLOCK + card_off
+        card_mask = cards < NUM_CARDS
+        positions = tl.load(
+            card_positions_ptr + extra * NUM_CARDS * MC_K + cards * MC_K + slot_off,
+            mask=card_mask,
+            other=H_ACTIVE,
+        )
+        in_range = positions < H_ACTIVE
+        safe_pos = tl.where(in_range, positions, 0)
+        hand_idx = tl.load(
+            sorted_indices_ptr + extra * H_ACTIVE + safe_pos,
+            mask=in_range & card_mask,
+            other=0,
+        )
+        out_base = cum_out_ptr + m * 2 * NUM_CARDS * MC_K + cards * MC_K + slot_off
+        for hero in tl.static_range(2):
+            villain = 1 - hero
+            b_at = tl.load(
+                beliefs_ptr + m * 2 * NUM_HANDS + villain * NUM_HANDS + hand_idx,
+                mask=in_range & card_mask,
+                other=0.0,
+            )
+            cum = tl.cumsum(b_at, axis=0)
+            tl.store(out_base + hero * NUM_CARDS * MC_K, cum, mask=card_mask)
+
+    @triton.jit
     def _showdown_gather_active_beliefs_kernel(
         beliefs_ptr,  # [M, 2, NUM_HANDS]
         extra_index_ptr,  # [M]
@@ -5263,6 +5345,125 @@ if triton is not None:
             scale = tl.load(scale_factor_ptr + m * 2 + hero)
             tl.store(
                 ev_out_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE + k_offs,
+                EV * scale,
+                mask=mask_k,
+            )
+
+    @triton.jit
+    def _showdown_ev_active_offset_full_nobopp_kernel(
+        beliefs_ptr,  # [M, 2, NUM_HANDS]
+        P_padded_ptr,  # [M, 2, H_ACTIVE+1]
+        card_cumsum_ptr,  # [M, 2, NUM_CARDS, MC]
+        extra_index_ptr,  # [M] int64
+        sorted_indices_ptr,  # [E, H_ACTIVE]
+        L_idx_ptr,
+        R_idx_ptr,
+        scale_factor_ptr,  # [M, 2] — potential / scale
+        off_L_c1_ptr,
+        off_L_c2_ptr,
+        off_R_c1_ptr,
+        off_R_c2_ptr,
+        off_last_c1_ptr,
+        off_last_c2_ptr,
+        ev_out_ptr,  # [M, 2, NUM_HANDS]
+        H_ACTIVE,
+        NUM_HANDS,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask_k = k_offs < H_ACTIVE
+
+        hand_idx = tl.load(
+            sorted_indices_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        )
+        L = tl.load(L_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        R = tl.load(R_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        off_L_c1 = tl.load(
+            off_L_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_L_c2 = tl.load(
+            off_L_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_R_c1 = tl.load(
+            off_R_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_R_c2 = tl.load(
+            off_R_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_last_c1 = tl.load(
+            off_last_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_last_c2 = tl.load(
+            off_last_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+
+        has_L1 = off_L_c1 >= 0
+        has_L2 = off_L_c2 >= 0
+        has_R1 = off_R_c1 >= 0
+        has_R2 = off_R_c2 >= 0
+        has_last1 = off_last_c1 >= 0
+        has_last2 = off_last_c2 >= 0
+        idx_L_c1 = tl.maximum(off_L_c1, 0)
+        idx_L_c2 = tl.maximum(off_L_c2, 0)
+        idx_R_c1 = tl.maximum(off_R_c1, 0)
+        idx_R_c2 = tl.maximum(off_R_c2, 0)
+        idx_last_c1 = tl.maximum(off_last_c1, 0)
+        idx_last_c2 = tl.maximum(off_last_c2, 0)
+
+        for hero in tl.static_range(2):
+            villain = 1 - hero
+            b_at_k = tl.load(
+                beliefs_ptr + m * 2 * NUM_HANDS + villain * NUM_HANDS + hand_idx,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_L = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + L,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_R = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + R,
+                mask=mask_k,
+                other=0.0,
+            )
+            cum_base = (
+                card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
+            )
+            Pcards_L_c1 = tl.load(cum_base + idx_L_c1, mask=mask_k & has_L1, other=0.0)
+            Pcards_L_c2 = tl.load(cum_base + idx_L_c2, mask=mask_k & has_L2, other=0.0)
+            Pcards_R_c1 = tl.load(cum_base + idx_R_c1, mask=mask_k & has_R1, other=0.0)
+            Pcards_R_c2 = tl.load(cum_base + idx_R_c2, mask=mask_k & has_R2, other=0.0)
+            Pcards_last_c1 = tl.load(
+                cum_base + idx_last_c1, mask=mask_k & has_last1, other=0.0
+            )
+            Pcards_last_c2 = tl.load(
+                cum_base + idx_last_c2, mask=mask_k & has_last2, other=0.0
+            )
+
+            win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
+            tie_mass = (
+                (P_R - P_L)
+                - (Pcards_R_c1 - Pcards_L_c1)
+                - (Pcards_R_c2 - Pcards_L_c2)
+                + b_at_k
+            )
+
+            denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
+            valid = denom > 1e-8
+            denom_safe = tl.where(valid, denom, 1.0)
+            win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
+            tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
+            loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
+            EV = win_prob - loss_prob
+            scale = tl.load(scale_factor_ptr + m * 2 + hero)
+            tl.store(
+                ev_out_ptr + m * 2 * NUM_HANDS + hero * NUM_HANDS + hand_idx,
                 EV * scale,
                 mask=mask_k,
             )
@@ -6861,9 +7062,9 @@ class ShowdownFullyCompactNoBOppCardBlockFastEVGraphRunner(
 class ShowdownActiveCardBlockGraphRunner:
     """Production runner for exact river showdown with full-shape I/O.
 
-    The hot showdown math runs on compact board-legal river hands, but this
-    runner preserves the evaluator contract by accepting and returning
-    `[M, 2, NUM_HANDS]` tensors.
+    Prefix math runs in active board-legal river-hand order, but the runner
+    reads full `[M, 2, NUM_HANDS]` beliefs and writes full shaped EV output
+    directly.
     """
 
     def __init__(
@@ -6875,7 +7076,6 @@ class ShowdownActiveCardBlockGraphRunner:
         block_k: int = 256,
         card_block: int = 64,
         finish_num_warps: int = 8,
-        gather_block_k: int = 256,
     ) -> None:
         if not triton_is_available():
             raise RuntimeError("Triton is not installed.")
@@ -6886,7 +7086,6 @@ class ShowdownActiveCardBlockGraphRunner:
         self.block_k = block_k
         self.card_block = card_block
         self.finish_num_warps = finish_num_warps
-        self.gather_block_k = gather_block_k
 
         self.H = extras["sorted_indices"].shape[1]
         self.num_cards = extras["card_positions"].shape[1]
@@ -6897,7 +7096,6 @@ class ShowdownActiveCardBlockGraphRunner:
 
         dtype = torch.float32
         self.beliefs_in = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
-        self.compact_beliefs = torch.empty(M, 2, self.H, device=device, dtype=dtype)
         self.P_padded = torch.empty(M, 2, self.H + 1, device=device, dtype=dtype)
         self.cum_both = torch.empty(
             M,
@@ -6907,7 +7105,6 @@ class ShowdownActiveCardBlockGraphRunner:
             device=device,
             dtype=dtype,
         )
-        self.compact_ev = torch.empty(M, 2, self.H, device=device, dtype=dtype)
         self.ev_out = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
         self.ev_out.zero_()
 
@@ -6925,41 +7122,36 @@ class ShowdownActiveCardBlockGraphRunner:
     def _launch_pipeline(self) -> None:
         e = self.extras
         extra_indices = e["extra_indices"]
-        gather_grid = (self.M, 2, triton.cdiv(self.H, self.gather_block_k))
-        _showdown_gather_active_beliefs_kernel[gather_grid](
+        _showdown_setup_P_active_full_kernel[(self.M, 2)](
             self.beliefs_in,
             extra_indices,
             e["sorted_indices"],
-            self.compact_beliefs,
-            self.H,
-            self.NUM_HANDS,
-            BLOCK_K=self.gather_block_k,
-            num_warps=8,
-        )
-        _showdown_setup_P_compact_kernel[(self.M, 2)](
-            self.compact_beliefs,
             self.P_padded,
             self.H,
+            self.NUM_HANDS,
             BLOCK_H=self.block_h,
         )
-        _showdown_build_cum_compact_card_block_kernel[
+        _showdown_build_cum_active_full_card_block_kernel[
             (self.M, triton.cdiv(self.num_cards, self.card_block))
         ](
-            self.compact_beliefs,
+            self.beliefs_in,
             extra_indices,
+            e["sorted_indices"],
             e["card_positions"],
             self.cum_both,
             self.H,
+            self.NUM_HANDS,
             NUM_CARDS=self.num_cards,
             MC_K=SHOWDOWN_MAX_PER_CARD,
             CARD_BLOCK=self.card_block,
         )
         finish_grid = (self.M, triton.cdiv(self.H, self.block_k))
-        _showdown_ev_active_offset_compact_nobopp_kernel[finish_grid](
-            self.compact_beliefs,
+        _showdown_ev_active_offset_full_nobopp_kernel[finish_grid](
+            self.beliefs_in,
             self.P_padded,
             self.cum_both,
             extra_indices,
+            e["sorted_indices"],
             e["L_idx"],
             e["R_idx"],
             e["scale_factor"],
@@ -6969,22 +7161,13 @@ class ShowdownActiveCardBlockGraphRunner:
             e["off_R_c2"],
             e["off_last_c1"],
             e["off_last_c2"],
-            self.compact_ev,
+            self.ev_out,
             self.H,
+            self.NUM_HANDS,
             NUM_CARDS=self.num_cards,
             MC_K=SHOWDOWN_MAX_PER_CARD,
             BLOCK_K=self.block_k,
             num_warps=self.finish_num_warps,
-        )
-        _showdown_scatter_active_values_kernel[gather_grid](
-            self.compact_ev,
-            extra_indices,
-            e["sorted_indices"],
-            self.ev_out,
-            self.H,
-            self.NUM_HANDS,
-            BLOCK_K=self.gather_block_k,
-            num_warps=8,
         )
 
     def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
