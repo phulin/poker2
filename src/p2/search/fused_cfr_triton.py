@@ -4314,14 +4314,26 @@ def precompute_showdown_card_positions(
     M, H, _ = hands_c1c2_sorted.shape
     device = hands_c1c2_sorted.device
     cards = torch.arange(num_cards, device=device).view(1, 1, num_cards)
-    c1 = hands_c1c2_sorted[..., 0].unsqueeze(-1)
-    c2 = hands_c1c2_sorted[..., 1].unsqueeze(-1)
-    incidence = (c1 == cards) | (c2 == cards)
-    j_idx = torch.arange(H, device=device).view(1, H, 1).expand(M, H, num_cards)
-    masked_j = torch.where(incidence, j_idx, H)
-    masked_j_t = masked_j.transpose(1, 2).contiguous()
-    sorted_j, _ = masked_j_t.sort(dim=-1)
-    return sorted_j[..., :max_per_card].contiguous()
+    c1 = hands_c1c2_sorted[..., 0]
+    c2 = hands_c1c2_sorted[..., 1]
+    incidence = (c1.unsqueeze(-1) == cards) | (c2.unsqueeze(-1) == cards)
+    slots = incidence.cumsum(dim=1, dtype=torch.int32)
+    slot1 = slots.gather(2, c1.unsqueeze(-1)).squeeze(-1) - 1
+    slot2 = slots.gather(2, c2.unsqueeze(-1)).squeeze(-1) - 1
+
+    out = torch.full(
+        (M * num_cards, max_per_card),
+        H,
+        dtype=torch.long,
+        device=device,
+    )
+    row_base = torch.arange(M, device=device, dtype=torch.long).view(M, 1) * num_cards
+    rows1 = (row_base + c1.to(torch.long)).reshape(-1)
+    rows2 = (row_base + c2.to(torch.long)).reshape(-1)
+    positions = torch.arange(H, device=device, dtype=torch.long).view(1, H).expand(M, H)
+    out[rows1, slot1.reshape(-1).to(torch.long)] = positions.reshape(-1)
+    out[rows2, slot2.reshape(-1).to(torch.long)] = positions.reshape(-1)
+    return out.view(M, num_cards, max_per_card)
 
 
 def precompute_showdown_lookup_slots(
