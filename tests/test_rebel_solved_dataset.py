@@ -90,11 +90,13 @@ def test_rebel_solved_dataset_reads_wrapped_batches(tmp_path):
 
     assert manifest["value_examples"] == 5
     assert manifest["policy_examples"] == 2
+    assert manifest["street_support"] == [0, 1, 2, 3]
     dataset = RebelSolvedDataset(
         tmp_path,
         num_players=2,
         num_actions=5,
         context_length=3,
+        street_support=[0, 1, 2, 3],
     )
 
     value = dataset.get_batch("value", 4, 3, wrap=True)
@@ -157,10 +159,34 @@ def test_rebel_solved_dataset_prefetched_reads_match_plain_reads(tmp_path):
 
 
 def test_rebel_solved_dataset_rejects_manifest_mismatch(tmp_path):
-    write_rebel_solved_dataset(tmp_path, value_batches=[_value_batch(0, 1)])
+    write_rebel_solved_dataset(
+        tmp_path,
+        value_batches=[_value_batch(0, 2)],
+        metadata={
+            "model_family": "BetterFFN",
+            "action_schedule": {
+                "bet_bins": [0.5, 1.0],
+                "bet_bins_by_depth": None,
+                "allin_by_depth": None,
+            },
+        },
+    )
 
     with pytest.raises(ValueError, match="num_actions mismatch"):
         RebelSolvedDataset(tmp_path, num_actions=9)
+    with pytest.raises(ValueError, match="model mismatch"):
+        RebelSolvedDataset(tmp_path, model_name="OtherModel")
+    with pytest.raises(ValueError, match="action_schedule mismatch"):
+        RebelSolvedDataset(
+            tmp_path,
+            action_schedule={
+                "bet_bins": [1.0],
+                "bet_bins_by_depth": None,
+                "allin_by_depth": None,
+            },
+        )
+    with pytest.raises(ValueError, match="street_support mismatch"):
+        RebelSolvedDataset(tmp_path, street_support=[3])
 
     manifest_path = tmp_path / MANIFEST_NAME
     manifest = json.loads(manifest_path.read_text())

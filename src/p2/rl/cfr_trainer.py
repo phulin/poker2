@@ -397,6 +397,17 @@ class RebelCFRTrainer:
                 num_players=self.num_players,
                 num_actions=self.num_actions,
                 context_length=num_context_features,
+                model_name=(
+                    cfg.model.name.value
+                    if hasattr(cfg.model.name, "value")
+                    else str(cfg.model.name)
+                ),
+                action_schedule={
+                    "bet_bins": list(cfg.env.bet_bins),
+                    "bet_bins_by_depth": cfg.search.bet_bins_by_depth,
+                    "allin_by_depth": cfg.search.allin_by_depth,
+                },
+                street_support=[0, 1, 2, 3],
                 generator=dataset_rng,
                 pin_memory=cfg.data.pregenerated.pin_memory,
                 async_shard_prefetch=cfg.data.pregenerated.async_shard_prefetch,

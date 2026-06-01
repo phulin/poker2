@@ -150,12 +150,17 @@ def write_rebel_solved_dataset(
     if example_batch is None:
         raise ValueError("At least one value or policy batch is required")
 
+    street_values: set[int] = set()
+    for batch in (*value_batches, *policy_batches):
+        street_values.update(int(x) for x in batch.features.street.unique().tolist())
+
     manifest: dict[str, Any] = {
         "format": FORMAT_VERSION,
         "num_players": example_batch.features.num_players,
         "hands": NUM_HANDS,
         "num_actions": int(example_batch.legal_masks.shape[-1]),
         "context_length": int(example_batch.features.context.shape[-1]),
+        "street_support": sorted(street_values),
         "value_examples": int(value_examples),
         "policy_examples": int(policy_examples),
         "shards": {"value": value_shards, "policy": policy_shards},
@@ -176,6 +181,9 @@ class RebelSolvedDataset:
         num_players: int | None = None,
         num_actions: int | None = None,
         context_length: int | None = None,
+        model_name: str | None = None,
+        action_schedule: Mapping[str, Any] | None = None,
+        street_support: Sequence[int] | None = None,
         pin_memory: bool = False,
         async_shard_prefetch: bool = False,
     ) -> None:
@@ -188,6 +196,9 @@ class RebelSolvedDataset:
             num_players=num_players,
             num_actions=num_actions,
             context_length=context_length,
+            model_name=model_name,
+            action_schedule=action_schedule,
+            street_support=street_support,
         )
         self.examples = {
             "value": int(self.manifest.get("value_examples", 0)),
@@ -229,6 +240,9 @@ class RebelSolvedDataset:
         num_players: int | None,
         num_actions: int | None,
         context_length: int | None,
+        model_name: str | None,
+        action_schedule: Mapping[str, Any] | None,
+        street_support: Sequence[int] | None,
     ) -> None:
         if self.manifest.get("format") != FORMAT_VERSION:
             raise ValueError(f"unsupported solved dataset format in {manifest_path}")
@@ -246,6 +260,29 @@ class RebelSolvedDataset:
             if actual != int(expected):
                 raise ValueError(
                     f"manifest {key} mismatch: expected {expected}, got {actual}"
+                )
+        if model_name is not None:
+            actual_model = self.manifest.get("model_family")
+            if actual_model is None:
+                model_config = self.manifest.get("model_config", {})
+                if isinstance(model_config, Mapping):
+                    actual_model = model_config.get("name")
+            if actual_model != model_name:
+                raise ValueError(
+                    f"manifest model mismatch: expected {model_name}, got {actual_model}"
+                )
+        if action_schedule is not None:
+            actual_schedule = self.manifest.get("action_schedule")
+            if actual_schedule != dict(action_schedule):
+                raise ValueError("manifest action_schedule mismatch")
+        if street_support is not None:
+            actual_streets = {int(x) for x in self.manifest.get("street_support", [])}
+            expected_streets = {int(x) for x in street_support}
+            if not actual_streets.issubset(expected_streets):
+                raise ValueError(
+                    "manifest street_support mismatch: "
+                    f"expected subset of {sorted(expected_streets)}, "
+                    f"got {sorted(actual_streets)}"
                 )
 
     def __len__(self) -> int:

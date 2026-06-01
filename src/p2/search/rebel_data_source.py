@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -121,6 +122,9 @@ class PregeneratedRebelDataSource(RebelDataSource):
         num_players: int,
         num_actions: int,
         context_length: int,
+        model_name: str | None = None,
+        action_schedule: dict[str, Any] | None = None,
+        street_support: list[int] | None = None,
         generator: torch.Generator | None = None,
         pin_memory: bool = False,
         async_shard_prefetch: bool = False,
@@ -140,6 +144,9 @@ class PregeneratedRebelDataSource(RebelDataSource):
                     num_players=num_players,
                     num_actions=num_actions,
                     context_length=context_length,
+                    model_name=model_name,
+                    action_schedule=action_schedule,
+                    street_support=street_support,
                     pin_memory=pin_memory,
                     async_shard_prefetch=async_shard_prefetch,
                 ),

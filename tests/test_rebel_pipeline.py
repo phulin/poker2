@@ -115,6 +115,18 @@ def test_rebel_cfr_trainer_runs_pregenerated_mode_one_step(tmp_path):
         tmp_path,
         value_batches=[_tiny_solved_batch(cfg, stream="value", start=0, count=4)],
         policy_batches=[_tiny_solved_batch(cfg, stream="policy", start=10, count=4)],
+        metadata={
+            "model_family": (
+                cfg.model.name.value
+                if hasattr(cfg.model.name, "value")
+                else str(cfg.model.name)
+            ),
+            "action_schedule": {
+                "bet_bins": list(cfg.env.bet_bins),
+                "bet_bins_by_depth": cfg.search.bet_bins_by_depth,
+                "allin_by_depth": cfg.search.allin_by_depth,
+            },
+        },
     )
 
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))

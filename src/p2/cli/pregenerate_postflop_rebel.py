@@ -108,6 +108,16 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
         metadata={
             "stage": pregenerate_cfg.stage,
             "root_streets": [cfg.data.live_root_source],
+            "model_family": (
+                cfg.model.name.value
+                if hasattr(cfg.model.name, "value")
+                else str(cfg.model.name)
+            ),
+            "action_schedule": {
+                "bet_bins": list(cfg.env.bet_bins),
+                "bet_bins_by_depth": cfg.search.bet_bins_by_depth,
+                "allin_by_depth": cfg.search.allin_by_depth,
+            },
             "generator": {
                 "seed": cfg.seed,
                 "device": str(device),
