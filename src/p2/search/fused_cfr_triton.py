@@ -4760,6 +4760,92 @@ if triton is not None:
             tl.store(out_base + hero * NUM_CARDS * MC_K, cum, mask=card_mask)
 
     @triton.jit
+    def _showdown_setup_P_active_full_indexed_kernel(
+        beliefs_ptr,  # [N, 2, NUM_HANDS]
+        row_index_ptr,  # [M]
+        extra_index_ptr,  # [M]
+        sorted_indices_ptr,  # [E, H_ACTIVE]
+        P_padded_both_ptr,  # [M, 2, H_ACTIVE+1] OUT
+        H_ACTIVE,
+        NUM_HANDS,
+        BLOCK_H: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        hero = tl.program_id(1)
+        villain = 1 - hero
+        src_row = tl.load(row_index_ptr + m)
+        extra = tl.load(extra_index_ptr + m)
+        h_offs = tl.arange(0, BLOCK_H)
+        mask_h = h_offs < H_ACTIVE
+        hand_idx = tl.load(
+            sorted_indices_ptr + extra * H_ACTIVE + h_offs, mask=mask_h, other=0
+        )
+        b_at = tl.load(
+            beliefs_ptr + src_row * 2 * NUM_HANDS + villain * NUM_HANDS + hand_idx,
+            mask=mask_h,
+            other=0.0,
+        )
+        cum = tl.cumsum(b_at, axis=0)
+        tl.store(
+            P_padded_both_ptr
+            + m * 2 * (H_ACTIVE + 1)
+            + hero * (H_ACTIVE + 1)
+            + h_offs
+            + 1,
+            cum,
+            mask=mask_h,
+        )
+        tl.store(
+            P_padded_both_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1),
+            0.0,
+        )
+
+    @triton.jit
+    def _showdown_build_cum_active_full_card_block_indexed_kernel(
+        beliefs_ptr,  # [N, 2, NUM_HANDS]
+        row_index_ptr,  # [M]
+        extra_index_ptr,  # [M]
+        sorted_indices_ptr,  # [E, H_ACTIVE]
+        card_positions_ptr,  # [E, NUM_CARDS, MC] active positions; pad=H_ACTIVE
+        cum_out_ptr,  # [M, 2, NUM_CARDS, MC] OUT
+        H_ACTIVE,
+        NUM_HANDS,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        CARD_BLOCK: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        card_block = tl.program_id(1)
+        src_row = tl.load(row_index_ptr + m)
+        extra = tl.load(extra_index_ptr + m)
+        slot_off = tl.arange(0, MC_K)[:, None]
+        card_off = tl.arange(0, CARD_BLOCK)[None, :]
+        cards = card_block * CARD_BLOCK + card_off
+        card_mask = cards < NUM_CARDS
+        positions = tl.load(
+            card_positions_ptr + extra * NUM_CARDS * MC_K + cards * MC_K + slot_off,
+            mask=card_mask,
+            other=H_ACTIVE,
+        )
+        in_range = positions < H_ACTIVE
+        safe_pos = tl.where(in_range, positions, 0)
+        hand_idx = tl.load(
+            sorted_indices_ptr + extra * H_ACTIVE + safe_pos,
+            mask=in_range & card_mask,
+            other=0,
+        )
+        out_base = cum_out_ptr + m * 2 * NUM_CARDS * MC_K + cards * MC_K + slot_off
+        for hero in tl.static_range(2):
+            villain = 1 - hero
+            b_at = tl.load(
+                beliefs_ptr + src_row * 2 * NUM_HANDS + villain * NUM_HANDS + hand_idx,
+                mask=in_range & card_mask,
+                other=0.0,
+            )
+            cum = tl.cumsum(b_at, axis=0)
+            tl.store(out_base + hero * NUM_CARDS * MC_K, cum, mask=card_mask)
+
+    @triton.jit
     def _showdown_gather_active_beliefs_kernel(
         beliefs_ptr,  # [M, 2, NUM_HANDS]
         extra_index_ptr,  # [M]
@@ -5599,6 +5685,116 @@ if triton is not None:
             scale = tl.load(scale_factor_ptr + m * 2 + hero)
             tl.store(
                 ev_out_ptr + m * 2 * NUM_HANDS + hero * NUM_HANDS + hand_idx,
+                EV * scale,
+                mask=mask_k,
+            )
+
+    @triton.jit
+    def _showdown_ev_active_offset_full_nobopp_indexed_kernel(
+        P_padded_ptr,  # [M, 2, H_ACTIVE+1]
+        card_cumsum_ptr,  # [M, 2, NUM_CARDS, MC]
+        row_index_ptr,  # [M]
+        extra_index_ptr,  # [M] int64
+        sorted_indices_ptr,  # [E, H_ACTIVE]
+        rank_bounds_packed_ptr,
+        scale_factor_ptr,  # [M, 2] — potential / scale
+        off_L_pair_ptr,
+        off_R_pair_ptr,
+        off_last_pair_ptr,
+        latest_values_ptr,  # [N, 2, NUM_HANDS]
+        H_ACTIVE,
+        NUM_HANDS,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+        dst_row = tl.load(row_index_ptr + m)
+        extra = tl.load(extra_index_ptr + m)
+        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask_k = k_offs < H_ACTIVE
+
+        hand_idx = tl.load(
+            sorted_indices_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        )
+        rank_bounds = tl.load(
+            rank_bounds_packed_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        L = rank_bounds & 0xFFFF
+        R = (rank_bounds >> 16) & 0xFFFF
+
+        off_L_pair = tl.load(
+            off_L_pair_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        off_R_pair = tl.load(
+            off_R_pair_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        off_last_pair = tl.load(
+            off_last_pair_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        enc_L_c1 = off_L_pair & 0xFFFF
+        enc_L_c2 = (off_L_pair >> 16) & 0xFFFF
+        enc_R_c1 = off_R_pair & 0xFFFF
+        enc_R_c2 = (off_R_pair >> 16) & 0xFFFF
+        enc_last_c1 = off_last_pair & 0xFFFF
+        enc_last_c2 = (off_last_pair >> 16) & 0xFFFF
+
+        has_L1 = enc_L_c1 > 0
+        has_L2 = enc_L_c2 > 0
+        has_R1 = enc_R_c1 > 0
+        has_R2 = enc_R_c2 > 0
+        has_last1 = enc_last_c1 > 0
+        has_last2 = enc_last_c2 > 0
+        idx_L_c1 = tl.maximum(enc_L_c1 - 1, 0)
+        idx_L_c2 = tl.maximum(enc_L_c2 - 1, 0)
+        idx_R_c1 = tl.maximum(enc_R_c1 - 1, 0)
+        idx_R_c2 = tl.maximum(enc_R_c2 - 1, 0)
+        idx_last_c1 = tl.maximum(enc_last_c1 - 1, 0)
+        idx_last_c2 = tl.maximum(enc_last_c2 - 1, 0)
+
+        for hero in tl.static_range(2):
+            p_base = P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1)
+            P_k = tl.load(p_base + k_offs, mask=mask_k, other=0.0)
+            P_k_next = tl.load(p_base + k_offs + 1, mask=mask_k, other=0.0)
+            b_at_k = P_k_next - P_k
+            P_L = tl.load(p_base + L, mask=mask_k, other=0.0)
+            P_R = tl.load(p_base + R, mask=mask_k, other=0.0)
+            cum_base = (
+                card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
+            )
+            Pcards_L_c1 = tl.load(cum_base + idx_L_c1, mask=mask_k & has_L1, other=0.0)
+            Pcards_L_c2 = tl.load(cum_base + idx_L_c2, mask=mask_k & has_L2, other=0.0)
+            Pcards_R_c1 = tl.load(cum_base + idx_R_c1, mask=mask_k & has_R1, other=0.0)
+            Pcards_R_c2 = tl.load(cum_base + idx_R_c2, mask=mask_k & has_R2, other=0.0)
+            Pcards_last_c1 = tl.load(
+                cum_base + idx_last_c1, mask=mask_k & has_last1, other=0.0
+            )
+            Pcards_last_c2 = tl.load(
+                cum_base + idx_last_c2, mask=mask_k & has_last2, other=0.0
+            )
+
+            win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
+            tie_mass = (
+                (P_R - P_L)
+                - (Pcards_R_c1 - Pcards_L_c1)
+                - (Pcards_R_c2 - Pcards_L_c2)
+                + b_at_k
+            )
+
+            denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
+            valid = denom > 1e-8
+            denom_safe = tl.where(valid, denom, 1.0)
+            win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
+            tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
+            loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
+            EV = win_prob - loss_prob
+            scale = tl.load(scale_factor_ptr + m * 2 + hero)
+            tl.store(
+                latest_values_ptr
+                + dst_row * 2 * NUM_HANDS
+                + hero * NUM_HANDS
+                + hand_idx,
                 EV * scale,
                 mask=mask_k,
             )
@@ -7371,6 +7567,103 @@ class ShowdownActiveCardBlockGraphRunner:
         else:
             self.graph.replay()
         return self.ev_out
+
+
+class ShowdownActiveCardBlockDirectGraphRunner(ShowdownActiveCardBlockGraphRunner):
+    """Indexed exact showdown runner that reads/writes evaluator rows directly."""
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        NUM_HANDS: int,
+        device: torch.device,
+        source_beliefs: torch.Tensor,
+        row_indices: torch.Tensor,
+        latest_values: torch.Tensor,
+        block_k: int = 256,
+        card_block: int = 64,
+        finish_num_warps: int = 8,
+    ) -> None:
+        self.source_beliefs = source_beliefs
+        self.row_indices = row_indices.contiguous()
+        self.latest_values = latest_values
+        super().__init__(
+            extras=extras,
+            M=M,
+            NUM_HANDS=NUM_HANDS,
+            device=device,
+            block_k=block_k,
+            card_block=card_block,
+            finish_num_warps=finish_num_warps,
+        )
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_P_active_full_indexed_kernel[(self.M, 2)](
+            self.source_beliefs,
+            self.row_indices,
+            extra_indices,
+            e["sorted_indices"],
+            self.P_padded,
+            self.H,
+            self.NUM_HANDS,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_active_full_card_block_indexed_kernel[
+            (self.M, triton.cdiv(self.num_cards, self.card_block))
+        ](
+            self.source_beliefs,
+            self.row_indices,
+            extra_indices,
+            e["sorted_indices"],
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            self.NUM_HANDS,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            CARD_BLOCK=self.card_block,
+        )
+        finish_grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_offset_full_nobopp_indexed_kernel[finish_grid](
+            self.P_padded,
+            self.cum_both,
+            self.row_indices,
+            extra_indices,
+            e["sorted_indices"],
+            e["rank_bounds_packed"],
+            e["scale_factor"],
+            e["off_L_pair"],
+            e["off_R_pair"],
+            e["off_last_pair"],
+            self.latest_values,
+            self.H,
+            self.NUM_HANDS,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=self.finish_num_warps,
+        )
+
+    def write_indexed(
+        self,
+        beliefs: torch.Tensor,
+        indices: torch.Tensor,
+        latest_values: torch.Tensor,
+    ) -> torch.Tensor:
+        if (
+            beliefs.data_ptr() == self.source_beliefs.data_ptr()
+            and latest_values.data_ptr() == self.latest_values.data_ptr()
+            and indices.data_ptr() == self.row_indices.data_ptr()
+        ):
+            if torch.cuda.is_current_stream_capturing():
+                self._launch_pipeline()
+            else:
+                self.graph.replay()
+            return self.ev_out
+        return super().write_indexed(beliefs, indices, latest_values)
 
 
 class ShowdownFullyCompactDirectGraphRunner:

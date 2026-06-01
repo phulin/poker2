@@ -78,7 +78,7 @@ from p2.search.fused_cfr_triton import (
     precompute_showdown_active_extras,
     precompute_showdown_extras,
     showdown_ev_v15,
-    ShowdownActiveCardBlockGraphRunner,
+    ShowdownActiveCardBlockDirectGraphRunner,
     triton_is_available,
     TScalars,
     _preprocess_unblocked_stats,
@@ -343,11 +343,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 scale_indices=self.showdown_indices,
                 extra_indices=extra_indices,
             )
-            self._showdown_graph_runner = ShowdownActiveCardBlockGraphRunner(
+            source_beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+            self._showdown_graph_runner = ShowdownActiveCardBlockDirectGraphRunner(
                 extras=self._showdown_extras,
                 M=self.showdown_indices.numel(),
                 NUM_HANDS=self.beliefs.shape[-1],
                 device=self.device,
+                source_beliefs=source_beliefs,
+                row_indices=self.showdown_indices,
+                latest_values=self.latest_values,
             )
             self._showdown_fallback_extras = None
         else:
