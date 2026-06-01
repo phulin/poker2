@@ -351,6 +351,52 @@ def test_normuon_matrix_update_is_torch_compileable():
     assert torch.isfinite(next_param).all()
 
 
+def test_normuon_update_scale_matches_pytorch_muon_original_mode():
+    for shape in [(256, 8), (512, 512), (512, 1024), (1, 512)]:
+        torch.manual_seed(123)
+        param = torch.randn(shape)
+        grad = torch.randn_like(param)
+        momentum = torch.zeros_like(param)
+        row_second_moment = torch.zeros(shape[0])
+
+        next_param, _, _ = _normuon_matrix_update(
+            param,
+            grad,
+            momentum,
+            row_second_moment,
+            torch.tensor(1.0),
+            torch.tensor(0.0),
+            torch.tensor(0.0),
+            torch.tensor(0.0),
+            torch.tensor(1.0e-8),
+            torch.tensor(1.0e-7),
+            5,
+        )
+        normuon_update_rms = (next_param - param).square().mean().sqrt()
+
+        muon_param = torch.nn.Parameter(param.detach().clone())
+        muon_param.grad = grad.detach().clone()
+        muon = torch.optim.Muon(
+            [muon_param],
+            lr=1.0,
+            weight_decay=0.0,
+            momentum=0.0,
+            nesterov=False,
+            eps=1.0e-7,
+            ns_steps=5,
+            adjust_lr_fn=None,
+        )
+        muon.step()
+        muon_update_rms = (muon_param.detach() - param).square().mean().sqrt()
+
+        torch.testing.assert_close(
+            normuon_update_rms,
+            muon_update_rms,
+            rtol=0.25,
+            atol=1.0e-5,
+        )
+
+
 def test_default_optimizer_is_adamw():
     model = nn.Linear(4, 3)
     cfg = TrainingConfig()

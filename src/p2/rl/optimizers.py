@@ -120,12 +120,13 @@ def _normuon_matrix_update(
         row_second_moment.sqrt()[:, None] + eps_tensor
     )
     update_norm = torch.linalg.vector_norm(normalized_update).clamp_min(eps_tensor)
-    scaled_lr = (
-        lr_tensor
-        * 0.2
-        * math.sqrt(float(param.shape[0] * param.shape[1]))
-        / update_norm
+    muon_original_lr = lr_tensor * math.sqrt(
+        max(1.0, float(param.shape[0]) / float(param.shape[1]))
     )
+    target_update_norm = muon_original_lr * torch.linalg.vector_norm(
+        orthogonal_update
+    )
+    scaled_lr = target_update_norm / update_norm
     param = param * (1.0 - lr_tensor * weight_decay_tensor)
     param = param - scaled_lr * normalized_update
     return param, momentum, row_second_moment
