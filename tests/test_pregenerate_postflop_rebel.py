@@ -68,11 +68,19 @@ class _FakeTrainer:
 def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, tmp_path):
     written = {}
 
-    def fake_write(output_dir, *, value_batches, policy_batches, metadata):
+    def fake_write(
+        output_dir,
+        *,
+        value_batches,
+        policy_batches,
+        metadata,
+        storage_float_dtype=None,
+    ):
         written["output_dir"] = output_dir
         written["value_batches"] = value_batches
         written["policy_batches"] = policy_batches
         written["metadata"] = metadata
+        written["storage_float_dtype"] = storage_float_dtype
         return {
             "value_examples": sum(len(batch) for batch in value_batches),
             "policy_examples": sum(len(batch) for batch in policy_batches),
@@ -89,6 +97,7 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
     cfg.rebel_pregenerate.policy_target_min = 4
     cfg.rebel_pregenerate.generation_batch_size = 2
     cfg.rebel_pregenerate.max_generation_batches = 3
+    cfg.rebel_pregenerate.storage_dtype = "float16"
     checkpoint = tmp_path / "closing.pt"
     checkpoint.write_bytes(b"closing leaf checkpoint")
     cfg.search.closing_leaf_checkpoint = str(checkpoint)
@@ -109,6 +118,7 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
         "checkpoint": str(checkpoint),
         "sha256": hashlib.sha256(b"closing leaf checkpoint").hexdigest(),
     }
+    assert written["storage_float_dtype"] == "float16"
 
 
 def test_pregenerate_postflop_rebel_requires_live_mode(tmp_path):

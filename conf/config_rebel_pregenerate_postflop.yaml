@@ -20,6 +20,7 @@ rebel_pregenerate:
   generation_batch_size: 512
   max_generation_batches: null
   root_source: random_river
+  storage_dtype: null
 
 search:
   sparse: true

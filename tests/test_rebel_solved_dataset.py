@@ -111,6 +111,38 @@ def test_rebel_solved_dataset_reads_wrapped_batches(tmp_path):
     torch.testing.assert_close(policy.features.context, _policy_batch(10, 2).features.context)
 
 
+def test_rebel_solved_dataset_supports_compressed_float_storage(tmp_path):
+    manifest = write_rebel_solved_dataset(
+        tmp_path,
+        value_batches=[_value_batch(0, 1)],
+        policy_batches=[_policy_batch(10, 1)],
+        storage_float_dtype=torch.float16,
+    )
+
+    assert manifest["storage_float_dtype"] == "float16"
+    value_shard = torch.load(
+        tmp_path / "value" / "shard_000000.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    policy_shard = torch.load(
+        tmp_path / "policy" / "shard_000000.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert value_shard["features.beliefs"].dtype == torch.float16
+    assert value_shard["value_targets"].dtype == torch.float16
+    assert policy_shard["policy_targets"].dtype == torch.float16
+    assert value_shard["features.street"].dtype == torch.long
+
+    dataset = RebelSolvedDataset(tmp_path)
+    value_batch = dataset.get_batch("value", 0, 1)
+    policy_batch = dataset.get_batch("policy", 0, 1)
+    assert value_batch.features.beliefs.dtype == torch.float32
+    assert value_batch.value_targets.dtype == torch.float32
+    assert policy_batch.policy_targets.dtype == torch.float32
+
+
 def test_rebel_solved_dataset_samples_random_rows(tmp_path):
     write_rebel_solved_dataset(tmp_path, value_batches=[_value_batch(0, 6)])
     dataset = RebelSolvedDataset(tmp_path)
@@ -190,6 +222,12 @@ def test_rebel_solved_dataset_rejects_manifest_mismatch(tmp_path):
 
     manifest_path = tmp_path / MANIFEST_NAME
     manifest = json.loads(manifest_path.read_text())
+    manifest["storage_float_dtype"] = "float8"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="storage_float_dtype mismatch"):
+        RebelSolvedDataset(tmp_path)
+
+    manifest["storage_float_dtype"] = "float32"
     manifest["format"] = "wrong"
     manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="unsupported solved dataset format"):

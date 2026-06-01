@@ -16,25 +16,74 @@ from p2.rl.rebel_batch import RebelBatch
 FORMAT_VERSION = "p2.rebel.solved_postflop.v1"
 MANIFEST_NAME = "manifest.json"
 StreamName = Literal["value", "policy"]
+SUPPORTED_STORAGE_FLOAT_DTYPES = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
 
 
-def rebel_batch_to_tensors(batch: RebelBatch) -> dict[str, torch.Tensor]:
+def _storage_dtype_name(dtype: torch.dtype | str | None) -> str | None:
+    if dtype is None:
+        return None
+    if isinstance(dtype, str):
+        name = dtype.removeprefix("torch.")
+        if name not in SUPPORTED_STORAGE_FLOAT_DTYPES:
+            raise ValueError(
+                "storage_float_dtype must be one of "
+                f"{sorted(SUPPORTED_STORAGE_FLOAT_DTYPES)}, got {dtype!r}"
+            )
+        return name
+    for name, torch_dtype in SUPPORTED_STORAGE_FLOAT_DTYPES.items():
+        if dtype == torch_dtype:
+            return name
+    raise ValueError(
+        "storage_float_dtype must be one of "
+        f"{sorted(SUPPORTED_STORAGE_FLOAT_DTYPES)}, got {dtype}"
+    )
+
+
+def _move_tensor(
+    tensor: torch.Tensor,
+    *,
+    device: torch.device,
+    float_dtype: torch.dtype | None,
+) -> torch.Tensor:
+    if tensor.dtype.is_floating_point and float_dtype is not None:
+        return tensor.to(device=device, dtype=float_dtype)
+    return tensor.to(device=device)
+
+
+def rebel_batch_to_tensors(
+    batch: RebelBatch, *, storage_float_dtype: torch.dtype | str | None = None
+) -> dict[str, torch.Tensor]:
     """Serialize a RebelBatch into plain tensors for shard storage."""
 
+    dtype_name = _storage_dtype_name(storage_float_dtype)
+    target_dtype = (
+        SUPPORTED_STORAGE_FLOAT_DTYPES[dtype_name] if dtype_name is not None else None
+    )
+
+    def prepare(tensor: torch.Tensor) -> torch.Tensor:
+        tensor = tensor.detach().cpu()
+        if target_dtype is not None and tensor.dtype.is_floating_point:
+            tensor = tensor.to(target_dtype)
+        return tensor
+
     tensors = {
-        "features.context": batch.features.context.detach().cpu(),
-        "features.street": batch.features.street.detach().cpu(),
-        "features.to_act": batch.features.to_act.detach().cpu(),
-        "features.board": batch.features.board.detach().cpu(),
-        "features.beliefs": batch.features.beliefs.detach().cpu(),
-        "legal_masks": batch.legal_masks.detach().cpu(),
+        "features.context": prepare(batch.features.context),
+        "features.street": prepare(batch.features.street),
+        "features.to_act": prepare(batch.features.to_act),
+        "features.board": prepare(batch.features.board),
+        "features.beliefs": prepare(batch.features.beliefs),
+        "legal_masks": prepare(batch.legal_masks),
     }
     if batch.value_targets is not None:
-        tensors["value_targets"] = batch.value_targets.detach().cpu()
+        tensors["value_targets"] = prepare(batch.value_targets)
     if batch.policy_targets is not None:
-        tensors["policy_targets"] = batch.policy_targets.detach().cpu()
+        tensors["policy_targets"] = prepare(batch.policy_targets)
     for key, value in batch.statistics.items():
-        tensors[f"statistics.{key}"] = value.detach().cpu()
+        tensors[f"statistics.{key}"] = prepare(value)
     return tensors
 
 
@@ -42,6 +91,7 @@ def rebel_batch_from_tensors(
     tensors: Mapping[str, torch.Tensor],
     *,
     device: torch.device | None = None,
+    float_dtype: torch.dtype | None = torch.float32,
 ) -> RebelBatch:
     """Deserialize a tensor-only shard payload into a RebelBatch."""
 
@@ -49,26 +99,36 @@ def rebel_batch_from_tensors(
         device = torch.device("cpu")
     statistics_prefix = "statistics."
     statistics = {
-        key[len(statistics_prefix) :]: value.to(device)
+        key[len(statistics_prefix) :]: _move_tensor(
+            value, device=device, float_dtype=float_dtype
+        )
         for key, value in tensors.items()
         if key.startswith(statistics_prefix)
     }
     return RebelBatch(
         features=MLPFeatures(
-            context=tensors["features.context"].to(device),
+            context=_move_tensor(
+                tensors["features.context"], device=device, float_dtype=float_dtype
+            ),
             street=tensors["features.street"].to(device),
             to_act=tensors["features.to_act"].to(device),
             board=tensors["features.board"].to(device),
-            beliefs=tensors["features.beliefs"].to(device),
+            beliefs=_move_tensor(
+                tensors["features.beliefs"], device=device, float_dtype=float_dtype
+            ),
         ),
         legal_masks=tensors["legal_masks"].to(device),
         value_targets=(
-            tensors["value_targets"].to(device)
+            _move_tensor(
+                tensors["value_targets"], device=device, float_dtype=float_dtype
+            )
             if "value_targets" in tensors
             else None
         ),
         policy_targets=(
-            tensors["policy_targets"].to(device)
+            _move_tensor(
+                tensors["policy_targets"], device=device, float_dtype=float_dtype
+            )
             if "policy_targets" in tensors
             else None
         ),
@@ -114,6 +174,8 @@ def _write_stream(
     root: Path,
     stream: StreamName,
     batches: Sequence[RebelBatch],
+    *,
+    storage_float_dtype: torch.dtype | str | None,
 ) -> tuple[list[dict[str, Any]], int]:
     stream_dir = root / stream
     stream_dir.mkdir(parents=True, exist_ok=True)
@@ -123,7 +185,12 @@ def _write_stream(
         _validate_stream_batch(batch, stream)
         end = start + len(batch)
         rel_path = f"{stream}/shard_{shard_idx:06d}.pt"
-        torch.save(rebel_batch_to_tensors(batch), root / rel_path)
+        torch.save(
+            rebel_batch_to_tensors(
+                batch, storage_float_dtype=storage_float_dtype
+            ),
+            root / rel_path,
+        )
         shards.append({"file": rel_path, "start": start, "end": end})
         start = end
     return shards, start
@@ -135,17 +202,29 @@ def write_rebel_solved_dataset(
     value_batches: Sequence[RebelBatch] = (),
     policy_batches: Sequence[RebelBatch] = (),
     metadata: Mapping[str, Any] | None = None,
+    storage_float_dtype: torch.dtype | str | None = None,
 ) -> dict[str, Any]:
     """Write bounded solved ReBeL examples as tensor-only shards."""
 
+    storage_dtype_name = _storage_dtype_name(storage_float_dtype) or "float32"
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / MANIFEST_NAME
     if manifest_path.exists():
         raise FileExistsError(f"{manifest_path} already exists")
 
-    value_shards, value_examples = _write_stream(root, "value", value_batches)
-    policy_shards, policy_examples = _write_stream(root, "policy", policy_batches)
+    value_shards, value_examples = _write_stream(
+        root,
+        "value",
+        value_batches,
+        storage_float_dtype=storage_dtype_name,
+    )
+    policy_shards, policy_examples = _write_stream(
+        root,
+        "policy",
+        policy_batches,
+        storage_float_dtype=storage_dtype_name,
+    )
     example_batch = next(iter(value_batches), None) or next(iter(policy_batches), None)
     if example_batch is None:
         raise ValueError("At least one value or policy batch is required")
@@ -161,6 +240,7 @@ def write_rebel_solved_dataset(
         "num_actions": int(example_batch.legal_masks.shape[-1]),
         "context_length": int(example_batch.features.context.shape[-1]),
         "street_support": sorted(street_values),
+        "storage_float_dtype": storage_dtype_name,
         "value_examples": int(value_examples),
         "policy_examples": int(policy_examples),
         "shards": {"value": value_shards, "policy": policy_shards},
@@ -213,6 +293,9 @@ class RebelSolvedDataset:
             "policy": None,
         }
         self._pin_memory = bool(pin_memory and torch.cuda.is_available())
+        self.storage_float_dtype = str(
+            self.manifest.get("storage_float_dtype", "float32")
+        )
         self._prefetch_executor = (
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="rebel-shard-prefetch")
             if async_shard_prefetch
@@ -248,6 +331,12 @@ class RebelSolvedDataset:
             raise ValueError(f"unsupported solved dataset format in {manifest_path}")
         if int(self.manifest.get("hands", -1)) != NUM_HANDS:
             raise ValueError(f"expected {NUM_HANDS} hands")
+        storage_float_dtype = str(self.manifest.get("storage_float_dtype", "float32"))
+        if storage_float_dtype not in SUPPORTED_STORAGE_FLOAT_DTYPES:
+            raise ValueError(
+                "manifest storage_float_dtype mismatch: "
+                f"got {storage_float_dtype!r}"
+            )
         checks = {
             "num_players": num_players,
             "num_actions": num_actions,
@@ -354,6 +443,7 @@ class RebelSolvedDataset:
         count: int,
         *,
         device: torch.device | None = None,
+        float_dtype: torch.dtype | None = torch.float32,
         wrap: bool = False,
     ) -> RebelBatch:
         if count <= 0 or start < 0:
@@ -391,7 +481,9 @@ class RebelSolvedDataset:
         if wrap or cursor < total:
             self.prefetch_shard_for_row(stream, cursor % total)
         tensors = chunks[0] if len(chunks) == 1 else _concat_tensors(chunks)
-        return rebel_batch_from_tensors(tensors, device=device)
+        return rebel_batch_from_tensors(
+            tensors, device=device, float_dtype=float_dtype
+        )
 
     def sample_batch(
         self,
@@ -400,6 +492,7 @@ class RebelSolvedDataset:
         *,
         generator: torch.Generator | None = None,
         device: torch.device | None = None,
+        float_dtype: torch.dtype | None = torch.float32,
     ) -> RebelBatch:
         total = self.examples[stream]
         if count <= 0:
@@ -417,4 +510,6 @@ class RebelSolvedDataset:
             local_rows = rows[mask] - shard_start
             chunks.append(_index_tensors(self._load_shard(stream, shard_idx), local_rows))
         tensors = chunks[0] if len(chunks) == 1 else _concat_tensors(chunks)
-        return rebel_batch_from_tensors(tensors, device=device)
+        return rebel_batch_from_tensors(
+            tensors, device=device, float_dtype=float_dtype
+        )

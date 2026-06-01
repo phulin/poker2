@@ -423,6 +423,7 @@ class RebelPregenerateConfig:
     generation_batch_size: int = 512
     max_generation_batches: int | None = None
     root_source: str | None = None
+    storage_dtype: str | None = None
 
 
 @dataclass

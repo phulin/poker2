@@ -154,6 +154,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 **postflop_spot_sampler_metadata(),
             },
         },
+        storage_float_dtype=pregenerate_cfg.storage_dtype,
     )
     print(
         f"wrote {manifest['value_examples']} value and "
