@@ -1,0 +1,23 @@
+# Initial postflop curriculum entry point for the implemented river train stage.
+
+defaults:
+  - config_rebel_cfr
+  - _self_
+
+checkpoint_dir: checkpoints-rebel-curriculum
+num_steps: 5000
+wandb_project: poker-rebel-postflop-curriculum
+wandb_tags: ["rebel", "cfr", "postflop-curriculum", "river"]
+
+data:
+  mode: live
+  live_root_source: random_river
+
+curriculum:
+  stages: [river]
+  wandb_group: rebel_postflop_curriculum
+  promote_dir: checkpoints-rebel-curriculum/promoted
+  river:
+    kind: train
+    net: S_river
+    num_steps: ${num_steps}

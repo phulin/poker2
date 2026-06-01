@@ -87,3 +87,15 @@ def test_rebel_curriculum_and_data_config_parse_from_hydra_shape():
     assert cfg.curriculum.stages == ["river", "distill_E_turn"]
     assert cfg.curriculum.substeps["river"].net == "S_river"
     assert cfg.curriculum.substeps["distill_E_turn"].from_net == "S_river"
+
+
+def test_rebel_curriculum_river_config_loads_from_yaml():
+    cfg = Config.from_dict_config(
+        OmegaConf.load("conf/config_rebel_curriculum_river.yaml")
+    )
+
+    assert cfg.data.mode == "live"
+    assert cfg.data.live_root_source == "random_river"
+    assert cfg.curriculum.stages == ["river"]
+    assert cfg.curriculum.substeps["river"].kind == "train"
+    assert cfg.curriculum.substeps["river"].net == "S_river"
