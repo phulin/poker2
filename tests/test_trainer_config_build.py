@@ -48,6 +48,7 @@ def test_rebel_curriculum_and_data_config_parse_from_hydra_shape():
                     "pregenerated": {
                         "value_batch_size": 32,
                         "policy_batch_size": 64,
+                        "direct_sample": True,
                         "datasets": [
                             {
                                 "path": "outputs/rebel_postflop/river_v1",
@@ -82,6 +83,7 @@ def test_rebel_curriculum_and_data_config_parse_from_hydra_shape():
     assert cfg.data.mode == "pregenerated"
     assert cfg.data.live_root_source == "self_play"
     assert cfg.data.pregenerated.value_batch_size == 32
+    assert cfg.data.pregenerated.direct_sample is True
     assert cfg.data.pregenerated.datasets[0].path == "outputs/rebel_postflop/river_v1"
     assert cfg.data.pregenerated.datasets[0].policy_weight == 2.0
     assert cfg.curriculum.stages == ["river", "distill_E_turn"]

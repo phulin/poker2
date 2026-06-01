@@ -25,6 +25,23 @@ class _FakeBuffer:
         return ("batch", batch_size, stratify_streets)
 
 
+class _StagingOnlyBuffer:
+    def __init__(self) -> None:
+        self.size = 0
+        self.sample_calls = 0
+
+    def __len__(self) -> int:
+        return self.size
+
+    def add_batch(self, batch: RebelBatch) -> None:
+        self.size += len(batch)
+
+    def sample(self, batch_size: int, stratify_streets):
+        del batch_size, stratify_streets
+        self.sample_calls += 1
+        raise AssertionError("direct pregenerated sampling should not hit buffer")
+
+
 class _FakeGenerator:
     def __init__(self, value_buffer: _FakeBuffer, policy_buffer: _FakeBuffer) -> None:
         self.value_buffer = value_buffer
@@ -223,3 +240,39 @@ def test_pregenerated_rebel_data_source_honors_step_windows_and_shuffle(tmp_path
     assert (late_value.features.context[:, 0] >= 50).all()
     assert (late_value.features.context[:, 0] < 55).all()
     assert (late_policy.features.context[:, 0] >= 150).all()
+
+
+def test_pregenerated_rebel_data_source_can_sample_directly_from_dataset(tmp_path):
+    write_rebel_solved_dataset(
+        tmp_path,
+        value_batches=[_batch("value", 0, 5)],
+        policy_batches=[_batch("policy", 100, 5)],
+    )
+    value_buffer = _StagingOnlyBuffer()
+    policy_buffer = _StagingOnlyBuffer()
+    source = PregeneratedRebelDataSource(
+        [PregeneratedDatasetConfig(path=str(tmp_path))],
+        value_buffer,
+        policy_buffer,
+        value_sample_count=1,
+        policy_sample_count=1,
+        num_players=2,
+        num_actions=5,
+        context_length=4,
+        generator=torch.Generator().manual_seed(13),
+        shuffle=False,
+        direct_sample=True,
+    )
+
+    source.prepare_step(0)
+    value_batch = source.sample_value(2, stratify_streets=None)
+    policy_batch = source.sample_policy(2, stratify_streets=None)
+
+    torch.testing.assert_close(
+        value_batch.features.context[:, 0], torch.tensor([1.0, 2.0])
+    )
+    torch.testing.assert_close(
+        policy_batch.features.context[:, 0], torch.tensor([101.0, 102.0])
+    )
+    assert value_buffer.sample_calls == 0
+    assert policy_buffer.sample_calls == 0

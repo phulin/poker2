@@ -134,6 +134,7 @@ class PregeneratedRebelDataSource(RebelDataSource):
         street_support: list[int] | None = None,
         generator: torch.Generator | None = None,
         shuffle: bool = True,
+        direct_sample: bool = False,
         pin_memory: bool = False,
         async_shard_prefetch: bool = False,
     ) -> None:
@@ -146,6 +147,7 @@ class PregeneratedRebelDataSource(RebelDataSource):
         self.policy_sample_count = int(policy_sample_count)
         self.generator = generator or torch.Generator(device="cpu")
         self.shuffle = bool(shuffle)
+        self.direct_sample = bool(direct_sample)
         self.current_step = 0
         self.datasets = [
             _PregeneratedDatasetState(
@@ -237,11 +239,15 @@ class PregeneratedRebelDataSource(RebelDataSource):
     def sample_value(
         self, batch_size: int, stratify_streets: list[float] | None
     ) -> RebelBatch:
+        if self.direct_sample and stratify_streets is None:
+            return self._next_batch("value", batch_size)
         return self.value_buffer.sample(batch_size, stratify_streets=stratify_streets)
 
     def sample_policy(
         self, batch_size: int, stratify_streets: list[float] | None
     ) -> RebelBatch:
+        if self.direct_sample and stratify_streets is None:
+            return self._next_batch("policy", batch_size)
         return self.policy_buffer.sample(batch_size, stratify_streets=stratify_streets)
 
     def state_dict(self) -> dict:

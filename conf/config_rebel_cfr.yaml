@@ -62,6 +62,7 @@ data:
     value_batch_size: null
     policy_batch_size: null
     shuffle: true
+    direct_sample: false
     pin_memory: true
     async_shard_prefetch: true
     validate_manifest: true

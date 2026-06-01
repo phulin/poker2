@@ -378,6 +378,7 @@ class PregeneratedDataConfig:
     value_batch_size: int | None = None
     policy_batch_size: int | None = None
     shuffle: bool = True
+    direct_sample: bool = False
     pin_memory: bool = True
     async_shard_prefetch: bool = True
     validate_manifest: bool = True
