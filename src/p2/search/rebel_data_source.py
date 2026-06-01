@@ -122,6 +122,8 @@ class PregeneratedRebelDataSource(RebelDataSource):
         num_actions: int,
         context_length: int,
         generator: torch.Generator | None = None,
+        pin_memory: bool = False,
+        async_shard_prefetch: bool = False,
     ) -> None:
         if not dataset_configs:
             raise ValueError("data.pregenerated.datasets must list at least one dataset")
@@ -138,6 +140,8 @@ class PregeneratedRebelDataSource(RebelDataSource):
                     num_players=num_players,
                     num_actions=num_actions,
                     context_length=context_length,
+                    pin_memory=pin_memory,
+                    async_shard_prefetch=async_shard_prefetch,
                 ),
                 value_weight=float(dataset_cfg.value_weight),
                 policy_weight=float(dataset_cfg.policy_weight),

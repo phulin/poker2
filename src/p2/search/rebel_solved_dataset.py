@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Literal
 
@@ -175,6 +176,8 @@ class RebelSolvedDataset:
         num_players: int | None = None,
         num_actions: int | None = None,
         context_length: int | None = None,
+        pin_memory: bool = False,
+        async_shard_prefetch: bool = False,
     ) -> None:
         self.path = Path(path)
         manifest_path = self.path / MANIFEST_NAME if self.path.is_dir() else self.path
@@ -198,6 +201,26 @@ class RebelSolvedDataset:
             "value": None,
             "policy": None,
         }
+        self._pin_memory = bool(pin_memory and torch.cuda.is_available())
+        self._prefetch_executor = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="rebel-shard-prefetch")
+            if async_shard_prefetch
+            else None
+        )
+        self._prefetched: dict[
+            StreamName, tuple[int, Future[dict[str, torch.Tensor]]] | None
+        ] = {"value": None, "policy": None}
+
+    def close(self) -> None:
+        if self._prefetch_executor is not None:
+            self._prefetch_executor.shutdown(wait=True)
+            self._prefetch_executor = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _validate_manifest(
         self,
@@ -231,11 +254,27 @@ class RebelSolvedDataset:
     def stream_len(self, stream: StreamName) -> int:
         return self.examples[stream]
 
+    def _load_shard_from_disk(
+        self, stream: StreamName, shard_idx: int
+    ) -> dict[str, torch.Tensor]:
+        shard_path = self.root / self.shards[stream][shard_idx]["file"]
+        tensors = torch.load(shard_path, map_location="cpu", weights_only=True)
+        if self._pin_memory:
+            tensors = {
+                key: value.pin_memory() if isinstance(value, torch.Tensor) else value
+                for key, value in tensors.items()
+            }
+        return tensors
+
     def _load_shard(self, stream: StreamName, shard_idx: int) -> dict[str, torch.Tensor]:
         loaded = self._loaded[stream]
         if loaded is None or loaded[0] != shard_idx:
-            shard_path = self.root / self.shards[stream][shard_idx]["file"]
-            tensors = torch.load(shard_path, map_location="cpu", weights_only=True)
+            prefetched = self._prefetched[stream]
+            if prefetched is not None and prefetched[0] == shard_idx:
+                tensors = prefetched[1].result()
+                self._prefetched[stream] = None
+            else:
+                tensors = self._load_shard_from_disk(stream, shard_idx)
             target_key = _stream_target_key(stream)
             if target_key not in tensors:
                 raise ValueError(f"{stream} shard missing {target_key}")
@@ -243,6 +282,25 @@ class RebelSolvedDataset:
         loaded = self._loaded[stream]
         assert loaded is not None
         return loaded[1]
+
+    def prefetch_shard_for_row(self, stream: StreamName, row: int) -> None:
+        if self._prefetch_executor is None or self.examples[stream] == 0:
+            return
+        shard_idx = self._shard_index_for_row(stream, row % self.examples[stream])
+        loaded = self._loaded[stream]
+        prefetched = self._prefetched[stream]
+        if loaded is not None and loaded[0] == shard_idx:
+            return
+        if prefetched is not None and prefetched[0] == shard_idx:
+            return
+        if prefetched is not None and not prefetched[1].done():
+            return
+        self._prefetched[stream] = (
+            shard_idx,
+            self._prefetch_executor.submit(
+                self._load_shard_from_disk, stream, shard_idx
+            ),
+        )
 
     def _shard_index_for_row(self, stream: StreamName, row: int) -> int:
         if row < 0 or row >= self.examples[stream]:
@@ -293,6 +351,8 @@ class RebelSolvedDataset:
             remaining -= take
             cursor += take
 
+        if wrap or cursor < total:
+            self.prefetch_shard_for_row(stream, cursor % total)
         tensors = chunks[0] if len(chunks) == 1 else _concat_tensors(chunks)
         return rebel_batch_from_tensors(tensors, device=device)
 

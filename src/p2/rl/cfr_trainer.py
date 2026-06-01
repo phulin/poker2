@@ -398,6 +398,8 @@ class RebelCFRTrainer:
                 num_actions=self.num_actions,
                 context_length=num_context_features,
                 generator=dataset_rng,
+                pin_memory=cfg.data.pregenerated.pin_memory,
+                async_shard_prefetch=cfg.data.pregenerated.async_shard_prefetch,
             )
 
         self.aggression_analyzer = AggressionAnalyzer(device=self.device)

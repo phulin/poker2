@@ -126,6 +126,36 @@ def test_rebel_solved_dataset_samples_random_rows(tmp_path):
     assert (batch.features.context[:, 0] < 6).all()
 
 
+def test_rebel_solved_dataset_prefetched_reads_match_plain_reads(tmp_path):
+    write_rebel_solved_dataset(
+        tmp_path,
+        value_batches=[_value_batch(0, 2), _value_batch(2, 2)],
+        policy_batches=[_policy_batch(10, 2), _policy_batch(12, 2)],
+    )
+    plain = RebelSolvedDataset(tmp_path)
+    prefetched = RebelSolvedDataset(
+        tmp_path,
+        pin_memory=True,
+        async_shard_prefetch=True,
+    )
+
+    plain_first = plain.get_batch("value", 1, 3, wrap=True)
+    prefetched.prefetch_shard_for_row("value", 1)
+    prefetched_first = prefetched.get_batch("value", 1, 3, wrap=True)
+    torch.testing.assert_close(
+        prefetched_first.features.context, plain_first.features.context
+    )
+    torch.testing.assert_close(prefetched_first.value_targets, plain_first.value_targets)
+
+    plain_policy = plain.get_batch("policy", 1, 3, wrap=True)
+    prefetched.prefetch_shard_for_row("policy", 1)
+    prefetched_policy = prefetched.get_batch("policy", 1, 3, wrap=True)
+    torch.testing.assert_close(
+        prefetched_policy.policy_targets, plain_policy.policy_targets
+    )
+    prefetched.close()
+
+
 def test_rebel_solved_dataset_rejects_manifest_mismatch(tmp_path):
     write_rebel_solved_dataset(tmp_path, value_batches=[_value_batch(0, 1)])
 
