@@ -7,8 +7,11 @@ from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
-from p2.search.rebel_data_source import LiveRebelDataSource
-from p2.search.rebel_data_source import PregeneratedRebelDataSource
+from p2.search.rebel_data_source import (
+    HybridRebelDataSource,
+    LiveRebelDataSource,
+    PregeneratedRebelDataSource,
+)
 from p2.search.rebel_solved_dataset import write_rebel_solved_dataset
 
 
@@ -100,6 +103,44 @@ def test_live_rebel_data_source_delegates_generation_sampling_and_state():
     assert source.state_dict() == {"cursor": 3}
     source.load_state_dict({"cursor": 4})
     assert generator.loaded_state == {"cursor": 4}
+
+
+def test_hybrid_rebel_data_source_trains_live_and_returns_holdout_metrics():
+    live_value_buffer = _FakeBuffer()
+    live_policy_buffer = _FakeBuffer()
+    holdout_value_buffer = _FakeBuffer()
+    holdout_policy_buffer = _FakeBuffer()
+    live = LiveRebelDataSource(
+        _FakeGenerator(live_value_buffer, live_policy_buffer),
+        live_value_buffer,
+        live_policy_buffer,
+        value_sample_count=5,
+        max_return_policy_samples=7,
+    )
+    holdout = LiveRebelDataSource(
+        _FakeGenerator(holdout_value_buffer, holdout_policy_buffer),
+        holdout_value_buffer,
+        holdout_policy_buffer,
+        value_sample_count=2,
+        max_return_policy_samples=3,
+    )
+    source = HybridRebelDataSource(live, holdout)
+
+    assert source.prepare_step(4) == ("value", "policy")
+    assert len(live_value_buffer) == 5
+    assert len(holdout_value_buffer) == 2
+    source.ensure_min_samples(10, 20)
+    assert len(live_value_buffer) >= 10
+    assert source.sample_value(4, None) == ("batch", 4, None)
+    assert source.sample_policy(6, [0.25, 0.25, 0.25, 0.25]) == (
+        "batch",
+        6,
+        [0.25, 0.25, 0.25, 0.25],
+    )
+    assert source.state_dict() == {
+        "live": {"cursor": 3},
+        "holdout": {"cursor": 3},
+    }
 
 
 def _batch(stream: str, start: int, count: int) -> RebelBatch:

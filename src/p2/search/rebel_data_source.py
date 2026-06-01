@@ -99,6 +99,51 @@ class LiveRebelDataSource(RebelDataSource):
         self.generator.load_state_dict(state)
 
 
+class HybridRebelDataSource(RebelDataSource):
+    """Live training source with pregenerated holdout batches for metrics."""
+
+    def __init__(
+        self,
+        live_source: RebelDataSource,
+        holdout_source: RebelDataSource,
+    ) -> None:
+        self.live_source = live_source
+        self.holdout_source = holdout_source
+
+    def prepare_step(self, step: int) -> tuple[RebelBatch | None, RebelBatch | None]:
+        self.live_source.prepare_step(step)
+        return self.holdout_source.prepare_step(step)
+
+    def ensure_min_samples(self, value_samples: int, policy_samples: int) -> None:
+        self.live_source.ensure_min_samples(value_samples, policy_samples)
+
+    def sample_value(
+        self, batch_size: int, stratify_streets: list[float] | None
+    ) -> RebelBatch:
+        return self.live_source.sample_value(
+            batch_size, stratify_streets=stratify_streets
+        )
+
+    def sample_policy(
+        self, batch_size: int, stratify_streets: list[float] | None
+    ) -> RebelBatch:
+        return self.live_source.sample_policy(
+            batch_size, stratify_streets=stratify_streets
+        )
+
+    def state_dict(self) -> dict:
+        return {
+            "live": self.live_source.state_dict(),
+            "holdout": self.holdout_source.state_dict(),
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        if "live" in state:
+            self.live_source.load_state_dict(state["live"])
+        if "holdout" in state:
+            self.holdout_source.load_state_dict(state["holdout"])
+
+
 @dataclass
 class _PregeneratedDatasetState:
     dataset: RebelSolvedDataset

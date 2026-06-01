@@ -56,6 +56,8 @@ train:
   model_ema: null
 
 data:
+  # live = production CFR roots; pregenerated = fixed HP-sweep data;
+  # hybrid = live training plus pregenerated holdout metrics.
   mode: live
   live_root_source: self_play
   pregenerated:

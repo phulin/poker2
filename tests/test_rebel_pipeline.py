@@ -46,14 +46,6 @@ def test_value_samples_per_step_allows_fractional_reuse_goal():
         _value_samples_per_step(batch_size=512, value_reuse_goal=0.0)
 
 
-def test_rebel_cfr_trainer_rejects_unimplemented_hybrid_mode():
-    cfg = Config(device="cpu")
-    cfg.data.mode = "hybrid"
-
-    with pytest.raises(NotImplementedError, match="data.mode=live or"):
-        RebelCFRTrainer(cfg, torch.device("cpu"))
-
-
 def _tiny_rebel_cfg() -> Config:
     cfg = Config()
     cfg.num_envs = 1
@@ -108,6 +100,7 @@ def test_rebel_cfr_trainer_runs_pregenerated_mode_one_step(tmp_path):
     cfg.train.episodes_per_step = 1
     cfg.train.replay_buffer_batches = 2
     cfg.train.value_reuse_goal = 1
+    cfg.search.depth = 1
     cfg.data.pregenerated.value_batch_size = 2
     cfg.data.pregenerated.policy_batch_size = 2
     cfg.data.pregenerated.datasets = [PregeneratedDatasetConfig(path=str(tmp_path))]
@@ -136,6 +129,48 @@ def test_rebel_cfr_trainer_runs_pregenerated_mode_one_step(tmp_path):
     assert torch.isfinite(torch.tensor(metrics["value_loss"]))
     assert torch.isfinite(torch.tensor(metrics["policy_loss"]))
     assert trainer.data_generator is None
+    assert len(trainer.value_buffer) >= cfg.train.batch_size
+    assert len(trainer.policy_buffer) >= cfg.train.batch_size
+
+
+def test_rebel_cfr_trainer_hybrid_mode_uses_holdout_metrics(tmp_path):
+    cfg = _tiny_rebel_cfg()
+    cfg.data.mode = "hybrid"
+    cfg.data.live_root_source = "random_river"
+    cfg.num_steps = 1
+    cfg.train.batch_size = 2
+    cfg.train.episodes_per_step = 1
+    cfg.train.replay_buffer_batches = 2
+    cfg.train.value_reuse_goal = 1
+    cfg.search.depth = 1
+    cfg.data.pregenerated.value_batch_size = 2
+    cfg.data.pregenerated.policy_batch_size = 2
+    cfg.data.pregenerated.datasets = [PregeneratedDatasetConfig(path=str(tmp_path))]
+    write_rebel_solved_dataset(
+        tmp_path,
+        value_batches=[_tiny_solved_batch(cfg, stream="value", start=0, count=4)],
+        policy_batches=[_tiny_solved_batch(cfg, stream="policy", start=10, count=4)],
+        metadata={
+            "model_family": (
+                cfg.model.name.value
+                if hasattr(cfg.model.name, "value")
+                else str(cfg.model.name)
+            ),
+            "action_schedule": {
+                "bet_bins": list(cfg.env.bet_bins),
+                "bet_bins_by_depth": cfg.search.bet_bins_by_depth,
+                "allin_by_depth": cfg.search.allin_by_depth,
+            },
+        },
+    )
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    metrics = trainer.train_step(0)
+
+    assert trainer.data_generator is not None
+    assert set(trainer.data_source.state_dict()) == {"live", "holdout"}
+    assert "fresh_value_loss" in metrics
+    assert "fresh_policy_target_model_kl" in metrics
     assert len(trainer.value_buffer) >= cfg.train.batch_size
     assert len(trainer.policy_buffer) >= cfg.train.batch_size
 

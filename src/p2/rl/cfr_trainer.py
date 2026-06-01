@@ -42,6 +42,7 @@ from p2.search.postflop_spot_sampler import (
 )
 from p2.search.rebel_data_generator import RebelDataGenerator
 from p2.search.rebel_data_source import (
+    HybridRebelDataSource,
     LiveRebelDataSource,
     PregeneratedRebelDataSource,
     RebelDataSource,
@@ -117,11 +118,10 @@ class RebelCFRTrainer:
     def __init__(self, cfg: Config, device: torch.device) -> None:
         self.cfg = cfg
         apply_action_schedule_to_config(cfg)
-        if cfg.data.mode not in {"live", "pregenerated"}:
+        if cfg.data.mode not in {"live", "pregenerated", "hybrid"}:
             raise NotImplementedError(
-                "RebelCFRTrainer currently supports data.mode=live or "
-                "data.mode=pregenerated only; hybrid mode requires validation "
-                "holdout plumbing."
+                "RebelCFRTrainer supports data.mode=live, "
+                "data.mode=pregenerated, or data.mode=hybrid."
             )
         self.device = device
         self.rng = torch.Generator(device=self.device)
@@ -386,30 +386,16 @@ class RebelCFRTrainer:
                 f"got {cfg.data.live_root_source!r}"
             )
 
-        self.data_generator: RebelDataGenerator | None = None
-        if cfg.data.mode == "live":
-            self.data_generator = RebelDataGenerator(
-                env_proto=self.env,
-                evaluator=self.cfr_evaluator,
-                value_buffer=self.value_buffer,
-                policy_buffer=self.policy_buffer,
-                root_sampler=root_sampler,
-            )
-            self.data_source = LiveRebelDataSource(
-                self.data_generator,
-                self.value_buffer,
-                self.policy_buffer,
-                value_sample_count=self.K_value,
-                max_return_policy_samples=self.batch_size,
-            )
-        else:
-            dataset_rng = torch.Generator(device="cpu")
-            if cfg.seed is not None:
-                dataset_rng.manual_seed(int(cfg.seed))
-            self.data_source: RebelDataSource = PregeneratedRebelDataSource(
+        def make_pregenerated_source(
+            value_buffer: RebelValueBuffer,
+            policy_buffer: RebelPolicyBuffer,
+            *,
+            generator: torch.Generator,
+        ) -> PregeneratedRebelDataSource:
+            return PregeneratedRebelDataSource(
                 cfg.data.pregenerated.datasets,
-                self.value_buffer,
-                self.policy_buffer,
+                value_buffer,
+                policy_buffer,
                 value_sample_count=cfg.data.pregenerated.value_batch_size
                 or self.K_value,
                 policy_sample_count=cfg.data.pregenerated.policy_batch_size
@@ -428,11 +414,63 @@ class RebelCFRTrainer:
                     "allin_by_depth": cfg.search.allin_by_depth,
                 },
                 street_support=[0, 1, 2, 3],
-                generator=dataset_rng,
+                generator=generator,
                 shuffle=cfg.data.pregenerated.shuffle,
                 direct_sample=cfg.data.pregenerated.direct_sample,
                 pin_memory=cfg.data.pregenerated.pin_memory,
                 async_shard_prefetch=cfg.data.pregenerated.async_shard_prefetch,
+            )
+
+        self.data_generator: RebelDataGenerator | None = None
+        if cfg.data.mode in {"live", "hybrid"}:
+            self.data_generator = RebelDataGenerator(
+                env_proto=self.env,
+                evaluator=self.cfr_evaluator,
+                value_buffer=self.value_buffer,
+                policy_buffer=self.policy_buffer,
+                root_sampler=root_sampler,
+            )
+            self.data_source = LiveRebelDataSource(
+                self.data_generator,
+                self.value_buffer,
+                self.policy_buffer,
+                value_sample_count=self.K_value,
+                max_return_policy_samples=self.batch_size,
+            )
+            if cfg.data.mode == "hybrid":
+                holdout_rng = torch.Generator(device="cpu")
+                if cfg.seed is not None:
+                    holdout_rng.manual_seed(int(cfg.seed) + 1)
+                holdout_value_buffer = RebelValueBuffer(
+                    capacity=value_capacity,
+                    num_actions=self.num_actions,
+                    num_players=self.num_players,
+                    num_context_features=num_context_features,
+                    device=self.buffer_device,
+                )
+                holdout_policy_buffer = RebelPolicyBuffer(
+                    capacity=policy_capacity,
+                    num_actions=self.num_actions,
+                    num_players=self.num_players,
+                    num_context_features=num_context_features,
+                    device=self.buffer_device,
+                )
+                holdout_source = make_pregenerated_source(
+                    holdout_value_buffer,
+                    holdout_policy_buffer,
+                    generator=holdout_rng,
+                )
+                self.data_source = HybridRebelDataSource(
+                    self.data_source, holdout_source
+                )
+        else:
+            dataset_rng = torch.Generator(device="cpu")
+            if cfg.seed is not None:
+                dataset_rng.manual_seed(int(cfg.seed))
+            self.data_source: RebelDataSource = make_pregenerated_source(
+                self.value_buffer,
+                self.policy_buffer,
+                generator=dataset_rng,
             )
 
         self.aggression_analyzer = AggressionAnalyzer(device=self.device)
