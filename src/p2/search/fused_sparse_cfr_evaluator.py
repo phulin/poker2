@@ -42,6 +42,7 @@ from p2.env.card_utils import NUM_HANDS, combo_to_onehot_tensor, hand_combos_ten
 from p2.env.env_gather_triton import gather_env_rows_into_triton
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.rules_triton import (
+    rank_hand_scores_triton,
     rank_hands_triton,
     triton_is_available as _rules_triton_ok,
 )
@@ -277,9 +278,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         m = indices.numel()
         k = torch.arange(NUM_HANDS, device=device).expand(m, -1)
 
-        import p2.search.cfr_evaluator as _ce
+        if _rules_triton_ok():
+            hand_ranks = rank_hand_scores_triton(board)
+            sorted_indices = torch.argsort(hand_ranks, dim=1, stable=False)
+        else:
+            import p2.search.cfr_evaluator as _ce
 
-        hand_ranks, sorted_indices = _ce.rank_hands(board)
+            hand_ranks, sorted_indices = _ce.rank_hands(board)
         ranks_sorted = torch.gather(hand_ranks, 1, sorted_indices)
         is_start = torch.ones_like(ranks_sorted, dtype=torch.bool)
         is_start[:, 1:] = ranks_sorted[:, 1:] != ranks_sorted[:, :-1]
