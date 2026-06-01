@@ -7231,25 +7231,25 @@ class ShowdownActiveCardBlockGraphRunner:
     def _copy_indexed_beliefs(
         self, beliefs: torch.Tensor, indices: torch.Tensor
     ) -> None:
-        grid = (self.M, 2, triton.cdiv(self.NUM_HANDS, 256))
+        grid = (self.M, 2, triton.cdiv(self.NUM_HANDS, 2048))
         _copy_indexed_belief_rows_kernel[grid](
             beliefs,
             indices,
             self.beliefs_in,
             self.NUM_HANDS,
-            BLOCK_H=256,
+            BLOCK_H=2048,
         )
 
     def _scatter_indexed_values(
         self, latest_values: torch.Tensor, indices: torch.Tensor
     ) -> None:
-        grid = (self.M, 2, triton.cdiv(self.NUM_HANDS, 256))
+        grid = (self.M, 2, triton.cdiv(self.NUM_HANDS, 2048))
         _copy_rows_to_indexed_values_kernel[grid](
             self.ev_out,
             indices,
             latest_values,
             self.NUM_HANDS,
-            BLOCK_H=256,
+            BLOCK_H=2048,
         )
 
     def write_indexed(
