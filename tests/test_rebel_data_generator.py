@@ -276,6 +276,49 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
     assert evaluator.self_play_calls >= 1
 
 
+def test_rebel_data_generator_can_use_sampled_roots(monkeypatch, env_proto):
+    monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
+    evaluator = DummyEvaluator(
+        env_proto=env_proto,
+        search_batch_size=2,
+        total_nodes=4,
+        num_players=2,
+        num_actions=env_proto.num_actions,
+    )
+    root_calls = []
+
+    def root_sampler(batch_size: int) -> PublicBeliefState:
+        root_calls.append(batch_size)
+        env = DummyEnv(batch_size, env_proto.num_actions, base_state=200)
+        beliefs = torch.full(
+            (batch_size, evaluator.num_players, NUM_HANDS),
+            1.0 / NUM_HANDS,
+            dtype=torch.float32,
+        )
+        return PublicBeliefState(env=env, beliefs=beliefs)
+
+    buffer = DummyBuffer()
+    generator = RebelDataGenerator(
+        env_proto=env_proto,
+        evaluator=evaluator,
+        value_buffer=buffer,
+        policy_buffer=buffer,
+        root_sampler=root_sampler,
+    )
+
+    assert root_calls == [2]
+    generator.generate_data(2)
+
+    assert root_calls == [2]
+    assert evaluator.last_initialized_env is not None
+    torch.testing.assert_close(
+        evaluator.last_initialized_env.states,
+        torch.tensor([200.0, 201.0]),
+    )
+    assert generator.current_pbs is None
+    assert evaluator.self_play_calls == 1
+
+
 def test_rebel_data_generator_terminates_when_no_next_pbs(monkeypatch, env_proto):
     """Test that generator terminates when self_play_iteration returns None."""
     monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)

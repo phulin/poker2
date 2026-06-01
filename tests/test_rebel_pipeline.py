@@ -52,6 +52,32 @@ def test_rebel_cfr_trainer_rejects_unimplemented_data_modes():
         RebelCFRTrainer(cfg, torch.device("cpu"))
 
 
+def test_rebel_cfr_trainer_wires_random_river_root_source():
+    cfg = Config()
+    cfg.num_envs = 1
+    cfg.train.batch_size = 1
+    cfg.env.bet_bins = [0.5]
+    cfg.model.name = "rebel_ffn"
+    cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+    cfg.model.input_dim = 2661
+    cfg.model.hidden_dim = 16
+    cfg.model.num_hidden_layers = 1
+    cfg.model.value_head_type = ValueHeadType.scalar
+    cfg.search.depth = 0
+    cfg.search.sparse = True
+    cfg.search.iterations = 1
+    cfg.search.warm_start_iterations = 0
+    cfg.search.dcfr_plus_delay = 0
+    cfg.data.live_root_source = "random_river"
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+
+    assert trainer.data_generator.root_sampler is not None
+    pbs = trainer.data_generator.root_sampler(2)
+    assert pbs.env.N == 2
+    assert torch.equal(pbs.env.street, torch.full((2,), 3, dtype=torch.long))
+
+
 def test_rebel_cfr_trainer_constructs_multiway_pbs_env():
     cfg = Config()
     cfg.num_envs = 1

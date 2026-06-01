@@ -386,6 +386,7 @@ class PregeneratedDataConfig:
 @dataclass
 class DataConfig:
     mode: str = "live"
+    live_root_source: str = "self_play"
     pregenerated: PregeneratedDataConfig = field(default_factory=PregeneratedDataConfig)
 
 

@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import torch
 
 from p2.env.card_utils import NUM_HANDS
@@ -46,6 +48,7 @@ class RebelDataGenerator:
         value_buffer: RebelReplayBuffer,
         policy_buffer: RebelReplayBuffer,
         warmup: bool = True,
+        root_sampler: Callable[[int], PublicBeliefState] | None = None,
     ):
         self.env_proto = env_proto
         self.evaluator = evaluator
@@ -53,11 +56,17 @@ class RebelDataGenerator:
         self.policy_buffer = policy_buffer
         self.device = evaluator.device
         self.target_batch_size = int(evaluator.root_nodes)
-        initial_pbs = self._new_pbs(self.target_batch_size)
+        self.root_sampler = root_sampler
+        initial_pbs = self._sample_roots(self.target_batch_size)
         self.current_pbs = initial_pbs
         self.last_extra = 0
-        if warmup:
+        if warmup and self.root_sampler is None:
             self._warmup_current_pbs()
+
+    def _sample_roots(self, target_batch_size: int) -> PublicBeliefState:
+        if self.root_sampler is not None:
+            return self.root_sampler(target_batch_size)
+        return self._new_pbs(target_batch_size)
 
     @torch.no_grad()
     def _record_batch_diag(self, refilled: bool) -> None:
@@ -232,12 +241,15 @@ class RebelDataGenerator:
         while collected < value_sample_count:
             refilled = False
             if self.current_pbs is None:
-                self.current_pbs = self._new_pbs(target_batch_size)
+                self.current_pbs = self._sample_roots(target_batch_size)
                 refilled = True
             elif self.current_pbs.env.N < target_batch_size:
-                self.current_pbs = self._extend_pbs(
-                    self.current_pbs, target_batch_size
-                )
+                if self.root_sampler is not None:
+                    self.current_pbs = self._sample_roots(target_batch_size)
+                else:
+                    self.current_pbs = self._extend_pbs(
+                        self.current_pbs, target_batch_size
+                    )
                 refilled = True
 
             root_count = int(self.current_pbs.env.N)
@@ -248,7 +260,8 @@ class RebelDataGenerator:
                 self.current_pbs.beliefs[:root_count],
             )
 
-            self.current_pbs = self.evaluator.evaluate_cfr()
+            next_pbs = self.evaluator.evaluate_cfr()
+            self.current_pbs = None if self.root_sampler is not None else next_pbs
             self._record_batch_diag(refilled)
 
             value_batch, augmented_value_batch, policy_batch = (

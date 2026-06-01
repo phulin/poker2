@@ -36,6 +36,7 @@ from p2.rl.rebel_batch import RebelBatch
 from p2.rl.trueskill_tracker import TrueSkillTracker
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
 from p2.search.cfr_evaluator import CFREvaluator
+from p2.search.postflop_spot_sampler import sample_river_start_roots
 from p2.search.rebel_data_generator import RebelDataGenerator
 from p2.search.rebel_data_source import LiveRebelDataSource, RebelDataSource
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
@@ -330,11 +331,25 @@ class RebelCFRTrainer:
             cfg=cfg,
             generator=self.rng,
         )
+        root_sampler = None
+        if cfg.data.live_root_source == "random_river":
+            root_sampler = lambda batch_size: sample_river_start_roots(
+                self.env,
+                batch_size=batch_size,
+                generator=self.rng,
+            )
+        elif cfg.data.live_root_source != "self_play":
+            raise ValueError(
+                "data.live_root_source must be 'self_play' or 'random_river'; "
+                f"got {cfg.data.live_root_source!r}"
+            )
+
         self.data_generator = RebelDataGenerator(
             env_proto=self.env,
             evaluator=self.cfr_evaluator,
             value_buffer=self.value_buffer,
             policy_buffer=self.policy_buffer,
+            root_sampler=root_sampler,
         )
         self.data_source: RebelDataSource = LiveRebelDataSource(
             self.data_generator,

@@ -57,6 +57,7 @@ train:
 
 data:
   mode: live
+  live_root_source: self_play
   pregenerated:
     value_batch_size: null
     policy_batch_size: null
