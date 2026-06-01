@@ -1,0 +1,30 @@
+# Live postflop ReBeL training with a fixed bounded solved-dataset holdout.
+#
+# Override data.live_root_source and data.pregenerated.datasets[0].path per street,
+# for example random_turn plus outputs/rebel_postflop/turn_val.
+
+defaults:
+  - config_rebel_cfr
+  - _self_
+
+checkpoint_dir: checkpoints-rebel-postflop-hybrid
+wandb_project: poker-rebel-postflop-curriculum
+wandb_tags: ["rebel", "cfr", "postflop", "hybrid-holdout"]
+
+data:
+  mode: hybrid
+  live_root_source: random_river
+  pregenerated:
+    value_batch_size: 4096
+    policy_batch_size: 4096
+    shuffle: false
+    direct_sample: false
+    pin_memory: true
+    async_shard_prefetch: true
+    validate_manifest: true
+    datasets:
+      - path: outputs/rebel_postflop/river_val
+        value_weight: 1.0
+        policy_weight: 1.0
+        min_step: 0
+        max_step: null

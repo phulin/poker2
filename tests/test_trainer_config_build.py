@@ -170,6 +170,24 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
     assert cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"
 
 
+def test_rebel_postflop_hybrid_holdout_config_loads_from_yaml():
+    cfg = Config.from_dict_config(
+        OmegaConf.load("conf/config_rebel_postflop_hybrid_holdout.yaml")
+    )
+
+    assert cfg.data.mode == "hybrid"
+    assert cfg.data.live_root_source == "random_river"
+    assert cfg.data.pregenerated.value_batch_size == 4096
+    assert cfg.data.pregenerated.policy_batch_size == 4096
+    assert cfg.data.pregenerated.shuffle is False
+    assert cfg.data.pregenerated.direct_sample is False
+    assert len(cfg.data.pregenerated.datasets) == 1
+    assert (
+        cfg.data.pregenerated.datasets[0].path
+        == "outputs/rebel_postflop/river_val"
+    )
+
+
 def test_rebel_pregenerate_postflop_config_loads_from_yaml():
     cfg = Config.from_dict_config(
         OmegaConf.load("conf/config_rebel_pregenerate_postflop.yaml")
