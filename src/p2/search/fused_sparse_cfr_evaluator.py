@@ -75,9 +75,10 @@ from p2.search.fused_cfr_triton import (
     fused_weighted_parent_sum_inline_opp_both,
     fused_weighted_parent_sum_inline_opp_both_noleaf,
     GraphedCFRIteration,
+    precompute_showdown_active_extras,
     precompute_showdown_extras,
     showdown_ev_v15,
-    ShowdownGraphRunner,
+    ShowdownActiveCardBlockGraphRunner,
     triton_is_available,
     TScalars,
     _preprocess_unblocked_stats,
@@ -125,8 +126,7 @@ def _compile_setting_from_env(cfg=None) -> str:
         return "default"
     if value not in {"off", "default", "max-autotune"}:
         raise ValueError(
-            "compile mode must be one of: off, default, max-autotune; "
-            f"got {mode!r}"
+            f"compile mode must be one of: off, default, max-autotune; got {mode!r}"
         )
     return value
 
@@ -336,22 +336,24 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 showdown_roots, sorted=True, return_inverse=True
             )
             self.hand_rank_data = self._build_hand_rank_data_for_indices(rank_indices)
-            self._showdown_extras = precompute_showdown_extras(
+            self._showdown_extras = precompute_showdown_active_extras(
                 self.hand_rank_data,
                 self.env,
                 rank_indices,
                 scale_indices=self.showdown_indices,
                 extra_indices=extra_indices,
             )
-            self._showdown_graph_runner = ShowdownGraphRunner(
+            self._showdown_graph_runner = ShowdownActiveCardBlockGraphRunner(
                 extras=self._showdown_extras,
                 M=self.showdown_indices.numel(),
                 NUM_HANDS=self.beliefs.shape[-1],
                 device=self.device,
             )
+            self._showdown_fallback_extras = None
         else:
             self.hand_rank_data = None
             self._showdown_extras = None
+            self._showdown_fallback_extras = None
             self._showdown_graph_runner = None
 
     def _showdown_value_both(self, beliefs: torch.Tensor) -> torch.Tensor:
@@ -366,7 +368,22 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         extras = getattr(self, "_showdown_extras", None)
         if extras is None:
             return super()._showdown_value_both(beliefs)
-        return showdown_ev_v15(beliefs, extras)
+        fallback_extras = getattr(self, "_showdown_fallback_extras", None)
+        if fallback_extras is None:
+            root_index = self._get_root_index()
+            showdown_roots = root_index[self.showdown_indices]
+            rank_indices, extra_indices = torch.unique(
+                showdown_roots, sorted=True, return_inverse=True
+            )
+            fallback_extras = precompute_showdown_extras(
+                self.hand_rank_data,
+                self.env,
+                rank_indices,
+                scale_indices=self.showdown_indices,
+                extra_indices=extra_indices,
+            )
+            self._showdown_fallback_extras = fallback_extras
+        return showdown_ev_v15(beliefs, fallback_extras)
 
     def _record_stats(self, t: int, old_policy_probs: torch.Tensor) -> None:
         """Record policy-update stats with a fused CFR-delta reduction."""
@@ -742,9 +759,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         env = self._subgame_env
         actor = env.to_act[parent_rows]
         opp = 1 - actor
-        parent_to_call = env.committed[parent_rows, opp] - env.committed[
-            parent_rows, actor
-        ]
+        parent_to_call = (
+            env.committed[parent_rows, opp] - env.committed[parent_rows, actor]
+        )
         parent_street = env.street[parent_rows]
         mask = (
             (action_bins == 1)
@@ -801,7 +818,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         call_rows = rows[is_check_call]
         if call_rows.numel() > 0:
-            call_amount = torch.minimum(to_call[is_check_call], actor_stack[is_check_call])
+            call_amount = torch.minimum(
+                to_call[is_check_call], actor_stack[is_check_call]
+            )
             self._bet_rows(call_rows, actor_idx[is_check_call], call_amount)
 
         allin_rows = rows[is_allin]
@@ -828,8 +847,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         equal_committed = env.committed[rows, 0] == env.committed[rows, 1]
         all_in_committed = (
             (env.is_allin[rows, 0] & env.is_allin[rows, 1])
-            | (env.is_allin[rows, 0] & (env.committed[rows, 0] <= env.committed[rows, 1]))
-            | (env.is_allin[rows, 1] & (env.committed[rows, 1] <= env.committed[rows, 0]))
+            | (
+                env.is_allin[rows, 0]
+                & (env.committed[rows, 0] <= env.committed[rows, 1])
+            )
+            | (
+                env.is_allin[rows, 1]
+                & (env.committed[rows, 1] <= env.committed[rows, 0])
+            )
         )
         round_closed = (
             ~env.done[rows]
@@ -925,7 +950,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         parent_street = self.env.street[self.allin_call_parent_indices].contiguous()
         self._cache_allin_call_street_partitions(parent_street)
 
-    def _construct_subgame(self, src_env: HUNLTensorEnv, src_indices: torch.Tensor) -> None:
+    def _construct_subgame(
+        self, src_env: HUNLTensorEnv, src_indices: torch.Tensor
+    ) -> None:
         self._ensure_fused_attrs()
         assert src_indices.dim() == 1, "src_indices must be 1-D"
         num_roots = src_indices.shape[0]
@@ -1184,7 +1211,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self.feature_encoder = self.policy_feature_encoder
         return True
 
-    def _root_allowed_from_board_indices(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def _root_allowed_from_board_indices(
+        self, n: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         root_allowed = torch.empty(n, NUM_HANDS, dtype=torch.bool, device=self.device)
         root_allowed_prob = torch.empty(
             n, NUM_HANDS, dtype=self.float_dtype, device=self.device
@@ -1396,14 +1425,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._ev_marginal_policy_buf is None
             or self._ev_marginal_policy_buf.shape != marginal_shape
         ):
-            self._ev_marginal_policy_buf = self.policy_probs.new_empty(
-                marginal_shape
-            )
+            self._ev_marginal_policy_buf = self.policy_probs.new_empty(marginal_shape)
         return self._ev_actor_beliefs_buf, self._ev_marginal_policy_buf
 
-    def _ensure_regret_src_buffers(
-        self, top: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _ensure_regret_src_buffers(self, top: int) -> tuple[torch.Tensor, torch.Tensor]:
         target_shape = (top, NUM_HANDS)
         stats_shape = (top, 53)
         if (
@@ -1614,7 +1639,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             m,
             s,
         )
-        if self._leaf_belief_gather_key != key or self._leaf_belief_gather_indices is None:
+        if (
+            self._leaf_belief_gather_key != key
+            or self._leaf_belief_gather_indices is None
+        ):
             self._leaf_belief_gather_indices = torch.cat(
                 (self.model_indices, self.showdown_indices),
                 dim=0,
@@ -2093,13 +2121,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             eps=1e-5,
         )
 
-    def _update_average_policy_true(
-        self, t: int, update_reach: bool = False
-    ) -> None:
+    def _update_average_policy_true(self, t: int, update_reach: bool = False) -> None:
         defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
-        if (
-            self.cfr_type == CFRType.discounted
-            and self._average_accumulation_delayed(t)
+        if self.cfr_type == CFRType.discounted and self._average_accumulation_delayed(
+            t
         ):
             if defer_avg_policy:
                 self.average_policy_initialized = False
@@ -2186,9 +2211,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             model = getattr(self, "value_model", self.model)
             base_model = getattr(model, "_orig_mod", model)
             if isinstance(base_model, BetterTRM):
-                model_output = model(
-                    features, include_policy=False, latent=self.latent
-                )
+                model_output = model(features, include_policy=False, latent=self.latent)
                 self.latent = model_output.latent
                 model_applied_zero_sum = bool(base_model.enforce_zero_sum)
             elif isinstance(base_model, BetterFFN):
@@ -2231,9 +2254,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     include_policy=False,
                     apply_zero_sum=True,
                     static_base_features=self._static_model_base_features,
-                    value_head="pre"
-                    if self._uses_street_cutoff_schedule()
-                    else "auto",
+                    value_head="pre" if self._uses_street_cutoff_schedule() else "auto",
                 )
                 model_applied_zero_sum = bool(base_model.enforce_zero_sum)
             else:
@@ -2241,7 +2262,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     model, "forward_pre"
                 ):
                     hand_values = model.forward_pre(features).contiguous()
-                    model_applied_zero_sum = bool(getattr(base_model, "enforce_zero_sum", False))
+                    model_applied_zero_sum = bool(
+                        getattr(base_model, "enforce_zero_sum", False)
+                    )
                     model_output = None
                 else:
                     model_output = model(features, include_policy=False)
@@ -2336,7 +2359,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         node_idx = indices_by_street[0]
         if node_idx.numel() > 0:
-            table, scale = resolver.payoff_for_board(boards_by_street[0].new_empty(0), 0)
+            table, scale = resolver.payoff_for_board(
+                boards_by_street[0].new_empty(0), 0
+            )
             preflop_stats = getattr(self, "allin_preflop_stats_buffer", None)
             if (
                 preflop_stats is None
@@ -2377,14 +2402,30 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         turn_ids = getattr(self, "allin_turn_table_ids", None)
         turn_stats = getattr(self, "allin_turn_stats_buffer", None)
         if flop_node_idx.numel() > 0:
-            if flop_tables is None or flop_ids is None or flop_stats is None or flop_tables.numel() == 0:
-                raise RuntimeError("Fused all-in flop evaluation requires cached flop tables.")
+            if (
+                flop_tables is None
+                or flop_ids is None
+                or flop_stats is None
+                or flop_tables.numel() == 0
+            ):
+                raise RuntimeError(
+                    "Fused all-in flop evaluation requires cached flop tables."
+                )
         if turn_node_idx.numel() > 0:
-            if turn_tables is None or turn_ids is None or turn_stats is None or turn_tables.numel() == 0:
-                raise RuntimeError("Fused all-in turn evaluation requires cached turn tables.")
+            if (
+                turn_tables is None
+                or turn_ids is None
+                or turn_stats is None
+                or turn_tables.numel() == 0
+            ):
+                raise RuntimeError(
+                    "Fused all-in turn evaluation requires cached turn tables."
+                )
         if flop_node_idx.numel() > 0 or turn_node_idx.numel() > 0:
             if flop_stats is None or turn_stats is None:
-                raise RuntimeError("Fused all-in evaluation requires cached stats buffers.")
+                raise RuntimeError(
+                    "Fused all-in evaluation requires cached stats buffers."
+                )
             write_allin_belief_card_stats_split_triton_(
                 beliefs=beliefs,
                 node_indices0=flop_node_idx,
@@ -2398,8 +2439,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             flop_tables = getattr(self, "allin_flop_tables_i8", None)
             flop_ids = getattr(self, "allin_flop_table_ids", None)
             flop_stats = getattr(self, "allin_flop_stats_buffer", None)
-            if flop_tables is None or flop_ids is None or flop_stats is None or flop_tables.numel() == 0:
-                raise RuntimeError("Fused all-in flop evaluation requires cached flop tables.")
+            if (
+                flop_tables is None
+                or flop_ids is None
+                or flop_stats is None
+                or flop_tables.numel() == 0
+            ):
+                raise RuntimeError(
+                    "Fused all-in flop evaluation requires cached flop tables."
+                )
             write_allin_table_values_card_denom_dot_values_triton_(
                 table=flop_tables,
                 beliefs=beliefs,
@@ -2422,8 +2470,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             turn_tables = getattr(self, "allin_turn_tables_i16", None)
             turn_ids = getattr(self, "allin_turn_table_ids", None)
             turn_stats = getattr(self, "allin_turn_stats_buffer", None)
-            if turn_tables is None or turn_ids is None or turn_stats is None or turn_tables.numel() == 0:
-                raise RuntimeError("Fused all-in turn evaluation requires cached turn tables.")
+            if (
+                turn_tables is None
+                or turn_ids is None
+                or turn_stats is None
+                or turn_tables.numel() == 0
+            ):
+                raise RuntimeError(
+                    "Fused all-in turn evaluation requires cached turn tables."
+                )
             write_allin_table_values_card_denom_dot_values_triton_(
                 table=turn_tables,
                 beliefs=beliefs,
@@ -2643,15 +2698,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         """Return the Python-branch regime that is safe to CUDA-graph replay."""
         if t < 2:
             return None
-        if (
-            self.cfr_type == CFRType.discounted
-            and t <= self.dcfr_delay
-        ):
+        if self.cfr_type == CFRType.discounted and t <= self.dcfr_delay:
             return "pre_dcfr_delay"
         return "post_dcfr_delay"
 
     @torch.no_grad()
-    def evaluate_cfr(self, training_mode: bool = True, sample_continuation: bool = True):
+    def evaluate_cfr(
+        self, training_mode: bool = True, sample_continuation: bool = True
+    ):
         """CFR-loop with per-call CUDA graphs for each Python branch regime.
 
         Runs ``t < 2`` uncaptured, then captures/replays one graph for the
@@ -2717,9 +2771,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if not self.cfr_avg and self.use_final_policy_values:
             self._finalize_deferred_average_policy()
             self.self_reach_avg[: self.root_nodes] = 1.0
-            self._calculate_reach_weights(
-                self.self_reach_avg, self.policy_probs_avg
-            )
+            self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
             self._refresh_average_beliefs()
 
         if self.use_final_policy_values:

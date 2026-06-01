@@ -233,10 +233,10 @@ if triton is not None:
 
     @triton.jit
     def _fused_block_normalize_kernel(
-        target_ptr,             # [R, H] flat view of target (R = N*P or N)
-        allowed_mask_ptr,       # [R_outer, H] bool (broadcast along P)
-        allowed_prob_ptr,       # [R_outer, H] fallback
-        row_to_outer_stride,    # stride from row index to outer index (P for [N,P,H], 1 for [N,H])
+        target_ptr,  # [R, H] flat view of target (R = N*P or N)
+        allowed_mask_ptr,  # [R_outer, H] bool (broadcast along P)
+        allowed_prob_ptr,  # [R_outer, H] fallback
+        row_to_outer_stride,  # stride from row index to outer index (P for [N,P,H], 1 for [N,H])
         H,
         EPS,
         BLOCK_H: tl.constexpr,
@@ -334,9 +334,9 @@ if triton is not None:
     @triton.jit
     def _fused_regret_matching_divide_kernel(
         positive_regrets_ptr,  # [N, H]
-        denom_ptr,             # [N, H]
-        uniform_ptr,           # [N, H]
-        out_ptr,               # [N, H]
+        denom_ptr,  # [N, H]
+        uniform_ptr,  # [N, H]
+        out_ptr,  # [N, H]
         N_elements,
         EPS,
         BLOCK: tl.constexpr,
@@ -397,18 +397,19 @@ if triton is not None:
 
     @triton.jit
     def _fused_weight_child_values_kernel(
-        values_src_ptr,        # [M, 2, H]
-        prev_actor_ptr,        # [M] int64
-        policy_hero_ptr,       # [M, H] — policy at child
-        policy_opp_ptr,        # [M, H] — opponent_conditioned_policy at child
-        out_ptr,               # [M, 2, H]
-        M, H,
+        values_src_ptr,  # [M, 2, H]
+        prev_actor_ptr,  # [M] int64
+        policy_hero_ptr,  # [M, H] — policy at child
+        policy_opp_ptr,  # [M, H] — opponent_conditioned_policy at child
+        out_ptr,  # [M, 2, H]
+        M,
+        H,
         BLOCK_H: tl.constexpr,
     ):
         m_idx = tl.program_id(0)
         p_idx = tl.program_id(1)
         prev_actor = tl.load(prev_actor_ptr + m_idx)
-        is_hero = (p_idx == prev_actor)
+        is_hero = p_idx == prev_actor
 
         row_offset = (m_idx * 2 + p_idx) * H
         pol_row_offset = m_idx * H
@@ -418,18 +419,22 @@ if triton is not None:
             mask = offs < H
             v = tl.load(values_src_ptr + row_offset + offs, mask=mask, other=0.0)
             if is_hero:
-                p = tl.load(policy_hero_ptr + pol_row_offset + offs, mask=mask, other=0.0)
+                p = tl.load(
+                    policy_hero_ptr + pol_row_offset + offs, mask=mask, other=0.0
+                )
             else:
-                p = tl.load(policy_opp_ptr + pol_row_offset + offs, mask=mask, other=0.0)
+                p = tl.load(
+                    policy_opp_ptr + pol_row_offset + offs, mask=mask, other=0.0
+                )
             tl.store(out_ptr + row_offset + offs, v * p, mask=mask)
 
 
 def fused_weight_child_values(
-    values_src: torch.Tensor,        # [M, 2, H]
-    prev_actor: torch.Tensor,        # [M]
-    policy_hero: torch.Tensor,       # [M, H]
-    policy_opp: torch.Tensor,        # [M, H]
-    out: torch.Tensor,               # [M, 2, H]
+    values_src: torch.Tensor,  # [M, 2, H]
+    prev_actor: torch.Tensor,  # [M]
+    policy_hero: torch.Tensor,  # [M, H]
+    policy_opp: torch.Tensor,  # [M, H]
+    out: torch.Tensor,  # [M, 2, H]
     block_h: int = 512,
 ) -> None:
     """Fused weighted copy used inside ``compute_expected_values``.
@@ -460,7 +465,8 @@ def fused_weight_child_values(
         policy_hero,
         policy_opp,
         out,
-        m, h,
+        m,
+        h,
         BLOCK_H=block_h,
         num_warps=4,
     )
@@ -475,11 +481,11 @@ if triton is not None:
 
     @triton.jit
     def _fused_update_average_values_kernel(
-        values_avg_ptr,     # [N, 2, H] in/out
-        latest_ptr,         # [N, 2, H]
+        values_avg_ptr,  # [N, 2, H] in/out
+        latest_ptr,  # [N, 2, H]
         old_scalar_ptr,
         new_scalar_ptr,
-        inv_total_ptr,      # 1 / (old + new)
+        inv_total_ptr,  # 1 / (old + new)
         n_elements,
         BLOCK: tl.constexpr,
     ):
@@ -559,14 +565,15 @@ if triton is not None:
 
     @triton.jit
     def _fused_avg_values_zs_kernel(
-        values_avg_ptr,    # [N, 2, H] in/out
-        latest_ptr,        # [N, 2, H]
-        beliefs_ptr,       # [N, 2, H]
-        ignore_mask_ptr,   # [N] bool (only read if HAS_IGNORE)
-        old_ptr,           # 0-D
-        new_ptr,           # 0-D
-        inv_total_ptr,     # 0-D
-        N, H,
+        values_avg_ptr,  # [N, 2, H] in/out
+        latest_ptr,  # [N, 2, H]
+        beliefs_ptr,  # [N, 2, H]
+        ignore_mask_ptr,  # [N] bool (only read if HAS_IGNORE)
+        old_ptr,  # 0-D
+        new_ptr,  # 0-D
+        inv_total_ptr,  # 0-D
+        N,
+        H,
         HAS_IGNORE: tl.constexpr,
         ENFORCE_ZS: tl.constexpr,
         BLOCK_H: tl.constexpr,
@@ -610,12 +617,12 @@ if triton is not None:
 
 
 def fused_avg_values_zero_sum_(
-    values_avg: torch.Tensor,        # [N, 2, H] in/out
-    latest_values: torch.Tensor,     # [N, 2, H]
-    beliefs: torch.Tensor,           # [N, 2, H]
-    old: torch.Tensor,               # 0-D
-    new: torch.Tensor,               # 0-D
-    inv_total: torch.Tensor,         # 0-D
+    values_avg: torch.Tensor,  # [N, 2, H] in/out
+    latest_values: torch.Tensor,  # [N, 2, H]
+    beliefs: torch.Tensor,  # [N, 2, H]
+    old: torch.Tensor,  # 0-D
+    new: torch.Tensor,  # 0-D
+    inv_total: torch.Tensor,  # 0-D
     enforce_zero_sum: bool,
     ignore_mask: torch.Tensor | None = None,  # [N] bool
     block_h: int = 2048,
@@ -649,7 +656,8 @@ def fused_avg_values_zero_sum_(
         old,
         new,
         inv_total,
-        n_rows, h,
+        n_rows,
+        h,
         HAS_IGNORE=ignore_mask is not None,
         ENFORCE_ZS=enforce_zero_sum,
         BLOCK_H=block_h,
@@ -666,13 +674,13 @@ if triton is not None:
 
     @triton.jit
     def _fused_regret_tail_kernel(
-        values_achieved_ptr,     # [total, 2, H]
-        values_expected_ptr,     # [top, 2, H]  (was: actor_values [top, H])
-        to_act_ptr,              # [top]        — selects the actor row inside values_expected
-        src_weights_ptr,         # [top, H]     (parent-aligned — was post-fan_out)
-        parent_index_ptr,        # [total] — parent_index[c] gives parent row in [0, top)
-        prev_actor_ptr,          # [total] — 0 or 1
-        regrets_ptr,             # [total, H] output (only rows [bottom, total) written)
+        values_achieved_ptr,  # [total, 2, H]
+        values_expected_ptr,  # [top, 2, H]  (was: actor_values [top, H])
+        to_act_ptr,  # [top]        — selects the actor row inside values_expected
+        src_weights_ptr,  # [top, H]     (parent-aligned — was post-fan_out)
+        parent_index_ptr,  # [total] — parent_index[c] gives parent row in [0, top)
+        prev_actor_ptr,  # [total] — 0 or 1
+        regrets_ptr,  # [total, H] output (only rows [bottom, total) written)
         bottom,
         total,
         H,
@@ -703,13 +711,13 @@ if triton is not None:
 
 
 def fused_regret_tail_(
-    regrets: torch.Tensor,              # [total, H] — in/out (only [bottom:] written)
-    values_achieved: torch.Tensor,      # [total, 2, H]
-    values_expected: torch.Tensor,      # [top, 2, H] — actor row picked in-kernel
-    to_act: torch.Tensor,               # [top]      — int64, picks the actor row
-    src_weights: torch.Tensor,          # [top, H] — parent-aligned (was post-fan_out)
-    parent_index: torch.Tensor,         # [total] int64
-    prev_actor: torch.Tensor,           # [total] int64
+    regrets: torch.Tensor,  # [total, H] — in/out (only [bottom:] written)
+    values_achieved: torch.Tensor,  # [total, 2, H]
+    values_expected: torch.Tensor,  # [top, 2, H] — actor row picked in-kernel
+    to_act: torch.Tensor,  # [top]      — int64, picks the actor row
+    src_weights: torch.Tensor,  # [top, H] — parent-aligned (was post-fan_out)
+    parent_index: torch.Tensor,  # [total] int64
+    prev_actor: torch.Tensor,  # [total] int64
     bottom: int,
     block_h: int = 512,
 ) -> None:
@@ -775,19 +783,19 @@ if triton is not None:
 
     @triton.jit
     def _fused_unblocked_regret_dcfr_update_kernel(
-        target_ptr,              # [top, H] opponent beliefs at parent rows
-        stats_ptr,               # [top, 53] stacked (S, cardsum)
-        card_a_ptr,              # [H]
-        card_b_ptr,              # [H]
-        allowed_ptr,             # optional [top, H]
-        values_achieved_ptr,     # [total, 2, H]
-        values_expected_ptr,     # [top, 2, H]
-        to_act_ptr,              # [top]
-        child_offsets_ptr,       # [top]
-        child_count_ptr,         # [top]
-        prev_actor_ptr,          # [total]
-        cumul_ptr,               # [total, H]
-        pos_out_ptr,             # [total, H]
+        target_ptr,  # [top, H] opponent beliefs at parent rows
+        stats_ptr,  # [top, 53] stacked (S, cardsum)
+        card_a_ptr,  # [H]
+        card_b_ptr,  # [H]
+        allowed_ptr,  # optional [top, H]
+        values_achieved_ptr,  # [total, 2, H]
+        values_expected_ptr,  # [top, 2, H]
+        to_act_ptr,  # [top]
+        child_offsets_ptr,  # [top]
+        child_count_ptr,  # [top]
+        prev_actor_ptr,  # [total]
+        cumul_ptr,  # [total, H]
+        pos_out_ptr,  # [total, H]
         t_alpha_num_ptr,
         t_beta_num_ptr,
         t_alpha_den_ptr,
@@ -828,7 +836,9 @@ if triton is not None:
         )
         src_w = tl.maximum(S - csa - csb + t, 0.0)
         if HAS_ALLOWED:
-            allowed = tl.load(allowed_ptr + p * H + offs, mask=mask, other=0).to(tl.int1)
+            allowed = tl.load(allowed_ptr + p * H + offs, mask=mask, other=0).to(
+                tl.int1
+            )
             src_w = tl.where(allowed, src_w, 0.0)
 
         actor = tl.load(to_act_ptr + p)
@@ -911,7 +921,9 @@ def fused_unblocked_regret_dcfr_update_with_tensors_(
     assert to_act.is_contiguous() and to_act.shape == (target.shape[0],)
     assert child_offsets.is_contiguous() and child_offsets.shape == (target.shape[0],)
     assert child_count.is_contiguous() and child_count.shape == child_offsets.shape
-    assert prev_actor.is_contiguous() and prev_actor.shape == (values_achieved.shape[0],)
+    assert prev_actor.is_contiguous() and prev_actor.shape == (
+        values_achieved.shape[0],
+    )
     assert cumulative_regrets.is_contiguous()
     total, h = cumulative_regrets.shape
     top = target.shape[0]
@@ -969,15 +981,15 @@ if triton is not None:
 
     @triton.jit
     def _fused_average_policy_mix_kernel(
-        self_reach_ptr,         # [total, 2, H]
-        policy_probs_ptr,       # [total, H]
-        policy_probs_avg_ptr,   # [total, H] in/out
-        avg_num_ptr,            # [total, H] in/out
-        avg_den_ptr,            # [total, H] in/out
-        to_act_ptr,             # [total] int64
-        parent_index_ptr,       # [total] int64
+        self_reach_ptr,  # [total, 2, H]
+        policy_probs_ptr,  # [total, H]
+        policy_probs_avg_ptr,  # [total, H] in/out
+        avg_num_ptr,  # [total, H] in/out
+        avg_den_ptr,  # [total, H] in/out
+        to_act_ptr,  # [total] int64
+        parent_index_ptr,  # [total] int64
         new_scalar_ptr,
-        bottom,                 # first child row to update
+        bottom,  # first child row to update
         total,
         H,
         EPS,
@@ -1023,13 +1035,13 @@ if triton is not None:
 
 
 def fused_average_policy_mix_(
-    policy_probs_avg: torch.Tensor,   # [total, H] in/out
-    average_policy_numerator: torch.Tensor,    # [total, H] in/out
+    policy_probs_avg: torch.Tensor,  # [total, H] in/out
+    average_policy_numerator: torch.Tensor,  # [total, H] in/out
     average_policy_denominator: torch.Tensor,  # [total, H] in/out
-    policy_probs: torch.Tensor,       # [total, H]
-    self_reach: torch.Tensor,         # [total, 2, H]
-    to_act: torch.Tensor,             # [total]
-    parent_index: torch.Tensor,       # [total]
+    policy_probs: torch.Tensor,  # [total, H]
+    self_reach: torch.Tensor,  # [total, 2, H]
+    to_act: torch.Tensor,  # [total]
+    parent_index: torch.Tensor,  # [total]
     new: float,
     bottom: int,
     eps: float = 1e-5,
@@ -1058,8 +1070,13 @@ def fused_average_policy_mix_(
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
     assert policy_probs_avg.is_contiguous() and policy_probs_avg.dim() == 2
-    assert average_policy_numerator.is_contiguous() and average_policy_numerator.dim() == 2
-    assert average_policy_denominator.is_contiguous() and average_policy_denominator.dim() == 2
+    assert (
+        average_policy_numerator.is_contiguous() and average_policy_numerator.dim() == 2
+    )
+    assert (
+        average_policy_denominator.is_contiguous()
+        and average_policy_denominator.dim() == 2
+    )
     assert policy_probs.is_contiguous() and policy_probs.dim() == 2
     assert self_reach.is_contiguous() and self_reach.dim() == 3
     assert self_reach.shape[1] == 2
@@ -1074,9 +1091,18 @@ def fused_average_policy_mix_(
     dt = policy_probs_avg.dtype
     new_t = torch.tensor(float(new), dtype=dt, device=dev)
     fused_average_policy_mix_with_tensors_(
-        policy_probs_avg, average_policy_numerator, average_policy_denominator,
-        policy_probs, self_reach, to_act, parent_index, new_t,
-        bottom=bottom, eps=eps, block_h=block_h, write_policy=write_policy,
+        policy_probs_avg,
+        average_policy_numerator,
+        average_policy_denominator,
+        policy_probs,
+        self_reach,
+        to_act,
+        parent_index,
+        new_t,
+        bottom=bottom,
+        eps=eps,
+        block_h=block_h,
+        write_policy=write_policy,
     )
 
 
@@ -1131,13 +1157,13 @@ if triton is not None:
 
     @triton.jit
     def _unblocked_mass_finalize_kernel(
-        target_ptr,    # [B, H]
-        cardsum_ptr,   # [B, NUM_CARDS]
-        S_ptr,         # [B]
-        card_a_ptr,    # [H] int32
-        card_b_ptr,    # [H] int32
-        allowed_ptr,   # optional [B, H] bool mask
-        out_ptr,       # [B, H]
+        target_ptr,  # [B, H]
+        cardsum_ptr,  # [B, NUM_CARDS]
+        S_ptr,  # [B]
+        card_a_ptr,  # [H] int32
+        card_b_ptr,  # [H] int32
+        allowed_ptr,  # optional [B, H] bool mask
+        out_ptr,  # [B, H]
         H,
         NUM_CARDS: tl.constexpr,
         HAS_ALLOWED: tl.constexpr,
@@ -1163,7 +1189,9 @@ if triton is not None:
         out = S - csa - csb + t
         out = tl.maximum(out, 0.0)
         if HAS_ALLOWED:
-            allowed = tl.load(allowed_ptr + b * H + offs, mask=mask, other=0).to(tl.int1)
+            allowed = tl.load(allowed_ptr + b * H + offs, mask=mask, other=0).to(
+                tl.int1
+            )
             out = tl.where(allowed, out, 0.0)
         tl.store(out_row + offs, out, mask=mask)
 
@@ -1280,7 +1308,9 @@ def select_actor_beliefs_triton(
     block_h: int = 1024,
 ) -> torch.Tensor:
     """Materialize ``beliefs[row, to_act[row], hand]`` for parent rows."""
-    out = torch.empty((top, beliefs.shape[-1]), device=beliefs.device, dtype=beliefs.dtype)
+    out = torch.empty(
+        (top, beliefs.shape[-1]), device=beliefs.device, dtype=beliefs.dtype
+    )
     select_actor_beliefs_triton_out_(beliefs, to_act, top, out, block_h=block_h)
     return out
 
@@ -1459,8 +1489,8 @@ class ParentBeliefUnblockedStats:
 
 
 def unblocked_mass_opp_at_parents_triton(
-    beliefs: torch.Tensor,   # [total, 2, H]
-    to_act: torch.Tensor,    # [total] int64
+    beliefs: torch.Tensor,  # [total, 2, H]
+    to_act: torch.Tensor,  # [total] int64
     top: int,
     cached_stats: ParentBeliefUnblockedStats | None = None,
     allowed_mask: torch.Tensor | None = None,
@@ -1497,7 +1527,13 @@ def unblocked_mass_opp_at_parents_triton(
     if has_allowed:
         assert allowed_mask.is_contiguous() and allowed_mask.shape == target.shape
     _unblocked_mass_finalize_kernel[(top,)](
-        target, cardsum, s, card_a, card_b, allowed_ptr, out,
+        target,
+        cardsum,
+        s,
+        card_a,
+        card_b,
+        allowed_ptr,
+        out,
         _UNBLOCKED_NUM_HANDS,
         NUM_CARDS=_UNBLOCKED_NUM_CARDS,
         HAS_ALLOWED=has_allowed,
@@ -1606,11 +1642,11 @@ if triton is not None:
 
     @triton.jit
     def _sibling_sum_kernel(
-        values_ptr,         # [total, H] (children contiguous per parent)
+        values_ptr,  # [total, H] (children contiguous per parent)
         child_offsets_ptr,  # [num_parents] — first child absolute index
-        child_count_ptr,    # [num_parents]
-        out_ptr,            # [num_children, H] (out_row = first + i - out_offset)
-        out_offset,         # absolute row index of first child (typically bottom)
+        child_count_ptr,  # [num_parents]
+        out_ptr,  # [num_children, H] (out_row = first + i - out_offset)
+        out_offset,  # absolute row index of first child (typically bottom)
         H,
         MAX_CHILDREN: tl.constexpr,
         BLOCK_H: tl.constexpr,
@@ -1632,13 +1668,11 @@ if triton is not None:
         mask_2d = row_mask[:, None] & col_mask[None, :]
 
         ptrs = values_ptr + (first + row_offs)[:, None] * H + col_offs[None, :]
-        tile = tl.load(ptrs, mask=mask_2d, other=0.0)   # [MC, BH]
-        acc = tl.sum(tile, axis=0)                      # [BH]
+        tile = tl.load(ptrs, mask=mask_2d, other=0.0)  # [MC, BH]
+        acc = tl.sum(tile, axis=0)  # [BH]
 
         out_ptrs = (
-            out_ptr
-            + (first + row_offs - out_offset)[:, None] * H
-            + col_offs[None, :]
+            out_ptr + (first + row_offs - out_offset)[:, None] * H + col_offs[None, :]
         )
         bcast = tl.broadcast_to(acc[None, :], (MAX_CHILDREN, BLOCK_H))
         tl.store(out_ptrs, bcast, mask=mask_2d)
@@ -1648,12 +1682,12 @@ if triton is not None:
 
     @triton.jit
     def _fused_parent_sum_divide_kernel(
-        values_ptr,         # [total, H] absolute-row values to sum over siblings
-        fallback_ptr,       # [num_children, H] child-aligned fallback
+        values_ptr,  # [total, H] absolute-row values to sum over siblings
+        fallback_ptr,  # [num_children, H] child-aligned fallback
         child_offsets_ptr,  # [num_parents] absolute first-child row
-        child_count_ptr,    # [num_parents]
-        out_ptr,            # [num_children, H] child-aligned output
-        out_offset,         # absolute row index corresponding to out row 0
+        child_count_ptr,  # [num_parents]
+        out_ptr,  # [num_children, H] child-aligned output
+        out_offset,  # absolute row index corresponding to out row 0
         H,
         EPS,
         MAX_CHILDREN: tl.constexpr,
@@ -1688,12 +1722,13 @@ if triton is not None:
         out_ptrs = out_ptr + child_rel[:, None] * H + col_offs[None, :]
         tl.store(out_ptrs, result, mask=mask_2d)
 
+
 def fused_parent_sum_divide_(
-    values: torch.Tensor,          # [total, H] absolute-row numerator
-    fallback: torch.Tensor,        # [num_children, H] fallback for denom <= eps
-    child_offsets: torch.Tensor,   # [num_parents] absolute child row
-    child_count: torch.Tensor,     # [num_parents]
-    out: torch.Tensor,             # [num_children, H]
+    values: torch.Tensor,  # [total, H] absolute-row numerator
+    fallback: torch.Tensor,  # [num_children, H] fallback for denom <= eps
+    child_offsets: torch.Tensor,  # [num_parents] absolute child row
+    child_count: torch.Tensor,  # [num_parents]
+    out: torch.Tensor,  # [num_children, H]
     out_offset: int,
     max_children: int = 8,
     eps: float = 1e-8,
@@ -1745,12 +1780,12 @@ if triton is not None:
 
     @triton.jit
     def _fused_cfr_delta_stats_kernel(
-        policy_ptr,         # [total, H]
-        old_policy_ptr,     # [total, H]
-        self_reach_ptr,     # [total, 2, H]
+        policy_ptr,  # [total, H]
+        old_policy_ptr,  # [total, H]
+        self_reach_ptr,  # [total, 2, H]
         child_offsets_ptr,  # [num_parents]
-        child_count_ptr,    # [num_parents]
-        out_ptr,            # [2], numerator sum and reachable-node count
+        child_count_ptr,  # [num_parents]
+        out_ptr,  # [2], numerator sum and reachable-node count
         H,
         MAX_CHILDREN: tl.constexpr,
         BLOCK_H: tl.constexpr,
@@ -1857,12 +1892,12 @@ if triton is not None:
 
     @triton.jit
     def _policy_renorm_reach_depth_kernel(
-        policy_ptr,         # [total, H] in/out
-        reach_ptr,          # [total, 2, H] in/out
-        allowed_mask_ptr,   # [total, H] bool
+        policy_ptr,  # [total, H] in/out
+        reach_ptr,  # [total, 2, H] in/out
+        allowed_mask_ptr,  # [total, H] bool
         child_offsets_ptr,  # [num_parents]
-        child_count_ptr,    # [num_parents]
-        prev_actor_ptr,     # [total]
+        child_count_ptr,  # [num_parents]
+        prev_actor_ptr,  # [total]
         parent_base,
         H,
         EPS,
@@ -1898,7 +1933,9 @@ if triton is not None:
                 tl.store(policy_ptr + child * H + offs, pol, mask=mask)
 
                 prev_actor = tl.load(prev_actor_ptr + child)
-                allowed = tl.load(allowed_mask_ptr + child * H + offs, mask=mask, other=0).to(tl.int1)
+                allowed = tl.load(
+                    allowed_mask_ptr + child * H + offs, mask=mask, other=0
+                ).to(tl.int1)
                 r0 = tl.where(prev_actor == 0, parent0 * pol, parent0)
                 r1 = tl.where(prev_actor == 1, parent1 * pol, parent1)
                 r0 = tl.where(allowed, r0, 0.0)
@@ -1922,7 +1959,11 @@ def fused_policy_renorm_reach_depth_(
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
     assert policy.is_contiguous() and policy.dim() == 2
-    assert reach.is_contiguous() and reach.shape == (policy.shape[0], 2, policy.shape[1])
+    assert reach.is_contiguous() and reach.shape == (
+        policy.shape[0],
+        2,
+        policy.shape[1],
+    )
     assert allowed_mask.is_contiguous() and allowed_mask.shape == policy.shape
     assert child_offsets.is_contiguous() and child_count.is_contiguous()
     assert prev_actor.is_contiguous()
@@ -1948,10 +1989,10 @@ def fused_policy_renorm_reach_depth_(
 
 
 def fused_sibling_sum(
-    values: torch.Tensor,          # [total, H]
-    child_offsets: torch.Tensor,   # [num_parents] — child_offsets[p] gives first child idx
-    child_count: torch.Tensor,     # [num_parents]
-    bottom: int,                   # first child absolute index
+    values: torch.Tensor,  # [total, H]
+    child_offsets: torch.Tensor,  # [num_parents] — child_offsets[p] gives first child idx
+    child_count: torch.Tensor,  # [num_parents]
+    bottom: int,  # first child absolute index
     num_children: int,
     max_children: int = 8,
     block_h: int = 512,
@@ -2002,16 +2043,16 @@ if triton is not None:
 
     @triton.jit
     def _unblocked_mass_ratio_indirect_kernel(
-        numer_target_ptr,     # [num_children, H] marginal_policy
-        denom_target_ptr,     # [top, H] actor_beliefs (parent-aligned)
-        numer_cardsum_ptr,    # [num_children, 52]
-        denom_cardsum_ptr,    # [top, 52]
-        numer_S_ptr,          # [num_children]
-        denom_S_ptr,          # [top]
-        parent_index_ptr,     # [num_children] — child c → parent in [0, top)
+        numer_target_ptr,  # [num_children, H] marginal_policy
+        denom_target_ptr,  # [top, H] actor_beliefs (parent-aligned)
+        numer_cardsum_ptr,  # [num_children, 52]
+        denom_cardsum_ptr,  # [top, 52]
+        numer_S_ptr,  # [num_children]
+        denom_S_ptr,  # [top]
+        parent_index_ptr,  # [num_children] — child c → parent in [0, top)
         card_a_ptr,
         card_b_ptr,
-        out_ptr,              # [num_children, H]
+        out_ptr,  # [num_children, H]
         H,
         NUM_CARDS: tl.constexpr,
         EPS,
@@ -2049,15 +2090,15 @@ if triton is not None:
 
     @triton.jit
     def _unblocked_mass_ratio_kernel(
-        numer_target_ptr,     # [B, H] marginal_policy
-        denom_target_ptr,     # [B, H] beliefs_dest
-        numer_cardsum_ptr,    # [B, 52]
-        denom_cardsum_ptr,    # [B, 52]
-        numer_S_ptr,          # [B]
-        denom_S_ptr,          # [B]
+        numer_target_ptr,  # [B, H] marginal_policy
+        denom_target_ptr,  # [B, H] beliefs_dest
+        numer_cardsum_ptr,  # [B, 52]
+        denom_cardsum_ptr,  # [B, 52]
+        numer_S_ptr,  # [B]
+        denom_S_ptr,  # [B]
         card_a_ptr,
         card_b_ptr,
-        out_ptr,              # [B, H]
+        out_ptr,  # [B, H]
         H,
         NUM_CARDS: tl.constexpr,
         EPS,
@@ -2092,9 +2133,9 @@ if triton is not None:
 
 
 def unblocked_mass_ratio_indirect_triton(
-    numer_target: torch.Tensor,   # [num_children, H] marginal_policy
-    denom_target: torch.Tensor,   # [top, H] actor_beliefs (parent-aligned)
-    parent_index: torch.Tensor,   # [num_children] int64 — child → parent idx
+    numer_target: torch.Tensor,  # [num_children, H] marginal_policy
+    denom_target: torch.Tensor,  # [top, H] actor_beliefs (parent-aligned)
+    parent_index: torch.Tensor,  # [num_children] int64 — child → parent idx
     eps: float = 1e-5,
     denom_stats: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
@@ -2185,9 +2226,15 @@ def unblocked_mass_ratio_triton(
 
     out = torch.empty_like(n)
     _unblocked_mass_ratio_kernel[(b,)](
-        n, d, ncs.contiguous(), dcs.contiguous(),
-        Sn.contiguous(), Sd.contiguous(),
-        card_a, card_b, out,
+        n,
+        d,
+        ncs.contiguous(),
+        dcs.contiguous(),
+        Sn.contiguous(),
+        Sd.contiguous(),
+        card_a,
+        card_b,
+        out,
         h,
         NUM_CARDS=_UNBLOCKED_NUM_CARDS,
         EPS=eps,
@@ -2206,11 +2253,11 @@ if triton is not None:
 
     @triton.jit
     def _fused_model_values_mix_kernel(
-        hand_values_ptr,        # [M, ...]
+        hand_values_ptr,  # [M, ...]
         last_model_values_ptr,  # [M, ...]
-        out_ptr,                # [M, ...]
+        out_ptr,  # [M, ...]
         old_plus_new_over_new_ptr,  # (old + new) / new
-        old_over_new_ptr,           # old / new
+        old_over_new_ptr,  # old / new
         n_elements,
         BLOCK: tl.constexpr,
     ):
@@ -2246,7 +2293,9 @@ def fused_model_values_mix(
     onon_t = torch.tensor(float((old + new) / new), dtype=dt, device=dev)
     oon_t = torch.tensor(float(old / new), dtype=dt, device=dev)
     out = torch.empty_like(hand_values)
-    fused_model_values_mix_with_tensors(hand_values, last_model_values, onon_t, oon_t, out, block_size=block_size)
+    fused_model_values_mix_with_tensors(
+        hand_values, last_model_values, onon_t, oon_t, out, block_size=block_size
+    )
     return out
 
 
@@ -2285,13 +2334,14 @@ if triton is not None:
 
     @triton.jit
     def _fused_model_values_mix_zs_kernel(
-        h_ptr,        # [M, 2, H] hand_values
-        l_ptr,        # [M, 2, H] last_model_values
-        b_ptr,        # [M, 2, H] beliefs
-        out_ptr,      # [M, 2, H]
-        onon_ptr,     # 0-D (old + new) / new
-        oon_ptr,      # 0-D old / new
-        M, H,
+        h_ptr,  # [M, 2, H] hand_values
+        l_ptr,  # [M, 2, H] last_model_values
+        b_ptr,  # [M, 2, H] beliefs
+        out_ptr,  # [M, 2, H]
+        onon_ptr,  # 0-D (old + new) / new
+        oon_ptr,  # 0-D old / new
+        M,
+        H,
         ENFORCE_ZS: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
@@ -2332,12 +2382,12 @@ if triton is not None:
 
 
 def fused_model_values_mix_zero_sum(
-    hand_values: torch.Tensor,             # [M, 2, H]
-    last_model_values: torch.Tensor,       # [M, 2, H]
-    beliefs: torch.Tensor,                 # [M, 2, H]
-    old_plus_new_over_new: torch.Tensor,   # 0-D
-    old_over_new: torch.Tensor,            # 0-D
-    out: torch.Tensor,                     # [M, 2, H]
+    hand_values: torch.Tensor,  # [M, 2, H]
+    last_model_values: torch.Tensor,  # [M, 2, H]
+    beliefs: torch.Tensor,  # [M, 2, H]
+    old_plus_new_over_new: torch.Tensor,  # 0-D
+    old_over_new: torch.Tensor,  # 0-D
+    out: torch.Tensor,  # [M, 2, H]
     enforce_zero_sum: bool,
     block_h: int = 2048,
 ) -> None:
@@ -2363,7 +2413,8 @@ def fused_model_values_mix_zero_sum(
         out,
         old_plus_new_over_new,
         old_over_new,
-        m, h,
+        m,
+        h,
         ENFORCE_ZS=enforce_zero_sum,
         BLOCK_H=block_h,
         num_warps=8,
@@ -2379,15 +2430,16 @@ if triton is not None:
 
     @triton.jit
     def _fused_model_values_writeback_kernel(
-        h_ptr,        # [M, 2, H] hand_values
-        l_ptr,        # [M, 2, H] previous last_model_values
-        b_ptr,        # [M, 2, H] beliefs
-        idx_ptr,      # [M] absolute latest_values row
-        latest_ptr,   # [T, 2, H]
-        last_out_ptr, # [M, 2, H]
-        onon_ptr,     # 0-D (old + new) / new
-        oon_ptr,      # 0-D old / new
-        M, H,
+        h_ptr,  # [M, 2, H] hand_values
+        l_ptr,  # [M, 2, H] previous last_model_values
+        b_ptr,  # [M, 2, H] beliefs
+        idx_ptr,  # [M] absolute latest_values row
+        latest_ptr,  # [T, 2, H]
+        last_out_ptr,  # [M, 2, H]
+        onon_ptr,  # 0-D (old + new) / new
+        oon_ptr,  # 0-D old / new
+        M,
+        H,
         DO_MIX: tl.constexpr,
         ENFORCE_ZS: tl.constexpr,
         STORE_LAST: tl.constexpr,
@@ -2444,14 +2496,14 @@ if triton is not None:
 
 
 def fused_model_values_writeback_(
-    hand_values: torch.Tensor,             # [M, 2, H]
-    last_model_values: torch.Tensor,       # [M, 2, H]
-    beliefs: torch.Tensor,                 # [M, 2, H]
-    model_indices: torch.Tensor,           # [M]
-    latest_values: torch.Tensor,           # [T, 2, H]
-    last_out: torch.Tensor,                # [M, 2, H]
-    old_plus_new_over_new: torch.Tensor,   # 0-D
-    old_over_new: torch.Tensor,            # 0-D
+    hand_values: torch.Tensor,  # [M, 2, H]
+    last_model_values: torch.Tensor,  # [M, 2, H]
+    beliefs: torch.Tensor,  # [M, 2, H]
+    model_indices: torch.Tensor,  # [M]
+    latest_values: torch.Tensor,  # [T, 2, H]
+    last_out: torch.Tensor,  # [M, 2, H]
+    old_plus_new_over_new: torch.Tensor,  # 0-D
+    old_over_new: torch.Tensor,  # 0-D
     do_mix: bool,
     enforce_zero_sum: bool,
     store_last: bool = True,
@@ -2471,7 +2523,9 @@ def fused_model_values_writeback_(
     assert model_indices.is_contiguous()
     assert latest_values.is_contiguous()
     assert last_out.is_contiguous()
-    assert hand_values.shape == last_model_values.shape == beliefs.shape == last_out.shape
+    assert (
+        hand_values.shape == last_model_values.shape == beliefs.shape == last_out.shape
+    )
     assert hand_values.dim() == 3 and hand_values.shape[1] == 2
     m, _, h = hand_values.shape
     assert model_indices.shape == (m,)
@@ -2485,7 +2539,8 @@ def fused_model_values_writeback_(
         last_out,
         old_plus_new_over_new,
         old_over_new,
-        m, h,
+        m,
+        h,
         DO_MIX=do_mix,
         ENFORCE_ZS=enforce_zero_sum,
         STORE_LAST=store_last,
@@ -2498,22 +2553,22 @@ if triton is not None:
 
     @triton.jit
     def _fused_weighted_parent_sum_inline_opp_both_kernel(
-        values_ptr,          # [total, 2, H] in/out
-        leaf_values_ptr,     # optional [total, 2, H]
-        leaf_mask_ptr,       # optional [total] bool
-        prev_actor_ptr,      # [total]
-        policy_hero_ptr,     # [total, H]
-        actor_beliefs_ptr,   # [top, H]
-        numer_s_ptr,         # [num_children]
-        numer_cardsum_ptr,   # [num_children, 52]
-        denom_s_ptr,         # [top]
-        denom_cardsum_ptr,   # [top, 52]
-        card_a_ptr,          # [H]
-        card_b_ptr,          # [H]
-        child_offsets_ptr,   # [num_parents] absolute first-child row
-        child_count_ptr,     # [num_parents]
-        parent_base,         # absolute row of first parent in this depth slice
-        child_base,          # absolute row corresponding to numer row 0
+        values_ptr,  # [total, 2, H] in/out
+        leaf_values_ptr,  # optional [total, 2, H]
+        leaf_mask_ptr,  # optional [total] bool
+        prev_actor_ptr,  # [total]
+        policy_hero_ptr,  # [total, H]
+        actor_beliefs_ptr,  # [top, H]
+        numer_s_ptr,  # [num_children]
+        numer_cardsum_ptr,  # [num_children, 52]
+        denom_s_ptr,  # [top]
+        denom_cardsum_ptr,  # [top, 52]
+        card_a_ptr,  # [H]
+        card_b_ptr,  # [H]
+        child_offsets_ptr,  # [num_parents] absolute first-child row
+        child_count_ptr,  # [num_parents]
+        parent_base,  # absolute row of first parent in this depth slice
+        child_base,  # absolute row corresponding to numer row 0
         H,
         NUM_CARDS: tl.constexpr,
         EPS,
@@ -2887,15 +2942,15 @@ if triton is not None:
 
     @triton.jit
     def _br_best_action_mass_kernel(
-        values_ptr,              # [total, 2, H] current child values / parent out
-        actor_beliefs_ptr,       # [top, H]
-        to_act_ptr,              # [total]
-        deviator_ptr,            # [total]
-        child_offsets_ptr,       # [num_parents] absolute first child
-        child_count_ptr,         # [num_parents]
+        values_ptr,  # [total, 2, H] current child values / parent out
+        actor_beliefs_ptr,  # [top, H]
+        to_act_ptr,  # [total]
+        deviator_ptr,  # [total]
+        child_offsets_ptr,  # [num_parents] absolute first child
+        child_count_ptr,  # [num_parents]
         action_from_parent_ptr,  # [total]
-        mass_ptr,                # [num_parents, A, H]
-        best_value_ptr,          # [num_parents, H]
+        mass_ptr,  # [num_parents, A, H]
+        best_value_ptr,  # [num_parents, H]
         parent_base,
         H,
         NUM_ACTIONS: tl.constexpr,
@@ -2937,15 +2992,15 @@ if triton is not None:
 
     @triton.jit
     def _br_finalize_depth_kernel(
-        values_ptr,              # [total, 2, H] in/out
-        policy_ptr,              # [total, H] child policy
-        opponent_policy_ptr,     # [top, A, H]
-        p_dev_ptr,               # [num_parents, A, H]
-        best_value_ptr,          # [num_parents, H]
-        to_act_ptr,              # [total]
-        deviator_ptr,            # [total]
-        child_offsets_ptr,       # [num_parents]
-        child_count_ptr,         # [num_parents]
+        values_ptr,  # [total, 2, H] in/out
+        policy_ptr,  # [total, H] child policy
+        opponent_policy_ptr,  # [top, A, H]
+        p_dev_ptr,  # [num_parents, A, H]
+        best_value_ptr,  # [num_parents, H]
+        to_act_ptr,  # [total]
+        deviator_ptr,  # [total]
+        child_offsets_ptr,  # [num_parents]
+        child_count_ptr,  # [num_parents]
         action_from_parent_ptr,  # [total]
         parent_base,
         opponent_policy_base,
@@ -3132,11 +3187,11 @@ if triton is not None:
 
     @triton.jit
     def _fused_reach_weights_kernel(
-        reach_ptr,              # [total, 2, H] in/out
-        policy_ptr,             # [total, H]
-        allowed_mask_ptr,       # [total, H] bool
-        parent_index_ptr,       # [total]
-        prev_actor_ptr,         # [total]
+        reach_ptr,  # [total, 2, H] in/out
+        policy_ptr,  # [total, H]
+        allowed_mask_ptr,  # [total, H] bool
+        parent_index_ptr,  # [total]
+        prev_actor_ptr,  # [total]
         start,
         end,
         H,
@@ -3175,11 +3230,11 @@ if triton is not None:
 
 
 def fused_reach_weights_depth_(
-    reach: torch.Tensor,             # [total, 2, H] in/out
-    policy: torch.Tensor,            # [total, H]
-    allowed_mask: torch.Tensor,      # [total, H] bool
-    parent_index: torch.Tensor,      # [total]
-    prev_actor: torch.Tensor,        # [total]
+    reach: torch.Tensor,  # [total, 2, H] in/out
+    policy: torch.Tensor,  # [total, H]
+    allowed_mask: torch.Tensor,  # [total, H] bool
+    parent_index: torch.Tensor,  # [total]
+    prev_actor: torch.Tensor,  # [total]
     start: int,
     end: int,
     block_h: int = 2048,
@@ -3223,17 +3278,17 @@ if triton is not None:
 
     @triton.jit
     def _fused_reach_beliefs_avg_depth_kernel(
-        reach_ptr,              # [total, 2, H] in/out
-        beliefs_ptr,            # [total, 2, H] in/out
-        policy_ptr,             # [total, H]
-        allowed_mask_ptr,       # [total, H] bool
-        allowed_prob_ptr,       # [total, H]
-        root_index_ptr,         # [total]
-        parent_index_ptr,       # [total]
-        prev_actor_ptr,         # [total]
-        to_act_ptr,             # [total]
-        avg_num_ptr,            # [total, H] in/out if WRITE_AVG
-        avg_den_ptr,            # [total, H] in/out if WRITE_AVG
+        reach_ptr,  # [total, 2, H] in/out
+        beliefs_ptr,  # [total, 2, H] in/out
+        policy_ptr,  # [total, H]
+        allowed_mask_ptr,  # [total, H] bool
+        allowed_prob_ptr,  # [total, H]
+        root_index_ptr,  # [total]
+        parent_index_ptr,  # [total]
+        prev_actor_ptr,  # [total]
+        to_act_ptr,  # [total]
+        avg_num_ptr,  # [total, H] in/out if WRITE_AVG
+        avg_den_ptr,  # [total, H] in/out if WRITE_AVG
         new_scalar_ptr,
         start,
         end,
@@ -3255,7 +3310,9 @@ if triton is not None:
         mask = offs < H
 
         pol = tl.load(policy_ptr + c * H + offs, mask=mask, other=0.0)
-        allowed = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(tl.int1)
+        allowed = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(
+            tl.int1
+        )
 
         parent0 = tl.load(
             reach_ptr + (parent * 2 + 0) * H + offs,
@@ -3309,6 +3366,7 @@ if triton is not None:
         out1 = tl.where(sum1 > EPS, b1 / sum1, fallback)
         tl.store(beliefs_ptr + (c * 2 + 0) * H + offs, out0, mask=mask)
         tl.store(beliefs_ptr + (c * 2 + 1) * H + offs, out1, mask=mask)
+
 
 def fused_reach_beliefs_avg_depth_(
     reach: torch.Tensor,
@@ -3386,18 +3444,18 @@ if triton is not None:
 
     @triton.jit
     def _fused_reach_beliefs_avg_scratch_depth_kernel(
-        parent_reach_ptr,       # [parent_count, 2, H], unused for ROOT_PARENT
-        child_reach_ptr,        # [child_count, 2, H] OUT if STORE_CHILD
-        beliefs_ptr,            # [total, 2, H] in/out
-        policy_ptr,             # [total, H]
-        allowed_mask_ptr,       # [total, H] bool
-        allowed_prob_ptr,       # [total, H]
-        root_index_ptr,         # [total]
-        parent_index_ptr,       # [total]
-        prev_actor_ptr,         # [total]
-        to_act_ptr,             # [total]
-        avg_num_ptr,            # [total, H] in/out if WRITE_AVG
-        avg_den_ptr,            # [total, H] in/out if WRITE_AVG
+        parent_reach_ptr,  # [parent_count, 2, H], unused for ROOT_PARENT
+        child_reach_ptr,  # [child_count, 2, H] OUT if STORE_CHILD
+        beliefs_ptr,  # [total, 2, H] in/out
+        policy_ptr,  # [total, H]
+        allowed_mask_ptr,  # [total, H] bool
+        allowed_prob_ptr,  # [total, H]
+        root_index_ptr,  # [total]
+        parent_index_ptr,  # [total]
+        prev_actor_ptr,  # [total]
+        to_act_ptr,  # [total]
+        avg_num_ptr,  # [total, H] in/out if WRITE_AVG
+        avg_den_ptr,  # [total, H] in/out if WRITE_AVG
         new_scalar_ptr,
         parent_base,
         start,
@@ -3422,7 +3480,9 @@ if triton is not None:
         mask = offs < H
 
         pol = tl.load(policy_ptr + c * H + offs, mask=mask, other=0.0)
-        allowed = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(tl.int1)
+        allowed = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(
+            tl.int1
+        )
 
         if ROOT_PARENT:
             parent0 = tl.full([BLOCK_H], 1.0, tl.float32)
@@ -3571,12 +3631,12 @@ if triton is not None:
 
     @triton.jit
     def _fused_deep_beliefs_kernel(
-        root_beliefs_ptr,       # [N, 2, H] (read-only; same storage as out[:N])
-        reach_ptr,              # [total, 2, H]; pre-blocked by reach kernel
-        allowed_prob_ptr,       # [total, H]
-        root_index_ptr,         # [total - N] (only non-root rows)
-        out_ptr,                # [total, 2, H]
-        N,                      # number of root rows (skipped; idempotent)
+        root_beliefs_ptr,  # [N, 2, H] (read-only; same storage as out[:N])
+        reach_ptr,  # [total, 2, H]; pre-blocked by reach kernel
+        allowed_prob_ptr,  # [total, H]
+        root_index_ptr,  # [total - N] (only non-root rows)
+        out_ptr,  # [total, 2, H]
+        N,  # number of root rows (skipped; idempotent)
         H,
         EPS,
         BLOCK_H: tl.constexpr,
@@ -3613,11 +3673,11 @@ if triton is not None:
 
 
 def fused_deep_beliefs_(
-    out: torch.Tensor,               # [total, 2, H] in/out (only [N:] is written)
-    root_beliefs: torch.Tensor,      # [>=N, 2, H]; only rows [:N] are read
-    reach_weights: torch.Tensor,     # [total, 2, H]; assumed pre-blocked
-    allowed_prob: torch.Tensor,      # [total, H]
-    root_index: torch.Tensor,        # [total] int64
+    out: torch.Tensor,  # [total, 2, H] in/out (only [N:] is written)
+    root_beliefs: torch.Tensor,  # [>=N, 2, H]; only rows [:N] are read
+    reach_weights: torch.Tensor,  # [total, 2, H]; assumed pre-blocked
+    allowed_prob: torch.Tensor,  # [total, H]
+    root_index: torch.Tensor,  # [total] int64
     num_roots: int | None = None,
     eps: float = 1e-5,
     block_h: int = 2048,
@@ -3658,7 +3718,9 @@ def fused_deep_beliefs_(
         root_beliefs,
         reach_weights,
         allowed_prob,
-        root_index[n:].contiguous() if not root_index[n:].is_contiguous() else root_index[n:],
+        root_index[n:].contiguous()
+        if not root_index[n:].is_contiguous()
+        else root_index[n:],
         out,
         n,
         h,
@@ -3677,11 +3739,11 @@ if triton is not None:
 
     @triton.jit
     def _fused_policy_sample_update_kernel(
-        policy_ptr,        # [total, H]
-        sample_ptr,        # [total, H] in/out
-        rows_ptr,          # [num_iters, max_updates] int64
-        counts_ptr,        # [num_iters] int64
-        t_ptr,             # 0-D int64
+        policy_ptr,  # [total, H]
+        sample_ptr,  # [total, H] in/out
+        rows_ptr,  # [num_iters, max_updates] int64
+        counts_ptr,  # [num_iters] int64
+        t_ptr,  # 0-D int64
         max_updates,
         H,
         BLOCK_H: tl.constexpr,
@@ -3701,25 +3763,25 @@ if triton is not None:
 
     @triton.jit
     def _fused_sample_leaf_compact_kernel(
-        policy_ptr,             # [total, H]
-        beliefs_ptr,            # [total, 2 * H]
-        rows_ptr,               # [num_iters, max_updates]
-        counts_ptr,             # [num_iters]
-        t_ptr,                  # scalar int64
-        players_ptr,            # [N]
-        hands_ptr,              # [N, 2]
-        uniform_draws_ptr,      # [D, N]
-        action_draws_ptr,       # [D, N]
-        effective_leaf_ptr,     # [total] bool
-        sampling_masks_ptr,     # [total, B] bool
-        uniform_policy_ptr,     # [total, B]
-        child_nodes_ptr,        # [total, B]
-        to_act_ptr,             # [total]
-        done_ptr,               # [total] bool
-        new_street_ptr,         # [total] bool
-        out_nodes_ptr,          # [N + 1]
-        out_beliefs_ptr,        # [N + 1, 2 * H]
-        out_ready_ptr,          # [N + 1]
+        policy_ptr,  # [total, H]
+        beliefs_ptr,  # [total, 2 * H]
+        rows_ptr,  # [num_iters, max_updates]
+        counts_ptr,  # [num_iters]
+        t_ptr,  # scalar int64
+        players_ptr,  # [N]
+        hands_ptr,  # [N, 2]
+        uniform_draws_ptr,  # [D, N]
+        action_draws_ptr,  # [D, N]
+        effective_leaf_ptr,  # [total] bool
+        sampling_masks_ptr,  # [total, B] bool
+        uniform_policy_ptr,  # [total, B]
+        child_nodes_ptr,  # [total, B]
+        to_act_ptr,  # [total]
+        done_ptr,  # [total] bool
+        new_street_ptr,  # [total] bool
+        out_nodes_ptr,  # [N + 1]
+        out_beliefs_ptr,  # [N + 1, 2 * H]
+        out_ready_ptr,  # [N + 1]
         max_updates,
         N,
         B: tl.constexpr,
@@ -3762,7 +3824,9 @@ if triton is not None:
                     mask=valid,
                     other=0,
                 )
-                p = tl.load(policy_ptr + child * H + hand, mask=valid & legal, other=0.0)
+                p = tl.load(
+                    policy_ptr + child * H + hand, mask=valid & legal, other=0.0
+                )
                 denom += p
 
             cdf = 0.0
@@ -3775,7 +3839,9 @@ if triton is not None:
                     mask=valid,
                     other=0,
                 )
-                p = tl.load(policy_ptr + child * H + hand, mask=valid & legal, other=0.0)
+                p = tl.load(
+                    policy_ptr + child * H + hand, mask=valid & legal, other=0.0
+                )
                 uniform_p = tl.load(
                     uniform_policy_ptr + node * B + a,
                     mask=valid,
@@ -3788,7 +3854,9 @@ if triton is not None:
                 action = tl.where(take, a, action)
                 chosen = chosen | take
 
-            next_node = tl.load(child_nodes_ptr + node * B + action, mask=valid, other=0)
+            next_node = tl.load(
+                child_nodes_ptr + node * B + action, mask=valid, other=0
+            )
             node = tl.where(active, next_node, node)
             active = active & (~tl.load(effective_leaf_ptr + node, mask=valid, other=1))
 
@@ -3827,7 +3895,10 @@ def fused_policy_sample_update_(
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
     assert policy_probs.is_contiguous() and policy_probs.dim() == 2
-    assert policy_probs_sample.is_contiguous() and policy_probs_sample.shape == policy_probs.shape
+    assert (
+        policy_probs_sample.is_contiguous()
+        and policy_probs_sample.shape == policy_probs.shape
+    )
     assert sample_rows.is_contiguous() and sample_rows.dim() == 2
     assert sample_counts.is_contiguous() and sample_counts.dim() == 1
     assert t.dim() == 0
@@ -3888,8 +3959,13 @@ def fused_sample_leaf_compact_(
     assert action_draws.is_contiguous() and action_draws.shape == uniform_draws.shape
     assert effective_leaf_mask.is_contiguous() and effective_leaf_mask.dim() == 1
     assert sampling_masks.is_contiguous() and sampling_masks.dim() == 2
-    assert uniform_policy.is_contiguous() and uniform_policy.shape == sampling_masks.shape
-    assert child_nodes_by_action.is_contiguous() and child_nodes_by_action.shape == sampling_masks.shape
+    assert (
+        uniform_policy.is_contiguous() and uniform_policy.shape == sampling_masks.shape
+    )
+    assert (
+        child_nodes_by_action.is_contiguous()
+        and child_nodes_by_action.shape == sampling_masks.shape
+    )
     assert to_act.is_contiguous() and done.is_contiguous()
     assert new_street_mask.is_contiguous() and new_street_mask.dim() == 1
     assert out_nodes.is_contiguous() and out_ready.is_contiguous()
@@ -3953,7 +4029,9 @@ class TScalars:
     baked into the graph.
     """
 
-    def __init__(self, device: torch.device, dtype: torch.dtype = torch.float32) -> None:
+    def __init__(
+        self, device: torch.device, dtype: torch.dtype = torch.float32
+    ) -> None:
         def _z():
             return torch.zeros((), dtype=dtype, device=device)
 
@@ -3972,7 +4050,7 @@ class TScalars:
         self.mix_inv_total = _z()
         # Model-values mix (for _set_model_values_impl): (old+new)/new and old/new
         self.mix_onon = _z()  # (old + new) / new
-        self.mix_oon = _z()   # old / new
+        self.mix_oon = _z()  # old / new
         # t as int64 device scalar (for t_sample == t comparisons)
         self.t_tensor = torch.zeros((), dtype=torch.long, device=device)
 
@@ -3989,8 +4067,8 @@ class TScalars:
         Always a host→device copy via ``.fill_(python_float)`` — call OUTSIDE
         any captured region (before ``graph.replay()``).
         """
-        t_alpha_num = float(t ** dcfr_alpha)
-        t_beta_num = float(t ** dcfr_beta)
+        t_alpha_num = float(t**dcfr_alpha)
+        t_beta_num = float(t**dcfr_beta)
         self.t_alpha_num.fill_(t_alpha_num)
         self.t_beta_num.fill_(t_beta_num)
         self.t_alpha_den.fill_(t_alpha_num + 1.0)
@@ -4221,6 +4299,8 @@ class GraphedCFRIteration:
 
 
 SHOWDOWN_MAX_PER_CARD = 64  # power-of-2 padding; non-board cards have 51 each
+SHOWDOWN_RIVER_ACTIVE_HANDS = 1081
+SHOWDOWN_RIVER_ACTIVE_CARDS = 47
 
 
 def precompute_showdown_card_positions(
@@ -4245,10 +4325,10 @@ def precompute_showdown_card_positions(
 
 
 def precompute_showdown_lookup_slots(
-    card_positions: torch.Tensor,    # [M, 52, MC] padded with H
-    L_idx: torch.Tensor,             # [M, H]
+    card_positions: torch.Tensor,  # [M, 52, MC] padded with H
+    L_idx: torch.Tensor,  # [M, H]
     R_idx: torch.Tensor,
-    hands_c1c2_sorted: torch.Tensor, # [M, H, 2]
+    hands_c1c2_sorted: torch.Tensor,  # [M, H, 2]
 ) -> tuple[torch.Tensor, ...]:
     """Per (m, k), per lookup type, count #positions of c1[k]/c2[k] that are
     strictly less than L[k] / R[k] / H. Returns six [M, H] int32 tensors:
@@ -4270,17 +4350,15 @@ def precompute_showdown_lookup_slots(
     )
 
 
-
-
 if triton is not None:
 
     @triton.jit
     def _showdown_setup_b_P_kernel(
-        beliefs_ptr,             # [M, 2, NUM_HANDS] fp32 (orig hand order)
-        extra_index_ptr,         # [M] int64, maps showdown row -> board-extra row
-        sorted_indices_ptr,      # [E, H] int64
-        b_opp_both_ptr,          # [M, 2, H] fp32 OUT
-        P_padded_both_ptr,       # [M, 2, H+1] fp32 OUT (with leading 0)
+        beliefs_ptr,  # [M, 2, NUM_HANDS] fp32 (orig hand order)
+        extra_index_ptr,  # [M] int64, maps showdown row -> board-extra row
+        sorted_indices_ptr,  # [E, H] int64
+        b_opp_both_ptr,  # [M, 2, H] fp32 OUT
+        P_padded_both_ptr,  # [M, 2, H+1] fp32 OUT (with leading 0)
         H,
         NUM_HANDS,
         BLOCK_H: tl.constexpr,
@@ -4292,29 +4370,91 @@ if triton is not None:
         h_offs = tl.arange(0, BLOCK_H)
         mask_h = h_offs < H
         sorted_idx = tl.load(
-            sorted_indices_ptr + extra * H + h_offs, mask=mask_h, other=0,
+            sorted_indices_ptr + extra * H + h_offs,
+            mask=mask_h,
+            other=0,
         )
         safe_idx = tl.where(mask_h, sorted_idx, 0)
         b_at = tl.load(
             beliefs_ptr + m * 2 * NUM_HANDS + villain * NUM_HANDS + safe_idx,
-            mask=mask_h, other=0.0,
+            mask=mask_h,
+            other=0.0,
         )
         tl.store(
-            b_opp_both_ptr + m * 2 * H + hero * H + h_offs, b_at, mask=mask_h,
+            b_opp_both_ptr + m * 2 * H + hero * H + h_offs,
+            b_at,
+            mask=mask_h,
         )
         cum = tl.cumsum(b_at, axis=0)
         tl.store(
             P_padded_both_ptr + m * 2 * (H + 1) + hero * (H + 1) + h_offs + 1,
-            cum, mask=mask_h,
+            cum,
+            mask=mask_h,
+        )
+        tl.store(P_padded_both_ptr + m * 2 * (H + 1) + hero * (H + 1) + 0, 0.0)
+
+    @triton.jit
+    def _showdown_setup_b_P_compact_kernel(
+        beliefs_ptr,  # [M, 2, H] fp32 in active sorted order
+        b_opp_both_ptr,  # [M, 2, H] fp32 OUT
+        P_padded_both_ptr,  # [M, 2, H+1] fp32 OUT (with leading 0)
+        H,
+        BLOCK_H: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        hero = tl.program_id(1)
+        villain = 1 - hero
+        h_offs = tl.arange(0, BLOCK_H)
+        mask_h = h_offs < H
+        b_at = tl.load(
+            beliefs_ptr + m * 2 * H + villain * H + h_offs,
+            mask=mask_h,
+            other=0.0,
+        )
+        tl.store(
+            b_opp_both_ptr + m * 2 * H + hero * H + h_offs,
+            b_at,
+            mask=mask_h,
+        )
+        cum = tl.cumsum(b_at, axis=0)
+        tl.store(
+            P_padded_both_ptr + m * 2 * (H + 1) + hero * (H + 1) + h_offs + 1,
+            cum,
+            mask=mask_h,
+        )
+        tl.store(P_padded_both_ptr + m * 2 * (H + 1) + hero * (H + 1) + 0, 0.0)
+
+    @triton.jit
+    def _showdown_setup_P_compact_kernel(
+        beliefs_ptr,  # [M, 2, H] fp32 in active sorted order
+        P_padded_both_ptr,  # [M, 2, H+1] fp32 OUT (with leading 0)
+        H,
+        BLOCK_H: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        hero = tl.program_id(1)
+        villain = 1 - hero
+        h_offs = tl.arange(0, BLOCK_H)
+        mask_h = h_offs < H
+        b_at = tl.load(
+            beliefs_ptr + m * 2 * H + villain * H + h_offs,
+            mask=mask_h,
+            other=0.0,
+        )
+        cum = tl.cumsum(b_at, axis=0)
+        tl.store(
+            P_padded_both_ptr + m * 2 * (H + 1) + hero * (H + 1) + h_offs + 1,
+            cum,
+            mask=mask_h,
         )
         tl.store(P_padded_both_ptr + m * 2 * (H + 1) + hero * (H + 1) + 0, 0.0)
 
     @triton.jit
     def _showdown_build_cum_kernel(
-        b_opp_sorted_ptr,        # [M, 2, H] fp32
-        extra_index_ptr,         # [M] int64
-        card_positions_ptr,      # [E, NUM_CARDS, MC] int32 (positions; pad=H)
-        cum_out_ptr,             # [M, 2, NUM_CARDS, MC] fp32 OUT
+        b_opp_sorted_ptr,  # [M, 2, H] fp32
+        extra_index_ptr,  # [M] int64
+        card_positions_ptr,  # [E, NUM_CARDS, MC] int32 (positions; pad=H)
+        cum_out_ptr,  # [M, 2, NUM_CARDS, MC] fp32 OUT
         H,
         NUM_CARDS: tl.constexpr,
         MC_K: tl.constexpr,
@@ -4336,24 +4476,195 @@ if triton is not None:
         b_at = tl.where(in_range, b_at, 0.0)
         cum = tl.cumsum(b_at, axis=0)
         tl.store(
-            cum_out_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
-            + c * MC_K + slot_off, cum,
+            cum_out_ptr
+            + m * 2 * NUM_CARDS * MC_K
+            + hero * NUM_CARDS * MC_K
+            + c * MC_K
+            + slot_off,
+            cum,
+        )
+
+    @triton.jit
+    def _showdown_build_cum_compact_kernel(
+        beliefs_ptr,  # [M, 2, H] compact active sorted beliefs
+        extra_index_ptr,  # [M] int64
+        card_positions_ptr,  # [E, NUM_CARDS, MC] int32 (positions; pad=H)
+        cum_out_ptr,  # [M, 2, NUM_CARDS, MC] fp32 OUT
+        H,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        hc = tl.program_id(1)
+        hero = hc // NUM_CARDS
+        villain = 1 - hero
+        c = hc % NUM_CARDS
+        extra = tl.load(extra_index_ptr + m)
+        slot_off = tl.arange(0, MC_K)
+        positions = tl.load(
+            card_positions_ptr + extra * NUM_CARDS * MC_K + c * MC_K + slot_off,
+        )
+        in_range = positions < H
+        safe_pos = tl.where(in_range, positions, 0)
+        b_at = tl.load(
+            beliefs_ptr + m * 2 * H + villain * H + safe_pos,
+            mask=in_range,
+            other=0.0,
+        )
+        cum = tl.cumsum(b_at, axis=0)
+        tl.store(
+            cum_out_ptr
+            + m * 2 * NUM_CARDS * MC_K
+            + hero * NUM_CARDS * MC_K
+            + c * MC_K
+            + slot_off,
+            cum,
+        )
+
+    @triton.jit
+    def _showdown_build_cum_compact_both_heroes_kernel(
+        beliefs_ptr,  # [M, 2, H] compact active sorted beliefs
+        extra_index_ptr,  # [M] int64
+        card_positions_ptr,  # [E, NUM_CARDS, MC] int32 (positions; pad=H)
+        cum_out_ptr,  # [M, 2, NUM_CARDS, MC] fp32 OUT
+        H,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        c = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        slot_off = tl.arange(0, MC_K)
+        positions = tl.load(
+            card_positions_ptr + extra * NUM_CARDS * MC_K + c * MC_K + slot_off,
+        )
+        in_range = positions < H
+        safe_pos = tl.where(in_range, positions, 0)
+        out_base = cum_out_ptr + m * 2 * NUM_CARDS * MC_K + c * MC_K
+        for hero in tl.static_range(2):
+            villain = 1 - hero
+            b_at = tl.load(
+                beliefs_ptr + m * 2 * H + villain * H + safe_pos,
+                mask=in_range,
+                other=0.0,
+            )
+            cum = tl.cumsum(b_at, axis=0)
+            tl.store(out_base + hero * NUM_CARDS * MC_K + slot_off, cum)
+
+    @triton.jit
+    def _showdown_build_cum_compact_card_block_kernel(
+        beliefs_ptr,  # [M, 2, H] compact active sorted beliefs
+        extra_index_ptr,  # [M] int64
+        card_positions_ptr,  # [E, NUM_CARDS, MC] int32 (positions; pad=H)
+        cum_out_ptr,  # [M, 2, NUM_CARDS, MC] fp32 OUT
+        H,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        CARD_BLOCK: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        card_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        slot_off = tl.arange(0, MC_K)[:, None]
+        card_off = tl.arange(0, CARD_BLOCK)[None, :]
+        cards = card_block * CARD_BLOCK + card_off
+        card_mask = cards < NUM_CARDS
+        positions = tl.load(
+            card_positions_ptr + extra * NUM_CARDS * MC_K + cards * MC_K + slot_off,
+            mask=card_mask,
+            other=H,
+        )
+        in_range = positions < H
+        safe_pos = tl.where(in_range, positions, 0)
+        out_base = cum_out_ptr + m * 2 * NUM_CARDS * MC_K + cards * MC_K + slot_off
+        for hero in tl.static_range(2):
+            villain = 1 - hero
+            b_at = tl.load(
+                beliefs_ptr + m * 2 * H + villain * H + safe_pos,
+                mask=in_range & card_mask,
+                other=0.0,
+            )
+            cum = tl.cumsum(b_at, axis=0)
+            tl.store(out_base + hero * NUM_CARDS * MC_K, cum, mask=card_mask)
+
+    @triton.jit
+    def _showdown_gather_active_beliefs_kernel(
+        beliefs_ptr,  # [M, 2, NUM_HANDS]
+        extra_index_ptr,  # [M]
+        sorted_indices_ptr,  # [E, H_ACTIVE]
+        compact_ptr,  # [M, 2, H_ACTIVE] OUT
+        H_ACTIVE,
+        NUM_HANDS,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        hero = tl.program_id(1)
+        k_block = tl.program_id(2)
+        extra = tl.load(extra_index_ptr + m)
+        k = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask = k < H_ACTIVE
+        hand_idx = tl.load(
+            sorted_indices_ptr + extra * H_ACTIVE + k, mask=mask, other=0
+        )
+        values = tl.load(
+            beliefs_ptr + m * 2 * NUM_HANDS + hero * NUM_HANDS + hand_idx,
+            mask=mask,
+            other=0.0,
+        )
+        tl.store(
+            compact_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE + k, values, mask=mask
+        )
+
+    @triton.jit
+    def _showdown_scatter_active_values_kernel(
+        compact_ptr,  # [M, 2, H_ACTIVE]
+        extra_index_ptr,  # [M]
+        sorted_indices_ptr,  # [E, H_ACTIVE]
+        ev_out_ptr,  # [M, 2, NUM_HANDS] OUT
+        H_ACTIVE,
+        NUM_HANDS,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        hero = tl.program_id(1)
+        k_block = tl.program_id(2)
+        extra = tl.load(extra_index_ptr + m)
+        k = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask = k < H_ACTIVE
+        hand_idx = tl.load(
+            sorted_indices_ptr + extra * H_ACTIVE + k, mask=mask, other=0
+        )
+        values = tl.load(
+            compact_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE + k,
+            mask=mask,
+            other=0.0,
+        )
+        tl.store(
+            ev_out_ptr + m * 2 * NUM_HANDS + hero * NUM_HANDS + hand_idx,
+            values,
+            mask=mask,
         )
 
     @triton.jit
     def _showdown_ev_v15_kernel(
-        b_opp_sorted_ptr,        # [M, 2, H]
-        P_padded_ptr,            # [M, 2, H+1]
-        card_cumsum_ptr,         # [M, 2, 52, MC]
-        extra_index_ptr,         # [M] int64
-        L_idx_ptr, R_idx_ptr,
-        c1_sorted_ptr, c2_sorted_ptr,
-        sorted_indices_ptr,      # [E, H] — write target index
-        hand_ok_sorted_ptr,      # [E, H] uint8
-        scale_factor_ptr,        # [M, 2] — potential / scale
-        slot_L_c1_ptr, slot_L_c2_ptr, slot_R_c1_ptr, slot_R_c2_ptr,
-        slot_last_c1_ptr, slot_last_c2_ptr,
-        ev_out_ptr,              # [M, 2, H] in unsorted order
+        b_opp_sorted_ptr,  # [M, 2, H]
+        P_padded_ptr,  # [M, 2, H+1]
+        card_cumsum_ptr,  # [M, 2, 52, MC]
+        extra_index_ptr,  # [M] int64
+        L_idx_ptr,
+        R_idx_ptr,
+        c1_sorted_ptr,
+        c2_sorted_ptr,
+        sorted_indices_ptr,  # [E, H] — write target index
+        hand_ok_sorted_ptr,  # [E, H] uint8
+        scale_factor_ptr,  # [M, 2] — potential / scale
+        slot_L_c1_ptr,
+        slot_L_c2_ptr,
+        slot_R_c1_ptr,
+        slot_R_c2_ptr,
+        slot_last_c1_ptr,
+        slot_last_c2_ptr,
+        ev_out_ptr,  # [M, 2, H] in unsorted order
         H,
         NUM_CARDS: tl.constexpr,
         MC_K: tl.constexpr,
@@ -4393,19 +4704,52 @@ if triton is not None:
         ok_factor = ok_int.to(tl.float32)
 
         for hero in tl.static_range(2):
-            b_at_k = tl.load(b_opp_sorted_ptr + m * 2 * H + hero * H + k_offs, mask=mask_k, other=0.0)
-            P_L = tl.load(P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + L, mask=mask_k, other=0.0)
-            P_R = tl.load(P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + R, mask=mask_k, other=0.0)
-            cum_base = card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
-            Pcards_L_c1 = tl.where(has_L1, tl.load(cum_base + c1 * MC_K + iL1, mask=mask_k, other=0.0), 0.0)
-            Pcards_L_c2 = tl.where(has_L2, tl.load(cum_base + c2 * MC_K + iL2, mask=mask_k, other=0.0), 0.0)
-            Pcards_R_c1 = tl.where(has_R1, tl.load(cum_base + c1 * MC_K + iR1, mask=mask_k, other=0.0), 0.0)
-            Pcards_R_c2 = tl.where(has_R2, tl.load(cum_base + c2 * MC_K + iR2, mask=mask_k, other=0.0), 0.0)
-            Pcards_last_c1 = tl.where(has_Last1, tl.load(cum_base + c1 * MC_K + iLast1, mask=mask_k, other=0.0), 0.0)
-            Pcards_last_c2 = tl.where(has_Last2, tl.load(cum_base + c2 * MC_K + iLast2, mask=mask_k, other=0.0), 0.0)
+            b_at_k = tl.load(
+                b_opp_sorted_ptr + m * 2 * H + hero * H + k_offs, mask=mask_k, other=0.0
+            )
+            P_L = tl.load(
+                P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + L,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_R = tl.load(
+                P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + R,
+                mask=mask_k,
+                other=0.0,
+            )
+            cum_base = (
+                card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
+            )
+            Pcards_L_c1 = tl.where(
+                has_L1, tl.load(cum_base + c1 * MC_K + iL1, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_L_c2 = tl.where(
+                has_L2, tl.load(cum_base + c2 * MC_K + iL2, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_R_c1 = tl.where(
+                has_R1, tl.load(cum_base + c1 * MC_K + iR1, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_R_c2 = tl.where(
+                has_R2, tl.load(cum_base + c2 * MC_K + iR2, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_last_c1 = tl.where(
+                has_Last1,
+                tl.load(cum_base + c1 * MC_K + iLast1, mask=mask_k, other=0.0),
+                0.0,
+            )
+            Pcards_last_c2 = tl.where(
+                has_Last2,
+                tl.load(cum_base + c2 * MC_K + iLast2, mask=mask_k, other=0.0),
+                0.0,
+            )
 
             win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
-            tie_mass = (P_R - P_L) - (Pcards_R_c1 - Pcards_L_c1) - (Pcards_R_c2 - Pcards_L_c2) + b_at_k
+            tie_mass = (
+                (P_R - P_L)
+                - (Pcards_R_c1 - Pcards_L_c1)
+                - (Pcards_R_c2 - Pcards_L_c2)
+                + b_at_k
+            )
 
             denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
             valid = denom > 1e-8
@@ -4417,8 +4761,956 @@ if triton is not None:
             scale = tl.load(scale_factor_ptr + m * 2 + hero)
             tl.store(
                 ev_out_ptr + m * 2 * H + hero * H + out_k,
-                EV * ok_factor * scale, mask=mask_k,
+                EV * ok_factor * scale,
+                mask=mask_k,
             )
+
+    @triton.jit
+    def _showdown_ev_active_kernel(
+        b_opp_sorted_ptr,  # [M, 2, H_ACTIVE]
+        P_padded_ptr,  # [M, 2, H_ACTIVE+1]
+        card_cumsum_ptr,  # [M, 2, NUM_CARDS, MC]
+        extra_index_ptr,  # [M] int64
+        L_idx_ptr,
+        R_idx_ptr,
+        c1_sorted_ptr,
+        c2_sorted_ptr,
+        sorted_indices_ptr,  # [E, H_ACTIVE] — write target full-hand index
+        scale_factor_ptr,  # [M, 2] — potential / scale
+        slot_L_c1_ptr,
+        slot_L_c2_ptr,
+        slot_R_c1_ptr,
+        slot_R_c2_ptr,
+        slot_last_c1_ptr,
+        slot_last_c2_ptr,
+        ev_out_ptr,  # [M, 2, NUM_HANDS] in unsorted full-hand order
+        H_ACTIVE,
+        NUM_HANDS,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask_k = k_offs < H_ACTIVE
+
+        L = tl.load(L_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        R = tl.load(R_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        c1 = tl.load(c1_sorted_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        c2 = tl.load(c2_sorted_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        out_k = tl.load(
+            sorted_indices_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        )
+        sL1 = tl.load(
+            slot_L_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        sL2 = tl.load(
+            slot_L_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        sR1 = tl.load(
+            slot_R_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        sR2 = tl.load(
+            slot_R_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        sLast1 = tl.load(
+            slot_last_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        sLast2 = tl.load(
+            slot_last_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+
+        has_L1 = sL1 > 0
+        has_L2 = sL2 > 0
+        has_R1 = sR1 > 0
+        has_R2 = sR2 > 0
+        has_Last1 = sLast1 > 0
+        has_Last2 = sLast2 > 0
+        iL1 = tl.maximum(sL1 - 1, 0)
+        iL2 = tl.maximum(sL2 - 1, 0)
+        iR1 = tl.maximum(sR1 - 1, 0)
+        iR2 = tl.maximum(sR2 - 1, 0)
+        iLast1 = tl.maximum(sLast1 - 1, 0)
+        iLast2 = tl.maximum(sLast2 - 1, 0)
+
+        for hero in tl.static_range(2):
+            b_at_k = tl.load(
+                b_opp_sorted_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE + k_offs,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_L = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + L,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_R = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + R,
+                mask=mask_k,
+                other=0.0,
+            )
+            cum_base = (
+                card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
+            )
+            Pcards_L_c1 = tl.where(
+                has_L1, tl.load(cum_base + c1 * MC_K + iL1, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_L_c2 = tl.where(
+                has_L2, tl.load(cum_base + c2 * MC_K + iL2, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_R_c1 = tl.where(
+                has_R1, tl.load(cum_base + c1 * MC_K + iR1, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_R_c2 = tl.where(
+                has_R2, tl.load(cum_base + c2 * MC_K + iR2, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_last_c1 = tl.where(
+                has_Last1,
+                tl.load(cum_base + c1 * MC_K + iLast1, mask=mask_k, other=0.0),
+                0.0,
+            )
+            Pcards_last_c2 = tl.where(
+                has_Last2,
+                tl.load(cum_base + c2 * MC_K + iLast2, mask=mask_k, other=0.0),
+                0.0,
+            )
+
+            win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
+            tie_mass = (
+                (P_R - P_L)
+                - (Pcards_R_c1 - Pcards_L_c1)
+                - (Pcards_R_c2 - Pcards_L_c2)
+                + b_at_k
+            )
+
+            denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
+            valid = denom > 1e-8
+            denom_safe = tl.where(valid, denom, 1.0)
+            win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
+            tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
+            loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
+            EV = win_prob - loss_prob
+            scale = tl.load(scale_factor_ptr + m * 2 + hero)
+            tl.store(
+                ev_out_ptr + m * 2 * NUM_HANDS + hero * NUM_HANDS + out_k,
+                EV * scale,
+                mask=mask_k,
+            )
+
+    @triton.jit
+    def _showdown_ev_active_compact_kernel(
+        b_opp_sorted_ptr,  # [M, 2, H_ACTIVE]
+        P_padded_ptr,  # [M, 2, H_ACTIVE+1]
+        card_cumsum_ptr,  # [M, 2, NUM_CARDS, MC]
+        extra_index_ptr,  # [M] int64
+        L_idx_ptr,
+        R_idx_ptr,
+        c1_sorted_ptr,
+        c2_sorted_ptr,
+        scale_factor_ptr,  # [M, 2] — potential / scale
+        slot_L_c1_ptr,
+        slot_L_c2_ptr,
+        slot_R_c1_ptr,
+        slot_R_c2_ptr,
+        slot_last_c1_ptr,
+        slot_last_c2_ptr,
+        ev_out_ptr,  # [M, 2, H_ACTIVE] in active sorted order
+        H_ACTIVE,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask_k = k_offs < H_ACTIVE
+
+        L = tl.load(L_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        R = tl.load(R_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        c1 = tl.load(c1_sorted_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        c2 = tl.load(c2_sorted_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        sL1 = tl.load(
+            slot_L_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        sL2 = tl.load(
+            slot_L_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        sR1 = tl.load(
+            slot_R_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        sR2 = tl.load(
+            slot_R_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        sLast1 = tl.load(
+            slot_last_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        sLast2 = tl.load(
+            slot_last_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+
+        has_L1 = sL1 > 0
+        has_L2 = sL2 > 0
+        has_R1 = sR1 > 0
+        has_R2 = sR2 > 0
+        has_Last1 = sLast1 > 0
+        has_Last2 = sLast2 > 0
+        iL1 = tl.maximum(sL1 - 1, 0)
+        iL2 = tl.maximum(sL2 - 1, 0)
+        iR1 = tl.maximum(sR1 - 1, 0)
+        iR2 = tl.maximum(sR2 - 1, 0)
+        iLast1 = tl.maximum(sLast1 - 1, 0)
+        iLast2 = tl.maximum(sLast2 - 1, 0)
+
+        for hero in tl.static_range(2):
+            b_at_k = tl.load(
+                b_opp_sorted_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE + k_offs,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_L = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + L,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_R = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + R,
+                mask=mask_k,
+                other=0.0,
+            )
+            cum_base = (
+                card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
+            )
+            Pcards_L_c1 = tl.where(
+                has_L1, tl.load(cum_base + c1 * MC_K + iL1, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_L_c2 = tl.where(
+                has_L2, tl.load(cum_base + c2 * MC_K + iL2, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_R_c1 = tl.where(
+                has_R1, tl.load(cum_base + c1 * MC_K + iR1, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_R_c2 = tl.where(
+                has_R2, tl.load(cum_base + c2 * MC_K + iR2, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_last_c1 = tl.where(
+                has_Last1,
+                tl.load(cum_base + c1 * MC_K + iLast1, mask=mask_k, other=0.0),
+                0.0,
+            )
+            Pcards_last_c2 = tl.where(
+                has_Last2,
+                tl.load(cum_base + c2 * MC_K + iLast2, mask=mask_k, other=0.0),
+                0.0,
+            )
+
+            win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
+            tie_mass = (
+                (P_R - P_L)
+                - (Pcards_R_c1 - Pcards_L_c1)
+                - (Pcards_R_c2 - Pcards_L_c2)
+                + b_at_k
+            )
+
+            denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
+            valid = denom > 1e-8
+            denom_safe = tl.where(valid, denom, 1.0)
+            win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
+            tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
+            loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
+            EV = win_prob - loss_prob
+            scale = tl.load(scale_factor_ptr + m * 2 + hero)
+            tl.store(
+                ev_out_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE + k_offs,
+                EV * scale,
+                mask=mask_k,
+            )
+
+    @triton.jit
+    def _showdown_ev_active_offset_compact_kernel(
+        b_opp_sorted_ptr,  # [M, 2, H_ACTIVE]
+        P_padded_ptr,  # [M, 2, H_ACTIVE+1]
+        card_cumsum_ptr,  # [M, 2, NUM_CARDS, MC]
+        extra_index_ptr,  # [M] int64
+        L_idx_ptr,
+        R_idx_ptr,
+        scale_factor_ptr,  # [M, 2] — potential / scale
+        off_L_c1_ptr,
+        off_L_c2_ptr,
+        off_R_c1_ptr,
+        off_R_c2_ptr,
+        off_last_c1_ptr,
+        off_last_c2_ptr,
+        ev_out_ptr,  # [M, 2, H_ACTIVE] in active sorted order
+        H_ACTIVE,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask_k = k_offs < H_ACTIVE
+
+        L = tl.load(L_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        R = tl.load(R_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        off_L_c1 = tl.load(
+            off_L_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_L_c2 = tl.load(
+            off_L_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_R_c1 = tl.load(
+            off_R_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_R_c2 = tl.load(
+            off_R_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_last_c1 = tl.load(
+            off_last_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_last_c2 = tl.load(
+            off_last_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+
+        has_L1 = off_L_c1 >= 0
+        has_L2 = off_L_c2 >= 0
+        has_R1 = off_R_c1 >= 0
+        has_R2 = off_R_c2 >= 0
+        has_last1 = off_last_c1 >= 0
+        has_last2 = off_last_c2 >= 0
+        idx_L_c1 = tl.maximum(off_L_c1, 0)
+        idx_L_c2 = tl.maximum(off_L_c2, 0)
+        idx_R_c1 = tl.maximum(off_R_c1, 0)
+        idx_R_c2 = tl.maximum(off_R_c2, 0)
+        idx_last_c1 = tl.maximum(off_last_c1, 0)
+        idx_last_c2 = tl.maximum(off_last_c2, 0)
+
+        for hero in tl.static_range(2):
+            b_at_k = tl.load(
+                b_opp_sorted_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE + k_offs,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_L = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + L,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_R = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + R,
+                mask=mask_k,
+                other=0.0,
+            )
+            cum_base = (
+                card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
+            )
+            Pcards_L_c1 = tl.where(
+                has_L1, tl.load(cum_base + idx_L_c1, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_L_c2 = tl.where(
+                has_L2, tl.load(cum_base + idx_L_c2, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_R_c1 = tl.where(
+                has_R1, tl.load(cum_base + idx_R_c1, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_R_c2 = tl.where(
+                has_R2, tl.load(cum_base + idx_R_c2, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_last_c1 = tl.where(
+                has_last1,
+                tl.load(cum_base + idx_last_c1, mask=mask_k, other=0.0),
+                0.0,
+            )
+            Pcards_last_c2 = tl.where(
+                has_last2,
+                tl.load(cum_base + idx_last_c2, mask=mask_k, other=0.0),
+                0.0,
+            )
+
+            win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
+            tie_mass = (
+                (P_R - P_L)
+                - (Pcards_R_c1 - Pcards_L_c1)
+                - (Pcards_R_c2 - Pcards_L_c2)
+                + b_at_k
+            )
+
+            denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
+            valid = denom > 1e-8
+            denom_safe = tl.where(valid, denom, 1.0)
+            win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
+            tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
+            loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
+            EV = win_prob - loss_prob
+            scale = tl.load(scale_factor_ptr + m * 2 + hero)
+            tl.store(
+                ev_out_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE + k_offs,
+                EV * scale,
+                mask=mask_k,
+            )
+
+    @triton.jit
+    def _showdown_ev_active_offset_compact_nobopp_kernel(
+        beliefs_ptr,  # [M, 2, H_ACTIVE] compact active sorted beliefs
+        P_padded_ptr,  # [M, 2, H_ACTIVE+1]
+        card_cumsum_ptr,  # [M, 2, NUM_CARDS, MC]
+        extra_index_ptr,  # [M] int64
+        L_idx_ptr,
+        R_idx_ptr,
+        scale_factor_ptr,  # [M, 2] — potential / scale
+        off_L_c1_ptr,
+        off_L_c2_ptr,
+        off_R_c1_ptr,
+        off_R_c2_ptr,
+        off_last_c1_ptr,
+        off_last_c2_ptr,
+        ev_out_ptr,  # [M, 2, H_ACTIVE] in active sorted order
+        H_ACTIVE,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask_k = k_offs < H_ACTIVE
+
+        L = tl.load(L_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        R = tl.load(R_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        off_L_c1 = tl.load(
+            off_L_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_L_c2 = tl.load(
+            off_L_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_R_c1 = tl.load(
+            off_R_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_R_c2 = tl.load(
+            off_R_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_last_c1 = tl.load(
+            off_last_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_last_c2 = tl.load(
+            off_last_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+
+        has_L1 = off_L_c1 >= 0
+        has_L2 = off_L_c2 >= 0
+        has_R1 = off_R_c1 >= 0
+        has_R2 = off_R_c2 >= 0
+        has_last1 = off_last_c1 >= 0
+        has_last2 = off_last_c2 >= 0
+        idx_L_c1 = tl.maximum(off_L_c1, 0)
+        idx_L_c2 = tl.maximum(off_L_c2, 0)
+        idx_R_c1 = tl.maximum(off_R_c1, 0)
+        idx_R_c2 = tl.maximum(off_R_c2, 0)
+        idx_last_c1 = tl.maximum(off_last_c1, 0)
+        idx_last_c2 = tl.maximum(off_last_c2, 0)
+
+        for hero in tl.static_range(2):
+            villain = 1 - hero
+            b_at_k = tl.load(
+                beliefs_ptr + m * 2 * H_ACTIVE + villain * H_ACTIVE + k_offs,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_L = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + L,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_R = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + R,
+                mask=mask_k,
+                other=0.0,
+            )
+            cum_base = (
+                card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
+            )
+            Pcards_L_c1 = tl.load(cum_base + idx_L_c1, mask=mask_k & has_L1, other=0.0)
+            Pcards_L_c2 = tl.load(cum_base + idx_L_c2, mask=mask_k & has_L2, other=0.0)
+            Pcards_R_c1 = tl.load(cum_base + idx_R_c1, mask=mask_k & has_R1, other=0.0)
+            Pcards_R_c2 = tl.load(cum_base + idx_R_c2, mask=mask_k & has_R2, other=0.0)
+            Pcards_last_c1 = tl.load(
+                cum_base + idx_last_c1, mask=mask_k & has_last1, other=0.0
+            )
+            Pcards_last_c2 = tl.load(
+                cum_base + idx_last_c2, mask=mask_k & has_last2, other=0.0
+            )
+
+            win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
+            tie_mass = (
+                (P_R - P_L)
+                - (Pcards_R_c1 - Pcards_L_c1)
+                - (Pcards_R_c2 - Pcards_L_c2)
+                + b_at_k
+            )
+
+            denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
+            valid = denom > 1e-8
+            denom_safe = tl.where(valid, denom, 1.0)
+            win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
+            tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
+            loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
+            EV = win_prob - loss_prob
+            scale = tl.load(scale_factor_ptr + m * 2 + hero)
+            tl.store(
+                ev_out_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE + k_offs,
+                EV * scale,
+                mask=mask_k,
+            )
+
+    @triton.jit
+    def _showdown_ev_active_offset_compact_nobopp_fast_ev_kernel(
+        beliefs_ptr,  # [M, 2, H_ACTIVE] compact active sorted beliefs
+        P_padded_ptr,  # [M, 2, H_ACTIVE+1]
+        card_cumsum_ptr,  # [M, 2, NUM_CARDS, MC]
+        extra_index_ptr,  # [M] int64
+        L_idx_ptr,
+        R_idx_ptr,
+        scale_factor_ptr,  # [M, 2] — potential / scale
+        off_L_c1_ptr,
+        off_L_c2_ptr,
+        off_R_c1_ptr,
+        off_R_c2_ptr,
+        off_last_c1_ptr,
+        off_last_c2_ptr,
+        ev_out_ptr,  # [M, 2, H_ACTIVE] in active sorted order
+        H_ACTIVE,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask_k = k_offs < H_ACTIVE
+
+        L = tl.load(L_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        R = tl.load(R_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        off_L_c1 = tl.load(
+            off_L_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_L_c2 = tl.load(
+            off_L_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_R_c1 = tl.load(
+            off_R_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_R_c2 = tl.load(
+            off_R_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_last_c1 = tl.load(
+            off_last_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+        off_last_c2 = tl.load(
+            off_last_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        ).to(tl.int32)
+
+        has_L1 = off_L_c1 >= 0
+        has_L2 = off_L_c2 >= 0
+        has_R1 = off_R_c1 >= 0
+        has_R2 = off_R_c2 >= 0
+        has_last1 = off_last_c1 >= 0
+        has_last2 = off_last_c2 >= 0
+        idx_L_c1 = tl.maximum(off_L_c1, 0)
+        idx_L_c2 = tl.maximum(off_L_c2, 0)
+        idx_R_c1 = tl.maximum(off_R_c1, 0)
+        idx_R_c2 = tl.maximum(off_R_c2, 0)
+        idx_last_c1 = tl.maximum(off_last_c1, 0)
+        idx_last_c2 = tl.maximum(off_last_c2, 0)
+
+        for hero in tl.static_range(2):
+            villain = 1 - hero
+            b_at_k = tl.load(
+                beliefs_ptr + m * 2 * H_ACTIVE + villain * H_ACTIVE + k_offs,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_L = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + L,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_R = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + R,
+                mask=mask_k,
+                other=0.0,
+            )
+            cum_base = (
+                card_cumsum_ptr + m * 2 * NUM_CARDS * MC_K + hero * NUM_CARDS * MC_K
+            )
+            Pcards_L_c1 = tl.where(
+                has_L1, tl.load(cum_base + idx_L_c1, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_L_c2 = tl.where(
+                has_L2, tl.load(cum_base + idx_L_c2, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_R_c1 = tl.where(
+                has_R1, tl.load(cum_base + idx_R_c1, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_R_c2 = tl.where(
+                has_R2, tl.load(cum_base + idx_R_c2, mask=mask_k, other=0.0), 0.0
+            )
+            Pcards_last_c1 = tl.where(
+                has_last1,
+                tl.load(cum_base + idx_last_c1, mask=mask_k, other=0.0),
+                0.0,
+            )
+            Pcards_last_c2 = tl.where(
+                has_last2,
+                tl.load(cum_base + idx_last_c2, mask=mask_k, other=0.0),
+                0.0,
+            )
+
+            win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
+            tie_mass = (
+                (P_R - P_L)
+                - (Pcards_R_c1 - Pcards_L_c1)
+                - (Pcards_R_c2 - Pcards_L_c2)
+                + b_at_k
+            )
+            denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
+            valid = denom > 1e-8
+            denom_safe = tl.where(valid, denom, 1.0)
+            EV = tl.where(valid, (2.0 * win_mass + tie_mass) / denom_safe - 1.0, 0.0)
+            scale = tl.load(scale_factor_ptr + m * 2 + hero)
+            tl.store(
+                ev_out_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE + k_offs,
+                EV * scale,
+                mask=mask_k,
+            )
+
+    @triton.jit
+    def _showdown_ev_active_direct_compact_kernel(
+        b_opp_sorted_ptr,  # [M, 2, H_ACTIVE]
+        P_padded_ptr,  # [M, 2, H_ACTIVE+1]
+        card_positions_ptr,  # [E, NUM_CARDS, MC]
+        extra_index_ptr,  # [M] int64
+        L_idx_ptr,
+        R_idx_ptr,
+        c1_sorted_ptr,
+        c2_sorted_ptr,
+        scale_factor_ptr,  # [M, 2] — potential / scale
+        ev_out_ptr,  # [M, 2, H_ACTIVE] in active sorted order
+        H_ACTIVE,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        k_offs = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        slot_offs = tl.arange(0, MC_K)
+        mask_k = k_offs < H_ACTIVE
+
+        L = tl.load(L_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        R = tl.load(R_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        c1 = tl.load(c1_sorted_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+        c2 = tl.load(c2_sorted_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
+
+        pos_base = card_positions_ptr + extra * NUM_CARDS * MC_K
+        pos1 = tl.load(pos_base + c1[:, None] * MC_K + slot_offs[None, :])
+        pos2 = tl.load(pos_base + c2[:, None] * MC_K + slot_offs[None, :])
+        in1 = pos1 < H_ACTIVE
+        in2 = pos2 < H_ACTIVE
+        safe1 = tl.where(in1, pos1, 0)
+        safe2 = tl.where(in2, pos2, 0)
+
+        for hero in tl.static_range(2):
+            b_base = b_opp_sorted_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE
+            b_at_k = tl.load(b_base + k_offs, mask=mask_k, other=0.0)
+            P_L = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + L,
+                mask=mask_k,
+                other=0.0,
+            )
+            P_R = tl.load(
+                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + R,
+                mask=mask_k,
+                other=0.0,
+            )
+
+            b1 = tl.load(b_base + safe1, mask=mask_k[:, None] & in1, other=0.0)
+            b2 = tl.load(b_base + safe2, mask=mask_k[:, None] & in2, other=0.0)
+            Pcards_L_c1 = tl.sum(tl.where((pos1 < L[:, None]) & in1, b1, 0.0), axis=1)
+            Pcards_L_c2 = tl.sum(tl.where((pos2 < L[:, None]) & in2, b2, 0.0), axis=1)
+            Pcards_R_c1 = tl.sum(tl.where((pos1 < R[:, None]) & in1, b1, 0.0), axis=1)
+            Pcards_R_c2 = tl.sum(tl.where((pos2 < R[:, None]) & in2, b2, 0.0), axis=1)
+            Pcards_last_c1 = tl.sum(tl.where(in1, b1, 0.0), axis=1)
+            Pcards_last_c2 = tl.sum(tl.where(in2, b2, 0.0), axis=1)
+
+            win_mass = P_L - Pcards_L_c1 - Pcards_L_c2
+            tie_mass = (
+                (P_R - P_L)
+                - (Pcards_R_c1 - Pcards_L_c1)
+                - (Pcards_R_c2 - Pcards_L_c2)
+                + b_at_k
+            )
+
+            denom = 1.0 - Pcards_last_c1 - Pcards_last_c2 + b_at_k
+            valid = denom > 1e-8
+            denom_safe = tl.where(valid, denom, 1.0)
+            win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
+            tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
+            loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
+            EV = win_prob - loss_prob
+            scale = tl.load(scale_factor_ptr + m * 2 + hero)
+            tl.store(
+                ev_out_ptr + m * 2 * H_ACTIVE + hero * H_ACTIVE + k_offs,
+                EV * scale,
+                mask=mask_k,
+            )
+
+    @triton.jit
+    def _showdown_card_corr_scatter_kernel(
+        b_opp_sorted_ptr,  # [M, 2, H]
+        extra_index_ptr,  # [M]
+        card_positions_ptr,  # [E, C, MC]
+        occ_slot_L_ptr,  # [E, C, MC]
+        occ_slot_R_ptr,  # [E, C, MC]
+        card_slot_count_ptr,  # [E, C]
+        corr_L_ptr,  # [M, 2, H]
+        corr_R_ptr,  # [M, 2, H]
+        corr_total_ptr,  # [M, 2, H]
+        H,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        hero = tl.program_id(1)
+        c = tl.program_id(2)
+        extra = tl.load(extra_index_ptr + m)
+        slot = tl.arange(0, MC_K)
+        positions = tl.load(
+            card_positions_ptr + extra * NUM_CARDS * MC_K + c * MC_K + slot
+        )
+        in_range = positions < H
+        safe_pos = tl.where(in_range, positions, 0)
+        b_base = b_opp_sorted_ptr + m * 2 * H + hero * H
+        b_at = tl.load(b_base + safe_pos, mask=in_range, other=0.0)
+
+        sL = tl.load(occ_slot_L_ptr + extra * NUM_CARDS * MC_K + c * MC_K + slot).to(
+            tl.int32
+        )
+        sR = tl.load(occ_slot_R_ptr + extra * NUM_CARDS * MC_K + c * MC_K + slot).to(
+            tl.int32
+        )
+        count = tl.load(card_slot_count_ptr + extra * NUM_CARDS + c).to(tl.int32)
+        prefix_slot = tl.arange(0, MC_K)
+        vL = tl.sum(
+            tl.where(
+                (prefix_slot[None, :] < sL[:, None]) & in_range[None, :],
+                b_at[None, :],
+                0.0,
+            ),
+            axis=1,
+        )
+        vR = tl.sum(
+            tl.where(
+                (prefix_slot[None, :] < sR[:, None]) & in_range[None, :],
+                b_at[None, :],
+                0.0,
+            ),
+            axis=1,
+        )
+        vTotal = tl.sum(tl.where(in_range, b_at, 0.0), axis=0)
+        vTotal = tl.where(count > 0, vTotal, 0.0)
+
+        out_base = m * 2 * H + hero * H
+        tl.atomic_add(
+            corr_L_ptr + out_base + safe_pos, vL, sem="relaxed", mask=in_range
+        )
+        tl.atomic_add(
+            corr_R_ptr + out_base + safe_pos, vR, sem="relaxed", mask=in_range
+        )
+        tl.atomic_add(
+            corr_total_ptr + out_base + safe_pos, vTotal, sem="relaxed", mask=in_range
+        )
+
+    @triton.jit
+    def _showdown_corr_finish_compact_kernel(
+        b_opp_sorted_ptr,  # [M, 2, H]
+        P_padded_ptr,  # [M, 2, H+1]
+        corr_L_ptr,  # [M, 2, H]
+        corr_R_ptr,  # [M, 2, H]
+        corr_total_ptr,  # [M, 2, H]
+        extra_index_ptr,  # [M]
+        L_idx_ptr,
+        R_idx_ptr,
+        scale_factor_ptr,
+        ev_out_ptr,  # [M, 2, H]
+        H,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        k = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask = k < H
+        L = tl.load(L_idx_ptr + extra * H + k, mask=mask, other=0)
+        R = tl.load(R_idx_ptr + extra * H + k, mask=mask, other=0)
+
+        for hero in tl.static_range(2):
+            row_base = m * 2 * H + hero * H
+            b_at_k = tl.load(b_opp_sorted_ptr + row_base + k, mask=mask, other=0.0)
+            P_L = tl.load(
+                P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + L,
+                mask=mask,
+                other=0.0,
+            )
+            P_R = tl.load(
+                P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + R,
+                mask=mask,
+                other=0.0,
+            )
+            corr_L = tl.load(corr_L_ptr + row_base + k, mask=mask, other=0.0)
+            corr_R = tl.load(corr_R_ptr + row_base + k, mask=mask, other=0.0)
+            corr_total = tl.load(corr_total_ptr + row_base + k, mask=mask, other=0.0)
+            win_mass = P_L - corr_L
+            tie_mass = (P_R - P_L) - (corr_R - corr_L) + b_at_k
+            denom = 1.0 - corr_total + b_at_k
+            valid = denom > 1e-8
+            denom_safe = tl.where(valid, denom, 1.0)
+            win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
+            tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
+            loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
+            EV = win_prob - loss_prob
+            scale = tl.load(scale_factor_ptr + m * 2 + hero)
+            tl.store(ev_out_ptr + row_base + k, EV * scale, mask=mask)
+
+    @triton.jit
+    def _showdown_card_corr_dualslot_kernel(
+        beliefs_ptr,  # [M, 2, H]
+        extra_index_ptr,  # [M]
+        card_positions_ptr,  # [E, C, MC]
+        occ_slot_L_ptr,  # [E, C, MC]
+        occ_slot_R_ptr,  # [E, C, MC]
+        card_slot_count_ptr,  # [E, C]
+        occ_is_c2_ptr,  # [E, C, MC]
+        corr_L1_ptr,  # [M, 2, H]
+        corr_L2_ptr,  # [M, 2, H]
+        corr_R1_ptr,  # [M, 2, H]
+        corr_R2_ptr,  # [M, 2, H]
+        corr_T1_ptr,  # [M, 2, H]
+        corr_T2_ptr,  # [M, 2, H]
+        H,
+        NUM_CARDS: tl.constexpr,
+        MC_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        hero = tl.program_id(1)
+        c = tl.program_id(2)
+        villain = 1 - hero
+        extra = tl.load(extra_index_ptr + m)
+        slot = tl.arange(0, MC_K)
+        base = extra * NUM_CARDS * MC_K + c * MC_K + slot
+        positions = tl.load(card_positions_ptr + base)
+        in_range = positions < H
+        safe_pos = tl.where(in_range, positions, 0)
+        b_base = beliefs_ptr + m * 2 * H + villain * H
+        b_at = tl.load(b_base + safe_pos, mask=in_range, other=0.0)
+
+        sL = tl.load(occ_slot_L_ptr + base).to(tl.int32)
+        sR = tl.load(occ_slot_R_ptr + base).to(tl.int32)
+        count = tl.load(card_slot_count_ptr + extra * NUM_CARDS + c).to(tl.int32)
+        prefix_slot = tl.arange(0, MC_K)
+        vL = tl.sum(
+            tl.where(
+                (prefix_slot[None, :] < sL[:, None]) & in_range[None, :],
+                b_at[None, :],
+                0.0,
+            ),
+            axis=1,
+        )
+        vR = tl.sum(
+            tl.where(
+                (prefix_slot[None, :] < sR[:, None]) & in_range[None, :],
+                b_at[None, :],
+                0.0,
+            ),
+            axis=1,
+        )
+        vT = tl.sum(tl.where(in_range, b_at, 0.0), axis=0)
+        vT = tl.where(count > 0, vT, 0.0)
+        is_c2 = tl.load(occ_is_c2_ptr + base, mask=in_range, other=0).to(tl.int1)
+        out_base = m * 2 * H + hero * H
+        mask_1 = in_range & ~is_c2
+        mask_2 = in_range & is_c2
+        tl.store(corr_L1_ptr + out_base + safe_pos, vL, mask=mask_1)
+        tl.store(corr_L2_ptr + out_base + safe_pos, vL, mask=mask_2)
+        tl.store(corr_R1_ptr + out_base + safe_pos, vR, mask=mask_1)
+        tl.store(corr_R2_ptr + out_base + safe_pos, vR, mask=mask_2)
+        tl.store(corr_T1_ptr + out_base + safe_pos, vT, mask=mask_1)
+        tl.store(corr_T2_ptr + out_base + safe_pos, vT, mask=mask_2)
+
+    @triton.jit
+    def _showdown_dualslot_finish_compact_kernel(
+        beliefs_ptr,  # [M, 2, H]
+        P_padded_ptr,  # [M, 2, H+1]
+        corr_L1_ptr,
+        corr_L2_ptr,
+        corr_R1_ptr,
+        corr_R2_ptr,
+        corr_T1_ptr,
+        corr_T2_ptr,
+        extra_index_ptr,  # [M]
+        L_idx_ptr,
+        R_idx_ptr,
+        scale_factor_ptr,
+        ev_out_ptr,  # [M, 2, H]
+        H,
+        BLOCK_K: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        k_block = tl.program_id(1)
+        extra = tl.load(extra_index_ptr + m)
+        k = k_block * BLOCK_K + tl.arange(0, BLOCK_K)
+        mask = k < H
+        L = tl.load(L_idx_ptr + extra * H + k, mask=mask, other=0)
+        R = tl.load(R_idx_ptr + extra * H + k, mask=mask, other=0)
+
+        for hero in tl.static_range(2):
+            villain = 1 - hero
+            row_base = m * 2 * H + hero * H
+            belief_base = m * 2 * H + villain * H
+            b_at_k = tl.load(beliefs_ptr + belief_base + k, mask=mask, other=0.0)
+            P_L = tl.load(
+                P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + L,
+                mask=mask,
+                other=0.0,
+            )
+            P_R = tl.load(
+                P_padded_ptr + m * 2 * (H + 1) + hero * (H + 1) + R,
+                mask=mask,
+                other=0.0,
+            )
+            corr_L = tl.load(corr_L1_ptr + row_base + k, mask=mask, other=0.0)
+            corr_L += tl.load(corr_L2_ptr + row_base + k, mask=mask, other=0.0)
+            corr_R = tl.load(corr_R1_ptr + row_base + k, mask=mask, other=0.0)
+            corr_R += tl.load(corr_R2_ptr + row_base + k, mask=mask, other=0.0)
+            corr_T = tl.load(corr_T1_ptr + row_base + k, mask=mask, other=0.0)
+            corr_T += tl.load(corr_T2_ptr + row_base + k, mask=mask, other=0.0)
+            win_mass = P_L - corr_L
+            tie_mass = (P_R - P_L) - (corr_R - corr_L) + b_at_k
+            denom = 1.0 - corr_T + b_at_k
+            valid = denom > 1e-8
+            denom_safe = tl.where(valid, denom, 1.0)
+            win_prob = tl.where(valid, win_mass / denom_safe, 0.0)
+            tie_prob = tl.where(valid, tie_mass / denom_safe, 0.0)
+            loss_prob = tl.where(valid, 1.0 - win_prob - tie_prob, 0.0)
+            EV = win_prob - loss_prob
+            scale = tl.load(scale_factor_ptr + m * 2 + hero)
+            tl.store(ev_out_ptr + row_base + k, EV * scale, mask=mask)
 
 
 def precompute_showdown_extras(
@@ -4438,7 +5730,10 @@ def precompute_showdown_extras(
     """
     card_positions = precompute_showdown_card_positions(hrd.hands_c1c2_sorted)
     slot_tensors = precompute_showdown_lookup_slots(
-        card_positions, hrd.L_idx, hrd.R_idx, hrd.hands_c1c2_sorted,
+        card_positions,
+        hrd.L_idx,
+        hrd.R_idx,
+        hrd.hands_c1c2_sorted,
     )
     hand_ok_sorted = (
         hrd.hand_ok_mask.gather(1, hrd.sorted_indices).to(torch.uint8).contiguous()
@@ -4477,8 +5772,160 @@ def precompute_showdown_extras(
     }
 
 
+def precompute_showdown_active_extras(
+    hrd,
+    env,
+    showdown_indices,
+    *,
+    scale_indices=None,
+    extra_indices=None,
+):
+    """Compute exact HU showdown metadata over board-legal river hands only.
+
+    This mirrors :func:`precompute_showdown_extras`, but each unique river board
+    is compacted to its 1081 legal hands and 47 non-board cards. The EV runner
+    scatters active-hand values back into the full 1326-hand output.
+    """
+    device = hrd.sorted_indices.device
+    e_count, full_hands = hrd.sorted_indices.shape
+    active_hands = SHOWDOWN_RIVER_ACTIVE_HANDS
+    active_cards = SHOWDOWN_RIVER_ACTIVE_CARDS
+
+    positions = torch.arange(full_hands, device=device).expand(e_count, -1)
+    hand_ok_sorted = hrd.hand_ok_mask.gather(1, hrd.sorted_indices)
+    active_pos = torch.where(hand_ok_sorted, positions, full_hands)
+    active_pos = active_pos.sort(dim=1).values[:, :active_hands].contiguous()
+
+    active_sorted_indices = hrd.sorted_indices.gather(1, active_pos).contiguous()
+    gather_2 = active_pos.unsqueeze(-1).expand(-1, -1, 2)
+    active_c1c2_global = hrd.hands_c1c2_sorted.gather(1, gather_2).contiguous()
+
+    board = env.board_indices[showdown_indices].int()
+    card_ok = torch.ones(e_count, 52, dtype=torch.bool, device=device)
+    card_ok.scatter_(1, board, False)
+    global_cards = torch.arange(52, device=device).expand(e_count, -1)
+    active_global_cards = torch.where(card_ok, global_cards, 52)
+    active_global_cards = (
+        active_global_cards.sort(dim=1).values[:, :active_cards].to(torch.int64)
+    )
+    card_to_local = torch.full((e_count, 52), -1, dtype=torch.int64, device=device)
+    local_ids = torch.arange(active_cards, device=device, dtype=torch.int64)
+    card_to_local.scatter_(1, active_global_cards, local_ids.expand(e_count, -1))
+    active_c1c2_local = card_to_local.gather(
+        1, active_c1c2_global.reshape(e_count, -1)
+    ).reshape(e_count, active_hands, 2)
+
+    full_group_key = hrd.L_idx.gather(1, active_pos)
+    is_start = torch.ones(e_count, active_hands, dtype=torch.bool, device=device)
+    is_start[:, 1:] = full_group_key[:, 1:] != full_group_key[:, :-1]
+    group_id = is_start.cumsum(dim=1, dtype=torch.int32) - 1
+    k = torch.arange(active_hands, device=device, dtype=torch.int32).expand(e_count, -1)
+    starts = torch.full(
+        (e_count, active_hands), active_hands, dtype=torch.int32, device=device
+    )
+    ends = torch.full((e_count, active_hands), -1, dtype=torch.int32, device=device)
+    starts.scatter_reduce_(1, group_id, k, reduce="amin", include_self=True)
+    ends.scatter_reduce_(1, group_id, k, reduce="amax", include_self=True)
+    l_idx = starts.gather(1, group_id).contiguous()
+    r_idx = (ends.gather(1, group_id) + 1).clamp(max=active_hands).contiguous()
+
+    card_positions = precompute_showdown_card_positions(
+        active_c1c2_local, num_cards=active_cards
+    )
+    slot_tensors = precompute_showdown_lookup_slots(
+        card_positions, l_idx, r_idx, active_c1c2_local
+    )
+    c1_local = active_c1c2_local[..., 0].to(torch.int32).contiguous()
+    c2_local = active_c1c2_local[..., 1].to(torch.int32).contiguous()
+    slot_l_c1 = slot_tensors[0].to(torch.int32)
+    slot_l_c2 = slot_tensors[1].to(torch.int32)
+    slot_r_c1 = slot_tensors[2].to(torch.int32)
+    slot_r_c2 = slot_tensors[3].to(torch.int32)
+    slot_last_c1 = slot_tensors[4].to(torch.int32)
+    slot_last_c2 = slot_tensors[5].to(torch.int32)
+
+    def _flat_offsets(cards: torch.Tensor, slots: torch.Tensor) -> torch.Tensor:
+        offsets = cards * SHOWDOWN_MAX_PER_CARD + slots - 1
+        return torch.where(slots > 0, offsets, torch.full_like(offsets, -1))
+
+    off_l_c1 = _flat_offsets(c1_local, slot_l_c1).to(torch.int16).contiguous()
+    off_l_c2 = _flat_offsets(c2_local, slot_l_c2).to(torch.int16).contiguous()
+    off_r_c1 = _flat_offsets(c1_local, slot_r_c1).to(torch.int16).contiguous()
+    off_r_c2 = _flat_offsets(c2_local, slot_r_c2).to(torch.int16).contiguous()
+    off_last_c1 = _flat_offsets(c1_local, slot_last_c1).to(torch.int16).contiguous()
+    off_last_c2 = _flat_offsets(c2_local, slot_last_c2).to(torch.int16).contiguous()
+
+    occ_pos = card_positions.to(torch.long)
+    valid_occ = occ_pos < active_hands
+    safe_occ = occ_pos.clamp(max=active_hands - 1)
+    occ_l = l_idx.gather(1, safe_occ.reshape(e_count, -1)).reshape(
+        e_count, active_cards, SHOWDOWN_MAX_PER_CARD
+    )
+    occ_r = r_idx.gather(1, safe_occ.reshape(e_count, -1)).reshape(
+        e_count, active_cards, SHOWDOWN_MAX_PER_CARD
+    )
+    occ_slot_l = ((occ_pos[:, :, None, :] < occ_l[:, :, :, None]).sum(dim=-1)).to(
+        torch.uint8
+    )
+    occ_slot_r = ((occ_pos[:, :, None, :] < occ_r[:, :, :, None]).sum(dim=-1)).to(
+        torch.uint8
+    )
+    occ_slot_l = torch.where(valid_occ, occ_slot_l, torch.zeros_like(occ_slot_l))
+    occ_slot_r = torch.where(valid_occ, occ_slot_r, torch.zeros_like(occ_slot_r))
+    card_slot_count = valid_occ.sum(dim=-1).to(torch.uint8).contiguous()
+    occ_c2 = c2_local.gather(1, safe_occ.reshape(e_count, -1)).reshape(
+        e_count, active_cards, SHOWDOWN_MAX_PER_CARD
+    )
+    occ_card = (
+        torch.arange(active_cards, device=device, dtype=torch.int32)
+        .view(1, active_cards, 1)
+        .expand(e_count, -1, SHOWDOWN_MAX_PER_CARD)
+    )
+    occ_is_c2 = ((occ_c2 == occ_card) & valid_occ).to(torch.uint8).contiguous()
+    if scale_indices is None:
+        scale_indices = showdown_indices
+    if extra_indices is None:
+        extra_indices = torch.arange(
+            int(scale_indices.numel()), device=scale_indices.device, dtype=torch.long
+        )
+    showdown_potential = (
+        env.stacks[scale_indices]
+        + env.pot[scale_indices, None]
+        - env.starting_stacks[scale_indices]
+    )
+    env_scale = env.scale[scale_indices]
+    scale_factor = (showdown_potential / env_scale[:, None]).contiguous()
+    return {
+        "card_positions": card_positions.to(torch.int32),
+        "slot_L_c1": slot_tensors[0].to(torch.uint8).contiguous(),
+        "slot_L_c2": slot_tensors[1].to(torch.uint8).contiguous(),
+        "slot_R_c1": slot_tensors[2].to(torch.uint8).contiguous(),
+        "slot_R_c2": slot_tensors[3].to(torch.uint8).contiguous(),
+        "slot_last_c1": slot_tensors[4].to(torch.uint8).contiguous(),
+        "slot_last_c2": slot_tensors[5].to(torch.uint8).contiguous(),
+        "scale_factor": scale_factor,
+        "c1": c1_local,
+        "c2": c2_local,
+        "L_idx": l_idx,
+        "R_idx": r_idx,
+        "sorted_indices": active_sorted_indices.to(torch.int32),
+        "extra_indices": extra_indices.to(torch.long).contiguous(),
+        "active_cards": active_global_cards.to(torch.int32).contiguous(),
+        "off_L_c1": off_l_c1,
+        "off_L_c2": off_l_c2,
+        "off_R_c1": off_r_c1,
+        "off_R_c2": off_r_c2,
+        "off_last_c1": off_last_c1,
+        "off_last_c2": off_last_c2,
+        "occ_slot_L": occ_slot_l.contiguous(),
+        "occ_slot_R": occ_slot_r.contiguous(),
+        "card_slot_count": card_slot_count,
+        "occ_is_c2": occ_is_c2,
+    }
+
+
 def showdown_ev_v15(
-    beliefs: torch.Tensor,    # [M, 2, NUM_HANDS]
+    beliefs: torch.Tensor,  # [M, 2, NUM_HANDS]
     extras: dict,
     block_k: int = 64,
 ) -> torch.Tensor:
@@ -4504,27 +5951,49 @@ def showdown_ev_v15(
     extra_indices = extras["extra_indices"].contiguous()
 
     _showdown_setup_b_P_kernel[(M, 2)](
-        beliefs.contiguous(), extra_indices, extras["sorted_indices"],
-        b_opp_both, P_padded_both,
-        H, NUM_HANDS, BLOCK_H=block_h,
+        beliefs.contiguous(),
+        extra_indices,
+        extras["sorted_indices"],
+        b_opp_both,
+        P_padded_both,
+        H,
+        NUM_HANDS,
+        BLOCK_H=block_h,
     )
     _showdown_build_cum_kernel[(M, 2 * 52)](
-        b_opp_both, extra_indices, extras["card_positions"], cum_both,
-        H, NUM_CARDS=52, MC_K=SHOWDOWN_MAX_PER_CARD,
+        b_opp_both,
+        extra_indices,
+        extras["card_positions"],
+        cum_both,
+        H,
+        NUM_CARDS=52,
+        MC_K=SHOWDOWN_MAX_PER_CARD,
     )
     grid = (M, triton.cdiv(NUM_HANDS, block_k))
     _showdown_ev_v15_kernel[grid](
-        b_opp_both, P_padded_both, cum_both, extra_indices,
-        extras["L_idx"], extras["R_idx"],
-        extras["c1"], extras["c2"],
+        b_opp_both,
+        P_padded_both,
+        cum_both,
+        extra_indices,
+        extras["L_idx"],
+        extras["R_idx"],
+        extras["c1"],
+        extras["c2"],
         extras["sorted_indices"],
-        extras["hand_ok_sorted"], extras["scale_factor"],
-        extras["slot_L_c1"], extras["slot_L_c2"],
-        extras["slot_R_c1"], extras["slot_R_c2"],
-        extras["slot_last_c1"], extras["slot_last_c2"],
+        extras["hand_ok_sorted"],
+        extras["scale_factor"],
+        extras["slot_L_c1"],
+        extras["slot_L_c2"],
+        extras["slot_R_c1"],
+        extras["slot_R_c2"],
+        extras["slot_last_c1"],
+        extras["slot_last_c2"],
         ev_unsorted,
-        NUM_HANDS, NUM_CARDS=52, MC_K=SHOWDOWN_MAX_PER_CARD,
-        BLOCK_K=block_k, num_warps=4,
+        NUM_HANDS,
+        NUM_CARDS=52,
+        MC_K=SHOWDOWN_MAX_PER_CARD,
+        BLOCK_K=block_k,
+        num_warps=4,
     )
     return ev_unsorted
 
@@ -4577,7 +6046,12 @@ class ShowdownGraphRunner:
         self.b_opp_both = torch.empty(M, 2, H, device=device, dtype=dtype)
         self.P_padded = torch.empty(M, 2, H + 1, device=device, dtype=dtype)
         self.cum_both = torch.empty(
-            M, 2, 52, SHOWDOWN_MAX_PER_CARD, device=device, dtype=dtype,
+            M,
+            2,
+            52,
+            SHOWDOWN_MAX_PER_CARD,
+            device=device,
+            dtype=dtype,
         )
         self.ev_out = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
 
@@ -4600,25 +6074,49 @@ class ShowdownGraphRunner:
         e = self.extras
         extra_indices = e["extra_indices"]
         _showdown_setup_b_P_kernel[(self.M, 2)](
-            self.beliefs_in, extra_indices, e["sorted_indices"],
-            self.b_opp_both, self.P_padded,
-            self.H, self.NUM_HANDS, BLOCK_H=self.block_h,
+            self.beliefs_in,
+            extra_indices,
+            e["sorted_indices"],
+            self.b_opp_both,
+            self.P_padded,
+            self.H,
+            self.NUM_HANDS,
+            BLOCK_H=self.block_h,
         )
         _showdown_build_cum_kernel[(self.M, 2 * 52)](
-            self.b_opp_both, extra_indices, e["card_positions"], self.cum_both,
-            self.H, NUM_CARDS=52, MC_K=SHOWDOWN_MAX_PER_CARD,
+            self.b_opp_both,
+            extra_indices,
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            NUM_CARDS=52,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
         )
         grid = (self.M, triton.cdiv(self.NUM_HANDS, self.block_k))
         _showdown_ev_v15_kernel[grid](
-            self.b_opp_both, self.P_padded, self.cum_both, extra_indices,
-            e["L_idx"], e["R_idx"], e["c1"], e["c2"],
-            e["sorted_indices"], e["hand_ok_sorted"], e["scale_factor"],
-            e["slot_L_c1"], e["slot_L_c2"],
-            e["slot_R_c1"], e["slot_R_c2"],
-            e["slot_last_c1"], e["slot_last_c2"],
+            self.b_opp_both,
+            self.P_padded,
+            self.cum_both,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["c1"],
+            e["c2"],
+            e["sorted_indices"],
+            e["hand_ok_sorted"],
+            e["scale_factor"],
+            e["slot_L_c1"],
+            e["slot_L_c2"],
+            e["slot_R_c1"],
+            e["slot_R_c2"],
+            e["slot_last_c1"],
+            e["slot_last_c2"],
             self.ev_out,
-            self.NUM_HANDS, NUM_CARDS=52, MC_K=SHOWDOWN_MAX_PER_CARD,
-            BLOCK_K=self.block_k, num_warps=4,
+            self.NUM_HANDS,
+            NUM_CARDS=52,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=4,
         )
 
     def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
@@ -4626,6 +6124,1156 @@ class ShowdownGraphRunner:
         # When called from inside an outer CUDA graph capture, replay() of
         # a pre-captured graph isn't allowed; emit the kernels directly so
         # they're recorded into the outer graph instead.
+        if torch.cuda.is_current_stream_capturing():
+            self._launch_pipeline()
+        else:
+            self.graph.replay()
+        return self.ev_out
+
+
+class ShowdownActiveGraphRunner:
+    """CUDA-graph runner for exact river showdown over compact active hands."""
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        NUM_HANDS: int,
+        device: torch.device,
+        block_k: int = 64,
+        zero_output: bool = True,
+    ) -> None:
+        if not triton_is_available():
+            raise RuntimeError("Triton is not installed.")
+        self.extras = extras
+        self.M = M
+        self.NUM_HANDS = NUM_HANDS
+        self.device = device
+        self.block_k = block_k
+        self.zero_output = zero_output
+
+        self.H = extras["sorted_indices"].shape[1]
+        self.num_cards = extras["card_positions"].shape[1]
+        block_h = 1
+        while block_h < self.H:
+            block_h *= 2
+        self.block_h = block_h
+
+        dtype = torch.float32
+        self.beliefs_in = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+        self.b_opp_both = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.P_padded = torch.empty(M, 2, self.H + 1, device=device, dtype=dtype)
+        self.cum_both = torch.empty(
+            M,
+            2,
+            self.num_cards,
+            SHOWDOWN_MAX_PER_CARD,
+            device=device,
+            dtype=dtype,
+        )
+        self.ev_out = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._launch_pipeline()
+        torch.cuda.current_stream().wait_stream(s)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._launch_pipeline()
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        if self.zero_output:
+            self.ev_out.zero_()
+        _showdown_setup_b_P_kernel[(self.M, 2)](
+            self.beliefs_in,
+            extra_indices,
+            e["sorted_indices"],
+            self.b_opp_both,
+            self.P_padded,
+            self.H,
+            self.NUM_HANDS,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_kernel[(self.M, 2 * self.num_cards)](
+            self.b_opp_both,
+            extra_indices,
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_kernel[grid](
+            self.b_opp_both,
+            self.P_padded,
+            self.cum_both,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["c1"],
+            e["c2"],
+            e["sorted_indices"],
+            e["scale_factor"],
+            e["slot_L_c1"],
+            e["slot_L_c2"],
+            e["slot_R_c1"],
+            e["slot_R_c2"],
+            e["slot_last_c1"],
+            e["slot_last_c2"],
+            self.ev_out,
+            self.H,
+            self.NUM_HANDS,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=4,
+        )
+
+    def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
+        self.beliefs_in.copy_(beliefs)
+        if torch.cuda.is_current_stream_capturing():
+            self._launch_pipeline()
+        else:
+            self.graph.replay()
+        return self.ev_out
+
+
+class ShowdownActiveCompactGraphRunner:
+    """CUDA-graph runner returning exact river CFVs in active sorted order."""
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        NUM_HANDS: int,
+        device: torch.device,
+        block_k: int = 64,
+    ) -> None:
+        if not triton_is_available():
+            raise RuntimeError("Triton is not installed.")
+        self.extras = extras
+        self.M = M
+        self.NUM_HANDS = NUM_HANDS
+        self.device = device
+        self.block_k = block_k
+
+        self.H = extras["sorted_indices"].shape[1]
+        self.num_cards = extras["card_positions"].shape[1]
+        block_h = 1
+        while block_h < self.H:
+            block_h *= 2
+        self.block_h = block_h
+
+        dtype = torch.float32
+        self.beliefs_in = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+        self.b_opp_both = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.P_padded = torch.empty(M, 2, self.H + 1, device=device, dtype=dtype)
+        self.cum_both = torch.empty(
+            M,
+            2,
+            self.num_cards,
+            SHOWDOWN_MAX_PER_CARD,
+            device=device,
+            dtype=dtype,
+        )
+        self.ev_out = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._launch_pipeline()
+        torch.cuda.current_stream().wait_stream(s)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._launch_pipeline()
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_b_P_kernel[(self.M, 2)](
+            self.beliefs_in,
+            extra_indices,
+            e["sorted_indices"],
+            self.b_opp_both,
+            self.P_padded,
+            self.H,
+            self.NUM_HANDS,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_kernel[(self.M, 2 * self.num_cards)](
+            self.b_opp_both,
+            extra_indices,
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_compact_kernel[grid](
+            self.b_opp_both,
+            self.P_padded,
+            self.cum_both,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["c1"],
+            e["c2"],
+            e["scale_factor"],
+            e["slot_L_c1"],
+            e["slot_L_c2"],
+            e["slot_R_c1"],
+            e["slot_R_c2"],
+            e["slot_last_c1"],
+            e["slot_last_c2"],
+            self.ev_out,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=4,
+        )
+
+    def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
+        self.beliefs_in.copy_(beliefs)
+        if torch.cuda.is_current_stream_capturing():
+            self._launch_pipeline()
+        else:
+            self.graph.replay()
+        return self.ev_out
+
+
+class ShowdownFullyCompactGraphRunner:
+    """CUDA-graph runner for compact input beliefs and compact exact CFVs."""
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        device: torch.device,
+        block_k: int = 64,
+    ) -> None:
+        if not triton_is_available():
+            raise RuntimeError("Triton is not installed.")
+        self.extras = extras
+        self.M = M
+        self.device = device
+        self.block_k = block_k
+
+        self.H = extras["sorted_indices"].shape[1]
+        self.num_cards = extras["card_positions"].shape[1]
+        block_h = 1
+        while block_h < self.H:
+            block_h *= 2
+        self.block_h = block_h
+
+        dtype = torch.float32
+        self.beliefs_in = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.b_opp_both = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.P_padded = torch.empty(M, 2, self.H + 1, device=device, dtype=dtype)
+        self.cum_both = torch.empty(
+            M,
+            2,
+            self.num_cards,
+            SHOWDOWN_MAX_PER_CARD,
+            device=device,
+            dtype=dtype,
+        )
+        self.ev_out = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._launch_pipeline()
+        torch.cuda.current_stream().wait_stream(s)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._launch_pipeline()
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_b_P_compact_kernel[(self.M, 2)](
+            self.beliefs_in,
+            self.b_opp_both,
+            self.P_padded,
+            self.H,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_kernel[(self.M, 2 * self.num_cards)](
+            self.b_opp_both,
+            extra_indices,
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_compact_kernel[grid](
+            self.b_opp_both,
+            self.P_padded,
+            self.cum_both,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["c1"],
+            e["c2"],
+            e["scale_factor"],
+            e["slot_L_c1"],
+            e["slot_L_c2"],
+            e["slot_R_c1"],
+            e["slot_R_c2"],
+            e["slot_last_c1"],
+            e["slot_last_c2"],
+            self.ev_out,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=4,
+        )
+
+    def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
+        self.beliefs_in.copy_(beliefs)
+        if torch.cuda.is_current_stream_capturing():
+            self._launch_pipeline()
+        else:
+            self.graph.replay()
+        return self.ev_out
+
+
+class ShowdownFullyCompactOffsetGraphRunner:
+    """Compact exact showdown with precomputed flat card-cumsum offsets."""
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        device: torch.device,
+        block_k: int = 64,
+    ) -> None:
+        if not triton_is_available():
+            raise RuntimeError("Triton is not installed.")
+        self.extras = extras
+        self.M = M
+        self.device = device
+        self.block_k = block_k
+
+        self.H = extras["sorted_indices"].shape[1]
+        self.num_cards = extras["card_positions"].shape[1]
+        block_h = 1
+        while block_h < self.H:
+            block_h *= 2
+        self.block_h = block_h
+
+        dtype = torch.float32
+        self.beliefs_in = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.b_opp_both = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.P_padded = torch.empty(M, 2, self.H + 1, device=device, dtype=dtype)
+        self.cum_both = torch.empty(
+            M,
+            2,
+            self.num_cards,
+            SHOWDOWN_MAX_PER_CARD,
+            device=device,
+            dtype=dtype,
+        )
+        self.ev_out = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._launch_pipeline()
+        torch.cuda.current_stream().wait_stream(s)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._launch_pipeline()
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_b_P_compact_kernel[(self.M, 2)](
+            self.beliefs_in,
+            self.b_opp_both,
+            self.P_padded,
+            self.H,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_kernel[(self.M, 2 * self.num_cards)](
+            self.b_opp_both,
+            extra_indices,
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_offset_compact_kernel[grid](
+            self.b_opp_both,
+            self.P_padded,
+            self.cum_both,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["scale_factor"],
+            e["off_L_c1"],
+            e["off_L_c2"],
+            e["off_R_c1"],
+            e["off_R_c2"],
+            e["off_last_c1"],
+            e["off_last_c2"],
+            self.ev_out,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=4,
+        )
+
+    def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
+        self.beliefs_in.copy_(beliefs)
+        if torch.cuda.is_current_stream_capturing():
+            self._launch_pipeline()
+        else:
+            self.graph.replay()
+        return self.ev_out
+
+
+class ShowdownFullyCompactNoBOppGraphRunner:
+    """Compact exact showdown without materializing opponent-belief rows."""
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        device: torch.device,
+        block_k: int = 64,
+    ) -> None:
+        if not triton_is_available():
+            raise RuntimeError("Triton is not installed.")
+        self.extras = extras
+        self.M = M
+        self.device = device
+        self.block_k = block_k
+
+        self.H = extras["sorted_indices"].shape[1]
+        self.num_cards = extras["card_positions"].shape[1]
+        block_h = 1
+        while block_h < self.H:
+            block_h *= 2
+        self.block_h = block_h
+
+        dtype = torch.float32
+        self.beliefs_in = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.P_padded = torch.empty(M, 2, self.H + 1, device=device, dtype=dtype)
+        self.cum_both = torch.empty(
+            M,
+            2,
+            self.num_cards,
+            SHOWDOWN_MAX_PER_CARD,
+            device=device,
+            dtype=dtype,
+        )
+        self.ev_out = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._launch_pipeline()
+        torch.cuda.current_stream().wait_stream(s)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._launch_pipeline()
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_P_compact_kernel[(self.M, 2)](
+            self.beliefs_in,
+            self.P_padded,
+            self.H,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_compact_kernel[(self.M, 2 * self.num_cards)](
+            self.beliefs_in,
+            extra_indices,
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_offset_compact_nobopp_kernel[grid](
+            self.beliefs_in,
+            self.P_padded,
+            self.cum_both,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["scale_factor"],
+            e["off_L_c1"],
+            e["off_L_c2"],
+            e["off_R_c1"],
+            e["off_R_c2"],
+            e["off_last_c1"],
+            e["off_last_c2"],
+            self.ev_out,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=4,
+        )
+
+    def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
+        self.beliefs_in.copy_(beliefs)
+        if torch.cuda.is_current_stream_capturing():
+            self._launch_pipeline()
+        else:
+            self.graph.replay()
+        return self.ev_out
+
+
+class ShowdownFullyCompactNoBOppFastEVGraphRunner(
+    ShowdownFullyCompactNoBOppGraphRunner
+):
+    """No-bopp compact runner with algebraically reduced EV arithmetic."""
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_P_compact_kernel[(self.M, 2)](
+            self.beliefs_in,
+            self.P_padded,
+            self.H,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_compact_kernel[(self.M, 2 * self.num_cards)](
+            self.beliefs_in,
+            extra_indices,
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_offset_compact_nobopp_fast_ev_kernel[grid](
+            self.beliefs_in,
+            self.P_padded,
+            self.cum_both,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["scale_factor"],
+            e["off_L_c1"],
+            e["off_L_c2"],
+            e["off_R_c1"],
+            e["off_R_c2"],
+            e["off_last_c1"],
+            e["off_last_c2"],
+            self.ev_out,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=4,
+        )
+
+
+class ShowdownFullyCompactNoBOppBothHeroCumGraphRunner(
+    ShowdownFullyCompactNoBOppGraphRunner
+):
+    """No-bopp compact runner building both hero cumsums per card program."""
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_P_compact_kernel[(self.M, 2)](
+            self.beliefs_in,
+            self.P_padded,
+            self.H,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_compact_both_heroes_kernel[(self.M, self.num_cards)](
+            self.beliefs_in,
+            extra_indices,
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_offset_compact_nobopp_kernel[grid](
+            self.beliefs_in,
+            self.P_padded,
+            self.cum_both,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["scale_factor"],
+            e["off_L_c1"],
+            e["off_L_c2"],
+            e["off_R_c1"],
+            e["off_R_c2"],
+            e["off_last_c1"],
+            e["off_last_c2"],
+            self.ev_out,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=4,
+        )
+
+
+class ShowdownFullyCompactNoBOppCardBlockCumGraphRunner(
+    ShowdownFullyCompactNoBOppGraphRunner
+):
+    """No-bopp compact runner building multiple cards per cumsum program."""
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        device: torch.device,
+        block_k: int = 64,
+        card_block: int = 2,
+        finish_num_warps: int = 4,
+    ) -> None:
+        self.card_block = card_block
+        self.finish_num_warps = finish_num_warps
+        super().__init__(extras=extras, M=M, device=device, block_k=block_k)
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_P_compact_kernel[(self.M, 2)](
+            self.beliefs_in,
+            self.P_padded,
+            self.H,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_compact_card_block_kernel[
+            (self.M, triton.cdiv(self.num_cards, self.card_block))
+        ](
+            self.beliefs_in,
+            extra_indices,
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            CARD_BLOCK=self.card_block,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_offset_compact_nobopp_kernel[grid](
+            self.beliefs_in,
+            self.P_padded,
+            self.cum_both,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["scale_factor"],
+            e["off_L_c1"],
+            e["off_L_c2"],
+            e["off_R_c1"],
+            e["off_R_c2"],
+            e["off_last_c1"],
+            e["off_last_c2"],
+            self.ev_out,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=self.finish_num_warps,
+        )
+
+
+class ShowdownFullyCompactNoBOppCardBlockFastEVGraphRunner(
+    ShowdownFullyCompactNoBOppCardBlockCumGraphRunner
+):
+    """Card-block cumsum runner using the reduced EV finish formula."""
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_P_compact_kernel[(self.M, 2)](
+            self.beliefs_in,
+            self.P_padded,
+            self.H,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_compact_card_block_kernel[
+            (self.M, triton.cdiv(self.num_cards, self.card_block))
+        ](
+            self.beliefs_in,
+            extra_indices,
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            CARD_BLOCK=self.card_block,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_offset_compact_nobopp_fast_ev_kernel[grid](
+            self.beliefs_in,
+            self.P_padded,
+            self.cum_both,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["scale_factor"],
+            e["off_L_c1"],
+            e["off_L_c2"],
+            e["off_R_c1"],
+            e["off_R_c2"],
+            e["off_last_c1"],
+            e["off_last_c2"],
+            self.ev_out,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=self.finish_num_warps,
+        )
+
+
+class ShowdownActiveCardBlockGraphRunner:
+    """Production runner for exact river showdown with full-shape I/O.
+
+    The hot showdown math runs on compact board-legal river hands, but this
+    runner preserves the evaluator contract by accepting and returning
+    `[M, 2, NUM_HANDS]` tensors.
+    """
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        NUM_HANDS: int,
+        device: torch.device,
+        block_k: int = 256,
+        card_block: int = 64,
+        finish_num_warps: int = 8,
+        gather_block_k: int = 256,
+    ) -> None:
+        if not triton_is_available():
+            raise RuntimeError("Triton is not installed.")
+        self.extras = extras
+        self.M = M
+        self.NUM_HANDS = NUM_HANDS
+        self.device = device
+        self.block_k = block_k
+        self.card_block = card_block
+        self.finish_num_warps = finish_num_warps
+        self.gather_block_k = gather_block_k
+
+        self.H = extras["sorted_indices"].shape[1]
+        self.num_cards = extras["card_positions"].shape[1]
+        block_h = 1
+        while block_h < self.H:
+            block_h *= 2
+        self.block_h = block_h
+
+        dtype = torch.float32
+        self.beliefs_in = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+        self.compact_beliefs = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.P_padded = torch.empty(M, 2, self.H + 1, device=device, dtype=dtype)
+        self.cum_both = torch.empty(
+            M,
+            2,
+            self.num_cards,
+            SHOWDOWN_MAX_PER_CARD,
+            device=device,
+            dtype=dtype,
+        )
+        self.compact_ev = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.ev_out = torch.empty(M, 2, NUM_HANDS, device=device, dtype=dtype)
+        self.ev_out.zero_()
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._launch_pipeline()
+        torch.cuda.current_stream().wait_stream(s)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._launch_pipeline()
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        gather_grid = (self.M, 2, triton.cdiv(self.H, self.gather_block_k))
+        _showdown_gather_active_beliefs_kernel[gather_grid](
+            self.beliefs_in,
+            extra_indices,
+            e["sorted_indices"],
+            self.compact_beliefs,
+            self.H,
+            self.NUM_HANDS,
+            BLOCK_K=self.gather_block_k,
+            num_warps=8,
+        )
+        _showdown_setup_P_compact_kernel[(self.M, 2)](
+            self.compact_beliefs,
+            self.P_padded,
+            self.H,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_build_cum_compact_card_block_kernel[
+            (self.M, triton.cdiv(self.num_cards, self.card_block))
+        ](
+            self.compact_beliefs,
+            extra_indices,
+            e["card_positions"],
+            self.cum_both,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            CARD_BLOCK=self.card_block,
+        )
+        finish_grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_offset_compact_nobopp_kernel[finish_grid](
+            self.compact_beliefs,
+            self.P_padded,
+            self.cum_both,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["scale_factor"],
+            e["off_L_c1"],
+            e["off_L_c2"],
+            e["off_R_c1"],
+            e["off_R_c2"],
+            e["off_last_c1"],
+            e["off_last_c2"],
+            self.compact_ev,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=self.finish_num_warps,
+        )
+        _showdown_scatter_active_values_kernel[gather_grid](
+            self.compact_ev,
+            extra_indices,
+            e["sorted_indices"],
+            self.ev_out,
+            self.H,
+            self.NUM_HANDS,
+            BLOCK_K=self.gather_block_k,
+            num_warps=8,
+        )
+
+    def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
+        self.beliefs_in.copy_(beliefs)
+        if torch.cuda.is_current_stream_capturing():
+            self._launch_pipeline()
+        else:
+            self.graph.replay()
+        return self.ev_out
+
+
+class ShowdownFullyCompactDirectGraphRunner:
+    """Compact exact showdown runner with direct sparse-card finish.
+
+    This keeps the rank-prefix setup but skips materializing the
+    `[M, 2, cards, slots]` card-cumsum buffer. The finish kernel sums the
+    sparse blocker masses from `card_positions` directly.
+    """
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        device: torch.device,
+        block_k: int = 64,
+    ) -> None:
+        if not triton_is_available():
+            raise RuntimeError("Triton is not installed.")
+        self.extras = extras
+        self.M = M
+        self.device = device
+        self.block_k = block_k
+
+        self.H = extras["sorted_indices"].shape[1]
+        self.num_cards = extras["card_positions"].shape[1]
+        block_h = 1
+        while block_h < self.H:
+            block_h *= 2
+        self.block_h = block_h
+
+        dtype = torch.float32
+        self.beliefs_in = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.b_opp_both = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.P_padded = torch.empty(M, 2, self.H + 1, device=device, dtype=dtype)
+        self.ev_out = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._launch_pipeline()
+        torch.cuda.current_stream().wait_stream(s)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._launch_pipeline()
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_b_P_compact_kernel[(self.M, 2)](
+            self.beliefs_in,
+            self.b_opp_both,
+            self.P_padded,
+            self.H,
+            BLOCK_H=self.block_h,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_ev_active_direct_compact_kernel[grid](
+            self.b_opp_both,
+            self.P_padded,
+            e["card_positions"],
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["c1"],
+            e["c2"],
+            e["scale_factor"],
+            self.ev_out,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=self.block_k,
+            num_warps=4,
+        )
+
+    def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
+        self.beliefs_in.copy_(beliefs)
+        if torch.cuda.is_current_stream_capturing():
+            self._launch_pipeline()
+        else:
+            self.graph.replay()
+        return self.ev_out
+
+
+class ShowdownFullyCompactScatterDirectGraphRunner:
+    """Compact exact showdown with card-prefix scatter correction buffers."""
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        device: torch.device,
+        block_k: int = 64,
+    ) -> None:
+        if not triton_is_available():
+            raise RuntimeError("Triton is not installed.")
+        self.extras = extras
+        self.M = M
+        self.device = device
+        self.block_k = block_k
+
+        self.H = extras["sorted_indices"].shape[1]
+        self.num_cards = extras["card_positions"].shape[1]
+        block_h = 1
+        while block_h < self.H:
+            block_h *= 2
+        self.block_h = block_h
+
+        dtype = torch.float32
+        self.beliefs_in = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.b_opp_both = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.P_padded = torch.empty(M, 2, self.H + 1, device=device, dtype=dtype)
+        self.corr_L = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.corr_R = torch.empty_like(self.corr_L)
+        self.corr_total = torch.empty_like(self.corr_L)
+        self.ev_out = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._launch_pipeline()
+        torch.cuda.current_stream().wait_stream(s)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._launch_pipeline()
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_b_P_compact_kernel[(self.M, 2)](
+            self.beliefs_in,
+            self.b_opp_both,
+            self.P_padded,
+            self.H,
+            BLOCK_H=self.block_h,
+        )
+        self.corr_L.zero_()
+        self.corr_R.zero_()
+        self.corr_total.zero_()
+        _showdown_card_corr_scatter_kernel[(self.M, 2, self.num_cards)](
+            self.b_opp_both,
+            extra_indices,
+            e["card_positions"],
+            e["occ_slot_L"],
+            e["occ_slot_R"],
+            e["card_slot_count"],
+            self.corr_L,
+            self.corr_R,
+            self.corr_total,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            num_warps=2,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_corr_finish_compact_kernel[grid](
+            self.b_opp_both,
+            self.P_padded,
+            self.corr_L,
+            self.corr_R,
+            self.corr_total,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["scale_factor"],
+            self.ev_out,
+            self.H,
+            BLOCK_K=self.block_k,
+            num_warps=4,
+        )
+
+    def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
+        self.beliefs_in.copy_(beliefs)
+        if torch.cuda.is_current_stream_capturing():
+            self._launch_pipeline()
+        else:
+            self.graph.replay()
+        return self.ev_out
+
+
+class ShowdownFullyCompactDualSlotGraphRunner:
+    """Compact exact showdown with deterministic per-card contribution stores."""
+
+    def __init__(
+        self,
+        extras: dict,
+        M: int,
+        device: torch.device,
+        block_k: int = 64,
+    ) -> None:
+        if not triton_is_available():
+            raise RuntimeError("Triton is not installed.")
+        self.extras = extras
+        self.M = M
+        self.device = device
+        self.block_k = block_k
+
+        self.H = extras["sorted_indices"].shape[1]
+        self.num_cards = extras["card_positions"].shape[1]
+        block_h = 1
+        while block_h < self.H:
+            block_h *= 2
+        self.block_h = block_h
+
+        dtype = torch.float32
+        self.beliefs_in = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.P_padded = torch.empty(M, 2, self.H + 1, device=device, dtype=dtype)
+        self.corr_L1 = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+        self.corr_L2 = torch.empty_like(self.corr_L1)
+        self.corr_R1 = torch.empty_like(self.corr_L1)
+        self.corr_R2 = torch.empty_like(self.corr_L1)
+        self.corr_T1 = torch.empty_like(self.corr_L1)
+        self.corr_T2 = torch.empty_like(self.corr_L1)
+        self.ev_out = torch.empty(M, 2, self.H, device=device, dtype=dtype)
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self._launch_pipeline()
+        torch.cuda.current_stream().wait_stream(s)
+
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self._launch_pipeline()
+
+    def _launch_pipeline(self) -> None:
+        e = self.extras
+        extra_indices = e["extra_indices"]
+        _showdown_setup_P_compact_kernel[(self.M, 2)](
+            self.beliefs_in,
+            self.P_padded,
+            self.H,
+            BLOCK_H=self.block_h,
+        )
+        _showdown_card_corr_dualslot_kernel[(self.M, 2, self.num_cards)](
+            self.beliefs_in,
+            extra_indices,
+            e["card_positions"],
+            e["occ_slot_L"],
+            e["occ_slot_R"],
+            e["card_slot_count"],
+            e["occ_is_c2"],
+            self.corr_L1,
+            self.corr_L2,
+            self.corr_R1,
+            self.corr_R2,
+            self.corr_T1,
+            self.corr_T2,
+            self.H,
+            NUM_CARDS=self.num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            num_warps=2,
+        )
+        grid = (self.M, triton.cdiv(self.H, self.block_k))
+        _showdown_dualslot_finish_compact_kernel[grid](
+            self.beliefs_in,
+            self.P_padded,
+            self.corr_L1,
+            self.corr_L2,
+            self.corr_R1,
+            self.corr_R2,
+            self.corr_T1,
+            self.corr_T2,
+            extra_indices,
+            e["L_idx"],
+            e["R_idx"],
+            e["scale_factor"],
+            self.ev_out,
+            self.H,
+            BLOCK_K=self.block_k,
+            num_warps=4,
+        )
+
+    def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
+        self.beliefs_in.copy_(beliefs)
         if torch.cuda.is_current_stream_capturing():
             self._launch_pipeline()
         else:
