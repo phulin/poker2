@@ -102,6 +102,38 @@ def _quality_metadata(cfg: Config) -> dict[str, object]:
     }
 
 
+def _component_feature_encoder_metadata(trainer: object, component: object) -> dict[str, str | None]:
+    metadata: dict[str, str | None] = {"model": type(component).__name__}
+    create_feature_encoder = getattr(component, "create_feature_encoder", None)
+    env = getattr(trainer, "env", None)
+    if not callable(create_feature_encoder) or env is None:
+        metadata["encoder"] = None
+        return metadata
+    try:
+        encoder = create_feature_encoder(
+            env,
+            device=getattr(trainer, "device", None),
+            dtype=getattr(trainer, "float_dtype", None),
+        )
+    except Exception:
+        metadata["encoder"] = None
+        return metadata
+    metadata["encoder"] = type(encoder).__name__
+    return metadata
+
+
+def _feature_encoder_metadata(trainer: object) -> dict[str, dict[str, str | None]]:
+    model = getattr(trainer, "model", None)
+    if model is None:
+        return {}
+    policy_model = getattr(model, "policy_model", model)
+    value_model = getattr(model, "value_model", model)
+    return {
+        "policy": _component_feature_encoder_metadata(trainer, policy_model),
+        "value": _component_feature_encoder_metadata(trainer, value_model),
+    }
+
+
 def _trim_batch(batch: RebelBatch, target_remaining: int) -> RebelBatch:
     if len(batch) <= target_remaining:
         return batch
@@ -199,6 +231,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 if hasattr(cfg.model.name, "value")
                 else str(cfg.model.name)
             ),
+            "feature_encoder": _feature_encoder_metadata(trainer),
             "action_schedule": {
                 "bet_bins": list(cfg.env.bet_bins),
                 "bet_bins_by_depth": cfg.search.bet_bins_by_depth,

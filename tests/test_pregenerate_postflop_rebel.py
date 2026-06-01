@@ -58,10 +58,30 @@ class _FakeGenerator:
         return value, policy
 
 
+class _FakeEncoder:
+    pass
+
+
+class _FakeModelComponent(torch.nn.Module):
+    def create_feature_encoder(self, env, device=None, dtype=None):
+        del env, device, dtype
+        return _FakeEncoder()
+
+
+class _FakeSplitModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.policy_model = _FakeModelComponent()
+        self.value_model = _FakeModelComponent()
+
+
 class _FakeTrainer:
     def __init__(self, cfg: Config, device: torch.device) -> None:
         self.cfg = cfg
         self.device = device
+        self.env = object()
+        self.float_dtype = torch.float32
+        self.model = _FakeSplitModel()
         self.data_generator = _FakeGenerator()
 
 
@@ -120,6 +140,10 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
         "role": "closing_leaf",
         "checkpoint": str(checkpoint),
         "sha256": hashlib.sha256(b"closing leaf checkpoint").hexdigest(),
+    }
+    assert written["metadata"]["feature_encoder"] == {
+        "policy": {"model": "_FakeModelComponent", "encoder": "_FakeEncoder"},
+        "value": {"model": "_FakeModelComponent", "encoder": "_FakeEncoder"},
     }
     assert written["metadata"]["quality"] == {
         "cfr_iterations": 17,
