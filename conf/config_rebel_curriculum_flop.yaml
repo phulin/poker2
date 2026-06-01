@@ -1,0 +1,28 @@
+# Initial postflop curriculum entry point for the implemented flop train stage.
+#
+# This config assumes `E_flop` leaf routing is added before full-quality flop
+# training. It is useful now for exercising random flop root generation and
+# train-stage orchestration.
+
+defaults:
+  - config_rebel_cfr
+  - _self_
+
+checkpoint_dir: checkpoints-rebel-curriculum
+num_steps: 5000
+wandb_project: poker-rebel-postflop-curriculum
+wandb_tags: ["rebel", "cfr", "postflop-curriculum", "flop"]
+
+data:
+  mode: live
+  live_root_source: random_flop
+
+curriculum:
+  stages: [flop]
+  wandb_group: rebel_postflop_curriculum
+  promote_dir: checkpoints-rebel-curriculum/promoted
+  flop:
+    kind: train
+    net: S_flop
+    closing_net: E_flop
+    num_steps: ${num_steps}

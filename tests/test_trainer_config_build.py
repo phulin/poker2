@@ -99,3 +99,19 @@ def test_rebel_curriculum_river_config_loads_from_yaml():
     assert cfg.curriculum.stages == ["river"]
     assert cfg.curriculum.substeps["river"].kind == "train"
     assert cfg.curriculum.substeps["river"].net == "S_river"
+
+
+def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
+    turn_cfg = Config.from_dict_config(
+        OmegaConf.load("conf/config_rebel_curriculum_turn.yaml")
+    )
+    flop_cfg = Config.from_dict_config(
+        OmegaConf.load("conf/config_rebel_curriculum_flop.yaml")
+    )
+
+    assert turn_cfg.data.live_root_source == "random_turn"
+    assert turn_cfg.curriculum.stages == ["turn"]
+    assert turn_cfg.curriculum.substeps["turn"].closing_net == "E_turn"
+    assert flop_cfg.data.live_root_source == "random_flop"
+    assert flop_cfg.curriculum.stages == ["flop"]
+    assert flop_cfg.curriculum.substeps["flop"].closing_net == "E_flop"
