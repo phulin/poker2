@@ -49,6 +49,7 @@ class RebelDataGenerator:
         policy_buffer: RebelReplayBuffer,
         warmup: bool = True,
         root_sampler: Callable[[int], PublicBeliefState] | None = None,
+        include_pre_chance_value_batches: bool = True,
     ):
         self.env_proto = env_proto
         self.evaluator = evaluator
@@ -57,6 +58,7 @@ class RebelDataGenerator:
         self.device = evaluator.device
         self.target_batch_size = int(evaluator.root_nodes)
         self.root_sampler = root_sampler
+        self.include_pre_chance_value_batches = bool(include_pre_chance_value_batches)
         initial_pbs = self._sample_roots(self.target_batch_size)
         self.current_pbs = initial_pbs
         self.last_extra = 0
@@ -269,7 +271,8 @@ class RebelDataGenerator:
             )
             self.policy_buffer.add_batch(policy_batch)
             self.value_buffer.add_batch(value_batch)
-            self.value_buffer.add_batch(augmented_value_batch)
+            if self.include_pre_chance_value_batches:
+                self.value_buffer.add_batch(augmented_value_batch)
 
             if return_policy_batch:
                 remaining = (
@@ -289,7 +292,8 @@ class RebelDataGenerator:
                     returned_policy_samples += len(policy_batch)
             if return_value_batch:
                 value_batches.append(value_batch)
-                value_batches.append(augmented_value_batch)
+                if self.include_pre_chance_value_batches:
+                    value_batches.append(augmented_value_batch)
 
             collected += len(value_batch)
 

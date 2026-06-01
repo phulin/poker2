@@ -12,6 +12,7 @@ wandb_tags: ["rebel", "cfr", "postflop-curriculum", "river"]
 data:
   mode: live
   live_root_source: random_river
+  include_pre_chance_value_batches: false
 
 curriculum:
   stages: [river]

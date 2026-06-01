@@ -16,6 +16,7 @@ wandb_tags: ["rebel", "cfr", "postflop-curriculum", "flop"]
 data:
   mode: live
   live_root_source: random_flop
+  include_pre_chance_value_batches: false
 
 curriculum:
   stages: [distill_E_flop, flop, distill_E_preflop]

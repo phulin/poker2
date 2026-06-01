@@ -429,6 +429,7 @@ class RebelCFRTrainer:
                 value_buffer=self.value_buffer,
                 policy_buffer=self.policy_buffer,
                 root_sampler=root_sampler,
+                include_pre_chance_value_batches=cfg.data.include_pre_chance_value_batches,
             )
             self.data_source = LiveRebelDataSource(
                 self.data_generator,

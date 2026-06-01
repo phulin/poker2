@@ -57,6 +57,14 @@ class DummyEnv:
         return self._legal_mask.clone()
 
 
+class DummyEnvProto(SimpleNamespace):
+    @classmethod
+    def from_proto(
+        cls, proto: SimpleNamespace, num_envs: int | None = None
+    ) -> DummyEnv:
+        return fake_from_proto(proto, num_envs=num_envs)
+
+
 class DummyBuffer:
     """Replay buffer stub that records appended batches."""
 
@@ -214,7 +222,7 @@ def fake_from_proto(proto: SimpleNamespace, num_envs: int | None = None) -> Dumm
 
 @pytest.fixture
 def env_proto() -> SimpleNamespace:
-    return SimpleNamespace(num_envs=2, num_actions=5)
+    return DummyEnvProto(num_envs=2, num_actions=5)
 
 
 def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
@@ -274,6 +282,45 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
         torch.arange(evaluator.search_batch_size),
     )
     assert evaluator.self_play_calls >= 1
+
+
+def test_rebel_data_generator_can_skip_pre_chance_value_batches(
+    monkeypatch, env_proto
+):
+    monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
+    evaluator = DummyEvaluator(
+        env_proto=env_proto,
+        search_batch_size=2,
+        total_nodes=4,
+        num_players=2,
+        num_actions=env_proto.num_actions,
+    )
+
+    buffer = DummyBuffer()
+    generator = RebelDataGenerator(
+        env_proto=env_proto,
+        evaluator=evaluator,
+        value_buffer=buffer,
+        policy_buffer=buffer,
+        include_pre_chance_value_batches=False,
+    )
+
+    fresh_value_batch, fresh_policy_batch = generator.generate_data(2)
+
+    assert fresh_value_batch is not None
+    assert fresh_policy_batch is not None
+    assert len(buffer.batches) == 2
+    policy_batch = buffer.batches[0]
+    value_batch = buffer.batches[1]
+    assert len(fresh_value_batch) == evaluator.search_batch_size
+    assert len(fresh_policy_batch) == evaluator.search_batch_size
+    torch.testing.assert_close(
+        value_batch.value_targets, evaluator.values[: evaluator.search_batch_size]
+    )
+    torch.testing.assert_close(
+        policy_batch.policy_targets,
+        evaluator.policy_probs_avg[: evaluator.search_batch_size],
+    )
 
 
 def test_rebel_data_generator_can_use_sampled_roots(monkeypatch, env_proto):
@@ -406,7 +453,7 @@ def test_rebel_data_generator_uses_stable_target_after_evaluator_root_mutates(
 
 def test_rebel_data_generator_warmup_mixes_streets(monkeypatch):
     monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
-    env_proto = SimpleNamespace(num_envs=8, num_actions=5)
+    env_proto = DummyEnvProto(num_envs=8, num_actions=5)
     evaluator = WarmupEvaluator(
         env_proto=env_proto,
         search_batch_size=8,
@@ -431,7 +478,7 @@ def test_rebel_data_generator_warmup_mixes_streets(monkeypatch):
 
 def test_rebel_data_generator_state_dict_roundtrip(monkeypatch):
     monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
-    env_proto = SimpleNamespace(num_envs=2, num_actions=5)
+    env_proto = DummyEnvProto(num_envs=2, num_actions=5)
     evaluator = DummyEvaluator(
         env_proto=env_proto,
         search_batch_size=2,

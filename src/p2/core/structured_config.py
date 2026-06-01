@@ -389,6 +389,7 @@ class PregeneratedDataConfig:
 class DataConfig:
     mode: str = "live"
     live_root_source: str = "self_play"
+    include_pre_chance_value_batches: bool = True
     pregenerated: PregeneratedDataConfig = field(default_factory=PregeneratedDataConfig)
 
 

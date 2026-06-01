@@ -9,7 +9,7 @@ CFR/DCFR search, public-belief state handling, ReBeL data generation, evaluator 
 - `cfr_manager.py`: High-level CFRManager orchestration.
 - `chance_node_helper.py`: Chance-node expansion and board/deck helper logic, including post-chance value-head evaluation for street-value targets.
 - `postflop_spot_sampler.py`: Random legal postflop public-root samplers for heads-up flop/turn/river street-start and legal-prefix roots, closed-street chance-target roots with randomized pre-chance beliefs, texture-stratified boards, tensorized strength-ordered and named-shape board-legal belief mixtures, and conservative pot/SPR templates.
-- `rebel_data_generator.py`: ReBeL public-belief training data generator.
+- `rebel_data_generator.py`: ReBeL public-belief training data generator with optional legacy pre-chance value augmentation.
 - `rebel_data_source.py`: Data-source boundary for ReBeL trainer batches, wrapping live CFR generation, bounded pregenerated solved datasets, or hybrid live-training-plus-holdout metrics through replay-buffer or direct dataset sampling with step-windowed dataset selection, optional shuffled row sampling, and checkpointed cursor plus manifest-state validation.
 - `rebel_solved_dataset.py`: Tensor-only bounded solved-example dataset writer/reader for postflop value and policy `RebelBatch` shards with manifest validation, street/depth/target-source/root-source coverage metadata, normalized included-street names, wrapped sampling, optional compressed float storage, and optional pinned/async shard prefetch.
 - `sparse_cfr_evaluator.py`: Sparse CFR evaluator implementation used as the reference path, including split policy/value encoder setup and initial PBSEnv-backed multiway tree construction.
