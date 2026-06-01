@@ -130,6 +130,88 @@ def test_curriculum_distill_substep_uses_promoted_source_checkpoint(
     }
 
 
+def test_curriculum_resume_restarts_recorded_substep(monkeypatch, tmp_path) -> None:
+    calls = []
+    promoted_dir = tmp_path / "promoted"
+    promoted_dir.mkdir()
+    promoted = {
+        "S_river": str(promoted_dir / "S_river.pt"),
+        "E_turn": str(promoted_dir / "E_turn.pt"),
+    }
+    for path in promoted.values():
+        torch.save({"model": {}, "metadata": {}}, path)
+    (promoted_dir / "curriculum_state.json").write_text(
+        json.dumps({"promoted": promoted})
+    )
+    resume_path = tmp_path / "turn" / "rebel_latest.pt"
+    resume_path.parent.mkdir()
+    torch.save(
+        {"model": {}, "metadata": {"curriculum_substep": "turn"}},
+        resume_path,
+    )
+
+    def fake_run_train(cfg, substep_name, substep, **kwargs):
+        calls.append((substep_name, kwargs["resume_from"], dict(kwargs["promoted"])))
+        promoted_path = promoted_dir / f"{substep.net}.pt"
+        promoted_path.write_bytes(b"promoted")
+        return str(promoted_path)
+
+    monkeypatch.setattr(curriculum_cli, "_run_train_substep", fake_run_train)
+    monkeypatch.setattr(
+        curriculum_cli,
+        "_run_distill_substep",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("resume should skip earlier distill substeps")
+        ),
+    )
+
+    cfg = Config(
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        use_wandb=False,
+        resume_from=str(resume_path),
+    )
+    cfg.curriculum.stages = ["river", "distill_E_turn", "turn"]
+    cfg.curriculum.substeps = {
+        "river": CurriculumSubstepConfig(kind="train", net="S_river", num_steps=3),
+        "distill_E_turn": CurriculumSubstepConfig(
+            kind="distill",
+            net="E_turn",
+            from_net="S_river",
+            num_steps=2,
+        ),
+        "turn": CurriculumSubstepConfig(
+            kind="train",
+            net="S_turn",
+            closing_net="E_turn",
+            num_steps=5,
+        ),
+    }
+
+    curriculum_cli.train_rebel_curriculum(cfg)
+
+    assert calls == [("turn", str(resume_path), promoted)]
+
+
+def test_curriculum_resume_rejects_non_curriculum_checkpoint(tmp_path) -> None:
+    resume_path = tmp_path / "plain.pt"
+    torch.save({"model": {}, "metadata": {}}, resume_path)
+
+    cfg = Config(
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        use_wandb=False,
+        resume_from=str(resume_path),
+    )
+    cfg.curriculum.stages = ["river"]
+    cfg.curriculum.substeps = {
+        "river": CurriculumSubstepConfig(kind="train", net="S_river", num_steps=1)
+    }
+
+    with pytest.raises(ValueError, match="missing metadata field"):
+        curriculum_cli.train_rebel_curriculum(cfg)
+
+
 def test_curriculum_substep_rejects_unknown_overrides(tmp_path) -> None:
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     cfg.curriculum.substeps = {

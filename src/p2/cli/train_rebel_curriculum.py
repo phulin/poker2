@@ -139,6 +139,28 @@ def _resume_start_index(stage_names: list[str], metadata: dict[str, Any]) -> int
     return 0
 
 
+def _validate_resume_checkpoint(
+    resume_from: str | None,
+    stage_names: list[str],
+    metadata: dict[str, Any],
+) -> None:
+    if not resume_from:
+        return
+    if not os.path.exists(resume_from):
+        raise FileNotFoundError(f"resume checkpoint does not exist: {resume_from}")
+    substep = metadata.get("curriculum_substep")
+    if not isinstance(substep, str):
+        raise ValueError(
+            "Curriculum resume checkpoint is missing metadata field "
+            "`curriculum_substep`"
+        )
+    if substep not in stage_names:
+        raise ValueError(
+            "Curriculum resume checkpoint substep is not in curriculum.stages: "
+            f"{substep!r}"
+        )
+
+
 def _stage_config(
     cfg: Config,
     substep_name: str,
@@ -387,6 +409,7 @@ def train_rebel_curriculum(cfg: Config) -> None:
 
     stage_names = _stage_names(cfg)
     resume_metadata = _read_checkpoint_metadata(cfg.resume_from or "", device)
+    _validate_resume_checkpoint(cfg.resume_from, stage_names, resume_metadata)
     start_index = _resume_start_index(stage_names, resume_metadata)
     promoted: dict[str, str] = _load_curriculum_state(cfg)
 
