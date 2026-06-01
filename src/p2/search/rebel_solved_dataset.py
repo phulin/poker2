@@ -11,6 +11,7 @@ import torch
 from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
+from p2.rl.target_provenance import TARGET_SOURCE_NAMES
 
 
 FORMAT_VERSION = "p2.rebel.solved_postflop.v1"
@@ -261,6 +262,8 @@ def write_rebel_solved_dataset(
     policy_street_counts = _count_tensor_values(policy_batches, "street")
     value_depth_counts = _count_tensor_values(value_batches, "node_depth")
     policy_depth_counts = _count_tensor_values(policy_batches, "node_depth")
+    value_target_source_counts = _count_tensor_values(value_batches, "target_source")
+    policy_target_source_counts = _count_tensor_values(policy_batches, "target_source")
 
     manifest: dict[str, Any] = {
         "format": FORMAT_VERSION,
@@ -278,6 +281,16 @@ def write_rebel_solved_dataset(
             "value": value_depth_counts,
             "policy": policy_depth_counts,
             "total": _merge_count_dicts(value_depth_counts, policy_depth_counts),
+        },
+        "target_source_counts": {
+            "value": value_target_source_counts,
+            "policy": policy_target_source_counts,
+            "total": _merge_count_dicts(
+                value_target_source_counts, policy_target_source_counts
+            ),
+        },
+        "target_source_names": {
+            str(code): name for code, name in sorted(TARGET_SOURCE_NAMES.items())
         },
         "storage_float_dtype": storage_dtype_name,
         "value_examples": int(value_examples),

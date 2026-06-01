@@ -8,6 +8,11 @@ import torch
 from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
+from p2.rl.target_provenance import (
+    TARGET_SOURCE_CFR_BACKUP,
+    TARGET_SOURCE_CHANCE_EXPECTATION,
+    TARGET_SOURCE_NAMES,
+)
 from p2.search.rebel_solved_dataset import (
     MANIFEST_NAME,
     RebelSolvedDataset,
@@ -48,7 +53,14 @@ def _value_batch(start: int, count: int) -> RebelBatch:
         features=features,
         legal_masks=torch.ones(count, 5, dtype=torch.bool),
         value_targets=value_targets,
-        statistics={"node_depth": torch.arange(start, start + count)},
+        statistics={
+            "node_depth": torch.arange(start, start + count),
+            "target_source": torch.where(
+                torch.arange(count).remainder(2) == 0,
+                torch.full((count,), TARGET_SOURCE_CFR_BACKUP),
+                torch.full((count,), TARGET_SOURCE_CHANCE_EXPECTATION),
+            ),
+        },
     )
 
 
@@ -100,6 +112,20 @@ def test_rebel_solved_dataset_reads_wrapped_batches(tmp_path):
         "value": {"0": 1, "1": 1, "2": 1, "3": 1, "4": 1},
         "policy": {"10": 1, "11": 1},
         "total": {"0": 1, "1": 1, "2": 1, "3": 1, "4": 1, "10": 1, "11": 1},
+    }
+    assert manifest["target_source_counts"] == {
+        "value": {
+            str(TARGET_SOURCE_CFR_BACKUP): 3,
+            str(TARGET_SOURCE_CHANCE_EXPECTATION): 2,
+        },
+        "policy": {},
+        "total": {
+            str(TARGET_SOURCE_CFR_BACKUP): 3,
+            str(TARGET_SOURCE_CHANCE_EXPECTATION): 2,
+        },
+    }
+    assert manifest["target_source_names"] == {
+        str(code): name for code, name in sorted(TARGET_SOURCE_NAMES.items())
     }
     dataset = RebelSolvedDataset(
         tmp_path,
