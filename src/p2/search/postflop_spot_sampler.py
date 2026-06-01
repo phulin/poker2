@@ -64,6 +64,45 @@ def _random_board_legal_beliefs(
     return scores / scores.sum(dim=-1, keepdim=True).clamp(min=1.0)
 
 
+def _apply_postflop_spot_templates(
+    env: HUNLTensorEnv | PBSEnv,
+    *,
+    generator: torch.Generator | None,
+) -> None:
+    """Apply conservative street-start pot/SPR templates in-place."""
+
+    batch_size = env.N
+    device = env.device
+    template = torch.randint(0, 4, (batch_size,), device=device, generator=generator)
+    # Approximate DeepStack-style pot buckets on the env's stack scale:
+    # single-raised, three-bet, short-stack low-SPR, and deep/high-SPR.
+    low = torch.tensor([0.04, 0.10, 0.35, 0.02], device=device)
+    high = torch.tensor([0.10, 0.28, 0.90, 0.06], device=device)
+    span = high[template] - low[template]
+    pot_frac = low[template] + span * torch.rand(
+        batch_size, device=device, generator=generator
+    )
+
+    scale = env.scale.to(torch.float32).clamp(min=float(env.bb * 4))
+    max_pot = (2.0 * (scale - float(env.bb))).clamp(min=float(env.bb * 2))
+    pot = (pot_frac * scale).round().to(torch.long)
+    pot = pot.clamp(min=int(env.bb * 2))
+    pot = torch.minimum(pot, max_pot.to(torch.long))
+    env.pot.copy_(pot)
+
+    p0_contrib = pot // 2
+    p1_contrib = pot - p0_contrib
+    contributions = torch.stack((p0_contrib, p1_contrib), dim=1)
+    stacks = (env.starting_stacks - contributions).clamp(min=0)
+    env.stacks.copy_(stacks)
+    env.chips_placed.copy_(contributions)
+    env.committed.zero_()
+
+    actions_last = torch.tensor([2, 3, 5, 2], device=device, dtype=torch.long)
+    env.actions_last_round.copy_(actions_last[template])
+    env.min_raise.fill_(env.bb)
+
+
 @torch.no_grad()
 def sample_postflop_start_roots(
     env_proto: HUNLTensorEnv | PBSEnv,
@@ -72,13 +111,14 @@ def sample_postflop_start_roots(
     street: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    randomize_spots: bool = True,
 ) -> PublicBeliefState:
     """Sample legal-looking heads-up postflop street-start roots.
 
     The first implementation is intentionally conservative: it constructs
     post-chance roots with no active bet, random button/to-act assignment,
-    unique public boards, and uniform board-legal beliefs. Betting history is
-    summarized by the inherited pot/stack state from reset plus round counters.
+    unique public boards, randomized board-legal beliefs, and simple legal
+    pot/SPR templates.
     """
 
     if int(env_proto.num_players) != 2:
@@ -120,6 +160,8 @@ def sample_postflop_start_roots(
     env.done.zero_()
     env.winner.fill_(-1)
     env.min_raise.fill_(env.bb)
+    if randomize_spots:
+        _apply_postflop_spot_templates(env, generator=generator)
 
     button = torch.randint(
         0, 2, (batch_size,), device=device, generator=generator
@@ -149,6 +191,7 @@ def sample_flop_start_roots(
     batch_size: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    randomize_spots: bool = True,
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
         env_proto,
@@ -156,6 +199,7 @@ def sample_flop_start_roots(
         street=1,
         generator=generator,
         randomize_beliefs=randomize_beliefs,
+        randomize_spots=randomize_spots,
     )
 
 
@@ -166,6 +210,7 @@ def sample_turn_start_roots(
     batch_size: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    randomize_spots: bool = True,
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
         env_proto,
@@ -173,6 +218,7 @@ def sample_turn_start_roots(
         street=2,
         generator=generator,
         randomize_beliefs=randomize_beliefs,
+        randomize_spots=randomize_spots,
     )
 
 
@@ -183,6 +229,7 @@ def sample_river_start_roots(
     batch_size: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    randomize_spots: bool = True,
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
         env_proto,
@@ -190,6 +237,7 @@ def sample_river_start_roots(
         street=3,
         generator=generator,
         randomize_beliefs=randomize_beliefs,
+        randomize_spots=randomize_spots,
     )
 
 

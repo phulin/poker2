@@ -10,7 +10,7 @@ Python unit and integration tests for environments, rules, models, training util
 - `test_allin_equity_model.py`: Preflop all-in random batch generation, browser-friendly LeakyReLU/RMSNorm model shape checks, pregenerated dataset helpers, and random/exhaustive all-in target sampler smoke coverage.
 - `test_*cfr*.py`, `test_allin_payoff.py`, `test_chance_node_helper.py`, `test_rebel_data_generator.py`, `test_rebel_pipeline.py`, `test_sparse_cfr_evaluator.py`, `test_high_exploitability_save.py`: Sparse CFR/search, all-in payoff kernels, and ReBeL pipeline coverage.
 - `test_end_of_street_distillation.py`: End-of-street `E_X` distillation target-batch coverage for pre-chance features and chance-mode validation.
-- `test_postflop_spot_sampler.py`: Random postflop public-root sampler invariants for flop/turn/river street-start roots, closed-street chance-target roots, and randomized board-legal beliefs.
+- `test_postflop_spot_sampler.py`: Random postflop public-root sampler invariants for flop/turn/river street-start roots, closed-street chance-target roots, randomized board-legal beliefs, and conservative pot/SPR templates.
 - `test_rebel_data_source.py`: ReBeL data-source abstraction coverage for live generator-backed and pregenerated solved-dataset-backed training data.
 - `test_rebel_solved_dataset.py`: Tensor-only solved ReBeL dataset serialization, manifest validation, wrapped reads, and random sampling coverage.
 - `test_pregenerate_postflop_rebel.py`: Bounded postflop pregeneration CLI coverage for live-mode validation and trimmed solved-batch writer calls.

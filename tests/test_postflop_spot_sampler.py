@@ -26,6 +26,10 @@ def _assert_street_start_root(pbs, *, street: int, board_cards: int) -> None:
     assert not pbs.env.done.any()
     assert not pbs.env.has_folded.any()
     assert not pbs.env.is_allin.any()
+    assert torch.equal(pbs.env.committed, torch.zeros(batch_size, 2, dtype=torch.long))
+    assert torch.equal(pbs.env.pot, pbs.env.chips_placed.sum(dim=1))
+    assert torch.equal(pbs.env.stacks + pbs.env.chips_placed, pbs.env.starting_stacks)
+    assert (pbs.env.pot >= 2 * pbs.env.bb).all()
 
     board = pbs.env.board_indices
     assert board.shape == (batch_size, 5)
@@ -135,6 +139,33 @@ def test_sample_postflop_start_roots_randomizes_board_legal_beliefs():
         torch.zeros_like(uniform_pbs.beliefs),
     )
     torch.testing.assert_close(uniform_pbs.beliefs, expected_uniform)
+
+
+def test_sample_postflop_start_roots_uses_conservative_spot_templates():
+    device = torch.device("cpu")
+    env = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=device,
+        float_dtype=torch.float32,
+    )
+
+    pbs = sample_river_start_roots(
+        env,
+        batch_size=64,
+        generator=torch.Generator(device=device).manual_seed(29),
+        randomize_beliefs=False,
+    )
+
+    assert pbs.env.pot.unique().numel() > 8
+    assert set(pbs.env.actions_last_round.unique().tolist()).issubset({2, 3, 5})
+    assert pbs.env.actions_last_round.unique().numel() >= 2
+    assert torch.equal(pbs.env.committed, torch.zeros(64, 2, dtype=torch.long))
+    assert torch.equal(pbs.env.pot, pbs.env.chips_placed.sum(dim=1))
+    assert torch.equal(pbs.env.stacks + pbs.env.chips_placed, pbs.env.starting_stacks)
+    assert pbs.env.legal_bins_mask().any(dim=1).all()
 
 
 def test_sample_end_of_street_chance_roots_builds_pre_chance_beliefs():
