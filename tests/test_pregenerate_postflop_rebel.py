@@ -98,6 +98,7 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
     cfg.rebel_pregenerate.generation_batch_size = 2
     cfg.rebel_pregenerate.max_generation_batches = 3
     cfg.rebel_pregenerate.storage_dtype = "float16"
+    cfg.search.iterations = 17
     checkpoint = tmp_path / "closing.pt"
     checkpoint.write_bytes(b"closing leaf checkpoint")
     cfg.search.closing_leaf_checkpoint = str(checkpoint)
@@ -119,6 +120,15 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
         "role": "closing_leaf",
         "checkpoint": str(checkpoint),
         "sha256": hashlib.sha256(b"closing leaf checkpoint").hexdigest(),
+    }
+    assert written["metadata"]["quality"] == {
+        "cfr_iterations": 17,
+        "cfr_type": "linear",
+        "cfr_plus": True,
+        "sparse": True,
+        "sparse_fused": False,
+        "holdout_value_loss": None,
+        "target_model_kl": None,
     }
     assert written["storage_float_dtype"] == "float16"
 

@@ -86,6 +86,22 @@ def _root_streets(root_source: str) -> list[str]:
     return [_ROOT_SOURCE_TO_STREET.get(root_source, root_source)]
 
 
+def _quality_metadata(cfg: Config) -> dict[str, object]:
+    return {
+        "cfr_iterations": int(cfg.search.iterations),
+        "cfr_type": (
+            cfg.search.cfr_type.value
+            if hasattr(cfg.search.cfr_type, "value")
+            else str(cfg.search.cfr_type)
+        ),
+        "cfr_plus": bool(cfg.search.cfr_plus),
+        "sparse": bool(cfg.search.sparse),
+        "sparse_fused": bool(cfg.search.sparse_fused),
+        "holdout_value_loss": None,
+        "target_model_kl": None,
+    }
+
+
 def _trim_batch(batch: RebelBatch, target_remaining: int) -> RebelBatch:
     if len(batch) <= target_remaining:
         return batch
@@ -194,6 +210,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 "generation_batches": generation_batches,
             },
             "target_model": _target_model_metadata(cfg),
+            "quality": _quality_metadata(cfg),
             "model_config": asdict(cfg.model),
             "env_config": asdict(cfg.env),
             "search_config": asdict(cfg.search),
