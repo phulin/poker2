@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 from torch.testing import assert_close
 
@@ -20,6 +22,8 @@ from p2.models.model_output import ModelOutput
 from p2.rl.target_provenance import (
     TARGET_SOURCE_CFR_BACKUP,
     TARGET_SOURCE_CHANCE_EXPECTATION,
+    TARGET_SOURCE_CLOSING_NET,
+    TARGET_SOURCE_EXACT_TERMINAL,
 )
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
@@ -335,6 +339,39 @@ def test_model_leaf_values_route_new_street_leaves_to_closing_model() -> None:
     )
     torch.testing.assert_close(
         closing_model.forward_pre_contexts[0].flatten(), torch.tensor([1.0])
+    )
+
+
+def test_root_leaf_target_source_counts_split_terminal_and_closing_leaves() -> None:
+    evaluator = object.__new__(SparseCFREvaluator)
+    evaluator.device = torch.device("cpu")
+    evaluator.total_nodes = 5
+    evaluator.depth_offsets = [0, 2, 5]
+    evaluator.parent_index = torch.tensor([-1, -1, 0, 0, 1], dtype=torch.long)
+    evaluator.leaf_mask = torch.tensor([False, False, True, True, True])
+    evaluator.valid_mask = torch.ones(5, dtype=torch.bool)
+    evaluator.new_street_mask = torch.tensor([False, False, True, False, False])
+    evaluator.env = SimpleNamespace(
+        done=torch.tensor([False, False, False, True, False])
+    )
+    evaluator.allin_call_indices = torch.tensor([4], dtype=torch.long)
+
+    counts = evaluator._root_leaf_target_source_counts(num_roots=2)
+
+    torch.testing.assert_close(
+        counts["leaf_total_count"], torch.tensor([2, 1], dtype=torch.long)
+    )
+    torch.testing.assert_close(
+        counts[f"leaf_target_source_{TARGET_SOURCE_CLOSING_NET}_count"],
+        torch.tensor([1, 0], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        counts[f"leaf_target_source_{TARGET_SOURCE_EXACT_TERMINAL}_count"],
+        torch.tensor([1, 1], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        counts[f"leaf_target_source_{TARGET_SOURCE_CFR_BACKUP}_count"],
+        torch.tensor([0, 0], dtype=torch.long),
     )
 
 
@@ -732,6 +769,18 @@ def test_variable_stack_root_training_data_is_finite() -> None:
             TARGET_SOURCE_CFR_BACKUP,
         ),
     )
+    leaf_total = value_batch.statistics["leaf_total_count"]
+    leaf_cfr = value_batch.statistics[
+        f"leaf_target_source_{TARGET_SOURCE_CFR_BACKUP}_count"
+    ]
+    leaf_exact = value_batch.statistics[
+        f"leaf_target_source_{TARGET_SOURCE_EXACT_TERMINAL}_count"
+    ]
+    leaf_closing = value_batch.statistics[
+        f"leaf_target_source_{TARGET_SOURCE_CLOSING_NET}_count"
+    ]
+    assert torch.equal(leaf_total, leaf_cfr + leaf_exact + leaf_closing)
+    assert (leaf_total > 0).all()
     assert torch.isfinite(policy_batch.policy_targets).all()
     if len(pre_value_batch) > 0:
         assert torch.isfinite(pre_value_batch.value_targets).all()

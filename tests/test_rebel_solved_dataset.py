@@ -11,6 +11,8 @@ from p2.rl.rebel_batch import RebelBatch
 from p2.rl.target_provenance import (
     TARGET_SOURCE_CFR_BACKUP,
     TARGET_SOURCE_CHANCE_EXPECTATION,
+    TARGET_SOURCE_CLOSING_NET,
+    TARGET_SOURCE_EXACT_TERMINAL,
     TARGET_SOURCE_NAMES,
 )
 from p2.search.rebel_solved_dataset import (
@@ -60,6 +62,15 @@ def _value_batch(start: int, count: int) -> RebelBatch:
                 torch.arange(count).remainder(2) == 0,
                 torch.full((count,), TARGET_SOURCE_CFR_BACKUP),
                 torch.full((count,), TARGET_SOURCE_CHANCE_EXPECTATION),
+            ),
+            f"leaf_target_source_{TARGET_SOURCE_CFR_BACKUP}_count": torch.arange(
+                start, start + count, dtype=torch.long
+            ),
+            f"leaf_target_source_{TARGET_SOURCE_EXACT_TERMINAL}_count": torch.ones(
+                count, dtype=torch.long
+            ),
+            f"leaf_target_source_{TARGET_SOURCE_CLOSING_NET}_count": torch.full(
+                (count,), 2, dtype=torch.long
             ),
         },
     )
@@ -131,6 +142,19 @@ def test_rebel_solved_dataset_reads_wrapped_batches(tmp_path):
     }
     assert manifest["target_source_names"] == {
         str(code): name for code, name in sorted(TARGET_SOURCE_NAMES.items())
+    }
+    assert manifest["leaf_target_source_counts"] == {
+        "value": {
+            str(TARGET_SOURCE_CFR_BACKUP): 10,
+            str(TARGET_SOURCE_EXACT_TERMINAL): 5,
+            str(TARGET_SOURCE_CLOSING_NET): 10,
+        },
+        "policy": {},
+        "total": {
+            str(TARGET_SOURCE_CFR_BACKUP): 10,
+            str(TARGET_SOURCE_EXACT_TERMINAL): 5,
+            str(TARGET_SOURCE_CLOSING_NET): 10,
+        },
     }
     assert manifest["root_source_counts"] == {
         "value": {"2": 5},

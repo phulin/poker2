@@ -11,7 +11,12 @@ import torch
 from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
-from p2.rl.target_provenance import TARGET_SOURCE_NAMES
+from p2.rl.target_provenance import (
+    TARGET_SOURCE_CFR_BACKUP,
+    TARGET_SOURCE_CLOSING_NET,
+    TARGET_SOURCE_EXACT_TERMINAL,
+    TARGET_SOURCE_NAMES,
+)
 
 
 FORMAT_VERSION = "p2.rebel.solved_postflop.v1"
@@ -215,6 +220,29 @@ def _count_tensor_values(batches: Sequence[RebelBatch], key: str) -> dict[str, i
     return {str(key): counts[key] for key in sorted(counts)}
 
 
+def _sum_stat_tensor(batches: Sequence[RebelBatch], key: str) -> int:
+    total = 0
+    for batch in batches:
+        values = batch.statistics.get(key)
+        if values is not None:
+            total += int(values.detach().cpu().to(torch.long).sum().item())
+    return total
+
+
+def _leaf_target_source_counts(batches: Sequence[RebelBatch]) -> dict[str, int]:
+    return {
+        str(TARGET_SOURCE_CFR_BACKUP): _sum_stat_tensor(
+            batches, f"leaf_target_source_{TARGET_SOURCE_CFR_BACKUP}_count"
+        ),
+        str(TARGET_SOURCE_EXACT_TERMINAL): _sum_stat_tensor(
+            batches, f"leaf_target_source_{TARGET_SOURCE_EXACT_TERMINAL}_count"
+        ),
+        str(TARGET_SOURCE_CLOSING_NET): _sum_stat_tensor(
+            batches, f"leaf_target_source_{TARGET_SOURCE_CLOSING_NET}_count"
+        ),
+    }
+
+
 def _merge_count_dicts(*dicts: dict[str, int]) -> dict[str, int]:
     merged: dict[str, int] = {}
     for counts in dicts:
@@ -269,6 +297,7 @@ def write_rebel_solved_dataset(
     policy_depth_counts = _count_tensor_values(policy_batches, "node_depth")
     value_target_source_counts = _count_tensor_values(value_batches, "target_source")
     policy_target_source_counts = _count_tensor_values(policy_batches, "target_source")
+    value_leaf_target_source_counts = _leaf_target_source_counts(value_batches)
     value_root_source_counts = _count_tensor_values(value_batches, "root_source")
     policy_root_source_counts = _count_tensor_values(policy_batches, "root_source")
 
@@ -299,6 +328,11 @@ def write_rebel_solved_dataset(
         },
         "target_source_names": {
             str(code): name for code, name in sorted(TARGET_SOURCE_NAMES.items())
+        },
+        "leaf_target_source_counts": {
+            "value": value_leaf_target_source_counts,
+            "policy": {},
+            "total": value_leaf_target_source_counts,
         },
         "root_source_counts": {
             "value": value_root_source_counts,

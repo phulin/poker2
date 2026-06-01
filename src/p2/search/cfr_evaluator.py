@@ -38,6 +38,8 @@ from p2.rl.rebel_batch import RebelBatch
 from p2.rl.target_provenance import (
     TARGET_SOURCE_CFR_BACKUP,
     TARGET_SOURCE_CHANCE_EXPECTATION,
+    TARGET_SOURCE_CLOSING_NET,
+    TARGET_SOURCE_EXACT_TERMINAL,
 )
 from p2.search.chance_node_helper import ChanceNodeHelper
 from p2.utils.model_utils import compute_masked_logits
@@ -2125,6 +2127,8 @@ class CFREvaluator(ABC):
         value_statistics["local_best_response_values"] = (
             exploit_stats.local_best_response_values
         )
+        for key, value in self._root_leaf_target_source_counts(N).items():
+            value_statistics[key] = value
 
         # Policy batch gets all valid, non-leaf states.
         # Use valid_mask directly (works for both: sparse has all-ones, dense has computed mask)
@@ -2224,6 +2228,61 @@ class CFREvaluator(ABC):
         )[transition_mask]
 
         return value_batch, pre_value_batch, policy_batch
+
+    def _root_leaf_target_source_counts(self, num_roots: int) -> dict[str, torch.Tensor]:
+        """Count terminal/model/closing leaf sources under each root."""
+
+        total_nodes = int(self.total_nodes)
+        device = self.device
+        counts = {
+            "leaf_total_count": torch.zeros(num_roots, dtype=torch.long, device=device),
+            f"leaf_target_source_{TARGET_SOURCE_CFR_BACKUP}_count": torch.zeros(
+                num_roots, dtype=torch.long, device=device
+            ),
+            f"leaf_target_source_{TARGET_SOURCE_EXACT_TERMINAL}_count": torch.zeros(
+                num_roots, dtype=torch.long, device=device
+            ),
+            f"leaf_target_source_{TARGET_SOURCE_CLOSING_NET}_count": torch.zeros(
+                num_roots, dtype=torch.long, device=device
+            ),
+        }
+        if num_roots == 0 or total_nodes == 0 or self.leaf_mask.numel() == 0:
+            return counts
+
+        root_owner = torch.arange(total_nodes, dtype=torch.long, device=device)
+        root_owner[:num_roots] = torch.arange(num_roots, dtype=torch.long, device=device)
+        for level in range(1, len(self.depth_offsets) - 1):
+            start = self.depth_offsets[level]
+            end = self.depth_offsets[level + 1]
+            if end <= start:
+                continue
+            parents = self.parent_index[start:end].clamp(min=0)
+            root_owner[start:end] = root_owner[parents]
+
+        valid_leaf = self.leaf_mask
+        if self.valid_mask.numel() == self.leaf_mask.numel():
+            valid_leaf = valid_leaf & self.valid_mask
+        valid_leaf = valid_leaf & (root_owner < num_roots)
+
+        allin_leaf = torch.zeros_like(valid_leaf)
+        allin_indices = getattr(self, "allin_call_indices", None)
+        if allin_indices is not None and allin_indices.numel() > 0:
+            allin_leaf[allin_indices] = True
+
+        closing_leaf = valid_leaf & self.new_street_mask
+        exact_terminal_leaf = valid_leaf & ~closing_leaf & (self.env.done | allin_leaf)
+        same_street_model_leaf = valid_leaf & ~closing_leaf & ~exact_terminal_leaf
+
+        one = torch.ones(total_nodes, dtype=torch.long, device=device)
+        leaf_source_masks = {
+            "leaf_total_count": valid_leaf,
+            f"leaf_target_source_{TARGET_SOURCE_CFR_BACKUP}_count": same_street_model_leaf,
+            f"leaf_target_source_{TARGET_SOURCE_EXACT_TERMINAL}_count": exact_terminal_leaf,
+            f"leaf_target_source_{TARGET_SOURCE_CLOSING_NET}_count": closing_leaf,
+        }
+        for key, mask in leaf_source_masks.items():
+            counts[key].scatter_add_(0, root_owner[mask], one[mask])
+        return counts
 
     def evaluate_cfr(self, training_mode: bool = True) -> PublicBeliefState:
         """Run CFR iterations to evaluate the subgame.

@@ -254,6 +254,7 @@ The manifest is the guardrail against stale or mixed-quality data:
   "node_depth_counts": {...},
   "target_source_counts": {...},
   "target_source_names": {...},
+  "leaf_target_source_counts": {...},
   "root_source_counts": {...},
   "quality": {
     "cfr_iterations": 400,
