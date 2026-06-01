@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from functools import lru_cache
 from typing import Any
 
 import torch
@@ -132,19 +131,11 @@ def _normuon_matrix_update(
     return param, momentum, row_second_moment
 
 
-@lru_cache(maxsize=2)
-def _normuon_update_fn(compile_update: bool) -> Any:
-    if not compile_update:
-        return _normuon_matrix_update
-    return torch.compile(_normuon_matrix_update, fullgraph=True)
-
-
 class NorMuon(torch.optim.Optimizer):
     """NorMuon optimizer for 2D matrix parameters.
 
-    The per-matrix computation follows the supplied algorithm and is factored
-    into a pure tensor function so CUDA training can compile it with
-    ``torch.compile``.
+    The per-matrix computation follows the supplied algorithm and runs eagerly
+    inside the optimizer step.
     """
 
     def __init__(
@@ -195,7 +186,6 @@ class NorMuon(torch.optim.Optimizer):
             loss = None
 
         for group in self.param_groups:
-            update_fn = _normuon_update_fn(bool(group["compile_update"]))
             lr = float(group["lr"])
             weight_decay = float(group["weight_decay"])
             beta1 = float(group["beta1"])
@@ -242,7 +232,7 @@ class NorMuon(torch.optim.Optimizer):
                     dtype=param.dtype,
                     device=param.device,
                 )
-                new_param, new_momentum, new_row_second_moment = update_fn(
+                new_param, new_momentum, new_row_second_moment = _normuon_matrix_update(
                     param,
                     grad,
                     state["momentum"],
@@ -454,7 +444,7 @@ def build_optimizer(
                 matrix_params,
                 train_cfg,
                 train_cfg.learning_rate,
-                compile_update=device.type == "cuda",
+                compile_update=False,
             )
         optimizers.append((optimizer_name, matrix_optimizer))
     if policy_head_matrix_params:
@@ -469,7 +459,7 @@ def build_optimizer(
                 policy_head_matrix_params,
                 train_cfg,
                 policy_head_muon_lr,
-                compile_update=device.type == "cuda",
+                compile_update=False,
             )
         for param_group in policy_head_optimizer.param_groups:
             param_group["lr_role"] = "policy_head_muon"
