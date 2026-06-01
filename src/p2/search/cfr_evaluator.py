@@ -2125,6 +2125,7 @@ class CFREvaluator(ABC):
             "continuation_value_target_indices",
             torch.empty(0, dtype=torch.long, device=self.device),
         )
+        value_roots_only = False
         if (
             self._continuation_value_target_sampling_enabled()
             and continuation_value_indices.numel() > 0
@@ -2137,6 +2138,7 @@ class CFREvaluator(ABC):
                 )
         else:
             value_node_indices = root_indices
+            value_roots_only = True
         value_targets = source_values[value_node_indices].clamp(-1.0, 1.0)
 
         policy_encoder = getattr(self, "policy_feature_encoder", self.feature_encoder)
@@ -2150,7 +2152,7 @@ class CFREvaluator(ABC):
                 pre_chance_node=False,
                 indices=valid_policy_indices,
             )
-        if torch.equal(value_node_indices, root_indices):
+        if value_roots_only:
             value_features_all = value_encoder.encode(
                 self.beliefs_avg, pre_chance_node=False
             )[:top]
@@ -2195,21 +2197,35 @@ class CFREvaluator(ABC):
             dtype=torch.long,
             device=self.device,
         )
-        root_value_mask = value_node_indices < N
-        value_statistics["local_exploitability"] = torch.zeros(
-            value_node_indices.numel(), dtype=self.float_dtype, device=self.device
-        )
-        value_statistics["local_exploitability_mbbg"] = torch.zeros(
-            value_node_indices.numel(), dtype=self.float_dtype, device=self.device
-        )
-        value_statistics["local_best_response_values"] = torch.zeros(
-            (value_node_indices.numel(),)
-            + tuple(exploit_stats.local_best_response_values.shape[1:]),
-            dtype=self.float_dtype,
-            device=self.device,
-        )
-        if root_value_mask.any():
+        if value_roots_only:
+            value_statistics["local_exploitability"] = (
+                exploit_stats.local_exploitability
+            )
+            value_statistics["local_exploitability_mbbg"] = exploit_mbbg
+            value_statistics["local_best_response_values"] = (
+                exploit_stats.local_best_response_values
+            )
+            continuation_value_mask = torch.zeros(
+                N, dtype=torch.bool, device=self.device
+            )
+            value_statistics["continuation_value_target"] = continuation_value_mask
+            for key, value in root_leaf_counts.items():
+                value_statistics[key] = value
+        else:
+            root_value_mask = value_node_indices < N
             root_value_indices = value_node_indices[root_value_mask]
+            value_statistics["local_exploitability"] = torch.zeros(
+                value_node_indices.numel(), dtype=self.float_dtype, device=self.device
+            )
+            value_statistics["local_exploitability_mbbg"] = torch.zeros(
+                value_node_indices.numel(), dtype=self.float_dtype, device=self.device
+            )
+            value_statistics["local_best_response_values"] = torch.zeros(
+                (value_node_indices.numel(),)
+                + tuple(exploit_stats.local_best_response_values.shape[1:]),
+                dtype=self.float_dtype,
+                device=self.device,
+            )
             value_statistics["local_exploitability"][root_value_mask] = (
                 exploit_stats.local_exploitability[root_value_indices]
             )
@@ -2219,22 +2235,21 @@ class CFREvaluator(ABC):
             value_statistics["local_best_response_values"][root_value_mask] = (
                 exploit_stats.local_best_response_values[root_value_indices]
             )
-        continuation_value_mask = torch.zeros(
-            value_node_indices.numel(), dtype=torch.bool, device=self.device
-        )
-        if continuation_value_indices.numel() > 0:
-            continuation_value_mask = torch.isin(
-                value_node_indices,
-                continuation_value_indices,
+            continuation_value_mask = torch.zeros(
+                value_node_indices.numel(), dtype=torch.bool, device=self.device
             )
-        value_statistics["continuation_value_target"] = continuation_value_mask
-        for key, value in root_leaf_counts.items():
-            stat = torch.zeros(
-                value_node_indices.numel(), dtype=value.dtype, device=self.device
-            )
-            if root_value_mask.any():
-                stat[root_value_mask] = value[value_node_indices[root_value_mask]]
-            value_statistics[key] = stat
+            if continuation_value_indices.numel() > 0:
+                continuation_value_mask = torch.isin(
+                    value_node_indices,
+                    continuation_value_indices,
+                )
+            value_statistics["continuation_value_target"] = continuation_value_mask
+            for key, value in root_leaf_counts.items():
+                stat = torch.zeros(
+                    value_node_indices.numel(), dtype=value.dtype, device=self.device
+                )
+                stat[root_value_mask] = value[root_value_indices]
+                value_statistics[key] = stat
 
         value_batch = RebelBatch(
             features=value_features,
