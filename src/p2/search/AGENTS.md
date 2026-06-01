@@ -8,7 +8,7 @@ CFR/DCFR search, public-belief state handling, ReBeL data generation, evaluator 
 - `end_of_street_distillation.py`: Builds value-only end-of-street distillation batches by evaluating frozen next-street value nets through chance-node target helpers.
 - `cfr_manager.py`: High-level CFRManager orchestration.
 - `chance_node_helper.py`: Chance-node expansion and board/deck helper logic, including post-chance value-head evaluation for street-value targets.
-- `postflop_spot_sampler.py`: Random legal postflop public-root samplers for heads-up flop/turn/river street-start roots, closed-street chance-target roots, and board-legal beliefs.
+- `postflop_spot_sampler.py`: Random legal postflop public-root samplers for heads-up flop/turn/river street-start roots, closed-street chance-target roots, and randomized board-legal beliefs.
 - `rebel_data_generator.py`: ReBeL public-belief training data generator.
 - `rebel_data_source.py`: Data-source boundary for ReBeL trainer batches, wrapping live CFR generation or bounded pregenerated solved datasets through replay-buffer sampling.
 - `rebel_solved_dataset.py`: Tensor-only bounded solved-example dataset writer/reader for postflop value and policy `RebelBatch` shards with manifest validation.

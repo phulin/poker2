@@ -98,6 +98,45 @@ def test_sample_postflop_start_roots_rejects_unsupported_street():
         raise AssertionError("Expected unsupported street to raise ValueError")
 
 
+def test_sample_postflop_start_roots_randomizes_board_legal_beliefs():
+    device = torch.device("cpu")
+    env = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=device,
+        float_dtype=torch.float32,
+    )
+
+    random_pbs = sample_river_start_roots(
+        env,
+        batch_size=4,
+        generator=torch.Generator(device=device).manual_seed(17),
+    )
+    uniform_pbs = sample_postflop_start_roots(
+        env,
+        batch_size=4,
+        street=3,
+        generator=torch.Generator(device=device).manual_seed(17),
+        randomize_beliefs=False,
+    )
+
+    allowed = board_allowed_hands(random_pbs.env.board_indices)
+    legal_counts = allowed.sum(dim=-1).to(torch.float32)
+    random_allowed_values = random_pbs.beliefs.masked_select(
+        allowed[:, None, :].expand_as(random_pbs.beliefs)
+    )
+    assert random_allowed_values.unique().numel() > 16
+
+    expected_uniform = torch.where(
+        allowed[:, None, :],
+        (1.0 / legal_counts)[:, None, None],
+        torch.zeros_like(uniform_pbs.beliefs),
+    )
+    torch.testing.assert_close(uniform_pbs.beliefs, expected_uniform)
+
+
 def test_sample_end_of_street_chance_roots_builds_pre_chance_beliefs():
     device = torch.device("cpu")
     env = HUNLTensorEnv(

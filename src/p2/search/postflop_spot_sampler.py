@@ -42,6 +42,28 @@ def _uniform_board_legal_beliefs(
     return beliefs / beliefs.sum(dim=-1, keepdim=True).clamp(min=1.0)
 
 
+def _random_board_legal_beliefs(
+    board: torch.Tensor,
+    *,
+    num_players: int,
+    generator: torch.Generator | None,
+) -> torch.Tensor:
+    allowed = board_allowed_hands(board)
+    allowed_f = allowed[:, None, :].expand(-1, num_players, -1).to(torch.float32)
+    scores = -torch.rand(
+        board.shape[0],
+        num_players,
+        NUM_HANDS,
+        device=board.device,
+        generator=generator,
+    ).clamp_min(1e-12).log()
+    # Keep a small uniform component so every board-legal hand remains represented
+    # while still generating asymmetric, non-uniform ranges.
+    scores = scores + 0.05
+    scores = scores * allowed_f
+    return scores / scores.sum(dim=-1, keepdim=True).clamp(min=1.0)
+
+
 @torch.no_grad()
 def sample_postflop_start_roots(
     env_proto: HUNLTensorEnv | PBSEnv,
@@ -49,6 +71,7 @@ def sample_postflop_start_roots(
     batch_size: int,
     street: int,
     generator: torch.Generator | None = None,
+    randomize_beliefs: bool = True,
 ) -> PublicBeliefState:
     """Sample legal-looking heads-up postflop street-start roots.
 
@@ -72,9 +95,13 @@ def sample_postflop_start_roots(
         (batch_size, 5), -1, dtype=torch.long, device=device
     )
     board_padded[:, :board_cards] = board
-    beliefs = _uniform_board_legal_beliefs(board_padded, num_players=2).to(
-        device=device
-    )
+    if randomize_beliefs:
+        beliefs = _random_board_legal_beliefs(
+            board_padded, num_players=2, generator=generator
+        )
+    else:
+        beliefs = _uniform_board_legal_beliefs(board_padded, num_players=2)
+    beliefs = beliefs.to(device=device)
     pbs = PublicBeliefState.from_proto(
         env_proto=env_proto,
         beliefs=beliefs,
@@ -121,9 +148,14 @@ def sample_flop_start_roots(
     *,
     batch_size: int,
     generator: torch.Generator | None = None,
+    randomize_beliefs: bool = True,
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
-        env_proto, batch_size=batch_size, street=1, generator=generator
+        env_proto,
+        batch_size=batch_size,
+        street=1,
+        generator=generator,
+        randomize_beliefs=randomize_beliefs,
     )
 
 
@@ -133,9 +165,14 @@ def sample_turn_start_roots(
     *,
     batch_size: int,
     generator: torch.Generator | None = None,
+    randomize_beliefs: bool = True,
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
-        env_proto, batch_size=batch_size, street=2, generator=generator
+        env_proto,
+        batch_size=batch_size,
+        street=2,
+        generator=generator,
+        randomize_beliefs=randomize_beliefs,
     )
 
 
@@ -145,9 +182,14 @@ def sample_river_start_roots(
     *,
     batch_size: int,
     generator: torch.Generator | None = None,
+    randomize_beliefs: bool = True,
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
-        env_proto, batch_size=batch_size, street=3, generator=generator
+        env_proto,
+        batch_size=batch_size,
+        street=3,
+        generator=generator,
+        randomize_beliefs=randomize_beliefs,
     )
 
 
