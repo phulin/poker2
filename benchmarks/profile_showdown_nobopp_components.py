@@ -16,10 +16,13 @@ from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.search.fused_cfr_triton import (
     SHOWDOWN_MAX_PER_CARD,
+    _showdown_build_cum_active_full_card_block_kernel,
     _showdown_build_cum_compact_both_heroes_kernel,
     _showdown_build_cum_compact_card_block_kernel,
     _showdown_build_cum_compact_kernel,
+    _showdown_ev_active_offset_full_nobopp_kernel,
     _showdown_ev_active_offset_compact_nobopp_kernel,
+    _showdown_setup_P_active_full_kernel,
     _showdown_setup_P_compact_kernel,
     precompute_showdown_active_extras,
 )
@@ -138,6 +141,8 @@ def main() -> None:
         m, 2, num_cards, SHOWDOWN_MAX_PER_CARD, device=device, dtype=torch.float32
     )
     ev_out = torch.empty(m, 2, h, device=device, dtype=torch.float32)
+    full_ev_out = torch.empty_like(beliefs)
+    full_ev_out.zero_()
     extra_indices = active_extras["extra_indices"]
 
     def setup() -> None:
@@ -145,6 +150,17 @@ def main() -> None:
             compact_beliefs,
             p_padded,
             h,
+            BLOCK_H=block_h,
+        )
+
+    def setup_direct() -> None:
+        _showdown_setup_P_active_full_kernel[(m, 2)](
+            beliefs,
+            extra_indices,
+            active_extras["sorted_indices"],
+            p_padded,
+            h,
+            beliefs.shape[-1],
             BLOCK_H=block_h,
         )
 
@@ -184,6 +200,22 @@ def main() -> None:
             CARD_BLOCK=args.card_block,
         )
 
+    def build_cum_card_block_direct() -> None:
+        _showdown_build_cum_active_full_card_block_kernel[
+            (m, triton.cdiv(num_cards, args.card_block))
+        ](
+            beliefs,
+            extra_indices,
+            active_extras["sorted_indices"],
+            active_extras["card_positions"],
+            cum_both,
+            h,
+            beliefs.shape[-1],
+            NUM_CARDS=num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            CARD_BLOCK=args.card_block,
+        )
+
     def finish() -> None:
         _showdown_ev_active_offset_compact_nobopp_kernel[(m, triton.cdiv(h, block_k))](
             compact_beliefs,
@@ -207,6 +239,31 @@ def main() -> None:
             num_warps=args.finish_warps,
         )
 
+    def finish_direct() -> None:
+        _showdown_ev_active_offset_full_nobopp_kernel[(m, triton.cdiv(h, block_k))](
+            beliefs,
+            p_padded,
+            cum_both,
+            extra_indices,
+            active_extras["sorted_indices"],
+            active_extras["L_idx"],
+            active_extras["R_idx"],
+            active_extras["scale_factor"],
+            active_extras["off_L_c1"],
+            active_extras["off_L_c2"],
+            active_extras["off_R_c1"],
+            active_extras["off_R_c2"],
+            active_extras["off_last_c1"],
+            active_extras["off_last_c2"],
+            full_ev_out,
+            h,
+            beliefs.shape[-1],
+            NUM_CARDS=num_cards,
+            MC_K=SHOWDOWN_MAX_PER_CARD,
+            BLOCK_K=block_k,
+            num_warps=args.finish_warps,
+        )
+
     def pipeline() -> None:
         setup()
         build_cum()
@@ -222,8 +279,13 @@ def main() -> None:
         build_cum_card_block()
         finish()
 
+    def pipeline_direct() -> None:
+        setup_direct()
+        build_cum_card_block_direct()
+        finish_direct()
+
     for _ in range(20):
-        pipeline_card_block()
+        pipeline_direct()
     torch.cuda.synchronize()
 
     print(
@@ -232,13 +294,17 @@ def main() -> None:
         flush=True,
     )
     _summarize("setup", _time_cuda_us(setup, args.reps))
+    _summarize("setup_direct", _time_cuda_us(setup_direct, args.reps))
     _summarize("build_cum", _time_cuda_us(build_cum, args.reps))
     _summarize("build_both", _time_cuda_us(build_cum_both, args.reps))
     _summarize("build_card", _time_cuda_us(build_cum_card_block, args.reps))
+    _summarize("build_direct", _time_cuda_us(build_cum_card_block_direct, args.reps))
     _summarize("finish", _time_cuda_us(finish, args.reps))
+    _summarize("finish_direct", _time_cuda_us(finish_direct, args.reps))
     _summarize("pipeline", _time_cuda_us(pipeline, args.reps))
     _summarize("pipe_both", _time_cuda_us(pipeline_both, args.reps))
     _summarize("pipe_card", _time_cuda_us(pipeline_card_block, args.reps))
+    _summarize("pipe_direct", _time_cuda_us(pipeline_direct, args.reps))
 
     with torch.profiler.profile(
         activities=[
@@ -248,7 +314,7 @@ def main() -> None:
         record_shapes=False,
     ) as prof:
         for _ in range(10):
-            pipeline_card_block()
+            pipeline_direct()
     print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=12))
 
 
