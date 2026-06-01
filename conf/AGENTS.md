@@ -14,7 +14,7 @@ Hydra configuration files for PPO/K-best training, transformer variants, and ReB
 - `config_rebel_curriculum_postflop.yaml`: Full fixed-schedule postflop curriculum config that runs river, turn, flop, and preflop-handoff substeps in one ordered orchestrator pass with per-train-stage live root overrides and legacy pre-chance value augmentation disabled.
 - `config_rebel_curriculum_turn.yaml`: Postflop curriculum config for `distill_E_turn` from promoted `S_river`, then live random-turn `S_turn` training with `E_turn` closing leaves and legacy pre-chance value augmentation disabled.
 - `config_rebel_curriculum_flop.yaml`: Postflop curriculum config for `distill_E_flop` from promoted `S_turn`, live random-flop `S_flop` training with `E_flop` closing leaves, then `distill_E_preflop`, with legacy pre-chance value augmentation disabled.
-- `config_rebel_pregenerate_postflop.yaml`: Bounded postflop solved-example pregeneration config for HP sweeps/holdouts using live random postflop CFR roots with optional compressed float storage.
+- `config_rebel_pregenerate_postflop.yaml`: Bounded postflop solved-example pregeneration config for HP sweeps/holdouts using live random postflop CFR roots with optional compressed float storage and legacy pre-chance value augmentation disabled.
 - `config_rebel_postflop_hybrid_holdout.yaml`: Live random postflop training config wired to a fixed bounded pregenerated holdout dataset for fresh validation metrics, with legacy pre-chance value augmentation disabled.
 - `config_rebel_debug.yaml`: Faster ReBeL debug configuration.
 

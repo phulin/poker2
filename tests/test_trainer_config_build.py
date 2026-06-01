@@ -200,6 +200,7 @@ def test_rebel_pregenerate_postflop_config_loads_from_yaml():
 
     assert cfg.data.mode == "live"
     assert cfg.data.live_root_source == "random_river"
+    assert cfg.data.include_pre_chance_value_batches is False
     assert cfg.rebel_pregenerate.output_dir == "outputs/rebel_postflop/river_v1"
     assert cfg.rebel_pregenerate.stage == "river"
     assert cfg.rebel_pregenerate.root_source == "random_river"
