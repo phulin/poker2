@@ -13,6 +13,7 @@ from p2.cli.train_rebel import _device_from_config
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
+from p2.search.postflop_spot_sampler import postflop_spot_sampler_metadata
 from p2.search.rebel_solved_dataset import write_rebel_solved_dataset
 from p2.utils.profiling import install_triton_compile_logger_from_env
 
@@ -128,6 +129,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
             "search_config": asdict(cfg.search),
             "spot_sampler_config": {
                 "live_root_source": cfg.data.live_root_source,
+                **postflop_spot_sampler_metadata(),
             },
         },
     )

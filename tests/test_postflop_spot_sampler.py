@@ -5,6 +5,13 @@ import torch
 from p2.env.card_utils import board_allowed_hands
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.search.postflop_spot_sampler import (
+    BOARD_TEXTURE_DRY,
+    BOARD_TEXTURE_MONOTONE,
+    BOARD_TEXTURE_PAIRED,
+    BOARD_TEXTURE_STRAIGHT_HEAVY,
+    BOARD_TEXTURE_TWO_TONE,
+    _board_texture_labels,
+    _board_texture_target_matches,
     _recursive_strength_beliefs,
     sample_end_of_street_chance_roots,
     sample_flop_start_roots,
@@ -171,6 +178,35 @@ def test_recursive_strength_beliefs_are_board_legal_normalized_and_nonuniform():
     allowed_values = beliefs.masked_select(allowed[:, None, :].expand_as(beliefs))
     assert allowed_values.unique().numel() > 128
     assert not torch.allclose(beliefs[:, 0], beliefs[:, 1])
+
+
+def test_sample_postflop_start_roots_stratifies_board_textures():
+    device = torch.device("cpu")
+    env = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=device,
+        float_dtype=torch.float32,
+    )
+
+    pbs = sample_river_start_roots(
+        env,
+        batch_size=256,
+        generator=torch.Generator(device=device).manual_seed(41),
+        randomize_beliefs=False,
+    )
+
+    labels = _board_texture_labels(pbs.env.board_indices)
+    observed = set(labels.unique().tolist())
+    assert {BOARD_TEXTURE_PAIRED, BOARD_TEXTURE_MONOTONE}.issubset(observed)
+    target_coverage = _board_texture_target_matches(pbs.env.board_indices).any(dim=0)
+    assert target_coverage[BOARD_TEXTURE_PAIRED]
+    assert target_coverage[BOARD_TEXTURE_MONOTONE]
+    assert target_coverage[BOARD_TEXTURE_TWO_TONE]
+    assert target_coverage[BOARD_TEXTURE_STRAIGHT_HEAVY]
+    assert target_coverage[BOARD_TEXTURE_DRY]
 
 
 def test_sample_postflop_start_roots_uses_conservative_spot_templates():

@@ -94,9 +94,11 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
     assert written["output_dir"] == str(tmp_path)
     assert sum(len(batch) for batch in written["value_batches"]) == 3
     assert sum(len(batch) for batch in written["policy_batches"]) == 4
-    assert written["metadata"]["spot_sampler_config"] == {
-        "live_root_source": "random_river"
-    }
+    spot_config = written["metadata"]["spot_sampler_config"]
+    assert spot_config["live_root_source"] == "random_river"
+    assert spot_config["board_texture_stratified"] is True
+    assert "recursive_strength" in spot_config["belief_mixture_weights"]
+    assert "straight_heavy" in spot_config["board_texture_weights"]
 
 
 def test_pregenerate_postflop_rebel_requires_live_mode(tmp_path):

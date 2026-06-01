@@ -14,12 +14,28 @@ from p2.search.cfr_evaluator import PublicBeliefState
 STREET_TO_BOARD_CARDS = {1: 3, 2: 4, 3: 5}
 CLOSED_STREET_TO_NEXT_STREET = {0: 1, 1: 2, 2: 3}
 RANGE_MIXTURE_WEIGHTS = (0.25, 0.15, 0.20, 0.20, 0.15, 0.05)
+RANGE_MIXTURE_NAMES = (
+    "recursive_strength",
+    "uniform",
+    "exponential",
+    "strength_biased",
+    "polarized",
+    "capped",
+)
 RANGE_MODE_RECURSIVE = 0
 RANGE_MODE_UNIFORM = 1
 RANGE_MODE_EXPONENTIAL = 2
 RANGE_MODE_STRENGTH_BIASED = 3
 RANGE_MODE_POLARIZED = 4
 RANGE_MODE_CAPPED = 5
+BOARD_TEXTURE_NAMES = ("paired", "monotone", "two_tone", "straight_heavy", "dry")
+BOARD_TEXTURE_WEIGHTS = (0.20, 0.10, 0.25, 0.25, 0.20)
+BOARD_TEXTURE_CANDIDATES = 24
+BOARD_TEXTURE_PAIRED = 0
+BOARD_TEXTURE_MONOTONE = 1
+BOARD_TEXTURE_TWO_TONE = 2
+BOARD_TEXTURE_STRAIGHT_HEAVY = 3
+BOARD_TEXTURE_DRY = 4
 
 
 @dataclass(frozen=True)
@@ -40,6 +56,121 @@ def _sample_unique_cards(
 ) -> torch.Tensor:
     scores = torch.rand(batch_size, 52, device=device, generator=generator)
     return scores.argsort(dim=1)[:, :num_cards]
+
+
+def _board_texture_target_matches(board: torch.Tensor) -> torch.Tensor:
+    """Return board matches for paired/monotone/two-tone/connected/dry targets."""
+
+    if board.shape[-1] != 5:
+        padded = torch.full(
+            (*board.shape[:-1], 5), -1, dtype=torch.long, device=board.device
+        )
+        padded[..., : board.shape[-1]] = board
+        board = padded
+
+    flat = board.reshape(-1, 5)
+    valid = flat >= 0
+    ranks = torch.where(valid, flat % 13, torch.zeros_like(flat))
+    suits = torch.where(valid, flat // 13, torch.zeros_like(flat))
+    rank_counts = torch.zeros(flat.shape[0], 13, dtype=torch.long, device=board.device)
+    suit_counts = torch.zeros(flat.shape[0], 4, dtype=torch.long, device=board.device)
+    rank_counts.scatter_add_(1, ranks, valid.to(torch.long))
+    suit_counts.scatter_add_(1, suits, valid.to(torch.long))
+
+    card_counts = valid.sum(dim=1)
+    paired = rank_counts.amax(dim=1) >= 2
+    monotone = suit_counts.amax(dim=1) >= torch.minimum(
+        card_counts, torch.full_like(card_counts, 3)
+    )
+    two_tone = (suit_counts == 2).any(dim=1) & ~monotone
+    rank_present = rank_counts > 0
+    regular_windows = rank_present.unfold(1, 5, 1).sum(dim=2).amax(dim=1)
+    wheel_window = rank_present[:, [12, 0, 1, 2, 3]].sum(dim=1)
+    connected_count = torch.maximum(regular_windows, wheel_window)
+    needed_connected = torch.where(
+        card_counts <= 3,
+        torch.full_like(card_counts, 3),
+        torch.full_like(card_counts, 4),
+    )
+    straight_heavy = connected_count >= needed_connected
+    dry = ~paired & ~monotone & ~straight_heavy
+
+    matches = torch.stack(
+        (
+            paired,
+            monotone & ~paired,
+            two_tone & ~paired & ~monotone,
+            straight_heavy & ~paired & ~monotone,
+            dry,
+        ),
+        dim=1,
+    )
+    return matches.reshape(*board.shape[:-1], len(BOARD_TEXTURE_NAMES))
+
+
+def _board_texture_labels(board: torch.Tensor) -> torch.Tensor:
+    """Classify boards into a single prioritized public-texture bucket."""
+
+    matches = _board_texture_target_matches(board)
+    labels = torch.full(
+        board.shape[:-1],
+        BOARD_TEXTURE_TWO_TONE,
+        dtype=torch.long,
+        device=board.device,
+    )
+    labels = torch.where(matches[..., BOARD_TEXTURE_DRY], BOARD_TEXTURE_DRY, labels)
+    labels = torch.where(
+        matches[..., BOARD_TEXTURE_STRAIGHT_HEAVY],
+        BOARD_TEXTURE_STRAIGHT_HEAVY,
+        labels,
+    )
+    labels = torch.where(
+        matches[..., BOARD_TEXTURE_MONOTONE], BOARD_TEXTURE_MONOTONE, labels
+    )
+    labels = torch.where(matches[..., BOARD_TEXTURE_PAIRED], BOARD_TEXTURE_PAIRED, labels)
+    return labels
+
+
+def _sample_texture_stratified_boards(
+    batch_size: int,
+    num_cards: int,
+    *,
+    device: torch.device,
+    generator: torch.Generator | None,
+) -> torch.Tensor:
+    weights = torch.tensor(BOARD_TEXTURE_WEIGHTS, dtype=torch.float32, device=device)
+    targets = torch.multinomial(
+        weights,
+        batch_size,
+        replacement=True,
+        generator=generator,
+    )
+    candidates = _sample_unique_cards(
+        batch_size * BOARD_TEXTURE_CANDIDATES,
+        num_cards,
+        device=device,
+        generator=generator,
+    ).reshape(BOARD_TEXTURE_CANDIDATES, batch_size, num_cards)
+    target_matches = _board_texture_target_matches(candidates).reshape(
+        BOARD_TEXTURE_CANDIDATES, batch_size, len(BOARD_TEXTURE_NAMES)
+    )
+    matches = target_matches.gather(
+        2,
+        targets[None, :, None].expand(BOARD_TEXTURE_CANDIDATES, -1, 1),
+    ).squeeze(2)
+    selected_attempts = matches.to(torch.long).argmax(dim=0)
+    rows = torch.arange(batch_size, device=device)
+    selected = candidates[selected_attempts, rows]
+    return torch.where(matches.any(dim=0)[:, None], selected, candidates[0])
+
+
+def postflop_spot_sampler_metadata() -> dict:
+    return {
+        "board_texture_stratified": True,
+        "board_texture_weights": dict(zip(BOARD_TEXTURE_NAMES, BOARD_TEXTURE_WEIGHTS)),
+        "board_texture_candidates": BOARD_TEXTURE_CANDIDATES,
+        "belief_mixture_weights": dict(zip(RANGE_MIXTURE_NAMES, RANGE_MIXTURE_WEIGHTS)),
+    }
 
 
 def _uniform_board_legal_beliefs(
@@ -273,13 +404,13 @@ def sample_postflop_start_roots(
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
     randomize_spots: bool = True,
+    stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
     """Sample legal-looking heads-up postflop street-start roots.
 
-    The first implementation is intentionally conservative: it constructs
-    post-chance roots with no active bet, random button/to-act assignment,
-    unique public boards, randomized board-legal beliefs, and simple legal
-    pot/SPR templates.
+    The sampler constructs post-chance roots with no active bet, random
+    button/to-act assignment, unique public boards, randomized board-legal
+    beliefs, and conservative legal pot/SPR templates.
     """
 
     if int(env_proto.num_players) != 2:
@@ -289,9 +420,14 @@ def sample_postflop_start_roots(
 
     device = env_proto.device
     board_cards = STREET_TO_BOARD_CARDS[street]
-    board = _sample_unique_cards(
-        batch_size, board_cards, device=device, generator=generator
-    )
+    if stratify_board_textures:
+        board = _sample_texture_stratified_boards(
+            batch_size, board_cards, device=device, generator=generator
+        )
+    else:
+        board = _sample_unique_cards(
+            batch_size, board_cards, device=device, generator=generator
+        )
     board_padded = torch.full(
         (batch_size, 5), -1, dtype=torch.long, device=device
     )
@@ -353,6 +489,7 @@ def sample_flop_start_roots(
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
     randomize_spots: bool = True,
+    stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
         env_proto,
@@ -361,6 +498,7 @@ def sample_flop_start_roots(
         generator=generator,
         randomize_beliefs=randomize_beliefs,
         randomize_spots=randomize_spots,
+        stratify_board_textures=stratify_board_textures,
     )
 
 
@@ -372,6 +510,7 @@ def sample_turn_start_roots(
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
     randomize_spots: bool = True,
+    stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
         env_proto,
@@ -380,6 +519,7 @@ def sample_turn_start_roots(
         generator=generator,
         randomize_beliefs=randomize_beliefs,
         randomize_spots=randomize_spots,
+        stratify_board_textures=stratify_board_textures,
     )
 
 
@@ -391,6 +531,7 @@ def sample_river_start_roots(
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
     randomize_spots: bool = True,
+    stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
         env_proto,
@@ -399,6 +540,7 @@ def sample_river_start_roots(
         generator=generator,
         randomize_beliefs=randomize_beliefs,
         randomize_spots=randomize_spots,
+        stratify_board_textures=stratify_board_textures,
     )
 
 
