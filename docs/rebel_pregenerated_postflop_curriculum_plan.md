@@ -8,6 +8,8 @@ Add a backward-bootstrapped postflop curriculum to heads-up ReBeL training, driv
 3. Distill `E_flop` from frozen `S_turn`, then train `S_flop` with `E_flop` as flop-closing terminal values.
 4. Distill `E_preflop` from frozen `S_flop` to feed the preflop handoff; keep preflop itself separate per `preflop_multiway_pbs_bootstrap_plan.md`.
 
+Current implementation policy: progression is fixed-schedule. Each configured sub-step runs for its configured `num_steps`, promotes its final checkpoint, and hands that frozen checkpoint to later stages. Holdout and boundary metrics are logged/inspected, but they do not block river→turn→flop progression yet; metric-based promotion gates are deferred.
+
 ### Model factoring: start-of-street and end-of-street nets per street
 Use **distinct networks per postflop street**, not one cumulative model conditioned on a street embedding. This is the DeepStack factoring and is what makes the backward curriculum clean. Per street `X` there are two nets with different roles:
 
@@ -116,7 +118,7 @@ Add a new script (e.g. `src/p2/cli/train_rebel_curriculum.py`) that owns the riv
 
 - Accepts a **superset** of train_rebel's `Config` (every option train_rebel takes) plus a `curriculum:` subtree (the ordered train/distill sub-steps, per-sub-step step budgets, per-sub-step data/search overrides, and the frozen-net handoff paths `S_X`/`E_X`).
 - For each sub-step: `train` sub-steps configure the trainer for street `X` (load frozen `E_X` as the closing-leaf net, train `S_X` to its step budget, promote it); `distill` sub-steps regress `E_X` onto the chance expectation of a frozen `S_{X+1}` and promote `E_X`. Each promoted net is frozen and handed to the next sub-step.
-- **Same wandb level as train_rebel**, structured as **one run per stage tied by a wandb `group`** (matches per-stage promotion gates and clean intra-stage resume).
+- **Same wandb level as train_rebel**, structured as **one run per stage tied by a wandb `group`** (matches fixed per-stage schedules and clean intra-stage resume).
 - **Resume must be sub-step-aware.** Checkpoints already carry metadata via `save_checkpoint`; add a `curriculum_substep` marker so a resumed orchestrator restarts the correct train/distill sub-step at the correct intra-sub-step step. Extend the existing run-id extraction in `_init_wandb` (it already reads checkpoint metadata) to recover the per-sub-step wandb run.
 
 ### Offline Data Components (for `pregenerated` mode + holdouts only)
@@ -364,7 +366,7 @@ Training:
 1. Train the postflop `BetterFFN`/`BetterTRM` net from river data.
 2. Use suit permutation exactly as live training does.
 3. Track value loss by river spot bucket and policy KL by node depth/reach.
-4. Promote `S_river` only when the holdout improves and the net is stable across board textures.
+4. Promote the final `S_river` checkpoint after the fixed `num_steps` schedule; use holdout and board-texture metrics for inspection until promotion gates are added.
 
 Output:
 
@@ -406,7 +408,7 @@ Training:
    - a bounded turn holdout;
    - `E_turn` boundary agreement with fresh `S_river` enumerations;
    - a small fresh live-solve probe set for sanity only.
-3. Promote `S_turn` when the turn holdout improves and boundary values are stable.
+3. Promote the final `S_turn` checkpoint after the fixed `num_steps` schedule; use turn holdout and boundary metrics for inspection until promotion gates are added.
 
 Because each street net trains on its own street only, there is no cross-street spot-mix to tune for the turn stage.
 
@@ -445,7 +447,7 @@ Training:
 1. Train `S_flop` (a fresh net) on flop spots only.
 2. Validate on a bounded flop holdout and on `E_flop` boundary agreement with fresh `S_turn` enumerations.
 3. Add real handoff flop roots only after random flop roots are stable.
-4. Promote `S_flop` when the flop holdout improves and boundary values are stable.
+4. Promote the final `S_flop` checkpoint after the fixed `num_steps` schedule; use flop holdout and boundary metrics for inspection until promotion gates are added.
 
 Output:
 
@@ -680,8 +682,10 @@ Track these before scaling dataset size:
 
 Do not optimize storage dtype or fused generation until the non-fused sparse pipeline has stable target correctness.
 
-## Quality Gates
-Promote a stage checkpoint only when:
+## Deferred Quality Gates
+For now, curriculum progression is schedule-driven: each sub-step runs for its configured `num_steps`, promotes its final checkpoint, and proceeds to the next configured sub-step. The metrics below should be logged and reviewed, but they do not block promotion until a later gate implementation is added.
+
+When promotion gates are added, promote a stage checkpoint only when:
 
 - validation value loss improves on that stage's holdout;
 - policy target KL improves or remains stable by depth/reach bucket;
@@ -690,7 +694,7 @@ Promote a stage checkpoint only when:
 - action mix is not collapsing in major spot buckets;
 - target mean/std by street and bucket is stable across generation batches.
 
-For the backward curriculum (each net is frozen once promoted, so there is no prior-street regression to guard against — only its own holdout and its boundary net):
+For the backward curriculum (each net is frozen once promoted, so there is no prior-street regression to guard against — only its own holdout and its boundary net), the eventual gates should be:
 
 - `S_river` is promoted on river holdout.
 - `E_turn` is promoted on boundary agreement with `S_river`; `S_turn` on turn holdout.
@@ -710,7 +714,7 @@ Random roots can become unlike real poker roots. Mitigation:
 ### Boundary Approximation Compounding
 Each `S_X` trains against `E_X`, which was distilled from `S_{X+1}`, which itself approximated `S_{X+2}` — errors compound backward (river → turn → flop → preflop). Because every net is frozen once promoted, there is no self-bootstrap feedback loop, but stale or biased `E_X` still propagates. Mitigation:
 
-- gate each `E_X` on holdout agreement with fresh chance-enumerated `S_{X+1}` values before training the street that consumes it;
+- monitor each `E_X` against holdout agreement with fresh chance-enumerated `S_{X+1}` values before training the street that consumes it; later, turn this into a promotion gate;
 - keep exact terminal rows mixed in (they are bias-free);
 - re-distill `E_X` and retrain downstream streets if an upstream net is later improved;
 - validate `S_X` closing-leaf reads against small fresh solves that enumerate the chance node directly.
