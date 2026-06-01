@@ -46,6 +46,15 @@ def test_value_samples_per_step_allows_fractional_reuse_goal():
         _value_samples_per_step(batch_size=512, value_reuse_goal=0.0)
 
 
+def test_rebel_cfr_trainer_rejects_fused_closing_leaf_checkpoint():
+    cfg = _tiny_rebel_cfg()
+    cfg.search.sparse_fused = True
+    cfg.search.closing_leaf_checkpoint = "outputs/E_turn.pt"
+
+    with pytest.raises(NotImplementedError, match="closing_leaf_checkpoint"):
+        RebelCFRTrainer(cfg, torch.device("cpu"))
+
+
 def _tiny_rebel_cfg() -> Config:
     cfg = Config()
     cfg.num_envs = 1

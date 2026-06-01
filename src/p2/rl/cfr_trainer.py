@@ -323,6 +323,11 @@ class RebelCFRTrainer:
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
             self.inference_model.compile_forward_modes(**_compile_kwargs(cfg))
         eval_model = self.inference_model
+        if cfg.search.sparse_fused and cfg.search.closing_leaf_checkpoint is not None:
+            raise NotImplementedError(
+                "search.sparse_fused does not yet support closing_leaf_checkpoint; "
+                "use non-fused sparse CFR for S_turn/S_flop curriculum stages."
+            )
         closing_leaf_model = None
         if cfg.search.closing_leaf_checkpoint is not None:
             closing_leaf_model = self._load_closing_leaf_model(
