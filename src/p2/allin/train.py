@@ -478,6 +478,7 @@ def _evaluate_pregenerated_dataset(
     abs_by_live = torch.zeros(players + 1, dtype=torch.float64, device=device)
     examples_by_live = torch.zeros(players + 1, dtype=torch.float64, device=device)
     max_abs = torch.zeros((), dtype=torch.float32, device=device)
+    abs_err_chunks: list[torch.Tensor] = []
     row_start = 0
     while row_start < len(dataset):
         cur = min(batch_size, len(dataset) - row_start)
@@ -523,6 +524,7 @@ def _evaluate_pregenerated_dataset(
             minlength=players + 1,
         ).to(torch.float64)
         max_abs = torch.maximum(max_abs, abs_err.amax())
+        abs_err_chunks.append(abs_err.reshape(-1).to(torch.float32))
         row_start += cur
     if model_was_training:
         model.train()
@@ -533,9 +535,21 @@ def _evaluate_pregenerated_dataset(
     examples_by_live_cpu = examples_by_live.cpu()
     value_count_by_live_cpu = value_count_by_live.cpu()
     total_value_count = max(float(value_count_by_live_cpu.sum().item()), 1.0)
+    all_abs_err = torch.cat(abs_err_chunks) if abs_err_chunks else torch.empty(0)
+    if all_abs_err.numel() > 0:
+        err_count = all_abs_err.numel()
+        sorted_idx_p95 = min(max(math.ceil(0.95 * err_count), 1), err_count)
+        sorted_idx_p99 = min(max(math.ceil(0.99 * err_count), 1), err_count)
+        mae_p95 = float(all_abs_err.kthvalue(sorted_idx_p95).values.cpu().item())
+        mae_p99 = float(all_abs_err.kthvalue(sorted_idx_p99).values.cpu().item())
+    else:
+        mae_p95 = 0.0
+        mae_p99 = 0.0
     metrics = {
         "eval/mse": float(squared_by_live_cpu.sum().item()) / total_value_count,
         "eval/mae": float(abs_by_live_cpu.sum().item()) / total_value_count,
+        "eval/mae_p95": mae_p95,
+        "eval/mae_p99": mae_p99,
         "eval/max_abs": float(max_abs.cpu().item()),
         "eval/examples": float(len(dataset)),
         "eval/seconds": time.perf_counter() - start,
@@ -1110,7 +1124,9 @@ def train(cfg: TrainConfig) -> None:
                         f"mse={eval_metrics['eval/mse']:.6f} "
                         f"mae={eval_metrics['eval/mae']:.5f} "
                         f"max_abs={eval_metrics['eval/max_abs']:.5f} "
-                        f"seconds={eval_metrics['eval/seconds']:.2f}s",
+                        f"seconds={eval_metrics['eval/seconds']:.2f}s "
+                        f"mae_p95={eval_metrics['eval/mae_p95']:.5f} "
+                        f"mae_p99={eval_metrics['eval/mae_p99']:.5f}",
                         flush=True,
                     )
                     if isinstance(run, wandb.Run):

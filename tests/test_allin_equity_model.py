@@ -319,6 +319,8 @@ def test_allin_eval_logs_mse_mae_by_live_player_count(tmp_path) -> None:
 
     assert metrics["eval/mse"] == 7.5
     assert metrics["eval/mae"] == 2.5
+    assert metrics["eval/mae_p95"] == 4.0
+    assert metrics["eval/mae_p99"] == 4.0
     assert metrics["eval/live_players/2/examples"] == 2.0
     assert metrics["eval/live_players/2/mse"] == 5.0
     assert metrics["eval/live_players/2/mae"] == 2.0
