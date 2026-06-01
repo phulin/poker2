@@ -5,6 +5,7 @@ import torch
 from p2.env.card_utils import board_allowed_hands
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.search.postflop_spot_sampler import (
+    _recursive_strength_beliefs,
     sample_end_of_street_chance_roots,
     sample_flop_start_roots,
     sample_postflop_start_roots,
@@ -139,6 +140,37 @@ def test_sample_postflop_start_roots_randomizes_board_legal_beliefs():
         torch.zeros_like(uniform_pbs.beliefs),
     )
     torch.testing.assert_close(uniform_pbs.beliefs, expected_uniform)
+
+
+def test_recursive_strength_beliefs_are_board_legal_normalized_and_nonuniform():
+    device = torch.device("cpu")
+    board = torch.tensor(
+        [
+            [0, 14, 28, 42, 51],
+            [12, 25, 38, 3, 16],
+        ],
+        device=device,
+        dtype=torch.long,
+    )
+    allowed = board_allowed_hands(board)
+    beliefs = _recursive_strength_beliefs(
+        board,
+        allowed,
+        num_players=2,
+        generator=torch.Generator(device=device).manual_seed(7),
+    )
+
+    assert beliefs.shape == (2, 2, 1326)
+    assert torch.equal(beliefs > 0, allowed[:, None, :].expand_as(beliefs))
+    torch.testing.assert_close(
+        beliefs.sum(dim=-1),
+        torch.ones(2, 2),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    allowed_values = beliefs.masked_select(allowed[:, None, :].expand_as(beliefs))
+    assert allowed_values.unique().numel() > 128
+    assert not torch.allclose(beliefs[:, 0], beliefs[:, 1])
 
 
 def test_sample_postflop_start_roots_uses_conservative_spot_templates():
