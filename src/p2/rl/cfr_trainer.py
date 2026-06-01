@@ -2073,6 +2073,7 @@ class RebelCFRTrainer:
         save_optimizer: bool = True,
         save_dtype: torch.dtype | None = None,
         batch: RebelBatch | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> None:
         directory = os.path.dirname(path)
         if directory:
@@ -2095,6 +2096,8 @@ class RebelCFRTrainer:
             # Store wandb run ID for resumption
             "wandb_run_id": wandb_run_id,
         }
+        if metadata is not None:
+            state["metadata"] = dict(metadata)
 
         # Only save optimizer and RNG state if requested
         if save_optimizer:
@@ -2160,6 +2163,7 @@ class RebelCFRTrainer:
                     param_group["lr_role"] = "adamw"
 
         self.cfg.wandb_run_id = ckpt.get("wandb_run_id")
+        self.checkpoint_metadata = dict(ckpt.get("metadata", {}))
         # if "rng" in ckpt:
         #     self.rng.set_state(ckpt["rng"].to(self.device))
         self._sync_inference_model()

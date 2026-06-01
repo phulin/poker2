@@ -618,9 +618,15 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
     trainer.data_generator.current_pbs.env.street.fill_(2)
     trainer.data_generator.current_pbs.beliefs.fill_(0.25)
     trainer.data_generator.last_extra = 5
-    trainer.save_checkpoint(str(ckpt_path), step=3, save_optimizer=False)
+    trainer.save_checkpoint(
+        str(ckpt_path),
+        step=3,
+        save_optimizer=False,
+        metadata={"curriculum_substep": "river", "stage_step": 7},
+    )
 
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    assert checkpoint["metadata"] == {"curriculum_substep": "river", "stage_step": 7}
     checkpoint["model"]["unexpected.compat_key"] = torch.zeros(1)
     torch.save(checkpoint, ckpt_path)
 
@@ -628,6 +634,10 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
     loaded_step = new_trainer.load_checkpoint(str(ckpt_path))
 
     assert loaded_step == 3
+    assert new_trainer.checkpoint_metadata == {
+        "curriculum_substep": "river",
+        "stage_step": 7,
+    }
     replay_path = RebelCFRTrainer.replay_buffer_checkpoint_path(str(ckpt_path))
     assert (tmp_path / "rebel_replay_buffers.pt").samefile(replay_path)
     assert len(new_trainer.value_buffer) == len(trainer.value_buffer)
