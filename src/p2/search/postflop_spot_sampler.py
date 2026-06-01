@@ -662,6 +662,7 @@ def sample_end_of_street_chance_roots(
     batch_size: int,
     closed_street: int,
     generator: torch.Generator | None = None,
+    randomize_beliefs: bool = True,
 ) -> ChanceRootSample:
     """Sample roots for end-of-street chance-value targets.
 
@@ -681,10 +682,20 @@ def sample_end_of_street_chance_roots(
         batch_size=batch_size,
         street=next_street,
         generator=generator,
+        randomize_beliefs=randomize_beliefs,
     )
-    pre_chance_beliefs = _uniform_board_legal_beliefs(
-        pbs.env.last_board_indices, num_players=2
-    ).to(device=env_proto.device)
+    if randomize_beliefs:
+        pre_chance_beliefs = _random_board_legal_beliefs(
+            pbs.env.last_board_indices,
+            num_players=2,
+            generator=generator,
+        )
+    else:
+        pre_chance_beliefs = _uniform_board_legal_beliefs(
+            pbs.env.last_board_indices,
+            num_players=2,
+        )
+    pre_chance_beliefs = pre_chance_beliefs.to(device=env_proto.device)
     return ChanceRootSample(
         pbs=pbs,
         pre_chance_beliefs=pre_chance_beliefs,

@@ -342,6 +342,50 @@ def test_sample_end_of_street_chance_roots_builds_pre_chance_beliefs():
         )
 
 
+def test_sample_end_of_street_chance_roots_randomizes_pre_chance_beliefs():
+    device = torch.device("cpu")
+    env = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=device,
+        float_dtype=torch.float32,
+    )
+
+    random_sample = sample_end_of_street_chance_roots(
+        env,
+        batch_size=8,
+        closed_street=2,
+        generator=torch.Generator(device=device).manual_seed(991),
+    )
+    uniform_sample = sample_end_of_street_chance_roots(
+        env,
+        batch_size=8,
+        closed_street=2,
+        generator=torch.Generator(device=device).manual_seed(991),
+        randomize_beliefs=False,
+    )
+
+    previous_allowed = board_allowed_hands(random_sample.pbs.env.last_board_indices)
+    random_allowed_values = random_sample.pre_chance_beliefs.masked_select(
+        previous_allowed[:, None, :].expand_as(random_sample.pre_chance_beliefs)
+    )
+    assert random_allowed_values.unique().numel() > 16
+
+    legal_counts = previous_allowed.sum(dim=-1).to(torch.float32)
+    expected_uniform = torch.where(
+        previous_allowed[:, None, :],
+        (1.0 / legal_counts)[:, None, None],
+        torch.zeros_like(uniform_sample.pre_chance_beliefs),
+    )
+    torch.testing.assert_close(
+        uniform_sample.pre_chance_beliefs,
+        expected_uniform,
+    )
+    assert not torch.allclose(random_sample.pre_chance_beliefs, expected_uniform)
+
+
 def test_sample_end_of_street_chance_roots_rejects_unsupported_street():
     env = HUNLTensorEnv(
         num_envs=1,
