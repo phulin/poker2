@@ -319,6 +319,7 @@ class SearchConfig:
     allin_call_terminal_abstraction: bool = True
     preflop_allin_table_path: str | None = None
     closing_leaf_checkpoint: str | None = None
+    street_model_checkpoints: dict[str, str] = field(default_factory=dict)
     bet_bins_by_depth: list[list[float]] | None = None
     allin_by_depth: list[bool] | None = None
 

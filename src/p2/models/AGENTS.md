@@ -7,6 +7,7 @@ Shared model interfaces, outputs, activation helpers, and model-family subpackag
 - `base_mlp_model.py`: Abstract base for MLP-style models.
 - `model_output.py`: Shared model output dataclasses, including TRM latent state.
 - `policy.py`: Categorical policy wrapper around model logits.
+- `street_model_registry.py`: Model-like dispatcher that routes MLP feature batches to frozen street-specific postflop nets by `features.street`.
 
 ### Subdirectories
 - `cnn/`: Convolutional encoders and SiameseConvNet policy/value model.

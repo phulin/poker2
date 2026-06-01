@@ -30,6 +30,7 @@ from p2.models.mlp.better_ffn import (
 from p2.models.mlp.better_trm import BetterTRM
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput, TRMLatent
+from p2.models.street_model_registry import StreetModelRegistry
 from p2.rl.losses import RebelSupervisedLoss
 from p2.rl.optimizers import build_optimizer
 from p2.rl.rebel_batch import RebelBatch
@@ -323,6 +324,15 @@ class RebelCFRTrainer:
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
             self.inference_model.compile_forward_modes(**_compile_kwargs(cfg))
         eval_model = self.inference_model
+        if cfg.search.street_model_checkpoints:
+            if cfg.search.sparse_fused:
+                raise NotImplementedError(
+                    "search.sparse_fused does not yet support street_model_checkpoints; "
+                    "use non-fused sparse CFR for street-dispatched resolving."
+                )
+            eval_model = self._load_street_model_registry(
+                cfg.search.street_model_checkpoints
+            )
         if cfg.search.sparse_fused and cfg.search.closing_leaf_checkpoint is not None:
             raise NotImplementedError(
                 "search.sparse_fused does not yet support closing_leaf_checkpoint; "
@@ -623,6 +633,9 @@ class RebelCFRTrainer:
         return twin
 
     def _load_closing_leaf_model(self, checkpoint_path: str) -> nn.Module:
+        return self._load_frozen_eval_model(checkpoint_path)
+
+    def _load_frozen_eval_model(self, checkpoint_path: str) -> nn.Module:
         model = self._make_eval_twin(compile_model=False)
         checkpoint = torch.load(
             checkpoint_path, map_location=self.device, weights_only=False
@@ -639,6 +652,18 @@ class RebelCFRTrainer:
         if self.device.type == "cuda" and _compile_setting(self.cfg) != "off":
             model.compile_forward_modes(**_compile_kwargs(self.cfg))
         return model
+
+    def _load_street_model_registry(
+        self, checkpoints_by_street: dict[str, str]
+    ) -> StreetModelRegistry:
+        models = {
+            street: self._load_frozen_eval_model(path)
+            for street, path in checkpoints_by_street.items()
+        }
+        registry = StreetModelRegistry(models)
+        registry.to(self.device)
+        registry.eval()
+        return registry
 
     @torch.no_grad()
     def _sync_inference_model(self) -> None:

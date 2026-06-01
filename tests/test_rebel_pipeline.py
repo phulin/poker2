@@ -18,6 +18,7 @@ from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from p2.models.model_output import ModelOutput
+from p2.models.street_model_registry import StreetModelRegistry
 from p2.rl.cfr_trainer import RebelCFRTrainer, _value_samples_per_step
 from p2.rl.losses import RebelSupervisedLoss
 from p2.rl.rebel_batch import RebelBatch
@@ -53,6 +54,26 @@ def test_rebel_cfr_trainer_rejects_fused_closing_leaf_checkpoint():
 
     with pytest.raises(NotImplementedError, match="closing_leaf_checkpoint"):
         RebelCFRTrainer(cfg, torch.device("cpu"))
+
+
+def test_rebel_cfr_trainer_loads_street_model_registry(tmp_path):
+    source_cfg = _tiny_rebel_cfg()
+    source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
+    flop_checkpoint = tmp_path / "S_flop.pt"
+    river_checkpoint = tmp_path / "S_river.pt"
+    checkpoint = {"model": source_trainer.model.state_dict()}
+    torch.save(checkpoint, flop_checkpoint)
+    torch.save(checkpoint, river_checkpoint)
+
+    cfg = _tiny_rebel_cfg()
+    cfg.search.street_model_checkpoints = {
+        "flop": str(flop_checkpoint),
+        "river": str(river_checkpoint),
+    }
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+
+    assert isinstance(trainer.cfr_evaluator.model, StreetModelRegistry)
 
 
 def _tiny_rebel_cfg() -> Config:
