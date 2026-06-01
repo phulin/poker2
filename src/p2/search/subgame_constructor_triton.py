@@ -226,6 +226,10 @@ if triton is not None:
             committed1 = tl.where(src_actor == 1, committed1 + chips, committed1)
             chips0 = tl.where(src_actor == 0, chips0 + chips, chips0)
             chips1 = tl.where(src_actor == 1, chips1 + chips, chips1)
+            actor_stack_after = tl.where(src_actor == 0, stack0, stack1)
+            implicit_allin = (chips > 0) & (actor_stack_after == 0)
+            allin0 = tl.where(implicit_allin & (src_actor == 0), True, allin0)
+            allin1 = tl.where(implicit_allin & (src_actor == 1), True, allin1)
             new_pot = new_pot + chips
 
             equal_committed = committed0 == committed1
@@ -436,8 +440,10 @@ if triton is not None:
         committed1 = tl.where(src_actor == 1, committed1 + chips, committed1)
         chips0 = tl.where(src_actor == 0, chips0 + chips, chips0)
         chips1 = tl.where(src_actor == 1, chips1 + chips, chips1)
-        allin0 = tl.where(is_allin_action & (src_actor == 0), True, allin0)
-        allin1 = tl.where(is_allin_action & (src_actor == 1), True, allin1)
+        actor_stack_after = tl.where(src_actor == 0, stack0, stack1)
+        implicit_allin = (chips > 0) & (actor_stack_after == 0)
+        allin0 = tl.where(implicit_allin & (src_actor == 0), True, allin0)
+        allin1 = tl.where(implicit_allin & (src_actor == 1), True, allin1)
 
         equal_committed = committed0 == committed1
         allin_committed = (

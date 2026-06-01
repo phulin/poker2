@@ -145,6 +145,82 @@ def test_fused_sparse_graph_capture_regime_splits_dcfr_delay() -> None:
     assert ev._graph_capture_regime(5) == "post_dcfr_delay"
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("kernel_name", ["optimized", "legacy"])
+def test_same_street_constructor_marks_implicit_allin_river_call(
+    kernel_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("triton")
+    from p2.env.hunl_tensor_env import HUNLTensorEnv
+    from p2.search.subgame_constructor_triton import write_children_same_street_triton_
+
+    if kernel_name == "legacy":
+        monkeypatch.setenv("P2_WRITE_CHILDREN_KERNEL", "legacy")
+    else:
+        monkeypatch.delenv("P2_WRITE_CHILDREN_KERNEL", raising=False)
+
+    device = torch.device("cuda")
+    env = HUNLTensorEnv(
+        num_envs=2,
+        mean_stack=10000,
+        sb=25,
+        bb=50,
+        device=device,
+    )
+    env.reset()
+    env.street[0] = 3
+    env.to_act[0] = 1
+    env.button[0] = 0
+    env.stacks[0] = torch.tensor([0, 9590], device=device)
+    env.starting_stacks[0] = torch.tensor([9592, 9590], device=device)
+    env.scale[0] = 9590
+    env.committed[0] = torch.tensor([9592, 0], device=device)
+    env.chips_placed[0] = torch.tensor([9592, 0], device=device)
+    env.pot[0] = 9592
+    env.is_allin[0] = torch.tensor([True, False], device=device)
+    env.has_folded[0] = False
+    env.done[0] = False
+    env.actions_this_round[0] = 4
+    env.actions_last_round[0] = 0
+
+    num_actions = len(env.default_bet_bins) + 3
+    legal_mask = torch.zeros(2, num_actions, dtype=torch.bool, device=device)
+    legal_mask[0, 1] = True
+    child_offsets = torch.zeros(1, dtype=torch.long, device=device)
+    parent_index = torch.full((2,), -1, dtype=torch.long, device=device)
+    action_from_parent = torch.full((2,), -1, dtype=torch.long, device=device)
+    rewards = torch.zeros(2, dtype=torch.float32, device=device)
+    allin_leaf = torch.zeros(2, dtype=torch.bool, device=device)
+    bet_bins = torch.tensor(
+        [0.0, 0.0, *env.default_bet_bins, 0.0],
+        dtype=torch.float32,
+        device=device,
+    )
+
+    write_children_same_street_triton_(
+        env,
+        legal_mask,
+        child_offsets,
+        parent_index,
+        action_from_parent,
+        rewards,
+        allin_leaf,
+        bet_bins,
+        parent_start=0,
+        parent_count=1,
+        dst_start=1,
+        allin_abstraction=True,
+    )
+    torch.cuda.synchronize()
+
+    assert parent_index[1].item() == 0
+    assert action_from_parent[1].item() == 1
+    assert env.is_allin[1].tolist() == [True, True]
+    assert env.done[1].item() is True
+    assert env.street[1].item() == 4
+    assert allin_leaf[1].item() is False
+
+
 def _build_evaluator(num_envs: int = 2, depth: int = 2):
     """Construct a small SparseCFREvaluator for testing."""
     from hydra import compose, initialize_config_dir

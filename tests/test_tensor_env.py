@@ -1291,6 +1291,70 @@ def test_allin_legal_mask_with_betting():
                 ), f"SB should not be able to bet/raise/all-in (bin {bin_idx}) vs BB all-in"
 
 
+def test_implicit_allin_call_marks_allin_and_finishes_runout():
+    env = _make_env(N=1, mean_stack=1000, sb=25, bb=50, device=torch.device("cpu"))
+    env.reset()
+    env.street[:] = 2
+    env.to_act[:] = 1
+    env.button[:] = 0
+    env.stacks[:] = torch.tensor([[0, 100]], device=env.device)
+    env.starting_stacks[:] = torch.tensor([[100, 100]], device=env.device)
+    env.scale[:] = 100
+    env.committed[:] = torch.tensor([[100, 0]], device=env.device)
+    env.chips_placed[:] = torch.tensor([[100, 0]], device=env.device)
+    env.pot[:] = 100
+    env.is_allin[:] = torch.tensor([[True, False]], device=env.device)
+    env.has_folded.zero_()
+    env.done.zero_()
+    env.actions_this_round[:] = 1
+    env.actions_last_round.zero_()
+    env.min_raise[:] = 50
+    env.deck_pos[:] = 8
+
+    _, new_streets, _ = env.step(
+        torch.tensor([1], device=env.device),
+        torch.tensor([0], device=env.device),
+    )
+
+    assert env.is_allin.tolist() == [[True, True]]
+    assert env.done.tolist() == [True]
+    assert env.street.tolist() == [4]
+    assert env.deck_pos.tolist() == [9]
+    assert new_streets.tolist() == [4]
+    assert (env.board_indices >= 0).all()
+
+
+def test_short_implicit_allin_river_call_terminates():
+    env = _make_env(N=1, mean_stack=10000, sb=25, bb=50, device=torch.device("cpu"))
+    env.reset()
+    env.street[:] = 3
+    env.to_act[:] = 1
+    env.button[:] = 0
+    env.stacks[:] = torch.tensor([[0, 9590]], device=env.device)
+    env.starting_stacks[:] = torch.tensor([[9592, 9590]], device=env.device)
+    env.scale[:] = 9590
+    env.committed[:] = torch.tensor([[9592, 0]], device=env.device)
+    env.chips_placed[:] = torch.tensor([[9592, 0]], device=env.device)
+    env.pot[:] = 9592
+    env.is_allin[:] = torch.tensor([[True, False]], device=env.device)
+    env.has_folded.zero_()
+    env.done.zero_()
+    env.actions_this_round[:] = 4
+    env.actions_last_round.zero_()
+    env.min_raise[:] = 50
+    env.deck_pos[:] = 9
+
+    _, new_streets, _ = env.step(
+        torch.tensor([1], device=env.device),
+        torch.tensor([0], device=env.device),
+    )
+
+    assert env.is_allin.tolist() == [[True, True]]
+    assert env.done.tolist() == [True]
+    assert env.street.tolist() == [4]
+    assert new_streets.tolist() == [4]
+
+
 def test_allin_legal_mask_consistency():
     """Test that all-in legal mask logic is consistent across different scenarios."""
 
