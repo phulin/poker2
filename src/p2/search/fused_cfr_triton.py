@@ -6025,6 +6025,7 @@ def precompute_showdown_active_extras(
     *,
     scale_indices=None,
     extra_indices=None,
+    include_experimental=False,
 ):
     """Compute exact HU showdown metadata over board-legal river hands only.
 
@@ -6114,33 +6115,6 @@ def precompute_showdown_active_extras(
     off_r_pair = _pack_encoded_offsets(off_r_c1, off_r_c2)
     off_last_pair = _pack_encoded_offsets(off_last_c1, off_last_c2)
 
-    occ_pos = card_positions.to(torch.long)
-    valid_occ = occ_pos < active_hands
-    safe_occ = occ_pos.clamp(max=active_hands - 1)
-    occ_l = l_idx.gather(1, safe_occ.reshape(e_count, -1)).reshape(
-        e_count, active_cards, SHOWDOWN_MAX_PER_CARD
-    )
-    occ_r = r_idx.gather(1, safe_occ.reshape(e_count, -1)).reshape(
-        e_count, active_cards, SHOWDOWN_MAX_PER_CARD
-    )
-    occ_slot_l = ((occ_pos[:, :, None, :] < occ_l[:, :, :, None]).sum(dim=-1)).to(
-        torch.uint8
-    )
-    occ_slot_r = ((occ_pos[:, :, None, :] < occ_r[:, :, :, None]).sum(dim=-1)).to(
-        torch.uint8
-    )
-    occ_slot_l = torch.where(valid_occ, occ_slot_l, torch.zeros_like(occ_slot_l))
-    occ_slot_r = torch.where(valid_occ, occ_slot_r, torch.zeros_like(occ_slot_r))
-    card_slot_count = valid_occ.sum(dim=-1).to(torch.uint8).contiguous()
-    occ_c2 = c2_local.gather(1, safe_occ.reshape(e_count, -1)).reshape(
-        e_count, active_cards, SHOWDOWN_MAX_PER_CARD
-    )
-    occ_card = (
-        torch.arange(active_cards, device=device, dtype=torch.int32)
-        .view(1, active_cards, 1)
-        .expand(e_count, -1, SHOWDOWN_MAX_PER_CARD)
-    )
-    occ_is_c2 = ((occ_c2 == occ_card) & valid_occ).to(torch.uint8).contiguous()
     if scale_indices is None:
         scale_indices = showdown_indices
     if extra_indices is None:
@@ -6154,7 +6128,7 @@ def precompute_showdown_active_extras(
     )
     env_scale = env.scale[scale_indices]
     scale_factor = (showdown_potential / env_scale[:, None]).contiguous()
-    return {
+    result = {
         "card_positions": card_positions.to(torch.int32),
         "slot_L_c1": slot_tensors[0].to(torch.uint8).contiguous(),
         "slot_L_c2": slot_tensors[1].to(torch.uint8).contiguous(),
@@ -6180,11 +6154,45 @@ def precompute_showdown_active_extras(
         "off_L_pair": off_l_pair,
         "off_R_pair": off_r_pair,
         "off_last_pair": off_last_pair,
-        "occ_slot_L": occ_slot_l.contiguous(),
-        "occ_slot_R": occ_slot_r.contiguous(),
-        "card_slot_count": card_slot_count,
-        "occ_is_c2": occ_is_c2,
     }
+    if include_experimental:
+        occ_pos = card_positions.to(torch.long)
+        valid_occ = occ_pos < active_hands
+        safe_occ = occ_pos.clamp(max=active_hands - 1)
+        occ_l = l_idx.gather(1, safe_occ.reshape(e_count, -1)).reshape(
+            e_count, active_cards, SHOWDOWN_MAX_PER_CARD
+        )
+        occ_r = r_idx.gather(1, safe_occ.reshape(e_count, -1)).reshape(
+            e_count, active_cards, SHOWDOWN_MAX_PER_CARD
+        )
+        occ_slot_l = ((occ_pos[:, :, None, :] < occ_l[:, :, :, None]).sum(dim=-1)).to(
+            torch.uint8
+        )
+        occ_slot_r = ((occ_pos[:, :, None, :] < occ_r[:, :, :, None]).sum(dim=-1)).to(
+            torch.uint8
+        )
+        occ_slot_l = torch.where(valid_occ, occ_slot_l, torch.zeros_like(occ_slot_l))
+        occ_slot_r = torch.where(valid_occ, occ_slot_r, torch.zeros_like(occ_slot_r))
+        card_slot_count = valid_occ.sum(dim=-1).to(torch.uint8).contiguous()
+        occ_c2 = c2_local.gather(1, safe_occ.reshape(e_count, -1)).reshape(
+            e_count, active_cards, SHOWDOWN_MAX_PER_CARD
+        )
+        occ_card = (
+            torch.arange(active_cards, device=device, dtype=torch.int32)
+            .view(1, active_cards, 1)
+            .expand(e_count, -1, SHOWDOWN_MAX_PER_CARD)
+        )
+        result.update(
+            {
+                "occ_slot_L": occ_slot_l.contiguous(),
+                "occ_slot_R": occ_slot_r.contiguous(),
+                "card_slot_count": card_slot_count,
+                "occ_is_c2": ((occ_c2 == occ_card) & valid_occ)
+                .to(torch.uint8)
+                .contiguous(),
+            }
+        )
+    return result
 
 
 def showdown_ev_v15(

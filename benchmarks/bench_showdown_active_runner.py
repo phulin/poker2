@@ -147,6 +147,7 @@ def main() -> None:
         rank_indices,
         scale_indices=ev.showdown_indices,
         extra_indices=active_extra_indices,
+        include_experimental=True,
     )
     legacy_extras = precompute_showdown_extras(
         ev.hand_rank_data,
