@@ -2,7 +2,7 @@
 CLI entry points for training, search tuning, model inspection, sampling public belief states, and demos. Most commands are intended to run through `uv run`.
 
 ### Source files
-- `train_rebel.py`: Main ReBeL-style CFR training loop with Hydra config, checkpointing, WandB logging, and training stats.
+- `train_rebel.py`: Hydra entry point for ReBeL-style CFR training; builds config/WandB/trainer setup and delegates the shared step loop to `p2.rl.rebel_loop`.
 - `train_kbest.py`: PPO self-play trainer using K-best/DReD-style opponent pools and tensorized environments.
 - `modal_train_rebel.py`: Modal wrapper for launching ReBeL training remotely.
 - `sample_spots.py`: Samples and serializes public belief states from ReBeL data generation.
