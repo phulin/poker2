@@ -225,9 +225,10 @@ def _run_train_substep(
     resume_from: str | None,
     promoted: dict[str, str] | None = None,
 ) -> str:
-    if cfg.data.mode != "live":
+    if cfg.data.mode not in {"live", "hybrid"}:
         raise NotImplementedError(
-            "Curriculum train substeps currently support data.mode=live only; "
+            "Curriculum train substeps currently support data.mode=live or "
+            "data.mode=hybrid only; "
             "use train_rebel.py with data.mode=pregenerated for bounded HP sweeps."
         )
 

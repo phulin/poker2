@@ -82,6 +82,48 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
     assert state == {"promoted": {"S_river": str(promoted_path)}}
 
 
+def test_curriculum_train_substep_allows_hybrid_holdout_mode(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+
+    def fake_run_loop(trainer, cfg, run, **kwargs):
+        del run, kwargs
+        calls.append((trainer, cfg))
+        final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
+        os.makedirs(cfg.checkpoint_dir, exist_ok=True)
+        torch.save(
+            {"model": trainer.model.state_dict(), "step": cfg.num_steps}, final_path
+        )
+        return cfg.num_steps - 1
+
+    monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
+    monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
+    monkeypatch.setattr(curriculum_cli, "_init_wandb", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(
+        curriculum_cli, "_log_model_parameter_summary", lambda model, run: None
+    )
+
+    cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
+    cfg.data.mode = "hybrid"
+    cfg.curriculum.stages = ["river"]
+    cfg.curriculum.substeps = {
+        "river": CurriculumSubstepConfig(
+            kind="train",
+            net="S_river",
+            num_steps=3,
+            data_overrides={"live_root_source": "random_river"},
+        )
+    }
+
+    curriculum_cli.train_rebel_curriculum(cfg)
+
+    assert len(calls) == 1
+    _, stage_cfg = calls[0]
+    assert stage_cfg.data.mode == "hybrid"
+    assert stage_cfg.data.live_root_source == "random_river"
+
+
 def test_curriculum_distill_substep_uses_promoted_source_checkpoint(
     monkeypatch, tmp_path
 ) -> None:
