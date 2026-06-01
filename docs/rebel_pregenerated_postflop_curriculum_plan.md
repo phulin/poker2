@@ -462,6 +462,12 @@ Preflop remains a separate multiway project.
 
 Why this is the unbiased choice: every fold is a voluntary, EV-maximizing player decision, so there is no artificial payoff to assign at the boundary and no incentive distortion to correct. The only closed-preflop boundary is heads-up, valued by `E_preflop` (distilled from `S_flop`). The cost is an explicit, logged abstraction — squeeze-or-fold removes multiway limped/called pots and inflates 3-bet frequencies relative to real poker. Multiway all-in showdowns are still allowed and resolved by the side-pot equity resolver.
 
+Use the existing all-in equity checkpoint for preflop multiway all-in/showdown equity:
+
+```text
+outputs/checkpoints_allin/allin_128k_linear64k_xf4_h384_r0005_lr005_maskfold_s131072_b8192/allin_equity_step_64000.pt
+```
+
 Use the plan in `preflop_multiway_pbs_bootstrap_plan.md`:
 
 1. Multiway preflop model solves preflop `PBSEnv` states under the legal-action invariant.
