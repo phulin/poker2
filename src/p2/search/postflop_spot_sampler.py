@@ -482,6 +482,54 @@ def sample_postflop_start_roots(
 
 
 @torch.no_grad()
+def sample_postflop_legal_prefix_roots(
+    env_proto: HUNLTensorEnv | PBSEnv,
+    *,
+    batch_size: int,
+    street: int,
+    generator: torch.Generator | None = None,
+    randomize_beliefs: bool = True,
+    randomize_spots: bool = True,
+    stratify_board_textures: bool = True,
+) -> PublicBeliefState:
+    """Sample postflop roots reached by replaying one random legal action.
+
+    This produces conservative in-street prefix states without independently
+    mutating action, pot, stack, or commitment fields.
+    """
+
+    pbs = sample_postflop_start_roots(
+        env_proto,
+        batch_size=batch_size,
+        street=street,
+        generator=generator,
+        randomize_beliefs=randomize_beliefs,
+        randomize_spots=randomize_spots,
+        stratify_board_textures=stratify_board_textures,
+    )
+    env = pbs.env
+    legal = env.legal_bins_mask()
+    num_actions = legal.shape[1]
+    allin_index = num_actions - 1
+    action_ids = torch.arange(num_actions, device=env.device)
+    bet_mask = legal & (action_ids[None, :] >= 2) & (action_ids[None, :] < allin_index)
+    fallback_mask = legal & (action_ids[None, :] == 1)
+    selectable = torch.where(bet_mask.any(dim=1, keepdim=True), bet_mask, fallback_mask)
+    scores = torch.rand(
+        batch_size,
+        num_actions,
+        device=env.device,
+        generator=generator,
+    )
+    bin_indices = torch.where(selectable, scores, torch.full_like(scores, -1.0)).argmax(
+        dim=1
+    )
+    env.step_bins(bin_indices)
+    pbs.beliefs = pbs.beliefs.reshape(batch_size, 2, NUM_HANDS)
+    return pbs
+
+
+@torch.no_grad()
 def sample_flop_start_roots(
     env_proto: HUNLTensorEnv | PBSEnv,
     *,
@@ -492,6 +540,27 @@ def sample_flop_start_roots(
     stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
+        env_proto,
+        batch_size=batch_size,
+        street=1,
+        generator=generator,
+        randomize_beliefs=randomize_beliefs,
+        randomize_spots=randomize_spots,
+        stratify_board_textures=stratify_board_textures,
+    )
+
+
+@torch.no_grad()
+def sample_flop_legal_prefix_roots(
+    env_proto: HUNLTensorEnv | PBSEnv,
+    *,
+    batch_size: int,
+    generator: torch.Generator | None = None,
+    randomize_beliefs: bool = True,
+    randomize_spots: bool = True,
+    stratify_board_textures: bool = True,
+) -> PublicBeliefState:
+    return sample_postflop_legal_prefix_roots(
         env_proto,
         batch_size=batch_size,
         street=1,
@@ -524,6 +593,27 @@ def sample_turn_start_roots(
 
 
 @torch.no_grad()
+def sample_turn_legal_prefix_roots(
+    env_proto: HUNLTensorEnv | PBSEnv,
+    *,
+    batch_size: int,
+    generator: torch.Generator | None = None,
+    randomize_beliefs: bool = True,
+    randomize_spots: bool = True,
+    stratify_board_textures: bool = True,
+) -> PublicBeliefState:
+    return sample_postflop_legal_prefix_roots(
+        env_proto,
+        batch_size=batch_size,
+        street=2,
+        generator=generator,
+        randomize_beliefs=randomize_beliefs,
+        randomize_spots=randomize_spots,
+        stratify_board_textures=stratify_board_textures,
+    )
+
+
+@torch.no_grad()
 def sample_river_start_roots(
     env_proto: HUNLTensorEnv | PBSEnv,
     *,
@@ -534,6 +624,27 @@ def sample_river_start_roots(
     stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
+        env_proto,
+        batch_size=batch_size,
+        street=3,
+        generator=generator,
+        randomize_beliefs=randomize_beliefs,
+        randomize_spots=randomize_spots,
+        stratify_board_textures=stratify_board_textures,
+    )
+
+
+@torch.no_grad()
+def sample_river_legal_prefix_roots(
+    env_proto: HUNLTensorEnv | PBSEnv,
+    *,
+    batch_size: int,
+    generator: torch.Generator | None = None,
+    randomize_beliefs: bool = True,
+    randomize_spots: bool = True,
+    stratify_board_textures: bool = True,
+) -> PublicBeliefState:
+    return sample_postflop_legal_prefix_roots(
         env_proto,
         batch_size=batch_size,
         street=3,

@@ -36,7 +36,10 @@ from p2.rl.rebel_batch import RebelBatch
 from p2.rl.trueskill_tracker import TrueSkillTracker
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
 from p2.search.cfr_evaluator import CFREvaluator, PublicBeliefState
-from p2.search.postflop_spot_sampler import sample_postflop_start_roots
+from p2.search.postflop_spot_sampler import (
+    sample_postflop_legal_prefix_roots,
+    sample_postflop_start_roots,
+)
 from p2.search.rebel_data_generator import RebelDataGenerator
 from p2.search.rebel_data_source import (
     LiveRebelDataSource,
@@ -348,6 +351,11 @@ class RebelCFRTrainer:
             "random_turn": 2,
             "random_river": 3,
         }
+        random_prefix_sources = {
+            "random_flop_prefix": 1,
+            "random_turn_prefix": 2,
+            "random_river_prefix": 3,
+        }
         if cfg.data.live_root_source in random_street_sources:
             street = random_street_sources[cfg.data.live_root_source]
 
@@ -359,10 +367,22 @@ class RebelCFRTrainer:
                     generator=self.rng,
                 )
 
+        elif cfg.data.live_root_source in random_prefix_sources:
+            street = random_prefix_sources[cfg.data.live_root_source]
+
+            def root_sampler(batch_size: int) -> PublicBeliefState:
+                return sample_postflop_legal_prefix_roots(
+                    self.env,
+                    batch_size=batch_size,
+                    street=street,
+                    generator=self.rng,
+                )
+
         elif cfg.data.live_root_source != "self_play":
             raise ValueError(
                 "data.live_root_source must be 'self_play', 'random_flop', "
-                "'random_turn', or 'random_river'; "
+                "'random_turn', 'random_river', 'random_flop_prefix', "
+                "'random_turn_prefix', or 'random_river_prefix'; "
                 f"got {cfg.data.live_root_source!r}"
             )
 

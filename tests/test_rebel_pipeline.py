@@ -207,6 +207,9 @@ def test_rebel_cfr_trainer_wires_random_postflop_root_sources():
         "random_flop": 1,
         "random_turn": 2,
         "random_river": 3,
+        "random_flop_prefix": 1,
+        "random_turn_prefix": 2,
+        "random_river_prefix": 3,
     }
 
     for root_source, street in expected_streets.items():
@@ -221,6 +224,8 @@ def test_rebel_cfr_trainer_wires_random_postflop_root_sources():
         assert torch.equal(
             pbs.env.street, torch.full((2,), street, dtype=torch.long)
         )
+        if root_source.endswith("_prefix"):
+            assert torch.equal(pbs.env.actions_this_round, torch.ones(2, dtype=torch.long))
 
 
 def test_rebel_cfr_trainer_loads_closing_leaf_checkpoint(tmp_path):

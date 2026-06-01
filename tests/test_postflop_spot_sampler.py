@@ -14,9 +14,13 @@ from p2.search.postflop_spot_sampler import (
     _board_texture_target_matches,
     _recursive_strength_beliefs,
     sample_end_of_street_chance_roots,
+    sample_flop_legal_prefix_roots,
     sample_flop_start_roots,
+    sample_postflop_legal_prefix_roots,
     sample_postflop_start_roots,
+    sample_river_legal_prefix_roots,
     sample_river_start_roots,
+    sample_turn_legal_prefix_roots,
     sample_turn_start_roots,
 )
 
@@ -92,6 +96,57 @@ def test_sample_postflop_start_roots_builds_board_legal_street_start_pbs():
         _assert_street_start_root(pbs, street=street, board_cards=board_cards)
 
 
+def _assert_legal_prefix_root(pbs, *, street: int, board_cards: int) -> None:
+    batch_size = pbs.env.N
+    assert pbs.beliefs.shape == (batch_size, 2, 1326)
+    assert torch.equal(
+        pbs.env.street, torch.full((batch_size,), street, dtype=torch.long)
+    )
+    assert torch.equal(
+        pbs.env.actions_this_round, torch.ones(batch_size, dtype=torch.long)
+    )
+    assert torch.equal(pbs.env.to_act, 1 - pbs.env.last_to_act)
+    assert not pbs.env.done.any()
+    assert not pbs.env.has_folded.any()
+    assert not pbs.env.is_allin.any()
+    assert torch.equal(pbs.env.pot, pbs.env.chips_placed.sum(dim=1))
+    assert torch.equal(pbs.env.stacks + pbs.env.chips_placed, pbs.env.starting_stacks)
+
+    board = pbs.env.board_indices
+    assert (board[:, :board_cards] >= 0).all()
+    assert (board[:, board_cards:] == -1).all()
+    allowed = board_allowed_hands(board)
+    assert torch.equal(pbs.beliefs > 0, allowed[:, None, :].expand_as(pbs.beliefs))
+    torch.testing.assert_close(
+        pbs.beliefs.sum(dim=-1),
+        torch.ones(batch_size, 2),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert pbs.env.legal_bins_mask().any(dim=1).all()
+
+
+def test_sample_postflop_legal_prefix_roots_replays_legal_action_prefix():
+    device = torch.device("cpu")
+    env = HUNLTensorEnv(
+        num_envs=2,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=device,
+        float_dtype=torch.float32,
+    )
+    generator = torch.Generator(device=device).manual_seed(456)
+
+    for street, board_cards, sampler in (
+        (1, 3, sample_flop_legal_prefix_roots),
+        (2, 4, sample_turn_legal_prefix_roots),
+        (3, 5, sample_river_legal_prefix_roots),
+    ):
+        pbs = sampler(env, batch_size=8, generator=generator)
+        _assert_legal_prefix_root(pbs, street=street, board_cards=board_cards)
+
+
 def test_sample_postflop_start_roots_rejects_unsupported_street():
     env = HUNLTensorEnv(
         num_envs=1,
@@ -104,6 +159,13 @@ def test_sample_postflop_start_roots_rejects_unsupported_street():
 
     try:
         sample_postflop_start_roots(env, batch_size=1, street=0)
+    except ValueError as exc:
+        assert "street must be" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported street to raise ValueError")
+
+    try:
+        sample_postflop_legal_prefix_roots(env, batch_size=1, street=0)
     except ValueError as exc:
         assert "street must be" in str(exc)
     else:
