@@ -3195,6 +3195,7 @@ if triton is not None:
         start,
         end,
         H,
+        APPLY_ALLOWED: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
         c = tl.program_id(0) + start
@@ -3212,19 +3213,18 @@ if triton is not None:
         # loads, plus a single policy load reused for whichever player is hero
         # (the other player just copies parent reach unchanged).
         pol = tl.load(policy_ptr + c * H + offs, mask=mask, other=0.0)
-        # Fused block: zero out hands that are invalid at child c (board may
-        # have changed across a chance node), eliminating the post-hoc
-        # _block_beliefs masked_fill_.
-        al = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(tl.int1)
-
         v0 = tl.load(reach_ptr + (parent * 2 + 0) * H + offs, mask=mask, other=0.0)
         v1 = tl.load(reach_ptr + (parent * 2 + 1) * H + offs, mask=mask, other=0.0)
         if prev_actor == 0:
             v0 = v0 * pol
         else:
             v1 = v1 * pol
-        v0 = tl.where(al, v0, 0.0)
-        v1 = tl.where(al, v1, 0.0)
+        if APPLY_ALLOWED:
+            al = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(
+                tl.int1
+            )
+            v0 = tl.where(al, v0, 0.0)
+            v1 = tl.where(al, v1, 0.0)
         tl.store(reach_ptr + (c * 2 + 0) * H + offs, v0, mask=mask)
         tl.store(reach_ptr + (c * 2 + 1) * H + offs, v1, mask=mask)
 
@@ -3237,6 +3237,7 @@ def fused_reach_weights_depth_(
     prev_actor: torch.Tensor,  # [total]
     start: int,
     end: int,
+    apply_allowed_mask: bool = True,
     block_h: int = 2048,
 ) -> None:
     """For each child row ``c in [start, end)`` and player ``p``::
@@ -3246,7 +3247,9 @@ def fused_reach_weights_depth_(
 
     Replaces the per-depth ``fan_out + scatter_reduce(prod)`` pair in
     ``_calculate_reach_weights``. Caller must invoke per depth in top-down
-    order (children depend on freshly-computed parents).
+    order (children depend on freshly-computed parents). For same-board trees,
+    callers can apply the allowed-hand mask only at depth 0; invalid-hand zeros
+    then propagate to every deeper node.
     """
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
@@ -3269,6 +3272,7 @@ def fused_reach_weights_depth_(
         start,
         end,
         h,
+        APPLY_ALLOWED=apply_allowed_mask,
         BLOCK_H=block_h,
         num_warps=4,
     )
@@ -3294,6 +3298,7 @@ if triton is not None:
         end,
         H,
         EPS,
+        APPLY_ALLOWED: tl.constexpr,
         WRITE_AVG: tl.constexpr,
         STORE_REACH: tl.constexpr,
         BLOCK_H: tl.constexpr,
@@ -3310,9 +3315,6 @@ if triton is not None:
         mask = offs < H
 
         pol = tl.load(policy_ptr + c * H + offs, mask=mask, other=0.0)
-        allowed = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(
-            tl.int1
-        )
 
         parent0 = tl.load(
             reach_ptr + (parent * 2 + 0) * H + offs,
@@ -3326,8 +3328,12 @@ if triton is not None:
         )
         child0 = tl.where(prev_actor == 0, parent0 * pol, parent0)
         child1 = tl.where(prev_actor == 1, parent1 * pol, parent1)
-        child0 = tl.where(allowed, child0, 0.0)
-        child1 = tl.where(allowed, child1, 0.0)
+        if APPLY_ALLOWED:
+            allowed = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(
+                tl.int1
+            )
+            child0 = tl.where(allowed, child0, 0.0)
+            child1 = tl.where(allowed, child1, 0.0)
 
         if STORE_REACH:
             tl.store(reach_ptr + (c * 2 + 0) * H + offs, child0, mask=mask)
@@ -3385,6 +3391,7 @@ def fused_reach_beliefs_avg_depth_(
     end: int,
     write_average_policy: bool,
     store_reach: bool = True,
+    apply_allowed_mask: bool = True,
     eps: float = 1e-5,
     block_h: int = 2048,
 ) -> None:
@@ -3392,6 +3399,8 @@ def fused_reach_beliefs_avg_depth_(
 
     The average-policy update is optional so pre-DCFR-delay iterations can use
     the same reach/belief fusion without changing deferred-average semantics.
+    For same-board trees, callers can apply the allowed-hand mask only at depth
+    0; invalid-hand zeros then propagate to every deeper node.
     """
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
@@ -3433,6 +3442,7 @@ def fused_reach_beliefs_avg_depth_(
         end,
         h,
         eps,
+        APPLY_ALLOWED=apply_allowed_mask,
         WRITE_AVG=write_average_policy,
         STORE_REACH=store_reach,
         BLOCK_H=block_h,
@@ -3463,6 +3473,7 @@ if triton is not None:
         H,
         EPS,
         ROOT_PARENT: tl.constexpr,
+        APPLY_ALLOWED: tl.constexpr,
         WRITE_AVG: tl.constexpr,
         STORE_CHILD: tl.constexpr,
         BLOCK_H: tl.constexpr,
@@ -3480,9 +3491,6 @@ if triton is not None:
         mask = offs < H
 
         pol = tl.load(policy_ptr + c * H + offs, mask=mask, other=0.0)
-        allowed = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(
-            tl.int1
-        )
 
         if ROOT_PARENT:
             parent0 = tl.full([BLOCK_H], 1.0, tl.float32)
@@ -3502,8 +3510,12 @@ if triton is not None:
 
         child0 = tl.where(prev_actor == 0, parent0 * pol, parent0)
         child1 = tl.where(prev_actor == 1, parent1 * pol, parent1)
-        child0 = tl.where(allowed, child0, 0.0)
-        child1 = tl.where(allowed, child1, 0.0)
+        if APPLY_ALLOWED:
+            allowed = tl.load(allowed_mask_ptr + c * H + offs, mask=mask, other=0).to(
+                tl.int1
+            )
+            child0 = tl.where(allowed, child0, 0.0)
+            child1 = tl.where(allowed, child1, 0.0)
 
         if STORE_CHILD:
             tl.store(child_reach_ptr + (c_rel * 2 + 0) * H + offs, child0, mask=mask)
@@ -3564,6 +3576,7 @@ def fused_reach_beliefs_avg_scratch_depth_(
     root_parent: bool,
     write_average_policy: bool,
     store_child: bool = True,
+    apply_allowed_mask: bool = True,
     eps: float = 1e-5,
     block_h: int = 2048,
 ) -> None:
@@ -3615,6 +3628,7 @@ def fused_reach_beliefs_avg_scratch_depth_(
         h,
         eps,
         ROOT_PARENT=root_parent,
+        APPLY_ALLOWED=apply_allowed_mask,
         WRITE_AVG=write_average_policy,
         STORE_CHILD=store_child,
         BLOCK_H=block_h,
@@ -3656,9 +3670,10 @@ if triton is not None:
 
         # Single-tile path: H (=1326) fits in BLOCK_H (=2048). Keep `v`
         # register-resident across the sum + normalize so we don't spill the
-        # intermediate to global memory. reach is pre-blocked (zero where
-        # ~allowed_mask[i]) by _fused_reach_weights_kernel, so rb * rw is
-        # already correctly masked — no extra allowed_mask load needed here.
+        # intermediate to global memory. For same-board trees, invalid-hand
+        # reach is zeroed at depth 0 and that zero propagates to all deeper
+        # nodes, so rb * rw is already correctly masked — no extra allowed_mask
+        # load needed here.
         off = tl.arange(0, BLOCK_H)
         m = off < H
         rb = tl.load(root_row + off, mask=m, other=0.0)
@@ -3684,8 +3699,9 @@ def fused_deep_beliefs_(
 ) -> None:
     """Fuses ``_fan_out_deep(root_beliefs) * reach_weights`` + normalize into
     one kernel. Replaces ``_propagate_all_beliefs``. ``reach_weights`` must
-    already be blocked (zero where allowed_mask is False) — the fused reach
-    kernel does that, so no extra block step is needed here.
+    already be blocked (zero where allowed_mask is False). For same-board trees,
+    blocking depth 0 is enough because invalid-hand zeros propagate down the
+    tree, so no extra block step is needed here.
 
     For each node ``i`` and player ``p``::
 

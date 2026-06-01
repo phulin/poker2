@@ -1671,10 +1671,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self, target: torch.Tensor, policy: torch.Tensor
     ) -> None:
         # Fused per-depth propagation: reach[c, p, h] = reach[parent, p, h] *
-        # (policy[c, h] if p == prev_actor[c] else 1.0), zeroed where the
-        # child's allowed_hands mask is False (board changes across chance
-        # nodes). The block step is folded into the kernel; no post-hoc
-        # _block_beliefs call needed.
+        # (policy[c, h] if p == prev_actor[c] else 1.0). The evaluator does not
+        # cross street boundaries; leaf nodes may represent pre-chance states,
+        # but still use root/pre-chance board blockers. Apply the allowed-hand
+        # mask at depth 0 only and let invalid-hand zeros propagate deeper.
         for depth in range(self.tree_depth):
             start = self.depth_offsets[depth + 1]
             end = self.depth_offsets[depth + 2]
@@ -1686,6 +1686,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 prev_actor=self.prev_actor,
                 start=start,
                 end=end,
+                apply_allowed_mask=depth == 0,
             )
 
     def _propagate_all_beliefs(
@@ -1788,6 +1789,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         root_parent=depth == 0,
                         write_average_policy=write_average_policy,
                         store_child=store_child,
+                        apply_allowed_mask=depth == 0,
                     )
                     parent_reach, child_reach = child_reach, parent_reach
             else:
@@ -1808,6 +1810,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         start=self.depth_offsets[depth + 1],
                         end=self.depth_offsets[depth + 2],
                         write_average_policy=write_average_policy,
+                        apply_allowed_mask=depth == 0,
                         # Final-depth reach has no descendants and stats only read
                         # non-leaf reach. When stats are stubbed, keep leaf reach
                         # register-local and avoid two full leaf-row stores.
