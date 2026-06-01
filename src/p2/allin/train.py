@@ -51,6 +51,7 @@ class AllInTrainConfig:
     normuon_eps: float = 1.0e-8
     policy_head_muon_learning_rate: float = 3.0e-4
     lr_decay: str = "cosine"
+    lr_warmup_steps: int = 0
     lr_warmdown_start_step: int = 1
     cosine_lr_decay_ratio: float = 1.0
     cosine_lr_decay_steps: int = 0
@@ -616,8 +617,21 @@ def _lr_scale(
     total_steps: int,
     ratio: float,
     decay: str,
+    warmup_steps: int,
     warmdown_start_step: int,
+    final_step: int | None = None,
 ) -> float:
+    if warmup_steps < 0:
+        raise ValueError("lr_warmup_steps must be non-negative")
+    if warmup_steps > 0:
+        if step <= warmup_steps:
+            return float(step) / float(warmup_steps)
+        total_steps = max(1, total_steps - warmup_steps)
+        if final_step is not None:
+            final_step = max(1, final_step - warmup_steps)
+        step = step - warmup_steps
+        warmdown_start_step = max(1, warmdown_start_step - warmup_steps)
+
     decay = decay.strip().lower()
     if decay == "cosine":
         return _cosine_lr_scale(step, total_steps=total_steps, ratio=ratio)
@@ -639,9 +653,23 @@ def _lr_scale(
             start_step=warmdown_start_step,
             shape="linear",
         )
+    if decay in {"cosine_then_linear_zero", "cosine_linear_zero"}:
+        final_step = total_steps if final_step is None else final_step
+        if final_step < total_steps:
+            raise ValueError("final_step cannot be smaller than cosine phase steps")
+        if step <= total_steps:
+            return _cosine_lr_scale(step, total_steps=total_steps, ratio=ratio)
+        if final_step == total_steps:
+            return 0.0
+        progress = min(
+            max((step - total_steps) / float(final_step - total_steps), 0.0),
+            1.0,
+        )
+        return ratio * (1.0 - progress)
     raise ValueError(
         "lr_decay must be one of: cosine, linear, stable_warmdown, "
-        f"cosine_warmdown, linear_warmdown; got {decay!r}"
+        "cosine_warmdown, linear_warmdown, cosine_then_linear_zero; "
+        f"got {decay!r}"
     )
 
 
@@ -659,7 +687,9 @@ def _set_optimizer_lrs(
         total_steps=decay_steps,
         ratio=float(cfg.cosine_lr_decay_ratio),
         decay=cfg.lr_decay,
+        warmup_steps=cfg.lr_warmup_steps,
         warmdown_start_step=cfg.lr_warmdown_start_step,
+        final_step=cfg.steps,
     )
     for param_group in optimizer.param_groups:
         base_lr = _base_lr_for_group(param_group, cfg)

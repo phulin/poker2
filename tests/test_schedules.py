@@ -156,6 +156,7 @@ def test_allin_lr_scale_modes():
             total_steps=5,
             ratio=0.2,
             decay="cosine",
+            warmup_steps=0,
             warmdown_start_step=1,
         ),
         1.0,
@@ -166,6 +167,7 @@ def test_allin_lr_scale_modes():
             total_steps=5,
             ratio=0.2,
             decay="cosine",
+            warmup_steps=0,
             warmdown_start_step=1,
         ),
         0.2,
@@ -176,6 +178,7 @@ def test_allin_lr_scale_modes():
             total_steps=5,
             ratio=0.2,
             decay="linear",
+            warmup_steps=0,
             warmdown_start_step=1,
         ),
         0.6,
@@ -187,6 +190,7 @@ def test_allin_lr_scale_modes():
             total_steps=6,
             ratio=0.1,
             decay="stable_warmdown",
+            warmup_steps=0,
             warmdown_start_step=4,
         ),
         1.0,
@@ -197,6 +201,7 @@ def test_allin_lr_scale_modes():
             total_steps=6,
             ratio=0.1,
             decay="stable_warmdown",
+            warmup_steps=0,
             warmdown_start_step=4,
         ),
         0.1,
@@ -207,6 +212,7 @@ def test_allin_lr_scale_modes():
             total_steps=6,
             ratio=0.1,
             decay="linear_warmdown",
+            warmup_steps=0,
             warmdown_start_step=4,
         ),
         0.55,
@@ -218,8 +224,90 @@ def test_allin_lr_scale_modes():
             total_steps=5,
             ratio=0.2,
             decay="unsupported",
+            warmup_steps=0,
             warmdown_start_step=1,
         )
+
+    assert math.isclose(
+        _lr_scale(
+            2,
+            total_steps=6,
+            ratio=0.2,
+            decay="cosine",
+            warmup_steps=4,
+            warmdown_start_step=1,
+        ),
+        0.5,
+    )
+    assert math.isclose(
+        _lr_scale(
+            6,
+            total_steps=6,
+            ratio=0.2,
+            decay="cosine",
+            warmup_steps=4,
+            warmdown_start_step=1,
+        ),
+        0.2,
+    )
+    with pytest.raises(ValueError, match="lr_warmup_steps"):
+        _lr_scale(
+            1,
+            total_steps=5,
+            ratio=0.2,
+            decay="cosine",
+            warmup_steps=-1,
+            warmdown_start_step=1,
+        )
+
+    assert math.isclose(
+        _lr_scale(
+            1,
+            total_steps=3,
+            ratio=0.2,
+            decay="cosine_then_linear_zero",
+            warmup_steps=0,
+            warmdown_start_step=1,
+            final_step=7,
+        ),
+        1.0,
+    )
+    assert math.isclose(
+        _lr_scale(
+            3,
+            total_steps=3,
+            ratio=0.2,
+            decay="cosine_then_linear_zero",
+            warmup_steps=0,
+            warmdown_start_step=1,
+            final_step=7,
+        ),
+        0.2,
+    )
+    assert math.isclose(
+        _lr_scale(
+            5,
+            total_steps=3,
+            ratio=0.2,
+            decay="cosine_then_linear_zero",
+            warmup_steps=0,
+            warmdown_start_step=1,
+            final_step=7,
+        ),
+        0.1,
+    )
+    assert math.isclose(
+        _lr_scale(
+            7,
+            total_steps=3,
+            ratio=0.2,
+            decay="cosine_then_linear_zero",
+            warmup_steps=0,
+            warmdown_start_step=1,
+            final_step=7,
+        ),
+        0.0,
+    )
 
 
 def test_separate_learning_rates():
