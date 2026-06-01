@@ -43,8 +43,11 @@ class _FakeTrainer:
         wandb_run_id: str | None = None,
         save_optimizer: bool = True,
         save_dtype: torch.dtype | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> None:
-        self.saved.append((path, step, wandb_run_id, save_optimizer, save_dtype))
+        self.saved.append(
+            (path, step, wandb_run_id, save_optimizer, save_dtype, metadata)
+        )
 
     def trueskill_snapshot_weights(self) -> dict:
         return {"weight": 1.0}
@@ -76,6 +79,7 @@ def test_run_training_loop_preserves_checkpoint_and_snapshot_flow(
         None,
         start_step=0,
         stop_step=3,
+        checkpoint_metadata={"curriculum_substep": "river"},
     )
 
     assert last_step == 2
@@ -87,9 +91,24 @@ def test_run_training_loop_preserves_checkpoint_and_snapshot_flow(
             None,
             False,
             torch.bfloat16,
+            {"curriculum_substep": "river"},
         ),
-        (str(tmp_path / "rebel_latest.pt"), 1, None, True, None),
-        (str(tmp_path / "rebel_final.pt"), 3, None, False, None),
+        (
+            str(tmp_path / "rebel_latest.pt"),
+            1,
+            None,
+            True,
+            None,
+            {"curriculum_substep": "river"},
+        ),
+        (
+            str(tmp_path / "rebel_final.pt"),
+            3,
+            None,
+            False,
+            None,
+            {"curriculum_substep": "river"},
+        ),
     ]
     assert trainer.trueskill_tracker.snapshots == [(2, {"weight": 1.0}, None)]
     assert grid_calls == [

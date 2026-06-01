@@ -106,6 +106,7 @@ def run_training_loop(
     start_step: int,
     stop_step: int,
     stage_tag: str | None = None,
+    checkpoint_metadata: dict[str, object] | None = None,
 ) -> int:
     del stage_tag
 
@@ -145,6 +146,7 @@ def run_training_loop(
                 wandb_run_id=wandb_run_id,
                 save_optimizer=False,
                 save_dtype=torch.bfloat16,
+                metadata=checkpoint_metadata,
             )
             trainer.save_checkpoint(
                 os.path.join(cfg.checkpoint_dir, "rebel_latest.pt"),
@@ -152,6 +154,7 @@ def run_training_loop(
                 wandb_run_id=wandb_run_id,
                 save_optimizer=True,
                 save_dtype=None,
+                metadata=checkpoint_metadata,
             )
 
             if cfg.economize_checkpoints:
@@ -175,7 +178,11 @@ def run_training_loop(
 
     final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
     trainer.save_checkpoint(
-        final_path, stop_step, save_optimizer=False, save_dtype=None
+        final_path,
+        stop_step,
+        save_optimizer=False,
+        save_dtype=None,
+        metadata=checkpoint_metadata,
     )
     total_elapsed = time.time() - training_start
     print(
