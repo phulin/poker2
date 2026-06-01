@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import json
+import os
 
 import pytest
 import torch
@@ -28,6 +30,11 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
 
     def fake_run_loop(trainer, cfg, run, **kwargs):
         calls.append((trainer, cfg, run, kwargs))
+        final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
+        os.makedirs(cfg.checkpoint_dir, exist_ok=True)
+        torch.save(
+            {"model": trainer.model.state_dict(), "step": cfg.num_steps}, final_path
+        )
         return cfg.num_steps - 1
 
     monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
@@ -69,6 +76,10 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
         "curriculum_kind": "train",
         "curriculum_net": "S_river",
     }
+    promoted_path = tmp_path / "promoted" / "S_river.pt"
+    assert promoted_path.exists()
+    state = json.loads((tmp_path / "promoted" / "curriculum_state.json").read_text())
+    assert state == {"promoted": {"S_river": str(promoted_path)}}
 
 
 def test_curriculum_distill_substep_is_explicitly_not_implemented(tmp_path) -> None:

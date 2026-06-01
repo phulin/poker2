@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
+import shutil
 from dataclasses import asdict
 from typing import Any
 
@@ -26,6 +28,40 @@ from p2.utils.profiling import install_triton_compile_logger_from_env
 
 def _stage_checkpoint_dir(cfg: Config, substep_name: str) -> str:
     return os.path.join(cfg.checkpoint_dir, substep_name)
+
+
+def _promote_dir(cfg: Config) -> str:
+    return cfg.curriculum.promote_dir or os.path.join(cfg.checkpoint_dir, "promoted")
+
+
+def _promoted_checkpoint_path(cfg: Config, net: str) -> str:
+    return os.path.join(_promote_dir(cfg), f"{net}.pt")
+
+
+def _state_path(cfg: Config) -> str:
+    return os.path.join(_promote_dir(cfg), "curriculum_state.json")
+
+
+def _save_curriculum_state(cfg: Config, promoted: dict[str, str]) -> None:
+    os.makedirs(_promote_dir(cfg), exist_ok=True)
+    tmp_path = f"{_state_path(cfg)}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump({"promoted": promoted}, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp_path, _state_path(cfg))
+
+
+def _promote_checkpoint(
+    cfg: Config, substep: CurriculumSubstepConfig, final_path: str
+) -> str:
+    os.makedirs(_promote_dir(cfg), exist_ok=True)
+    promoted_path = _promoted_checkpoint_path(cfg, substep.net)
+    shutil.copy2(final_path, promoted_path)
+    sidecar = os.path.splitext(final_path)[0] + "_replay_buffers.pt"
+    if os.path.exists(sidecar):
+        promoted_sidecar = os.path.splitext(promoted_path)[0] + "_replay_buffers.pt"
+        shutil.copy2(sidecar, promoted_sidecar)
+    return promoted_path
 
 
 def _stage_wandb_name(cfg: Config, substep_name: str) -> str | None:
@@ -163,11 +199,12 @@ def _run_train_substep(
             stop_step=stage_cfg.num_steps,
             stage_tag=substep_name,
             checkpoint_metadata=_checkpoint_metadata(substep_name, substep),
-        )
+    )
 
     final_path = os.path.join(stage_cfg.checkpoint_dir, "rebel_final.pt")
-    print(f"Promoted train substep {substep_name}: {final_path}")
-    return final_path
+    promoted_path = _promote_checkpoint(cfg, substep, final_path)
+    print(f"Promoted train substep {substep_name}: {promoted_path}")
+    return promoted_path
 
 
 def train_rebel_curriculum(cfg: Config) -> None:
@@ -200,6 +237,7 @@ def train_rebel_curriculum(cfg: Config) -> None:
                 resume_from=resume_from,
                 promoted=promoted,
             )
+            _save_curriculum_state(cfg, promoted)
         elif substep.kind == "distill":
             raise NotImplementedError(
                 "Curriculum distill substeps require the E_X distiller and "
