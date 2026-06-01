@@ -218,9 +218,14 @@ The manifest is the guardrail against stale or mixed-quality data:
   "hands": 1326,
   "num_actions": 8,
   "stage": "river",
+  "root_source": "random_river",
+  "root_source_codes": {"2": "random_river"},
   "root_streets": ["river"],
   "included_streets": ["river"],
-  "feature_encoder": "BetterStreetValueFFN/BetterPolicyFFN",
+  "feature_encoder": {
+    "policy": {"model": "BetterPolicyFFN", "encoder": "BetterPolicyFeatureEncoder"},
+    "value": {"model": "BetterStreetValueFFN", "encoder": "BetterStreetValueFeatureEncoder"}
+  },
   "model_config": {...},
   "env_config": {...},
   "search_config": {...},
@@ -230,17 +235,25 @@ The manifest is the guardrail against stale or mixed-quality data:
     "role": "none|river_chance_leaf|turn_chance_leaf",
     "checkpoint": "...",
     "sha256": "...",
+    "net": "E_turn",
+    "distilled_from_net": "S_river",
+    "distilled_from_checkpoint": "...",
+    "distilled_from_sha256": "...",
     "step": 0
   },
   "generator": {
     "seed": 0,
-    "code_version": "...",
+    "code_version": "git-sha-or-null",
+    "code_dirty": false,
     "device": "cuda"
   },
   "value_examples": 1000000,
   "policy_examples": 8000000,
   "street_counts": {...},
   "node_depth_counts": {...},
+  "target_source_counts": {...},
+  "target_source_names": {...},
+  "root_source_counts": {...},
   "quality": {
     "cfr_iterations": 400,
     "holdout_value_loss": null,
