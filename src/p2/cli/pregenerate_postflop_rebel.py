@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import hydra
 import torch
@@ -28,15 +29,47 @@ def _sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _checkpoint_metadata(path: str | Path) -> dict[str, Any]:
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception:
+        return {}
+    if not isinstance(checkpoint, dict):
+        return {}
+    metadata = checkpoint.get("metadata", {})
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _maybe_sha256_file(path: str | Path | None) -> str | None:
+    if path is None:
+        return None
+    path_obj = Path(path)
+    if not path_obj.exists():
+        return None
+    return _sha256_file(path_obj)
+
+
 def _target_model_metadata(cfg: Config) -> dict:
     checkpoint = cfg.search.closing_leaf_checkpoint
     if checkpoint is None:
         return {"role": "none", "checkpoint": None, "sha256": None}
-    return {
+    checkpoint_metadata = _checkpoint_metadata(checkpoint)
+    metadata = {
         "role": "closing_leaf",
         "checkpoint": checkpoint,
         "sha256": _sha256_file(checkpoint),
     }
+    source_checkpoint = checkpoint_metadata.get("curriculum_source_checkpoint")
+    if isinstance(source_checkpoint, str):
+        metadata["distilled_from_checkpoint"] = source_checkpoint
+        metadata["distilled_from_sha256"] = _maybe_sha256_file(source_checkpoint)
+    source_net = checkpoint_metadata.get("curriculum_from_net")
+    if isinstance(source_net, str):
+        metadata["distilled_from_net"] = source_net
+    target_net = checkpoint_metadata.get("curriculum_net")
+    if isinstance(target_net, str):
+        metadata["net"] = target_net
+    return metadata
 
 
 def _trim_batch(batch: RebelBatch, target_remaining: int) -> RebelBatch:

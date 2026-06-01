@@ -121,6 +121,36 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
     assert written["storage_float_dtype"] == "float16"
 
 
+def test_target_model_metadata_records_distilled_source_checkpoint(tmp_path):
+    source_checkpoint = tmp_path / "S_river.pt"
+    source_checkpoint.write_bytes(b"frozen start net")
+    closing_checkpoint = tmp_path / "E_turn.pt"
+    torch.save(
+        {
+            "model": {},
+            "metadata": {
+                "curriculum_net": "E_turn",
+                "curriculum_from_net": "S_river",
+                "curriculum_source_checkpoint": str(source_checkpoint),
+            },
+        },
+        closing_checkpoint,
+    )
+
+    cfg = Config(device="cpu", use_wandb=False)
+    cfg.search.closing_leaf_checkpoint = str(closing_checkpoint)
+
+    assert pregenerate_cli._target_model_metadata(cfg) == {
+        "role": "closing_leaf",
+        "checkpoint": str(closing_checkpoint),
+        "sha256": hashlib.sha256(closing_checkpoint.read_bytes()).hexdigest(),
+        "distilled_from_checkpoint": str(source_checkpoint),
+        "distilled_from_sha256": hashlib.sha256(b"frozen start net").hexdigest(),
+        "distilled_from_net": "S_river",
+        "net": "E_turn",
+    }
+
+
 def test_pregenerate_postflop_rebel_requires_live_mode(tmp_path):
     cfg = Config(device="cpu", use_wandb=False)
     cfg.data.mode = "pregenerated"
