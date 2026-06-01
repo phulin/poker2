@@ -30,6 +30,16 @@ _ROOT_SOURCE_TO_STREET = {
     "random_river": "river",
     "random_river_prefix": "river",
 }
+_ROOT_SOURCE_CODES = {
+    "random_flop": 0,
+    "random_turn": 1,
+    "random_river": 2,
+    "random_flop_prefix": 3,
+    "random_turn_prefix": 4,
+    "random_river_prefix": 5,
+    "multiway_preflop_handoff_natural_hu": 10,
+    "multiway_preflop_handoff_forced_fold": 11,
+}
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -86,6 +96,12 @@ def _target_model_metadata(cfg: Config) -> dict:
 
 def _root_streets(root_source: str) -> list[str]:
     return [_ROOT_SOURCE_TO_STREET.get(root_source, root_source)]
+
+
+def _root_source_code(root_source: str) -> int:
+    if root_source not in _ROOT_SOURCE_CODES:
+        raise ValueError(f"Unsupported root_source for row tagging: {root_source!r}")
+    return _ROOT_SOURCE_CODES[root_source]
 
 
 def _quality_metadata(cfg: Config) -> dict[str, object]:
@@ -166,6 +182,23 @@ def _trim_batch(batch: RebelBatch, target_remaining: int) -> RebelBatch:
     return batch[:target_remaining]
 
 
+def _tag_root_source(batch: RebelBatch, root_source_code: int) -> RebelBatch:
+    statistics = dict(batch.statistics)
+    statistics["root_source"] = torch.full(
+        (len(batch),),
+        int(root_source_code),
+        dtype=torch.long,
+        device=batch.legal_masks.device,
+    )
+    return RebelBatch(
+        features=batch.features,
+        legal_masks=batch.legal_masks,
+        policy_targets=batch.policy_targets,
+        value_targets=batch.value_targets,
+        statistics=statistics,
+    )
+
+
 def pregenerate_postflop_rebel(cfg: Config) -> dict:
     """Generate a bounded solved dataset from live CFR roots."""
 
@@ -177,6 +210,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
     pregenerate_cfg = cfg.rebel_pregenerate
     if pregenerate_cfg.root_source is not None:
         cfg.data.live_root_source = pregenerate_cfg.root_source
+    root_source_code = _root_source_code(cfg.data.live_root_source)
 
     device = _device_from_config(cfg)
     print(f"Using device: {device}")
@@ -217,6 +251,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 value_batch,
                 pregenerate_cfg.value_target_min - value_examples,
             )
+            batch = _tag_root_source(batch, root_source_code)
             value_batches.append(batch.to(torch.device("cpu")))
             value_examples += len(batch)
         if (
@@ -227,6 +262,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 policy_batch,
                 pregenerate_cfg.policy_target_min - policy_examples,
             )
+            batch = _tag_root_source(batch, root_source_code)
             policy_batches.append(batch.to(torch.device("cpu")))
             policy_examples += len(batch)
         print(
@@ -251,6 +287,9 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
         metadata={
             "stage": pregenerate_cfg.stage,
             "root_source": cfg.data.live_root_source,
+            "root_source_codes": {
+                str(root_source_code): cfg.data.live_root_source,
+            },
             "root_streets": _root_streets(cfg.data.live_root_source),
             "model_family": (
                 cfg.model.name.value

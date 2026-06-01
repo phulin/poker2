@@ -136,7 +136,18 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
     assert sum(len(batch) for batch in written["policy_batches"]) == 4
     spot_config = written["metadata"]["spot_sampler_config"]
     assert written["metadata"]["root_source"] == "random_river"
+    assert written["metadata"]["root_source_codes"] == {"2": "random_river"}
     assert written["metadata"]["root_streets"] == ["river"]
+    for batch in written["value_batches"]:
+        assert torch.equal(
+            batch.statistics["root_source"],
+            torch.full((len(batch),), 2, dtype=torch.long),
+        )
+    for batch in written["policy_batches"]:
+        assert torch.equal(
+            batch.statistics["root_source"],
+            torch.full((len(batch),), 2, dtype=torch.long),
+        )
     assert spot_config["live_root_source"] == "random_river"
     assert spot_config["board_texture_stratified"] is True
     assert "recursive_strength" in spot_config["belief_mixture_weights"]

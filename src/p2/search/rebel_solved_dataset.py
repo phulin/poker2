@@ -269,6 +269,8 @@ def write_rebel_solved_dataset(
     policy_depth_counts = _count_tensor_values(policy_batches, "node_depth")
     value_target_source_counts = _count_tensor_values(value_batches, "target_source")
     policy_target_source_counts = _count_tensor_values(policy_batches, "target_source")
+    value_root_source_counts = _count_tensor_values(value_batches, "root_source")
+    policy_root_source_counts = _count_tensor_values(policy_batches, "root_source")
 
     manifest: dict[str, Any] = {
         "format": FORMAT_VERSION,
@@ -297,6 +299,13 @@ def write_rebel_solved_dataset(
         },
         "target_source_names": {
             str(code): name for code, name in sorted(TARGET_SOURCE_NAMES.items())
+        },
+        "root_source_counts": {
+            "value": value_root_source_counts,
+            "policy": policy_root_source_counts,
+            "total": _merge_count_dicts(
+                value_root_source_counts, policy_root_source_counts
+            ),
         },
         "storage_float_dtype": storage_dtype_name,
         "value_examples": int(value_examples),

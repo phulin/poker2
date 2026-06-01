@@ -55,6 +55,7 @@ def _value_batch(start: int, count: int) -> RebelBatch:
         value_targets=value_targets,
         statistics={
             "node_depth": torch.arange(start, start + count),
+            "root_source": torch.full((count,), 2, dtype=torch.long),
             "target_source": torch.where(
                 torch.arange(count).remainder(2) == 0,
                 torch.full((count,), TARGET_SOURCE_CFR_BACKUP),
@@ -72,7 +73,10 @@ def _policy_batch(start: int, count: int) -> RebelBatch:
         features=features,
         legal_masks=torch.ones(count, 5, dtype=torch.bool),
         policy_targets=policy_targets,
-        statistics={"node_depth": torch.arange(start, start + count)},
+        statistics={
+            "node_depth": torch.arange(start, start + count),
+            "root_source": torch.full((count,), 2, dtype=torch.long),
+        },
     )
 
 
@@ -127,6 +131,11 @@ def test_rebel_solved_dataset_reads_wrapped_batches(tmp_path):
     }
     assert manifest["target_source_names"] == {
         str(code): name for code, name in sorted(TARGET_SOURCE_NAMES.items())
+    }
+    assert manifest["root_source_counts"] == {
+        "value": {"2": 5},
+        "policy": {"2": 2},
+        "total": {"2": 7},
     }
     dataset = RebelSolvedDataset(
         tmp_path,
