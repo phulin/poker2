@@ -92,6 +92,25 @@ def test_rebel_cfr_trainer_wires_random_postflop_root_sources():
         )
 
 
+def test_rebel_cfr_trainer_loads_closing_leaf_checkpoint(tmp_path):
+    checkpoint_path = tmp_path / "closing.pt"
+    source_cfg = _tiny_rebel_cfg()
+    source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
+    source_trainer.save_checkpoint(
+        str(checkpoint_path), step=0, save_optimizer=False
+    )
+
+    cfg = _tiny_rebel_cfg()
+    cfg.search.closing_leaf_checkpoint = str(checkpoint_path)
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+
+    assert trainer.cfr_evaluator.closing_leaf_value_model is not None
+    assert all(
+        not param.requires_grad
+        for param in trainer.cfr_evaluator.closing_leaf_value_model.parameters()
+    )
+
+
 def test_rebel_cfr_trainer_constructs_multiway_pbs_env():
     cfg = Config()
     cfg.num_envs = 1

@@ -318,6 +318,7 @@ class SearchConfig:
     value_targets_from_final_policy: bool = False
     allin_call_terminal_abstraction: bool = True
     preflop_allin_table_path: str | None = None
+    closing_leaf_checkpoint: str | None = None
     bet_bins_by_depth: list[list[float]] | None = None
     allin_by_depth: list[bool] | None = None
 
@@ -397,6 +398,7 @@ class CurriculumSubstepConfig:
     num_steps: int = 0
     from_net: str | None = None
     closing_net: str | None = None
+    closing_checkpoint: str | None = None
     chance: str | None = None
     checkpoint: str | None = None
     output_dir: str | None = None

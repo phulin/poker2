@@ -112,6 +112,8 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert turn_cfg.data.live_root_source == "random_turn"
     assert turn_cfg.curriculum.stages == ["turn"]
     assert turn_cfg.curriculum.substeps["turn"].closing_net == "E_turn"
+    assert turn_cfg.curriculum.substeps["turn"].closing_checkpoint is None
     assert flop_cfg.data.live_root_source == "random_flop"
     assert flop_cfg.curriculum.stages == ["flop"]
     assert flop_cfg.curriculum.substeps["flop"].closing_net == "E_flop"
+    assert flop_cfg.curriculum.substeps["flop"].closing_checkpoint is None

@@ -45,6 +45,7 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
             kind="train",
             net="S_river",
             num_steps=3,
+            closing_checkpoint="outputs/E_turn.pt",
         )
     }
 
@@ -55,6 +56,7 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
     assert run is None
     assert stage_cfg.num_steps == 3
     assert stage_cfg.checkpoint_dir == str(tmp_path / "river")
+    assert stage_cfg.search.closing_leaf_checkpoint == "outputs/E_turn.pt"
     assert kwargs["start_step"] == 0
     assert kwargs["stop_step"] == 3
     assert kwargs["stage_tag"] == "river"

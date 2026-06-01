@@ -315,6 +315,11 @@ class RebelCFRTrainer:
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
             self.inference_model.compile_forward_modes(**_compile_kwargs(cfg))
         eval_model = self.inference_model
+        closing_leaf_model = None
+        if cfg.search.closing_leaf_checkpoint is not None:
+            closing_leaf_model = self._load_closing_leaf_model(
+                cfg.search.closing_leaf_checkpoint
+            )
 
         if not cfg.search.sparse:
             raise ValueError(
@@ -330,6 +335,7 @@ class RebelCFRTrainer:
             device=self.device,
             cfg=cfg,
             generator=self.rng,
+            closing_leaf_model=closing_leaf_model,
         )
         root_sampler = None
         random_street_sources = {
@@ -509,6 +515,24 @@ class RebelCFRTrainer:
         ):
             twin.compile_forward_modes(**_compile_kwargs(cfg))
         return twin
+
+    def _load_closing_leaf_model(self, checkpoint_path: str) -> nn.Module:
+        model = self._make_eval_twin(compile_model=False)
+        checkpoint = torch.load(
+            checkpoint_path, map_location=self.device, weights_only=False
+        )
+        model_state = checkpoint["model"]
+        model_state = {
+            key: value.to(self.float_dtype) if value.dtype.is_floating_point else value
+            for key, value in model_state.items()
+        }
+        model.load_state_dict(model_state, strict=self.cfg.strict_model_loading)
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad = False
+        if self.device.type == "cuda" and _compile_setting(self.cfg) != "off":
+            model.compile_forward_modes(**_compile_kwargs(self.cfg))
+        return model
 
     @torch.no_grad()
     def _sync_inference_model(self) -> None:

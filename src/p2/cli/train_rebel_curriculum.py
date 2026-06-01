@@ -84,6 +84,7 @@ def _stage_config(
     substep: CurriculumSubstepConfig,
     *,
     resume_from: str | None,
+    promoted: dict[str, str] | None = None,
 ) -> Config:
     stage_cfg = copy.deepcopy(cfg)
     stage_cfg.num_steps = int(substep.num_steps)
@@ -92,6 +93,10 @@ def _stage_config(
     )
     stage_cfg.resume_from = resume_from
     stage_cfg.wandb_name = _stage_wandb_name(cfg, substep_name)
+    closing_checkpoint = substep.closing_checkpoint
+    if closing_checkpoint is None and promoted is not None and substep.closing_net:
+        closing_checkpoint = promoted.get(substep.closing_net)
+    stage_cfg.search.closing_leaf_checkpoint = closing_checkpoint
     return stage_cfg
 
 
@@ -102,6 +107,7 @@ def _run_train_substep(
     *,
     device: torch.device,
     resume_from: str | None,
+    promoted: dict[str, str] | None = None,
 ) -> str:
     if cfg.data.mode != "live":
         raise NotImplementedError(
@@ -110,7 +116,11 @@ def _run_train_substep(
         )
 
     stage_cfg = _stage_config(
-        cfg, substep_name, substep, resume_from=resume_from
+        cfg,
+        substep_name,
+        substep,
+        resume_from=resume_from,
+        promoted=promoted,
     )
     os.makedirs(stage_cfg.checkpoint_dir, exist_ok=True)
 
@@ -175,6 +185,7 @@ def train_rebel_curriculum(cfg: Config) -> None:
                 substep,
                 device=device,
                 resume_from=resume_from,
+                promoted=promoted,
             )
         elif substep.kind == "distill":
             raise NotImplementedError(
