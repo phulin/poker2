@@ -7,6 +7,7 @@ from p2.env.card_utils import NUM_HANDS, board_allowed_hands
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.better_feature_encoder import BetterStreetValueFeatureEncoder
 from p2.models.mlp.mlp_features import MLPFeatures
+from p2.models.model_output import ModelOutput
 from p2.search.end_of_street_distillation import build_end_of_street_value_batch
 from p2.search.postflop_spot_sampler import sample_end_of_street_chance_roots
 
@@ -20,6 +21,20 @@ class BoardCardCountModel(torch.nn.Module):
         del static_base_features
         counts = (features.board >= 0).sum(dim=1).to(features.beliefs.dtype)
         return counts[:, None, None].expand(-1, 2, NUM_HANDS).clone()
+
+
+class ForwardOnlyBoardCardCountModel(torch.nn.Module):
+    def forward(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = False,
+        include_value: bool = True,
+        latent=None,
+    ) -> ModelOutput:
+        del include_policy, include_value, latent
+        counts = (features.board >= 0).sum(dim=1).to(features.beliefs.dtype)
+        hand_values = counts[:, None, None].expand(-1, 2, NUM_HANDS).clone()
+        return ModelOutput(hand_values=hand_values)
 
 
 def _env() -> HUNLTensorEnv:
@@ -122,3 +137,30 @@ def test_build_end_of_street_value_batch_rejects_wrong_chance_mode():
             target_model=BoardCardCountModel(),
             chance="single_card",
         )
+
+
+def test_build_end_of_street_value_batch_supports_forward_only_value_models():
+    env = _env()
+    sample = sample_end_of_street_chance_roots(
+        env,
+        batch_size=1,
+        closed_street=2,
+        generator=torch.Generator(device=env.device).manual_seed(44),
+    )
+    encoder = BetterStreetValueFeatureEncoder(
+        sample.pbs.env, device=env.device, dtype=torch.float32
+    )
+
+    batch = build_end_of_street_value_batch(
+        sample,
+        value_encoder=encoder,
+        target_model=ForwardOnlyBoardCardCountModel(),
+    )
+
+    previous_allowed = board_allowed_hands(sample.pbs.env.last_board_indices)
+    expected_targets = torch.where(
+        previous_allowed[:, None, :],
+        torch.full((1, 2, NUM_HANDS), 5.0),
+        torch.zeros(1, 2, NUM_HANDS),
+    )
+    torch.testing.assert_close(batch.value_targets, expected_targets)

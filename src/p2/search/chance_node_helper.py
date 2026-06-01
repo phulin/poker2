@@ -175,11 +175,10 @@ class ChanceNodeHelper:
                         static_base_features=static_base_features,
                     )
                 else:
-                    hand_values = model(
-                        synthetic_features,
-                        include_policy=False,
-                        static_base_features=static_base_features,
-                    ).hand_values
+                    kwargs = {"include_policy": False}
+                    if static_base_features is not None:
+                        kwargs["static_base_features"] = static_base_features
+                    hand_values = model(synthetic_features, **kwargs).hand_values
             hand_values = hand_values.to(dtype=dtype).view(
                 B, chunk_len, self.num_players, NUM_HANDS
             )
@@ -341,11 +340,10 @@ class ChanceNodeHelper:
                     static_base_features=static_base_features,
                 )
             else:
-                hand_values = model(
-                    synthetic_features,
-                    include_policy=False,
-                    static_base_features=static_base_features,
-                ).hand_values
+                kwargs = {"include_policy": False}
+                if static_base_features is not None:
+                    kwargs["static_base_features"] = static_base_features
+                hand_values = model(synthetic_features, **kwargs).hand_values
         hand_values = hand_values.to(dtype=dtype)
 
         weights = calculate_unblocked_mass(post_unnorm).flip(dims=[-2])
