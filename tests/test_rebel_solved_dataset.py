@@ -91,6 +91,16 @@ def test_rebel_solved_dataset_reads_wrapped_batches(tmp_path):
     assert manifest["value_examples"] == 5
     assert manifest["policy_examples"] == 2
     assert manifest["street_support"] == [0, 1, 2, 3]
+    assert manifest["street_counts"] == {
+        "value": {"0": 2, "1": 1, "2": 1, "3": 1},
+        "policy": {"2": 1, "3": 1},
+        "total": {"0": 2, "1": 1, "2": 2, "3": 2},
+    }
+    assert manifest["node_depth_counts"] == {
+        "value": {"0": 1, "1": 1, "2": 1, "3": 1, "4": 1},
+        "policy": {"10": 1, "11": 1},
+        "total": {"0": 1, "1": 1, "2": 1, "3": 1, "4": 1, "10": 1, "11": 1},
+    }
     dataset = RebelSolvedDataset(
         tmp_path,
         num_players=2,

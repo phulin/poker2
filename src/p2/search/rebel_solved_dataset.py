@@ -196,6 +196,31 @@ def _write_stream(
     return shards, start
 
 
+def _count_tensor_values(batches: Sequence[RebelBatch], key: str) -> dict[str, int]:
+    counts: dict[int, int] = {}
+    for batch in batches:
+        if key == "street":
+            values = batch.features.street
+        else:
+            values = batch.statistics.get(key)
+            if values is None:
+                continue
+        unique, batch_counts = torch.unique(
+            values.detach().cpu().reshape(-1), return_counts=True
+        )
+        for value, count in zip(unique.tolist(), batch_counts.tolist(), strict=True):
+            counts[int(value)] = counts.get(int(value), 0) + int(count)
+    return {str(key): counts[key] for key in sorted(counts)}
+
+
+def _merge_count_dicts(*dicts: dict[str, int]) -> dict[str, int]:
+    merged: dict[str, int] = {}
+    for counts in dicts:
+        for key, value in counts.items():
+            merged[key] = merged.get(key, 0) + int(value)
+    return dict(sorted(merged.items(), key=lambda item: int(item[0])))
+
+
 def write_rebel_solved_dataset(
     output_dir: str | Path,
     *,
@@ -232,6 +257,10 @@ def write_rebel_solved_dataset(
     street_values: set[int] = set()
     for batch in (*value_batches, *policy_batches):
         street_values.update(int(x) for x in batch.features.street.unique().tolist())
+    value_street_counts = _count_tensor_values(value_batches, "street")
+    policy_street_counts = _count_tensor_values(policy_batches, "street")
+    value_depth_counts = _count_tensor_values(value_batches, "node_depth")
+    policy_depth_counts = _count_tensor_values(policy_batches, "node_depth")
 
     manifest: dict[str, Any] = {
         "format": FORMAT_VERSION,
@@ -240,6 +269,16 @@ def write_rebel_solved_dataset(
         "num_actions": int(example_batch.legal_masks.shape[-1]),
         "context_length": int(example_batch.features.context.shape[-1]),
         "street_support": sorted(street_values),
+        "street_counts": {
+            "value": value_street_counts,
+            "policy": policy_street_counts,
+            "total": _merge_count_dicts(value_street_counts, policy_street_counts),
+        },
+        "node_depth_counts": {
+            "value": value_depth_counts,
+            "policy": policy_depth_counts,
+            "total": _merge_count_dicts(value_depth_counts, policy_depth_counts),
+        },
         "storage_float_dtype": storage_dtype_name,
         "value_examples": int(value_examples),
         "policy_examples": int(policy_examples),
