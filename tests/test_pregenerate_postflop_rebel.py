@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 import torch
 
@@ -76,7 +77,10 @@ class _FakeSplitModel(torch.nn.Module):
 
 
 class _FakeTrainer:
-    def __init__(self, cfg: Config, device: torch.device) -> None:
+    def __init__(
+        self, cfg: Config, device: torch.device, pregeneration_only: bool = False
+    ) -> None:
+        assert pregeneration_only is True
         self.cfg = cfg
         self.device = device
         self.env = object()
@@ -86,28 +90,7 @@ class _FakeTrainer:
 
 
 def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, tmp_path):
-    written = {}
-
-    def fake_write(
-        output_dir,
-        *,
-        value_batches,
-        policy_batches,
-        metadata,
-        storage_float_dtype=None,
-    ):
-        written["output_dir"] = output_dir
-        written["value_batches"] = value_batches
-        written["policy_batches"] = policy_batches
-        written["metadata"] = metadata
-        written["storage_float_dtype"] = storage_float_dtype
-        return {
-            "value_examples": sum(len(batch) for batch in value_batches),
-            "policy_examples": sum(len(batch) for batch in policy_batches),
-        }
-
     monkeypatch.setattr(pregenerate_cli, "RebelCFRTrainer", _FakeTrainer)
-    monkeypatch.setattr(pregenerate_cli, "write_rebel_solved_dataset", fake_write)
     monkeypatch.setattr(
         pregenerate_cli,
         "_code_version_metadata",
@@ -130,38 +113,50 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
 
     manifest = pregenerate_cli.pregenerate_postflop_rebel(cfg)
 
-    assert manifest == {"value_examples": 3, "policy_examples": 4}
-    assert written["output_dir"] == str(tmp_path)
-    assert sum(len(batch) for batch in written["value_batches"]) == 3
-    assert sum(len(batch) for batch in written["policy_batches"]) == 4
-    spot_config = written["metadata"]["spot_sampler_config"]
-    assert written["metadata"]["root_source"] == "random_river"
-    assert written["metadata"]["root_source_codes"] == {"2": "random_river"}
-    assert written["metadata"]["root_streets"] == ["river"]
-    for batch in written["value_batches"]:
-        assert torch.equal(
-            batch.statistics["root_source"],
-            torch.full((len(batch),), 2, dtype=torch.long),
-        )
-    for batch in written["policy_batches"]:
-        assert torch.equal(
-            batch.statistics["root_source"],
-            torch.full((len(batch),), 2, dtype=torch.long),
-        )
+    assert manifest["value_examples"] == 3
+    assert manifest["policy_examples"] == 4
+    assert (tmp_path / "manifest.json").exists()
+    disk_manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert disk_manifest["value_examples"] == 3
+    assert disk_manifest["policy_examples"] == 4
+    assert disk_manifest["shards"]["value"] == [
+        {"file": "value/shard_000000.pt", "start": 0, "end": 2},
+        {"file": "value/shard_000001.pt", "start": 2, "end": 3},
+    ]
+    assert disk_manifest["shards"]["policy"] == [
+        {"file": "policy/shard_000000.pt", "start": 0, "end": 3},
+        {"file": "policy/shard_000001.pt", "start": 3, "end": 4},
+    ]
+    spot_config = manifest["spot_sampler_config"]
+    assert manifest["root_source"] == "random_river"
+    assert manifest["root_source_codes"] == {"2": "random_river"}
+    assert manifest["root_streets"] == ["river"]
+    value_shard = torch.load(
+        tmp_path / "value" / "shard_000001.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    policy_shard = torch.load(
+        tmp_path / "policy" / "shard_000001.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert torch.equal(value_shard["statistics.root_source"], torch.full((1,), 2))
+    assert torch.equal(policy_shard["statistics.root_source"], torch.full((1,), 2))
     assert spot_config["live_root_source"] == "random_river"
     assert spot_config["board_texture_stratified"] is True
     assert "recursive_strength" in spot_config["belief_mixture_weights"]
     assert "straight_heavy" in spot_config["board_texture_weights"]
-    assert written["metadata"]["target_model"] == {
+    assert manifest["target_model"] == {
         "role": "closing_leaf",
         "checkpoint": str(checkpoint),
         "sha256": hashlib.sha256(b"closing leaf checkpoint").hexdigest(),
     }
-    assert written["metadata"]["feature_encoder"] == {
+    assert manifest["feature_encoder"] == {
         "policy": {"model": "_FakeModelComponent", "encoder": "_FakeEncoder"},
         "value": {"model": "_FakeModelComponent", "encoder": "_FakeEncoder"},
     }
-    assert written["metadata"]["quality"] == {
+    assert manifest["quality"] == {
         "cfr_iterations": 17,
         "cfr_type": "linear",
         "cfr_plus": True,
@@ -170,9 +165,9 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
         "holdout_value_loss": None,
         "target_model_kl": None,
     }
-    assert written["metadata"]["generator"]["code_version"] == "abc123"
-    assert written["metadata"]["generator"]["code_dirty"] is False
-    assert written["storage_float_dtype"] == "float16"
+    assert manifest["generator"]["code_version"] == "abc123"
+    assert manifest["generator"]["code_dirty"] is False
+    assert manifest["storage_float_dtype"] == "float16"
 
 
 def test_code_version_metadata_records_commit_and_dirty_state(monkeypatch):

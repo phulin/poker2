@@ -2381,7 +2381,9 @@ class CFREvaluator(ABC):
             counts[key].scatter_add_(0, root_owner[mask], one[mask])
         return counts
 
-    def evaluate_cfr(self, training_mode: bool = True) -> PublicBeliefState:
+    def evaluate_cfr(
+        self, training_mode: bool = True, sample_continuation: bool = True
+    ) -> PublicBeliefState | None:
         """Run CFR iterations to evaluate the subgame.
 
         Returns:
@@ -2412,6 +2414,8 @@ class CFREvaluator(ABC):
         self._record_cfr_entropy()
         self._record_cumulative_regret()
 
+        if not sample_continuation:
+            return None
         return self.sample_leaves(training_mode)
 
     # ============================================================================

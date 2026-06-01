@@ -18,7 +18,7 @@ from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
 from p2.search.postflop_spot_sampler import postflop_spot_sampler_metadata
-from p2.search.rebel_solved_dataset import write_rebel_solved_dataset
+from p2.search.rebel_solved_dataset import RebelSolvedDatasetWriter
 from p2.utils.profiling import install_triton_compile_logger_from_env
 
 
@@ -218,12 +218,14 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
         torch.set_float32_matmul_precision("high")
     torch.manual_seed(cfg.seed)
 
-    trainer = RebelCFRTrainer(cfg=cfg, device=device)
+    trainer = RebelCFRTrainer(cfg=cfg, device=device, pregeneration_only=True)
     if trainer.data_generator is None:
         raise RuntimeError("postflop pregeneration requires a live data generator")
 
-    value_batches: list[RebelBatch] = []
-    policy_batches: list[RebelBatch] = []
+    writer = RebelSolvedDatasetWriter(
+        pregenerate_cfg.output_dir,
+        storage_float_dtype=pregenerate_cfg.storage_dtype,
+    )
     value_examples = 0
     policy_examples = 0
     generation_batches = 0
@@ -252,7 +254,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 pregenerate_cfg.value_target_min - value_examples,
             )
             batch = _tag_root_source(batch, root_source_code)
-            value_batches.append(batch.to(torch.device("cpu")))
+            writer.append("value", batch)
             value_examples += len(batch)
         if (
             policy_batch is not None
@@ -263,7 +265,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 pregenerate_cfg.policy_target_min - policy_examples,
             )
             batch = _tag_root_source(batch, root_source_code)
-            policy_batches.append(batch.to(torch.device("cpu")))
+            writer.append("policy", batch)
             policy_examples += len(batch)
         print(
             "Generated "
@@ -280,10 +282,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
             "policy target minimum was not reached before max_generation_batches"
         )
 
-    manifest = write_rebel_solved_dataset(
-        pregenerate_cfg.output_dir,
-        value_batches=value_batches,
-        policy_batches=policy_batches,
+    manifest = writer.finalize(
         metadata={
             "stage": pregenerate_cfg.stage,
             "root_source": cfg.data.live_root_source,
@@ -318,7 +317,6 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 **postflop_spot_sampler_metadata(),
             },
         },
-        storage_float_dtype=pregenerate_cfg.storage_dtype,
     )
     print(
         f"wrote {manifest['value_examples']} value and "

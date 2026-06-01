@@ -251,8 +251,164 @@ def _merge_count_dicts(*dicts: dict[str, int]) -> dict[str, int]:
     return dict(sorted(merged.items(), key=lambda item: int(item[0])))
 
 
+def _add_count_dict(target: dict[str, int], source: Mapping[str, int]) -> None:
+    for key, value in source.items():
+        target[str(key)] = target.get(str(key), 0) + int(value)
+
+
 def _street_names(streets: Sequence[int]) -> list[str]:
     return [STREET_NAMES.get(int(street), str(int(street))) for street in streets]
+
+
+class RebelSolvedDatasetWriter:
+    """Streaming writer for bounded solved ReBeL examples.
+
+    Shards are written as batches arrive; only small manifest counters are kept
+    in memory.
+    """
+
+    def __init__(
+        self,
+        output_dir: str | Path,
+        *,
+        storage_float_dtype: torch.dtype | str | None = None,
+    ) -> None:
+        self.root = Path(output_dir)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.manifest_path = self.root / MANIFEST_NAME
+        if self.manifest_path.exists():
+            raise FileExistsError(f"{self.manifest_path} already exists")
+        self.storage_dtype_name = _storage_dtype_name(storage_float_dtype) or "float32"
+        self.shards: dict[StreamName, list[dict[str, Any]]] = {
+            "value": [],
+            "policy": [],
+        }
+        self.examples: dict[StreamName, int] = {"value": 0, "policy": 0}
+        self.street_counts: dict[StreamName, dict[str, int]] = {
+            "value": {},
+            "policy": {},
+        }
+        self.depth_counts: dict[StreamName, dict[str, int]] = {
+            "value": {},
+            "policy": {},
+        }
+        self.target_source_counts: dict[StreamName, dict[str, int]] = {
+            "value": {},
+            "policy": {},
+        }
+        self.root_source_counts: dict[StreamName, dict[str, int]] = {
+            "value": {},
+            "policy": {},
+        }
+        self.leaf_target_source_counts: dict[str, int] = {}
+        self.street_values: set[int] = set()
+        self.example_batch: RebelBatch | None = None
+
+    def append(self, stream: StreamName, batch: RebelBatch) -> None:
+        _validate_stream_batch(batch, stream)
+        if len(batch) == 0:
+            return
+        if self.example_batch is None:
+            self.example_batch = batch
+
+        stream_dir = self.root / stream
+        stream_dir.mkdir(parents=True, exist_ok=True)
+        shard_idx = len(self.shards[stream])
+        start = self.examples[stream]
+        end = start + len(batch)
+        rel_path = f"{stream}/shard_{shard_idx:06d}.pt"
+        torch.save(
+            rebel_batch_to_tensors(
+                batch, storage_float_dtype=self.storage_dtype_name
+            ),
+            self.root / rel_path,
+        )
+        self.shards[stream].append({"file": rel_path, "start": start, "end": end})
+        self.examples[stream] = end
+
+        self.street_values.update(int(x) for x in batch.features.street.unique().tolist())
+        _add_count_dict(self.street_counts[stream], _count_tensor_values([batch], "street"))
+        _add_count_dict(self.depth_counts[stream], _count_tensor_values([batch], "node_depth"))
+        _add_count_dict(
+            self.target_source_counts[stream],
+            _count_tensor_values([batch], "target_source"),
+        )
+        _add_count_dict(
+            self.root_source_counts[stream],
+            _count_tensor_values([batch], "root_source"),
+        )
+        if stream == "value":
+            _add_count_dict(
+                self.leaf_target_source_counts,
+                _leaf_target_source_counts([batch]),
+            )
+
+    def finalize(self, metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        example_batch = self.example_batch
+        if example_batch is None:
+            raise ValueError("At least one value or policy batch is required")
+
+        value_street_counts = self.street_counts["value"]
+        policy_street_counts = self.street_counts["policy"]
+        value_depth_counts = self.depth_counts["value"]
+        policy_depth_counts = self.depth_counts["policy"]
+        value_target_source_counts = self.target_source_counts["value"]
+        policy_target_source_counts = self.target_source_counts["policy"]
+        value_root_source_counts = self.root_source_counts["value"]
+        policy_root_source_counts = self.root_source_counts["policy"]
+        value_leaf_target_source_counts = dict(
+            sorted(self.leaf_target_source_counts.items(), key=lambda item: int(item[0]))
+        )
+
+        manifest: dict[str, Any] = {
+            "format": FORMAT_VERSION,
+            "num_players": example_batch.features.num_players,
+            "hands": NUM_HANDS,
+            "num_actions": int(example_batch.legal_masks.shape[-1]),
+            "context_length": int(example_batch.features.context.shape[-1]),
+            "street_support": sorted(self.street_values),
+            "included_streets": _street_names(sorted(self.street_values)),
+            "street_counts": {
+                "value": value_street_counts,
+                "policy": policy_street_counts,
+                "total": _merge_count_dicts(value_street_counts, policy_street_counts),
+            },
+            "node_depth_counts": {
+                "value": value_depth_counts,
+                "policy": policy_depth_counts,
+                "total": _merge_count_dicts(value_depth_counts, policy_depth_counts),
+            },
+            "target_source_counts": {
+                "value": value_target_source_counts,
+                "policy": policy_target_source_counts,
+                "total": _merge_count_dicts(
+                    value_target_source_counts, policy_target_source_counts
+                ),
+            },
+            "target_source_names": {
+                str(code): name for code, name in sorted(TARGET_SOURCE_NAMES.items())
+            },
+            "leaf_target_source_counts": {
+                "value": value_leaf_target_source_counts,
+                "policy": {},
+                "total": value_leaf_target_source_counts,
+            },
+            "root_source_counts": {
+                "value": value_root_source_counts,
+                "policy": policy_root_source_counts,
+                "total": _merge_count_dicts(
+                    value_root_source_counts, policy_root_source_counts
+                ),
+            },
+            "storage_float_dtype": self.storage_dtype_name,
+            "value_examples": int(self.examples["value"]),
+            "policy_examples": int(self.examples["policy"]),
+            "shards": self.shards,
+        }
+        if metadata is not None:
+            manifest.update(dict(metadata))
+        self.manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        return manifest
 
 
 def write_rebel_solved_dataset(
@@ -265,91 +421,14 @@ def write_rebel_solved_dataset(
 ) -> dict[str, Any]:
     """Write bounded solved ReBeL examples as tensor-only shards."""
 
-    storage_dtype_name = _storage_dtype_name(storage_float_dtype) or "float32"
-    root = Path(output_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    manifest_path = root / MANIFEST_NAME
-    if manifest_path.exists():
-        raise FileExistsError(f"{manifest_path} already exists")
-
-    value_shards, value_examples = _write_stream(
-        root,
-        "value",
-        value_batches,
-        storage_float_dtype=storage_dtype_name,
+    writer = RebelSolvedDatasetWriter(
+        output_dir, storage_float_dtype=storage_float_dtype
     )
-    policy_shards, policy_examples = _write_stream(
-        root,
-        "policy",
-        policy_batches,
-        storage_float_dtype=storage_dtype_name,
-    )
-    example_batch = next(iter(value_batches), None) or next(iter(policy_batches), None)
-    if example_batch is None:
-        raise ValueError("At least one value or policy batch is required")
-
-    street_values: set[int] = set()
-    for batch in (*value_batches, *policy_batches):
-        street_values.update(int(x) for x in batch.features.street.unique().tolist())
-    value_street_counts = _count_tensor_values(value_batches, "street")
-    policy_street_counts = _count_tensor_values(policy_batches, "street")
-    value_depth_counts = _count_tensor_values(value_batches, "node_depth")
-    policy_depth_counts = _count_tensor_values(policy_batches, "node_depth")
-    value_target_source_counts = _count_tensor_values(value_batches, "target_source")
-    policy_target_source_counts = _count_tensor_values(policy_batches, "target_source")
-    value_leaf_target_source_counts = _leaf_target_source_counts(value_batches)
-    value_root_source_counts = _count_tensor_values(value_batches, "root_source")
-    policy_root_source_counts = _count_tensor_values(policy_batches, "root_source")
-
-    manifest: dict[str, Any] = {
-        "format": FORMAT_VERSION,
-        "num_players": example_batch.features.num_players,
-        "hands": NUM_HANDS,
-        "num_actions": int(example_batch.legal_masks.shape[-1]),
-        "context_length": int(example_batch.features.context.shape[-1]),
-        "street_support": sorted(street_values),
-        "included_streets": _street_names(sorted(street_values)),
-        "street_counts": {
-            "value": value_street_counts,
-            "policy": policy_street_counts,
-            "total": _merge_count_dicts(value_street_counts, policy_street_counts),
-        },
-        "node_depth_counts": {
-            "value": value_depth_counts,
-            "policy": policy_depth_counts,
-            "total": _merge_count_dicts(value_depth_counts, policy_depth_counts),
-        },
-        "target_source_counts": {
-            "value": value_target_source_counts,
-            "policy": policy_target_source_counts,
-            "total": _merge_count_dicts(
-                value_target_source_counts, policy_target_source_counts
-            ),
-        },
-        "target_source_names": {
-            str(code): name for code, name in sorted(TARGET_SOURCE_NAMES.items())
-        },
-        "leaf_target_source_counts": {
-            "value": value_leaf_target_source_counts,
-            "policy": {},
-            "total": value_leaf_target_source_counts,
-        },
-        "root_source_counts": {
-            "value": value_root_source_counts,
-            "policy": policy_root_source_counts,
-            "total": _merge_count_dicts(
-                value_root_source_counts, policy_root_source_counts
-            ),
-        },
-        "storage_float_dtype": storage_dtype_name,
-        "value_examples": int(value_examples),
-        "policy_examples": int(policy_examples),
-        "shards": {"value": value_shards, "policy": policy_shards},
-    }
-    if metadata is not None:
-        manifest.update(dict(metadata))
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    return manifest
+    for batch in value_batches:
+        writer.append("value", batch)
+    for batch in policy_batches:
+        writer.append("policy", batch)
+    return writer.finalize(metadata)
 
 
 class RebelSolvedDataset:

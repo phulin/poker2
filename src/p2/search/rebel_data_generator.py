@@ -45,11 +45,14 @@ class RebelDataGenerator:
         self,
         env_proto: HUNLTensorEnv | PBSEnv,
         evaluator: CFREvaluator,
-        value_buffer: RebelReplayBuffer,
-        policy_buffer: RebelReplayBuffer,
+        value_buffer: RebelReplayBuffer | None,
+        policy_buffer: RebelReplayBuffer | None,
         warmup: bool = True,
         root_sampler: Callable[[int], PublicBeliefState] | None = None,
         include_pre_chance_value_batches: bool = True,
+        store_replay: bool = True,
+        sample_continuations: bool = True,
+        record_batch_diag: bool = True,
     ):
         self.env_proto = env_proto
         self.evaluator = evaluator
@@ -59,6 +62,9 @@ class RebelDataGenerator:
         self.target_batch_size = int(evaluator.root_nodes)
         self.root_sampler = root_sampler
         self.include_pre_chance_value_batches = bool(include_pre_chance_value_batches)
+        self.store_replay = bool(store_replay)
+        self.sample_continuations = bool(sample_continuations)
+        self.record_batch_diag = bool(record_batch_diag)
         initial_pbs = self._sample_roots(self.target_batch_size)
         self.current_pbs = initial_pbs
         self.last_extra = 0
@@ -106,18 +112,41 @@ class RebelDataGenerator:
         opp_allin = (env.is_allin[:N] & other_players).any(dim=1)
         committed = env.committed[:N].float().sum(dim=1)
         commit_frac = committed / (committed + 2.0 * eff_stack + 1.0)
-        denom = float(N)
+        diag = torch.stack(
+            (
+                (street == 0).float().mean(),
+                (street == 1).float().mean(),
+                (street == 2).float().mean(),
+                (street == 3).float().mean(),
+                spr.median(),
+                (spr < 1.0).float().mean(),
+                commit_frac.mean(),
+                (me_allin | opp_allin).float().mean(),
+                (opp_allin & ~me_allin).float().mean(),
+            )
+        )
+        (
+            street_preflop,
+            street_flop,
+            street_turn,
+            street_river,
+            spr_p50,
+            spr_lt1_frac,
+            commit_frac_mean,
+            any_allin_frac,
+            facing_allin_frac,
+        ) = diag.detach().cpu().tolist()
         self.evaluator.stats["gen_batch"] = {
             "refilled": float(refilled),
-            "street_preflop": float((street == 0).float().mean().item()),
-            "street_flop": float((street == 1).float().mean().item()),
-            "street_turn": float((street == 2).float().mean().item()),
-            "street_river": float((street == 3).float().mean().item()),
-            "spr_p50": float(spr.median().item()),
-            "spr_lt1_frac": float((spr < 1.0).float().mean().item()),
-            "commit_frac_mean": float(commit_frac.mean().item()),
-            "any_allin_frac": float((me_allin | opp_allin).float().sum().item() / denom),
-            "facing_allin_frac": float((opp_allin & ~me_allin).float().sum().item() / denom),
+            "street_preflop": float(street_preflop),
+            "street_flop": float(street_flop),
+            "street_turn": float(street_turn),
+            "street_river": float(street_river),
+            "spr_p50": float(spr_p50),
+            "spr_lt1_frac": float(spr_lt1_frac),
+            "commit_frac_mean": float(commit_frac_mean),
+            "any_allin_frac": float(any_allin_frac),
+            "facing_allin_frac": float(facing_allin_frac),
         }
 
     def _new_pbs(self, target_batch_size: int) -> PublicBeliefState:
@@ -262,17 +291,23 @@ class RebelDataGenerator:
                 self.current_pbs.beliefs[:root_count],
             )
 
-            next_pbs = self.evaluator.evaluate_cfr()
+            next_pbs = self.evaluator.evaluate_cfr(
+                sample_continuation=self.sample_continuations
+            )
             self.current_pbs = None if self.root_sampler is not None else next_pbs
-            self._record_batch_diag(refilled)
+            if self.record_batch_diag:
+                self._record_batch_diag(refilled)
 
             value_batch, augmented_value_batch, policy_batch = (
                 self.evaluator.training_data()
             )
-            self.policy_buffer.add_batch(policy_batch)
-            self.value_buffer.add_batch(value_batch)
-            if self.include_pre_chance_value_batches:
-                self.value_buffer.add_batch(augmented_value_batch)
+            if self.store_replay:
+                if self.policy_buffer is None or self.value_buffer is None:
+                    raise RuntimeError("store_replay=True requires replay buffers")
+                self.policy_buffer.add_batch(policy_batch)
+                self.value_buffer.add_batch(value_batch)
+                if self.include_pre_chance_value_batches:
+                    self.value_buffer.add_batch(augmented_value_batch)
 
             if return_policy_batch:
                 remaining = (

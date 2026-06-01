@@ -25,4 +25,4 @@ rebel_pregenerate:
 
 search:
   sparse: true
-  sparse_fused: false
+  sparse_fused: true

@@ -163,7 +163,11 @@ class DummyEvaluator:
             beliefs=beliefs,
         )
 
-    def evaluate_cfr(self):
+    def evaluate_cfr(self, training_mode: bool = True, sample_continuation: bool = True):
+        del training_mode
+        if not sample_continuation:
+            self.self_play_calls += 1
+            return None
         return self.self_play_iteration()
 
     def training_data(self):
@@ -203,8 +207,11 @@ class DummyEvaluator:
 
 
 class WarmupEvaluator(DummyEvaluator):
-    def evaluate_cfr(self):
+    def evaluate_cfr(self, training_mode: bool = True, sample_continuation: bool = True):
+        del training_mode
         self.self_play_calls += 1
+        if not sample_continuation:
+            return None
         assert self.last_initialized_env is not None
         env = DummyEnv(self.last_initialized_env.N, self.num_actions)
         ids = torch.arange(env.N, dtype=torch.long)
@@ -364,6 +371,37 @@ def test_rebel_data_generator_can_use_sampled_roots(monkeypatch, env_proto):
     )
     assert generator.current_pbs is None
     assert evaluator.self_play_calls == 1
+
+
+def test_rebel_data_generator_can_skip_replay_and_continuation(monkeypatch, env_proto):
+    monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
+    evaluator = DummyEvaluator(
+        env_proto=env_proto,
+        search_batch_size=2,
+        total_nodes=4,
+        num_players=2,
+        num_actions=env_proto.num_actions,
+    )
+
+    buffer = DummyBuffer()
+    generator = RebelDataGenerator(
+        env_proto=env_proto,
+        evaluator=evaluator,
+        value_buffer=buffer,
+        policy_buffer=buffer,
+        warmup=False,
+        store_replay=False,
+        sample_continuations=False,
+        record_batch_diag=False,
+    )
+
+    fresh_value_batch, fresh_policy_batch = generator.generate_data(2)
+
+    assert fresh_value_batch is not None
+    assert fresh_policy_batch is not None
+    assert len(buffer.batches) == 0
+    assert evaluator.self_play_calls == 1
+    assert generator.current_pbs is None
 
 
 def test_rebel_data_generator_terminates_when_no_next_pbs(monkeypatch, env_proto):

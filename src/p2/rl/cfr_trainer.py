@@ -116,7 +116,9 @@ class RebelCFRTrainer:
 
     cfr_evaluator: CFREvaluator
 
-    def __init__(self, cfg: Config, device: torch.device) -> None:
+    def __init__(
+        self, cfg: Config, device: torch.device, pregeneration_only: bool = False
+    ) -> None:
         self.cfg = cfg
         apply_action_schedule_to_config(cfg)
         if cfg.data.mode not in {"live", "pregenerated", "hybrid"}:
@@ -269,29 +271,33 @@ class RebelCFRTrainer:
             math.ceil(value_capacity * self.cfg.train.policy_capacity_factor)
         )
 
-        # Replay buffers
-        self.value_buffer = RebelValueBuffer(
-            capacity=value_capacity,
-            num_actions=self.num_actions,
-            num_players=self.num_players,
-            num_context_features=num_context_features,
-            device=self.buffer_device,
-            generator=self.buffer_rng,
-        )
-        # Larger policy buffer since we store more samples there
-        self.policy_buffer = RebelPolicyBuffer(
-            capacity=policy_capacity,
-            num_actions=self.num_actions,
-            num_players=self.num_players,
-            num_context_features=num_context_features,
-            device=self.buffer_device,
-            decimate=1.0 / policy_decimate,
-            generator=self.buffer_rng,
-            depth_stratify_decimate=cfg.train.policy_depth_stratify_decimate,
-            depth_stratify_sample=cfg.train.policy_depth_stratify_sample,
-            depth_stratify_probs=cfg.train.policy_depth_stratify_probs,
-            depth_stratify_buckets=cfg.search.depth,
-        )
+        if pregeneration_only:
+            self.value_buffer = None
+            self.policy_buffer = None
+        else:
+            # Replay buffers
+            self.value_buffer = RebelValueBuffer(
+                capacity=value_capacity,
+                num_actions=self.num_actions,
+                num_players=self.num_players,
+                num_context_features=num_context_features,
+                device=self.buffer_device,
+                generator=self.buffer_rng,
+            )
+            # Larger policy buffer since we store more samples there
+            self.policy_buffer = RebelPolicyBuffer(
+                capacity=policy_capacity,
+                num_actions=self.num_actions,
+                num_players=self.num_players,
+                num_context_features=num_context_features,
+                device=self.buffer_device,
+                decimate=1.0 / policy_decimate,
+                generator=self.buffer_rng,
+                depth_stratify_decimate=cfg.train.policy_depth_stratify_decimate,
+                depth_stratify_sample=cfg.train.policy_depth_stratify_sample,
+                depth_stratify_probs=cfg.train.policy_depth_stratify_probs,
+                depth_stratify_buckets=cfg.search.depth,
+            )
 
         # Optimizer & loss
         self.optimizer = build_optimizer(self.model, cfg.train, device)
@@ -445,7 +451,15 @@ class RebelCFRTrainer:
                 policy_buffer=self.policy_buffer,
                 root_sampler=root_sampler,
                 include_pre_chance_value_batches=cfg.data.include_pre_chance_value_batches,
+                store_replay=not pregeneration_only,
+                sample_continuations=not pregeneration_only,
+                record_batch_diag=not pregeneration_only,
             )
+            if pregeneration_only:
+                self.data_source = None
+                self.aggression_analyzer = AggressionAnalyzer(device=self.device)
+                self.trueskill_tracker = None
+                return
             self.data_source = LiveRebelDataSource(
                 self.data_generator,
                 self.value_buffer,

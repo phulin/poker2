@@ -2651,7 +2651,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         return "post_dcfr_delay"
 
     @torch.no_grad()
-    def evaluate_cfr(self, training_mode: bool = True):
+    def evaluate_cfr(self, training_mode: bool = True, sample_continuation: bool = True):
         """CFR-loop with per-call CUDA graphs for each Python branch regime.
 
         Runs ``t < 2`` uncaptured, then captures/replays one graph for the
@@ -2677,7 +2677,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self.values_avg[:] = self.latest_values
 
         self.t_sample = self._get_sampling_schedule()
-        self._prepare_compact_leaf_sampling(training_mode)
+        if sample_continuation:
+            self._prepare_compact_leaf_sampling(training_mode)
+        else:
+            self._sample_leaf_enabled = False
 
         start = self.warm_start_iterations
         end = self.cfr_iterations
@@ -2726,4 +2729,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._record_cfr_entropy()
         self._record_cumulative_regret()
 
+        if not sample_continuation:
+            return None
         return self.sample_leaves(training_mode)
