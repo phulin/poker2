@@ -5,8 +5,8 @@ defaults:
   - /allin/config_schema@_global_
   - _self_
 
-steps: 32000
-batch_size: 128
+steps: 8000
+batch_size: 512
 batch_size_schedule: ""
 players: 6
 
@@ -20,29 +20,30 @@ muon_eps: 0.0000001
 muon_ns_steps: 5
 muon_adjust_lr_fn: null
 policy_head_muon_learning_rate: 0.0003
-lr_decay: cosine
+lr_decay: linear
+lr_warmup_steps: 0
 lr_warmdown_start_step: 1
-cosine_lr_decay_ratio: 0.015
-cosine_lr_decay_steps: 500
+cosine_lr_decay_ratio: 0.005
+cosine_lr_decay_steps: 8000
 
-model_type: mlp
-hidden_dim: 1024
-hand_dim: 512
-layers: 6
+model_type: player_transformer
+hidden_dim: 512
+hand_dim: 256
+layers: 4
 film_rank: 64
 transformer_heads: 8
 dense_output_residual: false
 mask_folded_player_tokens: false
-target_mode: net_value
+target_mode: eligible_pot_share
 compile_model: true
 compile_dynamic: true
 compile_mode: ""
 
-sample_count: 50000
-board_samples: 256
+sample_count: 32768
+board_samples: 2048
 tuple_samples: 0
 tuple_tries: 4
-board_chunk: 8
+board_chunk: 64
 hand_chunk: 128
 
 bb: 100
@@ -59,11 +60,11 @@ device: cuda
 wandb_project: p2-allin-equity
 wandb_name: null
 no_wandb: false
-log_interval: 10
-eval_interval: 250
+log_interval: 1000
+eval_interval: 500
 eval_batch_size: 512
-checkpoint_interval: 500
+checkpoint_interval: 8000
 checkpoint_dir: outputs/checkpoints_allin
 resume_checkpoint: null
 pregenerated_data: outputs/allin_training_data_512k_s65536_b4096_bc64
-validation_data: outputs/allin_validation_data_8192_s1048576_b131072_bc64
+validation_data: outputs/allin_validation_data_4096_s16777216_b2097152_bc64/manifest.json
