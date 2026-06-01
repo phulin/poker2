@@ -27,11 +27,11 @@ Properties:
 
 - Once promoted, `S_X` and `E_X` are **frozen forever**. No self-bootstrap feedback loop across streets and no forgetting to defend against.
 - During a stage's solve the evaluator holds the **current-street `S_X`** (training) plus the **frozen `E_X`** (closing leaves). Distilling `E_X` additionally loads the frozen `S_{X+1}`.
-- At play/resolve time, search dispatches by street through a small `street → net` registry.
+- At play/resolve time, search dispatches by street through a small `street → net` registry. The runtime config hook is `search.street_model_checkpoints`, mapping e.g. `flop`, `turn`, and `river` to the promoted `S_flop`, `S_turn`, and `S_river` checkpoints.
 
 Costs / caveats:
 
-- The evaluator and `ChanceNodeHelper` currently hold a single `model` (`sparse_cfr_evaluator.py`, `chance_node_helper.py`); they must take an `(S_X, E_X)` pair with leaf routing by phase (within-street → `S_X`, street-closing → `E_X`).
+- Non-fused sparse CFR supports the `(S_X, E_X)` pair with leaf routing by phase (within-street → `S_X`, street-closing → `E_X`). Fused sparse CFR still rejects closing-leaf checkpoints until fused parity is implemented.
 - Boundary approximation compounds: `S_{X+1}` error → distilled into `E_X` → consumed by `S_X` training. Keep exact terminals mixed in and validate `E_X` against fresh chance-enumerated `S_{X+1}` values on a holdout.
 - Cross-street weight sharing is given up; transfer flows through `E_X` targets instead.
 
@@ -520,6 +520,16 @@ curriculum:
 ```
 
 `train` sub-steps run street CFR + supervised training (the `S_X` nets need value+policy); `distill` sub-steps are value-only supervised regression of `E_X` onto chance expectations of a frozen `from` net, with `chance` selecting single-card enumeration vs flop sampling.
+
+For play/resolve jobs after the curriculum has promoted the postflop S-net set, load the frozen street registry through `search.street_model_checkpoints`:
+
+```yaml
+search:
+  street_model_checkpoints:
+    flop: checkpoints-rebel-curriculum/promoted/S_flop.pt
+    turn: checkpoints-rebel-curriculum/promoted/S_turn.pt
+    river: checkpoints-rebel-curriculum/promoted/S_river.pt
+```
 
 Add a data subtree to the ReBeL config. `live` is the production default; `pregenerated` is for bounded HP sweeps only:
 
