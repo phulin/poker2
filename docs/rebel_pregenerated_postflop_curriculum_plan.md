@@ -1,7 +1,7 @@
-# Pregenerated ReBeL Postflop Curriculum Plan
+# Random-Spot ReBeL Postflop Curriculum Plan
 
 ## Goal
-Add a backward-bootstrapped postflop curriculum to heads-up ReBeL training, driven by a single orchestrator script. The curriculum bootstraps backward:
+Add a backward-bootstrapped postflop curriculum to heads-up ReBeL training, driven by a single orchestrator script. Production training remains live/in-loop CFR, but the live root source changes from self-play continuation to random legal postflop spots sampled on the fly. The curriculum bootstraps backward:
 
 1. Train `S_river` on random river beliefs and river public spots (exact river terminals).
 2. Distill `E_turn` from frozen `S_river` (expectation over the river card), then train `S_turn` with `E_turn` as turn-closing terminal values.
@@ -36,12 +36,12 @@ Costs / caveats:
 Net inventory: `S_river` (exact river terminals, no `E_river`), `E_turn`←`S_river`, `S_turn`, `E_flop`←`S_turn`, `S_flop`, `E_preflop`←`S_flop` (feeds the preflop handoff).
 
 ### Data path: live is the main path
-Live, in-loop CFR data generation stays the **production** training path for every postflop street. On-disk solved-example datasets are too large to be the backbone (see "Storage Reality" below), so the trainer supports two data modes:
+Live, in-loop CFR data generation stays the **production** training path for every postflop street. In live mode, roots are generated on the fly by random legal street-start / later legal-prefix postflop spot samplers, not by advancing a self-play `current_pbs` trajectory. CFR still runs inside the optimizer loop for those sampled roots, and the replay buffer still amortizes recent solves. On-disk solved-example datasets are too large to be the backbone (see "Storage Reality" below), so the trainer supports two data modes:
 
-- `live` — used for the real, full-scale runs. All streets generate examples in-loop and feed the existing replay buffers. CFR stays in the optimizer loop; the replay buffer amortizes recent solves.
+- `live` — used for the real, full-scale runs. All streets sample random legal postflop roots in-loop, solve them with CFR, and feed the existing replay buffers.
 - `pregenerated` — used for **small, fast, fixed-data hyperparameter sweeps only**. Solved examples are written to disk at experiment scale (not the 50M+ production scale) so HP runs see identical data and skip the solver. This mode must never be assumed to fit a full run on disk.
 
-The "pregeneration" being added is therefore two things: (a) the optional bounded offline dataset path for HP testing, and (b) the staged train/distill curriculum itself, both owned by one orchestrator script.
+The optional "pregeneration" being added is therefore only the bounded offline dataset path for HP testing and holdouts. The staged train/distill curriculum itself is live by default and uses random spot generation at production scale.
 
 ### Storage Reality
 On-disk solved datasets do not scale to a full run. Per postflop example the belief vector and value target each cost `2 × 1326 ≈ 2652` floats:
