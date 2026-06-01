@@ -109,6 +109,11 @@ class RebelCFRTrainer:
     def __init__(self, cfg: Config, device: torch.device) -> None:
         self.cfg = cfg
         apply_action_schedule_to_config(cfg)
+        if cfg.data.mode != "live":
+            raise NotImplementedError(
+                "RebelCFRTrainer currently supports data.mode=live only; "
+                "pregenerated and hybrid modes require the offline RebelDataSource."
+            )
         self.device = device
         self.rng = torch.Generator(device=self.device)
         self.float_dtype = torch.float32

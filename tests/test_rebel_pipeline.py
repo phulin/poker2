@@ -44,6 +44,14 @@ def test_value_samples_per_step_allows_fractional_reuse_goal():
         _value_samples_per_step(batch_size=512, value_reuse_goal=0.0)
 
 
+def test_rebel_cfr_trainer_rejects_unimplemented_data_modes():
+    cfg = Config(device="cpu")
+    cfg.data.mode = "pregenerated"
+
+    with pytest.raises(NotImplementedError, match="data.mode=live"):
+        RebelCFRTrainer(cfg, torch.device("cpu"))
+
+
 def test_rebel_cfr_trainer_constructs_multiway_pbs_env():
     cfg = Config()
     cfg.num_envs = 1
