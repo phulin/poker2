@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import torch
 from hydra.core.config_store import ConfigStore
@@ -364,6 +364,54 @@ class TrueSkillConfig:
 
 
 @dataclass
+class PregeneratedDatasetConfig:
+    path: str
+    value_weight: float = 1.0
+    policy_weight: float = 1.0
+    min_step: int = 0
+    max_step: int | None = None
+
+
+@dataclass
+class PregeneratedDataConfig:
+    value_batch_size: int | None = None
+    policy_batch_size: int | None = None
+    shuffle: bool = True
+    pin_memory: bool = True
+    async_shard_prefetch: bool = True
+    validate_manifest: bool = True
+    datasets: list[PregeneratedDatasetConfig] = field(default_factory=list)
+
+
+@dataclass
+class DataConfig:
+    mode: str = "live"
+    pregenerated: PregeneratedDataConfig = field(default_factory=PregeneratedDataConfig)
+
+
+@dataclass
+class CurriculumSubstepConfig:
+    kind: str = "train"
+    net: str = ""
+    num_steps: int = 0
+    from_net: str | None = None
+    closing_net: str | None = None
+    chance: str | None = None
+    checkpoint: str | None = None
+    output_dir: str | None = None
+    data_overrides: dict[str, Any] = field(default_factory=dict)
+    search_overrides: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CurriculumConfig:
+    stages: list[str] = field(default_factory=list)
+    wandb_group: str | None = None
+    promote_dir: str | None = None
+    substeps: dict[str, CurriculumSubstepConfig] = field(default_factory=dict)
+
+
+@dataclass
 class Config:
     # Training parameters
     num_steps: int = 2000
@@ -400,6 +448,8 @@ class Config:
     exploiter: ExploiterConfig = field(default_factory=ExploiterConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     trueskill: TrueSkillConfig = field(default_factory=TrueSkillConfig)
+    data: DataConfig = field(default_factory=DataConfig)
+    curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
 
     def __post_init__(self):
         if self.wandb_tags is None:
@@ -414,7 +464,8 @@ class Config:
         return cls.from_dict(container)
 
     @classmethod
-    def from_dict(cls, container: dict[str, any]) -> "Config":
+    def from_dict(cls, container: dict[str, Any]) -> "Config":
+        container.pop("defaults", None)
         train_container = container.get("train", {})
         train_container["stratify_streets"] = [
             StratifyConfig(**config)
@@ -450,6 +501,35 @@ class Config:
         container["exploiter"] = ExploiterConfig(**(container.get("exploiter", {})))
         container["search"] = SearchConfig(**(container.get("search", {})))
         container["trueskill"] = TrueSkillConfig(**(container.get("trueskill", {})))
+        data_container = container.get("data", {})
+        pregenerated_container = data_container.get("pregenerated", {})
+        pregenerated_container["datasets"] = [
+            PregeneratedDatasetConfig(**dataset)
+            for dataset in pregenerated_container.get("datasets", [])
+        ]
+        data_container["pregenerated"] = PregeneratedDataConfig(
+            **pregenerated_container
+        )
+        container["data"] = DataConfig(**data_container)
+        curriculum_container = container.get("curriculum", {})
+        known_curriculum_keys = {"stages", "wandb_group", "promote_dir", "substeps"}
+        substep_containers = dict(curriculum_container.get("substeps", {}))
+        for key, value in list(curriculum_container.items()):
+            if key not in known_curriculum_keys and isinstance(value, dict):
+                substep_containers[key] = value
+        substeps = {}
+        for name, substep_container in substep_containers.items():
+            substep_container = dict(substep_container)
+            if "from" in substep_container:
+                substep_container["from_net"] = substep_container.pop("from")
+            substeps[name] = CurriculumSubstepConfig(**substep_container)
+        curriculum_clean = {
+            key: value
+            for key, value in curriculum_container.items()
+            if key in known_curriculum_keys
+        }
+        curriculum_clean["substeps"] = substeps
+        container["curriculum"] = CurriculumConfig(**curriculum_clean)
         return cls(**container)
 
 
