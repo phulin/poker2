@@ -68,5 +68,5 @@ eval_batch_size: 512
 checkpoint_interval: 8000
 checkpoint_dir: outputs/checkpoints_allin
 resume_checkpoint: null
-pregenerated_data: outputs/allin_training_data_512k_s65536_b4096_bc64
-validation_data: outputs/allin_validation_data_4096_s16777216_b2097152_bc64/manifest.json
+pregenerated_data: outputs/allin_training_data_1024000_s131072_b8192_bc64/manifest.json
+validation_data: outputs/allin_validation_data_8192_allboards_spb16_bc64/manifest.json
