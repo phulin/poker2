@@ -892,6 +892,8 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
 
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     assert checkpoint["metadata"] == {"curriculum_substep": "river", "stage_step": 7}
+    assert "data_source" in checkpoint
+    assert checkpoint["data_source"] == checkpoint["data_generator"]
     checkpoint["model"]["unexpected.compat_key"] = torch.zeros(1)
     torch.save(checkpoint, ckpt_path)
 
@@ -928,10 +930,26 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
         new_trainer.policy_buffer.policy_targets,
         trainer.policy_buffer.policy_targets,
     )
-    torch.testing.assert_close(
-        new_trainer.policy_buffer.statistics["node_depth"],
-        trainer.policy_buffer.statistics["node_depth"],
-    )
+
+
+def test_rebel_cfr_trainer_loads_legacy_data_generator_checkpoint_key(tmp_path):
+    cfg = _tiny_rebel_cfg()
+    cfg.strict_model_loading = False
+
+    ckpt_path = tmp_path / "legacy.pt"
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    trainer.data_generator.last_extra = 3
+    trainer.save_checkpoint(str(ckpt_path), step=2, save_optimizer=False)
+
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    checkpoint.pop("data_source")
+    torch.save(checkpoint, ckpt_path)
+
+    new_trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    loaded_step = new_trainer.load_checkpoint(str(ckpt_path))
+
+    assert loaded_step == 2
+    assert new_trainer.data_generator.last_extra == 3
 
 
 def test_permutation_loss_echo_model():

@@ -2368,7 +2368,10 @@ class RebelCFRTrainer:
         if batch is not None:
             batch_cpu = batch.to(torch.device("cpu"))
             state["batch"] = batch_cpu
-        state["data_generator"] = self.data_source.state_dict()
+        data_source_state = self.data_source.state_dict()
+        state["data_source"] = data_source_state
+        # Compatibility for checkpoints written before the data-source refactor.
+        state["data_generator"] = data_source_state
 
         torch.save(state, path)
         self.save_replay_buffers(path, step)
@@ -2419,8 +2422,9 @@ class RebelCFRTrainer:
         if "buffer_rng" in ckpt:
             self.buffer_rng.set_state(ckpt["buffer_rng"])
         self._sync_inference_model()
-        if "data_generator" in ckpt:
-            self.data_source.load_state_dict(ckpt["data_generator"])
+        data_source_state = ckpt.get("data_source", ckpt.get("data_generator"))
+        if data_source_state is not None:
+            self.data_source.load_state_dict(data_source_state)
         replay_loaded = self.load_replay_buffers(path)
         if replay_loaded:
             print(
