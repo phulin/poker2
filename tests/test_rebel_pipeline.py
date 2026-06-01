@@ -52,7 +52,7 @@ def test_rebel_cfr_trainer_rejects_unimplemented_data_modes():
         RebelCFRTrainer(cfg, torch.device("cpu"))
 
 
-def test_rebel_cfr_trainer_wires_random_river_root_source():
+def _tiny_rebel_cfg() -> Config:
     cfg = Config()
     cfg.num_envs = 1
     cfg.train.batch_size = 1
@@ -68,14 +68,28 @@ def test_rebel_cfr_trainer_wires_random_river_root_source():
     cfg.search.iterations = 1
     cfg.search.warm_start_iterations = 0
     cfg.search.dcfr_plus_delay = 0
-    cfg.data.live_root_source = "random_river"
+    return cfg
 
-    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
 
-    assert trainer.data_generator.root_sampler is not None
-    pbs = trainer.data_generator.root_sampler(2)
-    assert pbs.env.N == 2
-    assert torch.equal(pbs.env.street, torch.full((2,), 3, dtype=torch.long))
+def test_rebel_cfr_trainer_wires_random_postflop_root_sources():
+    expected_streets = {
+        "random_flop": 1,
+        "random_turn": 2,
+        "random_river": 3,
+    }
+
+    for root_source, street in expected_streets.items():
+        cfg = _tiny_rebel_cfg()
+        cfg.data.live_root_source = root_source
+
+        trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+
+        assert trainer.data_generator.root_sampler is not None
+        pbs = trainer.data_generator.root_sampler(2)
+        assert pbs.env.N == 2
+        assert torch.equal(
+            pbs.env.street, torch.full((2,), street, dtype=torch.long)
+        )
 
 
 def test_rebel_cfr_trainer_constructs_multiway_pbs_env():

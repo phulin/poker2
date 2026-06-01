@@ -36,7 +36,7 @@ from p2.rl.rebel_batch import RebelBatch
 from p2.rl.trueskill_tracker import TrueSkillTracker
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
 from p2.search.cfr_evaluator import CFREvaluator
-from p2.search.postflop_spot_sampler import sample_river_start_roots
+from p2.search.postflop_spot_sampler import sample_postflop_start_roots
 from p2.search.rebel_data_generator import RebelDataGenerator
 from p2.search.rebel_data_source import LiveRebelDataSource, RebelDataSource
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
@@ -332,15 +332,23 @@ class RebelCFRTrainer:
             generator=self.rng,
         )
         root_sampler = None
-        if cfg.data.live_root_source == "random_river":
-            root_sampler = lambda batch_size: sample_river_start_roots(
+        random_street_sources = {
+            "random_flop": 1,
+            "random_turn": 2,
+            "random_river": 3,
+        }
+        if cfg.data.live_root_source in random_street_sources:
+            street = random_street_sources[cfg.data.live_root_source]
+            root_sampler = lambda batch_size: sample_postflop_start_roots(
                 self.env,
                 batch_size=batch_size,
+                street=street,
                 generator=self.rng,
             )
         elif cfg.data.live_root_source != "self_play":
             raise ValueError(
-                "data.live_root_source must be 'self_play' or 'random_river'; "
+                "data.live_root_source must be 'self_play', 'random_flop', "
+                "'random_turn', or 'random_river'; "
                 f"got {cfg.data.live_root_source!r}"
             )
 

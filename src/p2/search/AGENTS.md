@@ -7,7 +7,7 @@ CFR/DCFR search, public-belief state handling, ReBeL data generation, evaluator 
 - `dcfr.py`: Standalone DCFR utilities and regret matching.
 - `cfr_manager.py`: High-level CFRManager orchestration.
 - `chance_node_helper.py`: Chance-node expansion and board/deck helper logic, including post-chance value-head evaluation for street-value targets.
-- `postflop_spot_sampler.py`: Random legal postflop public-root samplers, starting with heads-up river street-start roots and board-legal beliefs.
+- `postflop_spot_sampler.py`: Random legal postflop public-root samplers for heads-up flop/turn/river street-start roots and board-legal beliefs.
 - `rebel_data_generator.py`: ReBeL public-belief training data generator.
 - `rebel_data_source.py`: Data-source boundary for ReBeL trainer batches, currently wrapping live CFR generation and replay-buffer sampling.
 - `sparse_cfr_evaluator.py`: Sparse CFR evaluator implementation used as the reference path, including split policy/value encoder setup and initial PBSEnv-backed multiway tree construction.
