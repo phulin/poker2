@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -29,6 +30,7 @@ from p2.search.allin_payoff import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_PREFLOP_ALLIN_TABLE = _REPO_ROOT / "outputs" / "preflop_allin_table.pt.zst"
+NUM_FULL_BOARDS = 2_598_960
 
 
 def _combo_masks(device: torch.device) -> torch.Tensor:
@@ -66,6 +68,29 @@ def _sample_full_boards(
 ) -> torch.Tensor:
     scores = torch.rand(count, 52, device=device, generator=generator)
     return torch.topk(scores, 5, dim=1).indices
+
+
+def _device_cache_key(device: torch.device) -> tuple[str, int | None]:
+    if device.type == "cuda" and device.index is None:
+        return device.type, torch.cuda.current_device()
+    return device.type, device.index
+
+
+@lru_cache(maxsize=4)
+def _full_boards_cached(device_type: str, device_index: int | None) -> torch.Tensor:
+    device = torch.device(device_type, device_index)
+    cards = torch.arange(52, dtype=torch.long)
+    boards = torch.combinations(cards, r=5).contiguous()
+    return boards.to(device=device, non_blocking=True)
+
+
+def _full_boards(device: torch.device) -> torch.Tensor:
+    boards = _full_boards_cached(*_device_cache_key(device))
+    if boards.shape != (NUM_FULL_BOARDS, 5):
+        raise RuntimeError(
+            f"expected {NUM_FULL_BOARDS} full boards, got {boards.shape}"
+        )
+    return boards
 
 
 def _rank_hands(board: torch.Tensor) -> torch.Tensor:
@@ -174,6 +199,8 @@ def _resolve_sample_split(
     sample_count: int | None,
     board_samples: int | None,
     tuple_samples: int | None,
+    *,
+    exhaustive_boards: bool = False,
 ) -> tuple[int, int]:
     if sample_count is not None and sample_count <= 0:
         raise ValueError("sample_count must be positive")
@@ -181,6 +208,17 @@ def _resolve_sample_split(
         raise ValueError("board_samples must be positive")
     if tuple_samples is not None and tuple_samples <= 0:
         raise ValueError("tuple_samples must be positive")
+    if exhaustive_boards:
+        if board_samples is not None and board_samples != NUM_FULL_BOARDS:
+            raise ValueError(
+                f"exhaustive board mode requires board_samples={NUM_FULL_BOARDS}"
+            )
+        if tuple_samples is None:
+            raise ValueError(
+                "tuple_samples is required in exhaustive board mode; it is the "
+                "number of opponent tuple samples per full board"
+            )
+        return NUM_FULL_BOARDS, tuple_samples
     if sample_count is None:
         if board_samples is None or tuple_samples is None:
             raise ValueError(
@@ -286,6 +324,7 @@ def _estimate_preflop_allin_values_triton(
     workspace: PreflopAllInEstimatorWorkspace | None = None,
     use_board_masks: bool = True,
     skip_folded_heroes: bool = True,
+    exhaustive_boards: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     start = time.perf_counter()
     device = batch.beliefs.device
@@ -335,8 +374,15 @@ def _estimate_preflop_allin_values_triton(
             live_rep = live_mask_i8.index_select(0, root_ids)
             layer_amount_rep = layer_amount_f32.index_select(0, root_ids)
             eligible_rep = eligible_i8.index_select(0, root_ids)
-        boards = _sample_full_boards(row_count, device=device, generator=generator)
-        ranks = _rank_hands(boards)
+        if exhaustive_boards:
+            board_chunk_rows = _full_boards(device)[
+                done_boards : done_boards + cur_boards
+            ]
+            boards = board_chunk_rows.repeat(B, 1)
+            ranks = _rank_hands(board_chunk_rows).repeat(B, 1)
+        else:
+            boards = _sample_full_boards(row_count, device=device, generator=generator)
+            ranks = _rank_hands(boards)
         launch_start = time.perf_counter()
         if use_board_masks:
             board_masks = _board_masks(boards).contiguous()
@@ -405,6 +451,7 @@ def _estimate_preflop_allin_values_triton(
         "target_value_std": float(values.std().item()),
         "target_board_samples": float(board_samples),
         "target_tuple_samples": float(tuple_samples),
+        "target_exhaustive_boards": float(exhaustive_boards),
     }
     return values, diagnostics
 
@@ -426,6 +473,7 @@ def estimate_preflop_allin_values(
     workspace: PreflopAllInEstimatorWorkspace | None = None,
     use_board_masks: bool = True,
     skip_folded_heroes: bool = True,
+    exhaustive_boards: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Estimate preflop all-in chip-normalized values by sampling full boards.
 
@@ -439,11 +487,16 @@ def estimate_preflop_allin_values(
     ``torch.cuda.synchronize`` used to populate it. This lets the caller's CPU run
     ahead and overlap the next step's work; pass ``True`` only on steps that
     actually log the diagnostics.
+
+    When ``exhaustive_boards`` is true, ``tuple_samples`` is interpreted as a
+    fixed number of opponent tuple samples per one of the 2,598,960 possible
+    five-card boards. Random board sampling and ``sample_count`` are bypassed.
     """
     board_samples, tuple_samples = _resolve_sample_split(
         sample_count,
         board_samples,
         tuple_samples,
+        exhaustive_boards=exhaustive_boards,
     )
     if tuple_tries <= 0:
         raise ValueError("tuple_tries must be positive")
@@ -484,6 +537,7 @@ def estimate_preflop_allin_values(
                 workspace=workspace,
                 use_board_masks=use_board_masks,
                 skip_folded_heroes=skip_folded_heroes,
+                exhaustive_boards=exhaustive_boards,
             )
             values.index_copy_(0, mc_rows, mc_values)
         if not compute_stats:
@@ -498,6 +552,7 @@ def estimate_preflop_allin_values(
             "target_value_std": float(values.std().item()),
             "target_board_samples": float(board_samples),
             "target_tuple_samples": float(tuple_samples),
+            "target_exhaustive_boards": float(exhaustive_boards),
             "target_exact_two_player_rows": float(exact_rows.numel()),
             "target_mc_rows": float(mc_rows.numel()),
         }
@@ -519,6 +574,7 @@ def estimate_preflop_allin_values(
             workspace=workspace,
             use_board_masks=use_board_masks,
             skip_folded_heroes=skip_folded_heroes,
+            exhaustive_boards=exhaustive_boards,
         )
 
     beliefs = batch.beliefs.to(torch.float32)
@@ -551,8 +607,15 @@ def estimate_preflop_allin_values(
             live_rep = live_mask.index_select(0, root_ids)
             layer_amount_rep = layer_amount.index_select(0, root_ids)
             eligible_rep = eligible.index_select(0, root_ids)
-        boards = _sample_full_boards(row_count, device=device, generator=generator)
-        ranks = _rank_hands(boards)
+        if exhaustive_boards:
+            board_chunk_rows = _full_boards(device)[
+                done_boards : done_boards + cur_boards
+            ]
+            boards = board_chunk_rows.repeat(B, 1)
+            ranks = _rank_hands(board_chunk_rows).repeat(B, 1)
+        else:
+            boards = _sample_full_boards(row_count, device=device, generator=generator)
+            ranks = _rank_hands(boards)
         allowed = _board_allowed_from_combo_masks(boards, combo_masks)
         board_beliefs = beliefs.index_select(0, root_ids)
         board_beliefs.masked_fill_(~allowed[:, None, :], 0.0)
@@ -729,6 +792,7 @@ def estimate_preflop_allin_values(
         "target_value_std": float(values.std().item()),
         "target_board_samples": float(board_samples),
         "target_tuple_samples": float(tuple_samples),
+        "target_exhaustive_boards": float(exhaustive_boards),
     }
     if device.type == "cuda":
         torch.cuda.synchronize(device)

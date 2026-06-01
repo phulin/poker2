@@ -12,6 +12,7 @@ import torch
 from p2.allin.data import PreflopAllInBatch, make_random_preflop_allin_batch
 from p2.allin.sampler import (
     DEFAULT_PREFLOP_ALLIN_TABLE,
+    NUM_FULL_BOARDS,
     PreflopAllInEstimatorWorkspace,
     estimate_preflop_allin_values,
 )
@@ -34,9 +35,10 @@ MANIFEST_NAME = "manifest.json"
 @dataclass
 class AllInDataGenConfig:
     players: int = 4
-    sample_count: int = 50_000
+    sample_count: int | None = 50_000
     board_samples: int = 256
     tuple_samples: int = 0
+    all_boards: bool = False
     tuple_tries: int = 4
     board_chunk: int = 8
     hand_chunk: int = 128
@@ -239,7 +241,7 @@ def generate_allin_training_chunk(
     targets, diag = estimate_preflop_allin_values(
         batch,
         sample_count=cfg.sample_count,
-        board_samples=cfg.board_samples,
+        board_samples=NUM_FULL_BOARDS if cfg.all_boards else cfg.board_samples,
         tuple_samples=cfg.tuple_samples if cfg.tuple_samples > 0 else None,
         tuple_tries=cfg.tuple_tries,
         board_chunk=cfg.board_chunk,
@@ -249,6 +251,7 @@ def generate_allin_training_chunk(
         use_exact_two_player=cfg.use_exact_two_player,
         compute_stats=compute_stats,
         workspace=workspace,
+        exhaustive_boards=cfg.all_boards,
     )
     return batch_to_tensors(batch, targets), diag
 
@@ -281,6 +284,7 @@ def save_allin_training_dataset(
     start_time = time.perf_counter()
     produced = 0
     shard_idx = 0
+    workspace = PreflopAllInEstimatorWorkspace()
     while produced < examples:
         shard_examples = min(shard_size, examples - produced)
         chunks: list[dict[str, torch.Tensor]] = []
@@ -295,6 +299,7 @@ def save_allin_training_dataset(
                 device=device,
                 generator=generator,
                 compute_stats=(progress is not None),
+                workspace=workspace,
             )
             chunks.append({key: value.cpu() for key, value in chunk.items()})
             remaining -= cur

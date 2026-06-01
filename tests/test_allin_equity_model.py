@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import torch
 
 from p2.allin import (
@@ -9,6 +10,7 @@ from p2.allin import (
     estimate_preflop_allin_values,
     make_random_preflop_allin_batch,
 )
+from p2.allin.pregenerate import PregenerateConfig, _data_config
 from p2.allin.model import (
     OUTPUT_HEAD_INIT_BIAS,
     OUTPUT_HEAD_INIT_SCALE,
@@ -16,6 +18,7 @@ from p2.allin.model import (
     POT_LAYER_SCALAR_FEATURE_DIM,
     _LeakyRMSBlock,
 )
+from p2.allin.sampler import NUM_FULL_BOARDS
 from p2.allin.train import (
     AllInTrainConfig,
     _build_model,
@@ -811,9 +814,9 @@ def test_eligible_pot_share_target_round_trips_live_values() -> None:
         generator=torch.Generator(device="cpu").manual_seed(465),
     )
     targets = torch.randn(8, 4, NUM_HANDS) * 0.1
-    folded_value = (
-        batch.stacks_after - batch.starting_stacks
-    ) / batch.scale[:, None].clamp_min(1.0)
+    folded_value = (batch.stacks_after - batch.starting_stacks) / batch.scale[
+        :, None
+    ].clamp_min(1.0)
     targets = torch.where(
         batch.folded_mask[:, :, None],
         folded_value[:, :, None],
@@ -950,6 +953,79 @@ def test_preflop_allin_sampler_small_smoke() -> None:
     assert diagnostics["target_boards_per_second"] > 0.0
 
 
+def test_pregenerate_all_boards_config_uses_samples_per_board() -> None:
+    cfg = _data_config(
+        PregenerateConfig(
+            all_boards=True,
+            samples_per_board=3,
+            sample_count=50_000,
+            board_samples=256,
+            tuple_samples=0,
+        )
+    )
+
+    assert cfg.all_boards is True
+    assert cfg.sample_count is None
+    assert cfg.board_samples == NUM_FULL_BOARDS
+    assert cfg.tuple_samples == 3
+
+
+def test_pregenerate_all_boards_requires_samples_per_board() -> None:
+    with pytest.raises(ValueError, match="--all-boards requires"):
+        _data_config(
+            PregenerateConfig(all_boards=True, samples_per_board=0, tuple_samples=0)
+        )
+
+
+def test_preflop_allin_sampler_exhaustive_boards_uses_fixed_board_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import p2.allin.sampler as sampler
+
+    boards = torch.tensor(
+        [
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 5],
+            [0, 1, 2, 3, 6],
+            [0, 1, 2, 3, 7],
+        ],
+        dtype=torch.long,
+    )
+
+    def fail_random_boards(*args: object, **kwargs: object) -> torch.Tensor:
+        raise AssertionError("random board sampler should not run")
+
+    monkeypatch.setattr(sampler, "NUM_FULL_BOARDS", boards.shape[0])
+    monkeypatch.setattr(sampler, "_full_boards", lambda device: boards.to(device))
+    monkeypatch.setattr(sampler, "_sample_full_boards", fail_random_boards)
+
+    generator = torch.Generator(device="cpu").manual_seed(789)
+    batch = make_random_preflop_allin_batch(
+        1,
+        players=3,
+        bb=100,
+        device="cpu",
+        generator=generator,
+    )
+    values, diagnostics = sampler.estimate_preflop_allin_values(
+        batch,
+        sample_count=None,
+        tuple_samples=1,
+        tuple_tries=1,
+        board_chunk=2,
+        hand_chunk=512,
+        generator=generator,
+        use_exact_two_player=False,
+        exhaustive_boards=True,
+    )
+
+    assert values.shape == (1, 3, NUM_HANDS)
+    assert torch.isfinite(values).all()
+    assert diagnostics["target_board_samples"] == float(boards.shape[0])
+    assert diagnostics["target_tuple_samples"] == 1.0
+    assert diagnostics["target_exhaustive_boards"] == 1.0
+
+
 def test_preflop_allin_sampler_compute_stats_false_matches_values() -> None:
     def run(compute_stats: bool):
         generator = torch.Generator(device="cpu").manual_seed(789)
@@ -1053,9 +1129,9 @@ def test_preflop_allin_targets_award_folded_dead_money_to_live_players() -> None
     live_delta = (
         (dead_money_values[:, :2] - base_values[:, :2]) * beliefs[:, :2]
     ).sum()
-    folded_delta = (
-        (dead_money_values[:, 2] - base_values[:, 2]) * beliefs[:, 2]
-    ).sum()
+    folded_delta = ((dead_money_values[:, 2] - base_values[:, 2]) * beliefs[:, 2]).sum()
     torch.testing.assert_close(live_delta, torch.tensor(0.2), atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(folded_delta, torch.tensor(-0.2), atol=1e-6, rtol=1e-6)
-    torch.testing.assert_close(live_delta + folded_delta, torch.tensor(0.0), atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(
+        live_delta + folded_delta, torch.tensor(0.0), atol=1e-5, rtol=1e-5
+    )

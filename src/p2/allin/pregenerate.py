@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from p2.allin.sampler import NUM_FULL_BOARDS
 from p2.allin.training_data import AllInDataGenConfig, save_allin_training_dataset
 
 
@@ -22,6 +23,8 @@ class PregenerateConfig:
     sample_count: int = 50_000
     board_samples: int = 256
     tuple_samples: int = 0
+    all_boards: bool = False
+    samples_per_board: int = 0
     tuple_tries: int = 4
     board_chunk: int = 8
     hand_chunk: int = 128
@@ -45,11 +48,27 @@ def _device(name: str) -> torch.device:
 
 
 def _data_config(cfg: PregenerateConfig) -> AllInDataGenConfig:
+    sample_count: int | None = cfg.sample_count
+    board_samples = cfg.board_samples
+    tuple_samples = cfg.tuple_samples
+    if cfg.all_boards:
+        tuple_samples = (
+            cfg.samples_per_board if cfg.samples_per_board > 0 else cfg.tuple_samples
+        )
+        if tuple_samples <= 0:
+            raise ValueError(
+                "--all-boards requires --samples-per-board or a positive "
+                "--tuple-samples value"
+            )
+        sample_count = None
+        board_samples = NUM_FULL_BOARDS
+
     kwargs: dict[str, Any] = {
         "players": cfg.players,
-        "sample_count": cfg.sample_count,
-        "board_samples": cfg.board_samples,
-        "tuple_samples": cfg.tuple_samples,
+        "sample_count": sample_count,
+        "board_samples": board_samples,
+        "tuple_samples": tuple_samples,
+        "all_boards": cfg.all_boards,
         "tuple_tries": cfg.tuple_tries,
         "board_chunk": cfg.board_chunk,
         "hand_chunk": cfg.hand_chunk,
