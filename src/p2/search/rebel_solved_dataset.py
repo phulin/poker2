@@ -17,6 +17,7 @@ from p2.rl.target_provenance import TARGET_SOURCE_NAMES
 FORMAT_VERSION = "p2.rebel.solved_postflop.v1"
 MANIFEST_NAME = "manifest.json"
 StreamName = Literal["value", "policy"]
+STREET_NAMES = {0: "preflop", 1: "flop", 2: "turn", 3: "river", 4: "terminal"}
 SUPPORTED_STORAGE_FLOAT_DTYPES = {
     "float32": torch.float32,
     "float16": torch.float16,
@@ -222,6 +223,10 @@ def _merge_count_dicts(*dicts: dict[str, int]) -> dict[str, int]:
     return dict(sorted(merged.items(), key=lambda item: int(item[0])))
 
 
+def _street_names(streets: Sequence[int]) -> list[str]:
+    return [STREET_NAMES.get(int(street), str(int(street))) for street in streets]
+
+
 def write_rebel_solved_dataset(
     output_dir: str | Path,
     *,
@@ -272,6 +277,7 @@ def write_rebel_solved_dataset(
         "num_actions": int(example_batch.legal_masks.shape[-1]),
         "context_length": int(example_batch.features.context.shape[-1]),
         "street_support": sorted(street_values),
+        "included_streets": _street_names(sorted(street_values)),
         "street_counts": {
             "value": value_street_counts,
             "policy": policy_street_counts,

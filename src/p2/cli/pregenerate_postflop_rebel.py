@@ -21,6 +21,16 @@ from p2.search.rebel_solved_dataset import write_rebel_solved_dataset
 from p2.utils.profiling import install_triton_compile_logger_from_env
 
 
+_ROOT_SOURCE_TO_STREET = {
+    "random_flop": "flop",
+    "random_flop_prefix": "flop",
+    "random_turn": "turn",
+    "random_turn_prefix": "turn",
+    "random_river": "river",
+    "random_river_prefix": "river",
+}
+
+
 def _sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -70,6 +80,10 @@ def _target_model_metadata(cfg: Config) -> dict:
     if isinstance(target_net, str):
         metadata["net"] = target_net
     return metadata
+
+
+def _root_streets(root_source: str) -> list[str]:
+    return [_ROOT_SOURCE_TO_STREET.get(root_source, root_source)]
 
 
 def _trim_batch(batch: RebelBatch, target_remaining: int) -> RebelBatch:
@@ -162,7 +176,8 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
         policy_batches=policy_batches,
         metadata={
             "stage": pregenerate_cfg.stage,
-            "root_streets": [cfg.data.live_root_source],
+            "root_source": cfg.data.live_root_source,
+            "root_streets": _root_streets(cfg.data.live_root_source),
             "model_family": (
                 cfg.model.name.value
                 if hasattr(cfg.model.name, "value")

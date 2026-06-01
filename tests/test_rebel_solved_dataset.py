@@ -103,6 +103,7 @@ def test_rebel_solved_dataset_reads_wrapped_batches(tmp_path):
     assert manifest["value_examples"] == 5
     assert manifest["policy_examples"] == 2
     assert manifest["street_support"] == [0, 1, 2, 3]
+    assert manifest["included_streets"] == ["preflop", "flop", "turn", "river"]
     assert manifest["street_counts"] == {
         "value": {"0": 2, "1": 1, "2": 1, "3": 1},
         "policy": {"2": 1, "3": 1},
