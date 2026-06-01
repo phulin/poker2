@@ -4362,6 +4362,68 @@ def precompute_showdown_lookup_slots(
     )
 
 
+def precompute_showdown_card_positions_and_lookup_slots(
+    hands_c1c2_sorted: torch.Tensor,
+    L_idx: torch.Tensor,
+    R_idx: torch.Tensor,
+    num_cards: int = 52,
+    max_per_card: int = SHOWDOWN_MAX_PER_CARD,
+) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+    """Build per-card sorted positions and lookup slots from one cumsum pass."""
+    M, H, _ = hands_c1c2_sorted.shape
+    device = hands_c1c2_sorted.device
+    c1 = hands_c1c2_sorted[..., 0].to(torch.long)
+    c2 = hands_c1c2_sorted[..., 1].to(torch.long)
+    cards = torch.arange(num_cards, device=device).view(1, 1, num_cards)
+    incidence = (c1.unsqueeze(-1) == cards) | (c2.unsqueeze(-1) == cards)
+    slots = incidence.cumsum(dim=1, dtype=torch.int32)
+    slot1 = slots.gather(2, c1.unsqueeze(-1)).squeeze(-1) - 1
+    slot2 = slots.gather(2, c2.unsqueeze(-1)).squeeze(-1) - 1
+
+    card_positions = torch.full(
+        (M * num_cards, max_per_card),
+        H,
+        dtype=torch.long,
+        device=device,
+    )
+    row_base = torch.arange(M, device=device, dtype=torch.long).view(M, 1) * num_cards
+    rows1 = (row_base + c1).reshape(-1)
+    rows2 = (row_base + c2).reshape(-1)
+    positions = torch.arange(H, device=device, dtype=torch.long).view(1, H).expand(M, H)
+    card_positions[rows1, slot1.reshape(-1).to(torch.long)] = positions.reshape(-1)
+    card_positions[rows2, slot2.reshape(-1).to(torch.long)] = positions.reshape(-1)
+    card_positions = card_positions.view(M, num_cards, max_per_card)
+
+    m_idx = torch.arange(M, device=device).view(M, 1).expand(M, H)
+    safe_l = (L_idx - 1).clamp(min=0).to(torch.long)
+    safe_r = (R_idx - 1).clamp(min=0).to(torch.long)
+    has_l = L_idx > 0
+    has_r = R_idx > 0
+    slot_L_c1 = torch.where(
+        has_l, slots[m_idx, safe_l, c1], torch.zeros_like(L_idx, dtype=torch.int32)
+    )
+    slot_L_c2 = torch.where(
+        has_l, slots[m_idx, safe_l, c2], torch.zeros_like(L_idx, dtype=torch.int32)
+    )
+    slot_R_c1 = torch.where(
+        has_r, slots[m_idx, safe_r, c1], torch.zeros_like(R_idx, dtype=torch.int32)
+    )
+    slot_R_c2 = torch.where(
+        has_r, slots[m_idx, safe_r, c2], torch.zeros_like(R_idx, dtype=torch.int32)
+    )
+    counts = slots[:, -1, :]
+    slot_last_c1 = counts.gather(1, c1).to(torch.int32)
+    slot_last_c2 = counts.gather(1, c2).to(torch.int32)
+    return card_positions, (
+        slot_L_c1,
+        slot_L_c2,
+        slot_R_c1,
+        slot_R_c2,
+        slot_last_c1,
+        slot_last_c2,
+    )
+
+
 if triton is not None:
 
     @triton.jit
@@ -5986,12 +6048,10 @@ def precompute_showdown_extras(
       card_positions, slot_L_c1, slot_L_c2, slot_R_c1, slot_R_c2,
       slot_last_c1, slot_last_c2, hand_ok_sorted, scale_factor, c1, c2.
     """
-    card_positions = precompute_showdown_card_positions(hrd.hands_c1c2_sorted)
-    slot_tensors = precompute_showdown_lookup_slots(
-        card_positions,
+    card_positions, slot_tensors = precompute_showdown_card_positions_and_lookup_slots(
+        hrd.hands_c1c2_sorted,
         hrd.L_idx,
         hrd.R_idx,
-        hrd.hands_c1c2_sorted,
     )
     hand_ok_sorted = (
         hrd.hand_ok_mask.gather(1, hrd.sorted_indices).to(torch.uint8).contiguous()
@@ -6088,11 +6148,11 @@ def precompute_showdown_active_extras(
     l_idx = starts.gather(1, group_id).contiguous()
     r_idx = (ends.gather(1, group_id) + 1).clamp(max=active_hands).contiguous()
 
-    card_positions = precompute_showdown_card_positions(
-        active_c1c2_local, num_cards=active_cards
-    )
-    slot_tensors = precompute_showdown_lookup_slots(
-        card_positions, l_idx, r_idx, active_c1c2_local
+    card_positions, slot_tensors = precompute_showdown_card_positions_and_lookup_slots(
+        active_c1c2_local,
+        l_idx,
+        r_idx,
+        num_cards=active_cards,
     )
     c1_local = active_c1c2_local[..., 0].to(torch.int32).contiguous()
     c2_local = active_c1c2_local[..., 1].to(torch.int32).contiguous()
