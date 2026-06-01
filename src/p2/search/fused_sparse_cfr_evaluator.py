@@ -746,23 +746,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             parent_rows, actor
         ]
         parent_street = env.street[parent_rows]
-        search_cfg = getattr(getattr(self, "cfg", None), "search", None)
-        has_preflop_table = (
-            getattr(
-                search_cfg,
-                "preflop_allin_table_path",
-                getattr(self, "preflop_allin_table_path", None),
-            )
-            is not None
-        )
         mask = (
             (action_bins == 1)
             & env.is_allin[parent_rows, opp]
             & (parent_to_call > 0)
+            & (parent_street > 0)
             & (parent_street < 3)
         )
-        if not has_preflop_table:
-            mask &= parent_street > 0
         return mask
 
     def _bet_rows(
@@ -981,15 +971,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._subgame_action_from_parent[:num_roots].fill_(-1)
             self._subgame_rewards[:num_roots].zero_()
             self._subgame_allin_leaf[:num_roots].zero_()
-        search_cfg = getattr(getattr(self, "cfg", None), "search", None)
-        has_preflop_table = (
-            getattr(
-                search_cfg,
-                "preflop_allin_table_path",
-                getattr(self, "preflop_allin_table_path", None),
-            )
-            is not None
-        )
         allin_abstraction = self._allin_abstraction_enabled()
 
         depth_offsets = [0, num_roots]
@@ -1043,7 +1024,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     parent_start=parent_start,
                     parent_count=parent_count,
                     dst_start=cursor,
-                    has_preflop_table=has_preflop_table,
                     allin_abstraction=allin_abstraction,
                 )
             with _init_profile_region("cfr_init_attempt_copy_child_cards"):

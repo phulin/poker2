@@ -137,7 +137,6 @@ if triton is not None:
         dst_start,
         bb,
         mean_stack,
-        has_preflop_table: tl.constexpr,
         allin_abstraction: tl.constexpr,
         flop_showdown: tl.constexpr,
         num_actions: tl.constexpr,
@@ -304,10 +303,9 @@ if triton is not None:
                 & (action == 1)
                 & tl.load(is_allin + src * 2 + src_opp, mask=local_mask, other=0)
                 & (parent_to_call > 0)
+                & (src_street > 0)
                 & (src_street < 3)
             )
-            if not has_preflop_table:
-                allin_call_leaf = allin_call_leaf & (src_street > 0)
             tl.store(allin_leaf + dst, allin_call_leaf, mask=write)
 
             rank += legal.to(tl.int64)
@@ -343,7 +341,6 @@ if triton is not None:
         dst_start,
         bb,
         mean_stack,
-        has_preflop_table: tl.constexpr,
         allin_abstraction: tl.constexpr,
         flop_showdown: tl.constexpr,
         num_actions: tl.constexpr,
@@ -497,10 +494,9 @@ if triton is not None:
             & is_call
             & tl.load(is_allin + src * 2 + src_opp, mask=local_mask, other=0)
             & (to_call > 0)
+            & (src_street > 0)
             & (src_street < 3)
         )
-        if not has_preflop_table:
-            allin_call_leaf = allin_call_leaf & (src_street > 0)
         tl.store(allin_leaf + dst, allin_call_leaf, mask=write)
 
     @triton.jit
@@ -727,7 +723,6 @@ def write_children_same_street_triton_legacy_(
     parent_start: int,
     parent_count: int,
     dst_start: int,
-    has_preflop_table: bool,
     allin_abstraction: bool,
     block: int = 32,
 ) -> None:
@@ -772,7 +767,6 @@ def write_children_same_street_triton_legacy_(
         dst_start,
         env.bb,
         env.mean_stack,
-        has_preflop_table,
         allin_abstraction,
         env.flop_showdown,
         legal_mask.shape[1],
@@ -794,7 +788,6 @@ def write_children_same_street_triton_optimized_(
     parent_start: int,
     parent_count: int,
     dst_start: int,
-    has_preflop_table: bool,
     allin_abstraction: bool,
     block: int = 128,
 ) -> None:
@@ -841,7 +834,6 @@ def write_children_same_street_triton_optimized_(
         dst_start,
         env.bb,
         env.mean_stack,
-        has_preflop_table,
         allin_abstraction,
         env.flop_showdown,
         num_actions,
@@ -863,7 +855,6 @@ def write_children_same_street_triton_(
     parent_start: int,
     parent_count: int,
     dst_start: int,
-    has_preflop_table: bool,
     allin_abstraction: bool,
     block: int = 128,
 ) -> None:
@@ -880,7 +871,6 @@ def write_children_same_street_triton_(
             parent_start=parent_start,
             parent_count=parent_count,
             dst_start=dst_start,
-            has_preflop_table=has_preflop_table,
             allin_abstraction=allin_abstraction,
             block=32,
         )
@@ -897,7 +887,6 @@ def write_children_same_street_triton_(
         parent_start=parent_start,
         parent_count=parent_count,
         dst_start=dst_start,
-        has_preflop_table=has_preflop_table,
         allin_abstraction=allin_abstraction,
         block=block,
     )

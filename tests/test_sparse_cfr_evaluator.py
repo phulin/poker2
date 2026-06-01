@@ -902,6 +902,64 @@ def test_sparse_allin_call_leaf_does_not_create_descendants() -> None:
     assert evaluator.child_count[2] == 0
 
 
+def test_sparse_allin_call_abstraction_skips_preflop_even_with_table() -> None:
+    device = get_device()
+    env = make_env(1, device=device)
+    cfg = make_config(env.default_bet_bins)
+    cfg.search.depth = 2
+    cfg.search.allin_call_terminal_abstraction = True
+    cfg.search.preflop_allin_table_path = "outputs/preflop_allin_table.pt.zst"
+
+    env.street[0] = 0
+    env.board_indices[0] = -1
+    env.board_onehot[0].zero_()
+    env.to_act[0] = 0
+    env.actions_this_round[0] = 1
+    env.stacks[0] = torch.tensor([100, 0], device=device)
+    env.starting_stacks[0] = torch.tensor([100, 100], device=device)
+    env.scale[0] = 100
+    env.committed[0] = torch.tensor([0, 100], device=device)
+    env.pot[0] = 100
+    env.is_allin[0] = torch.tensor([False, True], device=device)
+
+    evaluator, _, _ = make_sparse_evaluator(env=env, cfg=cfg, device=device)
+    call_mask = evaluator._allin_call_child_mask(
+        env,
+        torch.tensor([0], device=device),
+        torch.tensor([1], device=device),
+    )
+
+    evaluator.initialize_subgame(env, torch.tensor([0], device=device))
+
+    assert not call_mask.item()
+    assert evaluator.allin_call_indices.numel() == 0
+    assert not evaluator.allin_call_mask.any()
+
+
+def test_sparse_allin_call_abstraction_applies_postflop_with_table() -> None:
+    device = get_device()
+    env = make_env(1, device=device)
+    cfg = make_config(env.default_bet_bins)
+    cfg.search.allin_call_terminal_abstraction = True
+    cfg.search.preflop_allin_table_path = "outputs/preflop_allin_table.pt.zst"
+
+    env.street[0] = 1
+    env.to_act[0] = 0
+    env.actions_this_round[0] = 1
+    env.stacks[0] = torch.tensor([100, 0], device=device)
+    env.committed[0] = torch.tensor([0, 100], device=device)
+    env.is_allin[0] = torch.tensor([False, True], device=device)
+
+    evaluator, _, _ = make_sparse_evaluator(env=env, cfg=cfg, device=device)
+    call_mask = evaluator._allin_call_child_mask(
+        env,
+        torch.tensor([0], device=device),
+        torch.tensor([1], device=device),
+    )
+
+    assert call_mask.item()
+
+
 def test_parent_child_indices() -> None:
     """Test that parent and child indices are correctly set."""
     device = get_device()

@@ -419,24 +419,13 @@ class CFREvaluator(ABC):
             self.env.committed[parent, opp] - self.env.committed[parent, actor]
         )
         parent_street = self.env.street[parent]
-        search_cfg = getattr(getattr(self, "cfg", None), "search", None)
-        has_preflop_table = (
-            getattr(
-                search_cfg,
-                "preflop_allin_table_path",
-                getattr(self, "preflop_allin_table_path", None),
-            )
-            is not None
-        )
-
         mask = (
             (action == 1)
             & self.env.is_allin[parent, opp]
             & (parent_to_call > 0)
+            & (parent_street > 0)
             & (parent_street < 3)
         )
-        if not has_preflop_table:
-            mask &= parent_street > 0
         indices = child_indices[mask]
         if indices.numel() == 0:
             return
@@ -608,23 +597,13 @@ class CFREvaluator(ABC):
             - parent_env.committed[parent_local_indices, actor]
         )
         parent_street = parent_env.street[parent_local_indices]
-        search_cfg = getattr(getattr(self, "cfg", None), "search", None)
-        has_preflop_table = (
-            getattr(
-                search_cfg,
-                "preflop_allin_table_path",
-                getattr(self, "preflop_allin_table_path", None),
-            )
-            is not None
-        )
         mask = (
             (action_bins == 1)
             & parent_env.is_allin[parent_local_indices, opp]
             & (parent_to_call > 0)
+            & (parent_street > 0)
             & (parent_street < 3)
         )
-        if not has_preflop_table:
-            mask &= parent_street > 0
         return mask
 
     def _prune_allin_call_descendants(self) -> None:
