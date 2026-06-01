@@ -185,9 +185,7 @@ class HUNLTensorEnv:
 
         # Chip tracking for delta calculations - single tensor for both players
         # chips_placed[env_idx, player] = total chips placed by that player in that environment
-        self.chips_placed = torch.empty(
-            self.N, 2, dtype=torch.long, device=self.device
-        )
+        self.chips_placed = torch.empty(self.N, 2, dtype=torch.long, device=self.device)
         self.done = torch.empty(self.N, dtype=torch.bool, device=self.device)
         self.winner = torch.empty(self.N, dtype=torch.long, device=self.device)
 
@@ -275,7 +273,9 @@ class HUNLTensorEnv:
             min_stack = math.ceil(0.1 * self.mean_stack)
             total_chips = 2 * self.mean_stack
             if min_stack * 2 > total_chips:
-                raise ValueError("mean_stack too small to satisfy minimum stack constraint")
+                raise ValueError(
+                    "mean_stack too small to satisfy minimum stack constraint"
+                )
 
             # Allocate at least min_stack to both players, then randomize the remainder.
             low = min_stack
@@ -509,6 +509,36 @@ class HUNLTensorEnv:
 
         return amounts, mask
 
+    def legal_bins_amounts_for(
+        self, indices: torch.Tensor, bet_bins: Optional[list[float]] = None
+    ) -> torch.Tensor:
+        """Return concrete bin amounts for selected rows."""
+        if bet_bins is None:
+            bet_bins = self.default_bet_bins
+
+        M = indices.numel()
+        B = len(bet_bins) + 3
+        amounts = torch.full((M, B), -1, dtype=torch.long, device=self.device)
+        if M == 0:
+            return amounts
+
+        me = self.to_act[indices]
+        opp = 1 - me
+        me_stack = self.stacks[indices, me]
+        me_committed = self.committed[indices, me]
+        opp_committed = self.committed[indices, opp]
+        to_call = opp_committed - me_committed
+
+        bet_bins_t = torch.tensor(
+            [0] * 2 + bet_bins + [0], dtype=torch.float32, device=self.device
+        )
+        additional_amounts = (
+            bet_bins_t[2:-1].view(1, B - 3) * self.pot[indices].view(M, 1)
+        ).long()
+        amounts[:, 2:-1] = to_call.view(M, 1) + additional_amounts
+        amounts[:, B - 1] = me_stack
+        return amounts
+
     def legal_bins_mask(self, bet_bins: Optional[list[float]] = None) -> torch.Tensor:
         """Return [N, B] mask of legal bins with deduplication."""
         _, mask = self.legal_bins_amounts_and_mask(bet_bins)
@@ -662,9 +692,9 @@ class HUNLTensorEnv:
         smax = int(src_parents.max().item())
         dmin = int(dst_children.min().item())
         dmax = int(dst_children.max().item())
-        assert (
-            smax < dmin or dmax < smin
-        ), "clone_states requires non-overlapping index ranges between src_parents and dst_children"
+        assert smax < dmin or dmax < smin, (
+            "clone_states requires non-overlapping index ranges between src_parents and dst_children"
+        )
         # Snapshot source slices to avoid overlap aliasing during assignment
         self.copy_state_from(self, src_parents, dst_children, copy_deck=True)
 
@@ -988,16 +1018,11 @@ class HUNLTensorEnv:
 
         actor_stack_after = self.stacks.gather(1, actor_idx.view(N, 1)).squeeze(1)
         implicit_allin = (
-            acting_mask
-            & ~is_fold
-            & (actor_stack > 0)
-            & (actor_stack_after == 0)
+            acting_mask & ~is_fold & (actor_stack > 0) & (actor_stack_after == 0)
         )
         implicit_allin_idx = torch.where(implicit_allin)[0]
         if implicit_allin_idx.numel() > 0:
-            self.is_allin[
-                implicit_allin_idx, actor_idx[implicit_allin_idx]
-            ] = True
+            self.is_allin[implicit_allin_idx, actor_idx[implicit_allin_idx]] = True
 
         # Advance to next actor (simple alternation)
         self.last_to_act[acting] = self.to_act[acting]

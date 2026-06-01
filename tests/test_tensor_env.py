@@ -61,7 +61,9 @@ def test_n1_reset_and_shapes():
     )
     torch.testing.assert_close(
         env.scale,
-        torch.full((1,), float(env.mean_stack), dtype=env.float_dtype, device=env.device),
+        torch.full(
+            (1,), float(env.mean_stack), dtype=env.float_dtype, device=env.device
+        ),
     )
     assert env.hole_onehot.shape == (1, 2, 2, 4, 13)
     assert env.board_onehot.shape == (1, 5, 4, 13)
@@ -101,6 +103,20 @@ def test_n1_min_raise_and_amounts():
             assert amt < env.stacks[0, env.to_act.item()].item()
             opp = 1 - env.to_act.item()
             assert amt <= env.stacks[0, opp].item()
+
+
+def test_legal_bin_amounts_for_matches_full_tensor():
+    env = _make_env(N=5)
+    actions = torch.tensor([1, 2, 0, 7, 1], dtype=torch.long, device=env.device)
+    env.step_bins(actions)
+
+    full_amounts, _ = env.legal_bins_amounts_and_mask()
+    indices = torch.tensor([3, 0, 4], dtype=torch.long, device=env.device)
+
+    torch.testing.assert_close(
+        env.legal_bins_amounts_for(indices),
+        full_amounts[indices],
+    )
 
 
 def test_n1_allin_and_auto_runout_rewards():
@@ -168,9 +184,7 @@ def test_weighted_uniform_stacks_on_reset():
     high_fraction = (env.starting_stacks[:, 0] >= mid_chips).to(torch.float32).mean()
     assert 0.20 <= high_fraction.item() <= 0.30
     assert torch.unique(env.starting_stacks[:, 0]).numel() > 1
-    torch.testing.assert_close(
-        env.scale, env.starting_stacks[:, 0].to(env.float_dtype)
-    )
+    torch.testing.assert_close(env.scale, env.starting_stacks[:, 0].to(env.float_dtype))
     torch.testing.assert_close(
         env.stacks[env_rows, env.button],
         env.starting_stacks[env_rows, env.button] - env.sb,
@@ -502,21 +516,21 @@ def test_blinds_correctly_entered_after_reset():
 
     # Check that pot contains the blinds
     expected_pot = sb + bb  # 25 + 50 = 75
-    assert torch.all(
-        env.pot == expected_pot
-    ), f"Expected pot {expected_pot}, got {env.pot}"
+    assert torch.all(env.pot == expected_pot), (
+        f"Expected pot {expected_pot}, got {env.pot}"
+    )
 
     # Check that committed amounts are correct based on button position
     for i in range(env.N):
         sb_player = env.button[i].item()
         bb_player = 1 - sb_player
 
-        assert (
-            env.committed[i, sb_player] == sb
-        ), f"Env {i}: Expected SB player {sb_player} committed {sb}, got {env.committed[i, sb_player]}"
-        assert (
-            env.committed[i, bb_player] == bb
-        ), f"Env {i}: Expected BB player {bb_player} committed {bb}, got {env.committed[i, bb_player]}"
+        assert env.committed[i, sb_player] == sb, (
+            f"Env {i}: Expected SB player {sb_player} committed {sb}, got {env.committed[i, sb_player]}"
+        )
+        assert env.committed[i, bb_player] == bb, (
+            f"Env {i}: Expected BB player {bb_player} committed {bb}, got {env.committed[i, bb_player]}"
+        )
 
     # Check that stacks are reduced by the blinds
     expected_stack_after_blinds = mean_stack - sb  # SB player
@@ -527,12 +541,12 @@ def test_blinds_correctly_entered_after_reset():
         sb_player = env.button[i].item()
         bb_player = 1 - sb_player
 
-        assert (
-            env.stacks[i, sb_player] == expected_stack_after_blinds
-        ), f"Env {i}: Expected SB player stack {expected_stack_after_blinds}, got {env.stacks[i, sb_player]}"
-        assert (
-            env.stacks[i, bb_player] == expected_stack_bb
-        ), f"Env {i}: Expected BB player stack {expected_stack_bb}, got {env.stacks[i, bb_player]}"
+        assert env.stacks[i, sb_player] == expected_stack_after_blinds, (
+            f"Env {i}: Expected SB player stack {expected_stack_after_blinds}, got {env.stacks[i, sb_player]}"
+        )
+        assert env.stacks[i, bb_player] == expected_stack_bb, (
+            f"Env {i}: Expected BB player stack {expected_stack_bb}, got {env.stacks[i, bb_player]}"
+        )
 
     # Test with different blind sizes
     sb2, bb2 = 10, 20
@@ -549,21 +563,21 @@ def test_blinds_correctly_entered_after_reset():
 
     # Check pot and committed amounts
     expected_pot2 = sb2 + bb2  # 10 + 20 = 30
-    assert torch.all(
-        env2.pot == expected_pot2
-    ), f"Expected pot {expected_pot2}, got {env2.pot}"
+    assert torch.all(env2.pot == expected_pot2), (
+        f"Expected pot {expected_pot2}, got {env2.pot}"
+    )
 
     # Check committed amounts based on button position
     for i in range(env2.N):
         sb_player = env2.button[i].item()
         bb_player = 1 - sb_player
 
-        assert (
-            env2.committed[i, sb_player] == sb2
-        ), f"Env {i}: Expected SB player {sb_player} committed {sb2}, got {env2.committed[i, sb_player]}"
-        assert (
-            env2.committed[i, bb_player] == bb2
-        ), f"Env {i}: Expected BB player {bb_player} committed {bb2}, got {env2.committed[i, bb_player]}"
+        assert env2.committed[i, sb_player] == sb2, (
+            f"Env {i}: Expected SB player {sb_player} committed {sb2}, got {env2.committed[i, sb_player]}"
+        )
+        assert env2.committed[i, bb_player] == bb2, (
+            f"Env {i}: Expected BB player {bb_player} committed {bb2}, got {env2.committed[i, bb_player]}"
+        )
 
     # Check stacks
     expected_stack_sb2 = 2000 - sb2  # 1990
@@ -573,12 +587,12 @@ def test_blinds_correctly_entered_after_reset():
         sb_player = env2.button[i].item()
         bb_player = 1 - sb_player
 
-        assert (
-            env2.stacks[i, sb_player] == expected_stack_sb2
-        ), f"Env {i}: Expected SB player stack {expected_stack_sb2}, got {env2.stacks[i, sb_player]}"
-        assert (
-            env2.stacks[i, bb_player] == expected_stack_bb2
-        ), f"Env {i}: Expected BB player stack {expected_stack_bb2}, got {env2.stacks[i, bb_player]}"
+        assert env2.stacks[i, sb_player] == expected_stack_sb2, (
+            f"Env {i}: Expected SB player stack {expected_stack_sb2}, got {env2.stacks[i, sb_player]}"
+        )
+        assert env2.stacks[i, bb_player] == expected_stack_bb2, (
+            f"Env {i}: Expected BB player stack {expected_stack_bb2}, got {env2.stacks[i, bb_player]}"
+        )
 
 
 def test_reward_assignment_perspective():
@@ -614,9 +628,9 @@ def test_reward_assignment_perspective():
     elif winner == 1:  # Player 1 won
         assert final_reward < 0, f"Player 1 won but reward is positive: {final_reward}"
     elif winner == 2:  # Tie
-        assert (
-            abs(final_reward) < 0.01
-        ), f"Tie but reward is not near zero: {final_reward}"
+        assert abs(final_reward) < 0.01, (
+            f"Tie but reward is not near zero: {final_reward}"
+        )
 
     # Scenario 2: Test with multiple environments to ensure consistency
     env2 = HUNLTensorEnv(
@@ -655,9 +669,9 @@ def test_reward_assignment_perspective():
         elif winner == 1:  # Player 1 won
             assert reward < 0, f"Env {i}: Player 1 won but reward is positive: {reward}"
         elif winner == 2:  # Tie
-            assert (
-                abs(reward) < 0.01
-            ), f"Env {i}: Tie but reward is not near zero: {reward}"
+            assert abs(reward) < 0.01, (
+                f"Env {i}: Tie but reward is not near zero: {reward}"
+            )
 
     # Test fold reward perspective issues
     print("\n=== TESTING FOLD REWARD PERSPECTIVE ISSUES ===")
@@ -683,9 +697,9 @@ def test_reward_assignment_perspective():
         p0_fold_reward, _, *_ = env3.step_bins(torch.tensor([0], device=env3.device))
         print(f"Player 0 fold reward: {p0_fold_reward[0].item():.4f}")
         # Player 0 folded, so Player 1 wins - reward should be negative from Player 0's perspective
-        assert (
-            p0_fold_reward[0].item() < 0
-        ), f"Player 0 fold should give negative reward, got {p0_fold_reward[0].item()}"
+        assert p0_fold_reward[0].item() < 0, (
+            f"Player 0 fold should give negative reward, got {p0_fold_reward[0].item()}"
+        )
 
     # Test Player 1 fold (Player 0 wins)
     env4 = HUNLTensorEnv(
@@ -708,9 +722,9 @@ def test_reward_assignment_perspective():
             print(f"Player 1 fold reward: {p1_fold_reward[0].item():.4f}")
             # Player 1 folded, so Player 0 wins - reward should be positive from Player 0's perspective
             # ISSUE: Currently this gives 0.0 instead of positive reward
-            assert (
-                p1_fold_reward[0].item() > 0
-            ), f"Player 1 fold should give positive reward to Player 0, got {p1_fold_reward[0].item()}"
+            assert p1_fold_reward[0].item() > 0, (
+                f"Player 1 fold should give positive reward to Player 0, got {p1_fold_reward[0].item()}"
+            )
             break
         elif mask[0, 1]:
             env4.step_bins(torch.tensor([1], device=env4.device))
@@ -767,17 +781,17 @@ def test_reward_calculation_consistency():
 
         # The reward should always be from player 0's perspective
         if winner == 0:  # Player 0 won
-            assert (
-                reward > 0
-            ), f"Env {i}: Player 0 won but reward is negative: {reward} (last actor: {last_actor})"
+            assert reward > 0, (
+                f"Env {i}: Player 0 won but reward is negative: {reward} (last actor: {last_actor})"
+            )
         elif winner == 1:  # Player 1 won
-            assert (
-                reward < 0
-            ), f"Env {i}: Player 1 won but reward is positive: {reward} (last actor: {last_actor})"
+            assert reward < 0, (
+                f"Env {i}: Player 1 won but reward is positive: {reward} (last actor: {last_actor})"
+            )
         elif winner == 2:  # Tie
-            assert (
-                abs(reward) < 0.01
-            ), f"Env {i}: Tie but reward is not near zero: {reward} (last actor: {last_actor})"
+            assert abs(reward) < 0.01, (
+                f"Env {i}: Tie but reward is not near zero: {reward} (last actor: {last_actor})"
+            )
 
 
 def test_fold_reward_assignment():
@@ -791,9 +805,9 @@ def test_fold_reward_assignment():
         r, *_ = env.step_bins(
             torch.tensor([0, -1], device=env.device)
         )  # Player 0 folds in env 0, no action in env 1
-        assert (
-            r[0].item() < 0
-        ), f"Player 0 folded but got positive reward: {r[0].item()}"
+        assert r[0].item() < 0, (
+            f"Player 0 folded but got positive reward: {r[0].item()}"
+        )
         assert env.done[0].item(), "Environment 0 should be done after player 0 folds"
         assert not env.done[1].item(), "Environment 1 should not be done"
 
@@ -808,12 +822,12 @@ def test_fold_reward_assignment():
             r, *_ = env.step_bins(
                 torch.tensor([0, -1], device=env.device)
             )  # Player 1 folds in env 0, no action in env 1
-            assert (
-                r[0].item() > 0
-            ), f"Player 1 folded but got negative reward for us (Player 0): {r[0].item()}"
-            assert env.done[
-                0
-            ].item(), "Environment 0 should be done after player 1 folds"
+            assert r[0].item() > 0, (
+                f"Player 1 folded but got negative reward for us (Player 0): {r[0].item()}"
+            )
+            assert env.done[0].item(), (
+                "Environment 0 should be done after player 1 folds"
+            )
             break
         elif mask[0, 1]:  # Can check/call
             env.step_bins(
@@ -879,9 +893,9 @@ def test_flop_showdown_skips_turn_river():
             break
 
     # Should be on flop now (street 1)
-    assert torch.all(
-        env.street == 1
-    ), f"Expected street 1 (flop/showdown), got {env.street}"
+    assert torch.all(env.street == 1), (
+        f"Expected street 1 (flop/showdown), got {env.street}"
+    )
     assert torch.all(env.done), f"Expected all games to be done, got {env.done}"
 
 
@@ -900,18 +914,18 @@ def test_flop_showdown_board_cards():
     river_card = board_cards[4]  # River position
 
     # Flop cards should be exactly [1, 1, 1]
-    assert torch.equal(
-        flop_cards, torch.tensor([1, 1, 1], device=flop_cards.device)
-    ), f"Flop cards should be [1, 1, 1], got {flop_cards}"
+    assert torch.equal(flop_cards, torch.tensor([1, 1, 1], device=flop_cards.device)), (
+        f"Flop cards should be [1, 1, 1], got {flop_cards}"
+    )
 
     # In flop showdown mode, turn and river cards should not be set initially
     # (they might be set later when we reach showdown, but not during flop betting)
-    assert (
-        turn_card.item() == 0
-    ), f"Turn card should not be set during flop betting, got {turn_card}"
-    assert (
-        river_card.item() == 0
-    ), f"River card should not be set during flop betting, got {river_card}"
+    assert turn_card.item() == 0, (
+        f"Turn card should not be set during flop betting, got {turn_card}"
+    )
+    assert river_card.item() == 0, (
+        f"River card should not be set during flop betting, got {river_card}"
+    )
 
 
 def test_flop_showdown_multiple_environments():
@@ -940,9 +954,9 @@ def test_flop_showdown_multiple_environments():
     assert torch.all(env.street == 1), f"Expected all streets == 1, got {env.street}"
 
     # Winners should be assigned
-    assert torch.all(
-        (env.winner >= 0) & (env.winner <= 2)
-    ), f"Expected winners to be assigned, got {env.winner}"
+    assert torch.all((env.winner >= 0) & (env.winner <= 2)), (
+        f"Expected winners to be assigned, got {env.winner}"
+    )
 
 
 def test_flop_showdown_rewards():
@@ -974,17 +988,17 @@ def test_flop_showdown_rewards():
             winner = env.winner[i].item()
 
             if winner == 0:  # Player 0 won
-                assert (
-                    reward > 0
-                ), f"Env {i}: Player 0 won but reward is negative: {reward}"
+                assert reward > 0, (
+                    f"Env {i}: Player 0 won but reward is negative: {reward}"
+                )
             elif winner == 1:  # Player 1 won
-                assert (
-                    reward < 0
-                ), f"Env {i}: Player 1 won but reward is positive: {reward}"
+                assert reward < 0, (
+                    f"Env {i}: Player 1 won but reward is positive: {reward}"
+                )
             elif winner == 2:  # Tie
-                assert (
-                    abs(reward) < 0.01
-                ), f"Env {i}: Tie but reward is not near zero: {reward}"
+                assert abs(reward) < 0.01, (
+                    f"Env {i}: Tie but reward is not near zero: {reward}"
+                )
 
 
 def test_flop_showdown_with_betting():
@@ -1024,9 +1038,9 @@ def test_flop_showdown_with_betting():
             pot = env.pot[i].item()
 
             # Reward should be scaled relative to pot size
-            assert (
-                abs(reward) <= pot
-            ), f"Env {i}: Reward {reward} should not exceed pot {pot}"
+            assert abs(reward) <= pot, (
+                f"Env {i}: Reward {reward} should not exceed pot {pot}"
+            )
 
 
 def test_flop_showdown_edge_cases():
@@ -1100,9 +1114,9 @@ def test_allin_legal_mask_logic():
 
     # Should not be able to bet/raise/all-in (bins 2-7)
     for bin_idx in range(2, 8):
-        assert (
-            legal_mask[bin_idx].item() is False
-        ), f"Should not be able to bet/raise/all-in (bin {bin_idx}) when opponent all-in"
+        assert legal_mask[bin_idx].item() is False, (
+            f"Should not be able to bet/raise/all-in (bin {bin_idx}) when opponent all-in"
+        )
 
     # Test 2: When we are all-in, we can only call
     env2 = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
@@ -1121,13 +1135,13 @@ def test_allin_legal_mask_logic():
     assert legal_mask[1].item() is True, "Should be able to call when we are all-in"
 
     # Should not be able to fold (bin 0) or bet/raise/all-in (bins 2-7)
-    assert (
-        legal_mask[0].item() is False
-    ), "Should not be able to fold when we are all-in"
+    assert legal_mask[0].item() is False, (
+        "Should not be able to fold when we are all-in"
+    )
     for bin_idx in range(2, 8):
-        assert (
-            legal_mask[bin_idx].item() is False
-        ), f"Should not be able to bet/raise/all-in (bin {bin_idx}) when we are all-in"
+        assert legal_mask[bin_idx].item() is False, (
+            f"Should not be able to bet/raise/all-in (bin {bin_idx}) when we are all-in"
+        )
 
     # Test 3: When both players are all-in, we can only call
     env3 = _make_env(N=1, mean_stack=200, sb=50, bb=100)  # Small stacks to force all-in
@@ -1145,18 +1159,18 @@ def test_allin_legal_mask_logic():
     legal_mask = mask[0]
 
     # Should only be able to call (bin 1)
-    assert (
-        legal_mask[1].item() is True
-    ), "Should be able to call when both players all-in"
+    assert legal_mask[1].item() is True, (
+        "Should be able to call when both players all-in"
+    )
 
     # Should not be able to fold (bin 0) or bet/raise/all-in (bins 2-7)
-    assert (
-        legal_mask[0].item() is False
-    ), "Should not be able to fold when both players all-in"
+    assert legal_mask[0].item() is False, (
+        "Should not be able to fold when both players all-in"
+    )
     for bin_idx in range(2, 8):
-        assert (
-            legal_mask[bin_idx].item() is False
-        ), f"Should not be able to bet/raise/all-in (bin {bin_idx}) when both players all-in"
+        assert legal_mask[bin_idx].item() is False, (
+            f"Should not be able to bet/raise/all-in (bin {bin_idx}) when both players all-in"
+        )
 
 
 def test_allin_legal_mask_edge_cases():
@@ -1196,48 +1210,48 @@ def test_allin_legal_mask_edge_cases():
 
     # Env 0: Player 0 is all-in, should only be able to call
     assert mask[0, 1].item() is True, "Env 0: Should be able to call when we are all-in"
-    assert (
-        mask[0, 0].item() is False
-    ), "Env 0: Should not be able to fold when we are all-in"
+    assert mask[0, 0].item() is False, (
+        "Env 0: Should not be able to fold when we are all-in"
+    )
     for bin_idx in range(2, 8):
-        assert (
-            mask[0, bin_idx].item() is False
-        ), f"Env 0: Should not be able to bet/raise/all-in (bin {bin_idx}) when we are all-in"
+        assert mask[0, bin_idx].item() is False, (
+            f"Env 0: Should not be able to bet/raise/all-in (bin {bin_idx}) when we are all-in"
+        )
 
     # Env 1: Player 1 is all-in, player 0 can fold or call
-    assert (
-        mask[1, 0].item() is True
-    ), "Env 1: Should be able to fold when opponent all-in"
-    assert (
-        mask[1, 1].item() is True
-    ), "Env 1: Should be able to call when opponent all-in"
+    assert mask[1, 0].item() is True, (
+        "Env 1: Should be able to fold when opponent all-in"
+    )
+    assert mask[1, 1].item() is True, (
+        "Env 1: Should be able to call when opponent all-in"
+    )
     for bin_idx in range(2, 8):
-        assert (
-            mask[1, bin_idx].item() is False
-        ), f"Env 1: Should not be able to bet/raise/all-in (bin {bin_idx}) when opponent all-in"
+        assert mask[1, bin_idx].item() is False, (
+            f"Env 1: Should not be able to bet/raise/all-in (bin {bin_idx}) when opponent all-in"
+        )
 
     # Env 2: Both all-in, should only be able to call
-    assert (
-        mask[2, 1].item() is True
-    ), "Env 2: Should be able to call when both players all-in"
-    assert (
-        mask[2, 0].item() is False
-    ), "Env 2: Should not be able to fold when both players all-in"
+    assert mask[2, 1].item() is True, (
+        "Env 2: Should be able to call when both players all-in"
+    )
+    assert mask[2, 0].item() is False, (
+        "Env 2: Should not be able to fold when both players all-in"
+    )
     for bin_idx in range(2, 8):
-        assert (
-            mask[2, bin_idx].item() is False
-        ), f"Env 2: Should not be able to bet/raise/all-in (bin {bin_idx}) when both players all-in"
+        assert mask[2, bin_idx].item() is False, (
+            f"Env 2: Should not be able to bet/raise/all-in (bin {bin_idx}) when both players all-in"
+        )
 
     # Env 3: Normal case, should have normal legal actions
-    assert (
-        mask[3, 1].item() is True
-    ), "Env 3: Should be able to check/call in normal case"
+    assert mask[3, 1].item() is True, (
+        "Env 3: Should be able to check/call in normal case"
+    )
     assert mask[3, 7].item() is True, "Env 3: Should be able to all-in in normal case"
     # Fold might not be legal if not facing a bet
     if env.committed[3, 0].item() == env.committed[3, 1].item():
-        assert (
-            mask[3, 0].item() is False
-        ), "Env 3: Should not be able to fold when not facing a bet"
+        assert mask[3, 0].item() is False, (
+            "Env 3: Should not be able to fold when not facing a bet"
+        )
 
 
 def test_allin_legal_mask_with_betting():
@@ -1260,9 +1274,9 @@ def test_allin_legal_mask_with_betting():
 
         # BB should not be able to bet/raise/all-in
         for bin_idx in range(2, 8):
-            assert (
-                mask[0, bin_idx].item() is False
-            ), f"BB should not be able to bet/raise/all-in (bin {bin_idx}) vs SB all-in"
+            assert mask[0, bin_idx].item() is False, (
+                f"BB should not be able to bet/raise/all-in (bin {bin_idx}) vs SB all-in"
+            )
 
     # Test scenario: BB goes all-in, SB can fold or call
     env2 = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
@@ -1286,9 +1300,9 @@ def test_allin_legal_mask_with_betting():
 
             # SB should not be able to bet/raise/all-in
             for bin_idx in range(2, 8):
-                assert (
-                    mask[0, bin_idx].item() is False
-                ), f"SB should not be able to bet/raise/all-in (bin {bin_idx}) vs BB all-in"
+                assert mask[0, bin_idx].item() is False, (
+                    f"SB should not be able to bet/raise/all-in (bin {bin_idx}) vs BB all-in"
+                )
 
 
 def test_implicit_allin_call_marks_allin_without_runout_cutoff():
@@ -1373,9 +1387,9 @@ def test_allin_legal_mask_consistency():
 
         # BB should not be able to bet/raise/all-in
         for bin_idx in range(2, 8):
-            assert (
-                mask[0, bin_idx].item() is False
-            ), f"BB should not be able to bet/raise/all-in (bin {bin_idx}) vs SB all-in"
+            assert mask[0, bin_idx].item() is False, (
+                f"BB should not be able to bet/raise/all-in (bin {bin_idx}) vs SB all-in"
+            )
 
     # Test scenario 2: BB goes all-in first
     env2 = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
@@ -1399,9 +1413,9 @@ def test_allin_legal_mask_consistency():
 
             # SB should not be able to bet/raise/all-in
             for bin_idx in range(2, 8):
-                assert (
-                    mask[0, bin_idx].item() is False
-                ), f"SB should not be able to bet/raise/all-in (bin {bin_idx}) vs BB all-in"
+                assert mask[0, bin_idx].item() is False, (
+                    f"SB should not be able to bet/raise/all-in (bin {bin_idx}) vs BB all-in"
+                )
 
     # Test scenario 3: Manual setup to test all-in player restrictions
     env3 = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
@@ -1417,9 +1431,9 @@ def test_allin_legal_mask_consistency():
     assert mask[0, 1].item() is True, "All-in player should be able to call"
     assert mask[0, 0].item() is False, "All-in player should not be able to fold"
     for bin_idx in range(2, 8):
-        assert (
-            mask[0, bin_idx].item() is False
-        ), f"All-in player should not be able to bet/raise/all-in (bin {bin_idx})"
+        assert mask[0, bin_idx].item() is False, (
+            f"All-in player should not be able to bet/raise/all-in (bin {bin_idx})"
+        )
 
 
 def test_minimum_raise_rules():
@@ -1442,9 +1456,9 @@ def test_minimum_raise_rules():
             bet_amount = amounts[0, bin_idx].item()
             additional_amount = bet_amount - to_call  # Additional amount above call
             min_raise = env.bb  # Minimum raise is the size of the big blind
-            assert (
-                additional_amount >= min_raise
-            ), f"Additional amount {additional_amount} is less than minimum raise {min_raise}"
+            assert additional_amount >= min_raise, (
+                f"Additional amount {additional_amount} is less than minimum raise {min_raise}"
+            )
 
     # Test 2: Minimum raise after a bet
     env2 = _make_env(N=1, mean_stack=1000, sb=25, bb=50)
@@ -1467,9 +1481,9 @@ def test_minimum_raise_rules():
         if mask[0, bin_idx]:
             bet_amount = amounts[0, bin_idx].item()
             additional_amount = bet_amount - to_call  # Additional amount above call
-            assert (
-                additional_amount >= min_raise
-            ), f"Additional amount {additional_amount} is less than minimum raise {min_raise}"
+            assert additional_amount >= min_raise, (
+                f"Additional amount {additional_amount} is less than minimum raise {min_raise}"
+            )
 
     # Test 3: All-in as valid raise (even if less than minimum)
     env3 = _make_env(N=1, mean_stack=100, sb=25, bb=50)  # Small stack
@@ -1482,9 +1496,9 @@ def test_minimum_raise_rules():
 
     # All-in should be legal even if it's less than minimum raise
     amounts, mask = env3.legal_bins_amounts_and_mask()
-    assert (
-        mask[0, 7].item() is True
-    ), "All-in should be legal even if less than minimum raise"
+    assert mask[0, 7].item() is True, (
+        "All-in should be legal even if less than minimum raise"
+    )
 
     # Test 4: Multiple environments with different raise scenarios
     env4 = _make_env(N=3, mean_stack=1000, sb=25, bb=50)
@@ -1514,9 +1528,9 @@ def test_minimum_raise_rules():
             if mask[i, bin_idx]:
                 bet_amount = amounts[i, bin_idx].item()
                 additional_amount = bet_amount - to_call  # Additional amount above call
-                assert (
-                    additional_amount >= min_raise
-                ), f"Env {i}, bin {bin_idx}: Additional amount {additional_amount} is less than minimum raise {min_raise}"
+                assert additional_amount >= min_raise, (
+                    f"Env {i}, bin {bin_idx}: Additional amount {additional_amount} is less than minimum raise {min_raise}"
+                )
 
 
 def test_button_position_and_blind_posting():
@@ -1535,18 +1549,18 @@ def test_button_position_and_blind_posting():
         sb_player = button_pos
         bb_player = 1 - button_pos
 
-        assert (
-            env.committed[i, sb_player] == env.sb
-        ), f"Env {i}: SB player {sb_player} should have committed {env.sb}"
-        assert (
-            env.committed[i, bb_player] == env.bb
-        ), f"Env {i}: BB player {bb_player} should have committed {env.bb}"
+        assert env.committed[i, sb_player] == env.sb, (
+            f"Env {i}: SB player {sb_player} should have committed {env.sb}"
+        )
+        assert env.committed[i, bb_player] == env.bb, (
+            f"Env {i}: BB player {bb_player} should have committed {env.bb}"
+        )
 
         # Check that pot contains both blinds
         expected_pot = env.sb + env.bb
-        assert (
-            env.pot[i] == expected_pot
-        ), f"Env {i}: Pot should be {expected_pot}, got {env.pot[i]}"
+        assert env.pot[i] == expected_pot, (
+            f"Env {i}: Pot should be {expected_pot}, got {env.pot[i]}"
+        )
 
     # Test 2: Button randomization on reset (not rotation)
     env2 = _make_env(N=2, mean_stack=1000, sb=25, bb=50)
@@ -1585,12 +1599,12 @@ def test_button_position_and_blind_posting():
         expected_sb_stack = env3.mean_stack - env3.sb
         expected_bb_stack = env3.mean_stack - env3.bb
 
-        assert (
-            env3.stacks[i, sb_player] == expected_sb_stack
-        ), f"Env {i}: SB stack should be {expected_sb_stack}"
-        assert (
-            env3.stacks[i, bb_player] == expected_bb_stack
-        ), f"Env {i}: BB stack should be {expected_bb_stack}"
+        assert env3.stacks[i, sb_player] == expected_sb_stack, (
+            f"Env {i}: SB stack should be {expected_sb_stack}"
+        )
+        assert env3.stacks[i, bb_player] == expected_bb_stack, (
+            f"Env {i}: BB stack should be {expected_bb_stack}"
+        )
 
     # Test 4: Action order based on button position
     env4 = _make_env(N=3, mean_stack=1000, sb=25, bb=50)
@@ -1602,9 +1616,9 @@ def test_button_position_and_blind_posting():
         # In heads-up, SB acts first preflop (regardless of button position)
         # Check that to_act is set correctly initially
         sb_player = button_pos  # SB is the button player
-        assert (
-            env4.to_act[i] == sb_player
-        ), f"Env {i}: SB player {sb_player} should act first"
+        assert env4.to_act[i] == sb_player, (
+            f"Env {i}: SB player {sb_player} should act first"
+        )
 
     # Test 5: Blind posting edge case - stack smaller than big blind
     env5 = _make_env(N=1, mean_stack=30, sb=25, bb=50)  # Stack < BB
@@ -1613,12 +1627,12 @@ def test_button_position_and_blind_posting():
     # Player with insufficient chips will have negative stack (environment doesn't handle this edge case)
     bb_player = 1 - env5.button[0].item()
     expected_bb_stack = env5.mean_stack - env5.bb  # 30 - 50 = -20
-    assert (
-        env5.stacks[0, bb_player] == expected_bb_stack
-    ), f"BB player should have stack {expected_bb_stack}"
-    assert (
-        env5.committed[0, bb_player] == env5.bb
-    ), f"BB player should have committed {env5.bb}"
+    assert env5.stacks[0, bb_player] == expected_bb_stack, (
+        f"BB player should have stack {expected_bb_stack}"
+    )
+    assert env5.committed[0, bb_player] == env5.bb, (
+        f"BB player should have committed {env5.bb}"
+    )
 
     # Test 6: Multiple resets maintain button randomization
     env6 = _make_env(N=2, mean_stack=1000, sb=25, bb=50)

@@ -1361,6 +1361,14 @@ class CFREvaluator(ABC):
         bb = max(float(self.env.bb), 1.0)
         return local_exploitability * scale * (1000.0 / bb)
 
+    def _legal_bin_amounts_for(self, indices: torch.Tensor) -> torch.Tensor:
+        """Return concrete action-bin amounts for selected evaluator nodes."""
+        amount_fn = getattr(self.env, "legal_bins_amounts_for", None)
+        if callable(amount_fn):
+            return amount_fn(indices)
+        amounts, _ = self.env.legal_bins_amounts_and_mask()
+        return amounts[indices]
+
     def _compute_policy_node_reach(self, top: int) -> torch.Tensor:
         """Approximate public-node reach under the average policy.
 
@@ -2163,8 +2171,10 @@ class CFREvaluator(ABC):
             )
             value_features = value_features_all[value_node_indices]
         root_value_features = value_features_all[:N]
-        bin_amounts, _ = self.env.legal_bins_amounts_and_mask()
         legal_masks = self.legal_mask
+        bin_amounts = None
+        if include_policy_batch:
+            bin_amounts, _ = self.env.legal_bins_amounts_and_mask()
         node_depth = torch.zeros(self.total_nodes, dtype=torch.long, device=self.device)
         for depth in range(len(self.depth_offsets) - 1):
             node_depth[self.depth_offsets[depth] : self.depth_offsets[depth + 1]] = (
@@ -2177,7 +2187,6 @@ class CFREvaluator(ABC):
             "stage": 2 * self.env.street,
             "board": self.env.board_indices,
             "pot": self.env.pot,
-            "bet_amounts": bin_amounts,
             "node_depth": node_depth,
             "actions_this_round": self.env.actions_this_round,
         }
@@ -2191,6 +2200,11 @@ class CFREvaluator(ABC):
         value_statistics = {
             key: statistics[key][value_node_indices] for key in statistics
         }
+        value_statistics["bet_amounts"] = (
+            bin_amounts[value_node_indices]
+            if bin_amounts is not None
+            else self._legal_bin_amounts_for(value_node_indices)
+        )
         value_statistics["target_source"] = torch.full(
             (value_node_indices.numel(),),
             TARGET_SOURCE_CFR_BACKUP,
@@ -2287,6 +2301,8 @@ class CFREvaluator(ABC):
             policy_statistics = {
                 key: statistics[key][:top][valid_top] for key in statistics
             }
+            assert bin_amounts is not None
+            policy_statistics["bet_amounts"] = bin_amounts[:top][valid_top]
             if self._should_record_policy_node_reach():
                 policy_statistics["policy_node_reach"] = (
                     self._compute_policy_node_reach(top)[valid_top]
@@ -2308,6 +2324,11 @@ class CFREvaluator(ABC):
 
         value_targets_pre = root_value_targets.clone()
         value_statistics_pre = {key: statistics[key][:N].clone() for key in statistics}
+        value_statistics_pre["bet_amounts"] = (
+            bin_amounts[:N].clone()
+            if bin_amounts is not None
+            else self._legal_bin_amounts_for(root_indices)
+        )
         value_statistics_pre["target_source"] = torch.full(
             (N,),
             TARGET_SOURCE_CHANCE_EXPECTATION,

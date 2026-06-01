@@ -48,7 +48,9 @@ class PBSEnv:
             raise ValueError("num_players must be at least 2")
         if mean_stack is None:
             if starting_stack is None:
-                raise ValueError("mean_stack is required when starting_stack is not set")
+                raise ValueError(
+                    "mean_stack is required when starting_stack is not set"
+                )
             mean_stack = starting_stack
         elif starting_stack is not None and starting_stack != mean_stack:
             raise ValueError("mean_stack and starting_stack must match when both set")
@@ -78,8 +80,10 @@ class PBSEnv:
         self.bb = int(bb)
         self.default_bet_bins = default_bet_bins or DEFAULT_BET_BINS
         self.num_bet_bins = len(self.default_bet_bins) + 3
-        self.device = torch.device(device) if device is not None else torch.device(
-            "mps" if torch.backends.mps.is_available() else "cpu"
+        self.device = (
+            torch.device(device)
+            if device is not None
+            else torch.device("mps" if torch.backends.mps.is_available() else "cpu")
         )
         self.float_dtype = float_dtype
         self.rng = rng if rng is not None else torch.Generator(device=self.device)
@@ -94,26 +98,42 @@ class PBSEnv:
         self.last_to_act = torch.empty(self.N, dtype=torch.long, device=self.device)
         self.pot = torch.empty(self.N, dtype=torch.long, device=self.device)
         self.min_raise = torch.empty(self.N, dtype=torch.long, device=self.device)
-        self.last_aggressive_amount = torch.empty(self.N, dtype=torch.long, device=self.device)
-        self.actions_this_round = torch.empty(self.N, dtype=torch.long, device=self.device)
-        self.actions_last_round = torch.empty(self.N, dtype=torch.long, device=self.device)
-        self.stacks = torch.empty(self.N, self.num_players, dtype=torch.long, device=self.device)
+        self.last_aggressive_amount = torch.empty(
+            self.N, dtype=torch.long, device=self.device
+        )
+        self.actions_this_round = torch.empty(
+            self.N, dtype=torch.long, device=self.device
+        )
+        self.actions_last_round = torch.empty(
+            self.N, dtype=torch.long, device=self.device
+        )
+        self.stacks = torch.empty(
+            self.N, self.num_players, dtype=torch.long, device=self.device
+        )
         self.starting_stacks = torch.empty_like(self.stacks)
         self.scale = torch.empty(self.N, dtype=self.float_dtype, device=self.device)
         self.committed = torch.empty_like(self.stacks)
         self.chips_placed = torch.empty_like(self.stacks)
-        self.has_folded = torch.empty(self.N, self.num_players, dtype=torch.bool, device=self.device)
+        self.has_folded = torch.empty(
+            self.N, self.num_players, dtype=torch.bool, device=self.device
+        )
         self.is_allin = torch.empty_like(self.has_folded)
         self.acted_this_round = torch.empty_like(self.has_folded)
         self.done = torch.empty(self.N, dtype=torch.bool, device=self.device)
         self.winner = torch.empty(self.N, dtype=torch.long, device=self.device)
         self.winners = torch.empty_like(self.has_folded)
-        self.board_indices = torch.empty(self.N, 5, dtype=torch.long, device=self.device)
+        self.board_indices = torch.empty(
+            self.N, 5, dtype=torch.long, device=self.device
+        )
         self.last_board_indices = torch.empty_like(self.board_indices)
-        self.board_onehot = torch.empty(self.N, 5, 4, 13, dtype=torch.bool, device=self.device)
+        self.board_onehot = torch.empty(
+            self.N, 5, 4, 13, dtype=torch.bool, device=self.device
+        )
 
         cards = torch.arange(52, device=self.device)
-        self.card_onehot_cache = torch.zeros(52, 4, 13, dtype=torch.bool, device=self.device)
+        self.card_onehot_cache = torch.zeros(
+            52, 4, 13, dtype=torch.bool, device=self.device
+        )
         self.card_onehot_cache[cards, cards // 13, cards % 13] = True
 
         if init_state:
@@ -223,8 +243,16 @@ class PBSEnv:
                 raise ValueError("force_deck must have shape [num_reset, 5]")
             self.deck[ids] = force_deck
 
-        button = force_button if force_button is not None else torch.randint(
-            0, self.num_players, (num_reset,), generator=self.rng, device=self.device
+        button = (
+            force_button
+            if force_button is not None
+            else torch.randint(
+                0,
+                self.num_players,
+                (num_reset,),
+                generator=self.rng,
+                device=self.device,
+            )
         )
         sb_player = self._small_blind_player(button)
         bb_player = self._big_blind_player(button)
@@ -325,6 +353,33 @@ class PBSEnv:
         mask[:, -1] = can_act & (actor_stack > 0)
         return amounts, mask
 
+    def legal_bins_amounts_for(
+        self, indices: torch.Tensor, bet_bins: list[float] | None = None
+    ) -> torch.Tensor:
+        """Return concrete bin amounts for selected rows."""
+        if bet_bins is None:
+            bet_bins = self.default_bet_bins
+        B = len(bet_bins) + 3
+        M = indices.numel()
+        amounts = torch.full((M, B), -1, dtype=torch.long, device=self.device)
+        if M == 0:
+            return amounts
+
+        actor = self.to_act[indices]
+        actor_stack = self.stacks[indices, actor]
+        actor_committed = self.committed[indices, actor]
+        max_committed = self.committed[indices].amax(dim=1)
+        to_call = max_committed - actor_committed
+
+        amounts[:, 1] = torch.minimum(to_call, actor_stack)
+        bet_bins_t = torch.tensor(bet_bins, dtype=torch.float32, device=self.device)
+        additional = (
+            self.pot[indices, None].to(torch.float32) * bet_bins_t[None, :]
+        ).long()
+        amounts[:, 2:-1] = to_call[:, None] + additional
+        amounts[:, -1] = actor_stack
+        return amounts
+
     def legal_bins_mask(self, bet_bins: list[float] | None = None) -> torch.Tensor:
         _, mask = self.legal_bins_amounts_and_mask(bet_bins)
         return mask
@@ -333,7 +388,9 @@ class PBSEnv:
         self, indices: torch.Tensor, bet_bins: list[float] | None = None
     ) -> torch.Tensor:
         if indices.numel() == 0:
-            return torch.zeros(0, self.num_bet_bins, dtype=torch.bool, device=self.device)
+            return torch.zeros(
+                0, self.num_bet_bins, dtype=torch.bool, device=self.device
+            )
         return self.legal_bins_mask(bet_bins)[indices]
 
     def active_indices(self) -> torch.Tensor:
@@ -364,8 +421,12 @@ class PBSEnv:
         clamped_bins = bin_indices.clamp(0, all_in_idx)
         selected_amounts = bin_amounts.gather(1, clamped_bins[:, None]).squeeze(1)
         action_indices = torch.full_like(bin_indices, -1)
-        action_indices = torch.where(bin_indices == 0, torch.zeros_like(action_indices), action_indices)
-        action_indices = torch.where(bin_indices == 1, torch.ones_like(action_indices), action_indices)
+        action_indices = torch.where(
+            bin_indices == 0, torch.zeros_like(action_indices), action_indices
+        )
+        action_indices = torch.where(
+            bin_indices == 1, torch.ones_like(action_indices), action_indices
+        )
         action_indices = torch.where(
             (bin_indices >= 2) & (bin_indices < all_in_idx),
             torch.full_like(action_indices, 2),
@@ -404,7 +465,9 @@ class PBSEnv:
         call_amount = torch.minimum(to_call, actor_stack)
         put_in = torch.zeros(self.N, dtype=torch.long, device=self.device)
         put_in = torch.where(is_call, call_amount, put_in)
-        put_in = torch.where(is_bet_raise, bet_amounts.clamp_min(0).minimum(actor_stack), put_in)
+        put_in = torch.where(
+            is_bet_raise, bet_amounts.clamp_min(0).minimum(actor_stack), put_in
+        )
         put_in = torch.where(is_allin, actor_stack, put_in)
 
         self.last_to_act[acting] = self.to_act[acting]
@@ -432,7 +495,9 @@ class PBSEnv:
         acted_after[rows, actor] |= acting
         reset_acted = torch.zeros_like(acted_after)
         reset_acted[rows, actor] = acting
-        self.acted_this_round = torch.where(aggressive[:, None], reset_acted, acted_after)
+        self.acted_this_round = torch.where(
+            aggressive[:, None], reset_acted, acted_after
+        )
         self.actions_this_round += acting.to(torch.long)
         self.last_board_indices[acting] = self.board_indices[acting]
         return acting, actor
@@ -454,14 +519,11 @@ class PBSEnv:
         matched = self.committed == max_committed[:, None]
         all_ready = ((~eligible) | (self.acted_this_round & matched)).all(dim=1)
         no_more_betting = acting & ~self.done & (live_count > 1) & (eligible_count == 0)
-        round_closed = (
-            acting
-            & ~self.done
-            & (eligible_count > 0)
-            & all_ready
-        )
+        round_closed = acting & ~self.done & (eligible_count > 0) & all_ready
 
-        rewards = torch.zeros(self.N, self.num_players, dtype=self.float_dtype, device=self.device)
+        rewards = torch.zeros(
+            self.N, self.num_players, dtype=self.float_dtype, device=self.device
+        )
         new_streets = torch.full((self.N,), -1, dtype=torch.long, device=self.device)
         dealt_cards = torch.full((self.N, 5), -1, dtype=torch.long, device=self.device)
         rewards = self._assign_fold_rewards(rewards, terminal_fold)
@@ -492,11 +554,15 @@ class PBSEnv:
         winners_mask = torch.zeros(
             env_indices.numel(), self.num_players, dtype=torch.bool, device=self.device
         )
-        winners_mask[torch.arange(env_indices.numel(), device=self.device), winners] = True
+        winners_mask[torch.arange(env_indices.numel(), device=self.device), winners] = (
+            True
+        )
         self.done[env_indices] = True
         self.winner[env_indices] = winners
         self.winners[env_indices] = winners_mask
-        rewards = torch.zeros(self.N, self.num_players, dtype=self.float_dtype, device=self.device)
+        rewards = torch.zeros(
+            self.N, self.num_players, dtype=self.float_dtype, device=self.device
+        )
         return self._reward_rows(env_indices, winners_mask, rewards)[env_indices]
 
     def expected_showdown_rewards(
@@ -519,8 +585,7 @@ class PBSEnv:
             ids = env_indices.to(self.device)
         if beliefs.shape != (ids.numel(), self.num_players, NUM_HANDS):
             raise ValueError(
-                "beliefs must have shape "
-                f"{(ids.numel(), self.num_players, NUM_HANDS)}"
+                f"beliefs must have shape {(ids.numel(), self.num_players, NUM_HANDS)}"
             )
         if ids.numel() == 0:
             return torch.zeros(
@@ -598,12 +663,16 @@ class PBSEnv:
             self.deck[dest_select] = src_env.deck[src_select]
 
     def repeat_interleave(self, repeats: torch.Tensor, output_size: int) -> PBSEnv:
-        indices = self.arange_n.repeat_interleave(repeats.to(self.device), output_size=output_size)
+        indices = self.arange_n.repeat_interleave(
+            repeats.to(self.device), output_size=output_size
+        )
         return self.gather_rows(indices)
 
     def gather_rows(self, indices: torch.Tensor) -> PBSEnv:
         dst = type(self).from_proto(self, num_envs=indices.numel())
-        dst.copy_state_from(self, indices, torch.arange(indices.numel(), device=self.device))
+        dst.copy_state_from(
+            self, indices, torch.arange(indices.numel(), device=self.device)
+        )
         return dst
 
     def __getitem__(self, indices: torch.Tensor | slice) -> PBSEnv:
@@ -625,7 +694,9 @@ class PBSEnv:
             return self._small_blind_player(button)
         return (self._big_blind_player(button) + 1) % self.num_players
 
-    def _next_player_after(self, start: torch.Tensor, eligible: torch.Tensor) -> torch.Tensor:
+    def _next_player_after(
+        self, start: torch.Tensor, eligible: torch.Tensor
+    ) -> torch.Tensor:
         offsets = torch.arange(1, self.num_players + 1, device=self.device)
         candidates = (start[:, None] + offsets[None, :]) % self.num_players
         candidate_ok = eligible.gather(1, candidates)
@@ -663,9 +734,7 @@ class PBSEnv:
         sorted_levels = contrib.sort(dim=1).values
         previous = torch.cat(
             (
-                torch.zeros(
-                    ids.numel(), 1, dtype=self.float_dtype, device=self.device
-                ),
+                torch.zeros(ids.numel(), 1, dtype=self.float_dtype, device=self.device),
                 sorted_levels[:, :-1],
             ),
             dim=1,
@@ -678,7 +747,9 @@ class PBSEnv:
         live_eligible = participants & (~self.has_folded[ids])[:, None, :]
         live_counts = live_eligible.sum(dim=2)
         use_live = winner_counts == 0
-        payout_masks = torch.where(use_live[:, :, None], live_eligible, eligible_winners)
+        payout_masks = torch.where(
+            use_live[:, :, None], live_eligible, eligible_winners
+        )
         payout_counts = torch.where(use_live, live_counts, winner_counts).clamp_min(1)
         shares = (
             layer_amounts[:, :, None]
@@ -697,7 +768,9 @@ class PBSEnv:
         batch_size, players, hand_count = weights.shape
         lower_pos = torch.searchsorted(sorted_ranks.contiguous(), ranks, right=False)
         upper_pos = torch.searchsorted(sorted_ranks.contiguous(), ranks, right=True)
-        expanded_order = sorted_indices[:, None, :].expand(batch_size, players, hand_count)
+        expanded_order = sorted_indices[:, None, :].expand(
+            batch_size, players, hand_count
+        )
         sorted_weights = weights.gather(2, expanded_order)
         prefix = torch.cat(
             (
@@ -712,8 +785,12 @@ class PBSEnv:
             ),
             dim=2,
         )
-        lower = prefix.gather(2, lower_pos[:, None, :].expand(batch_size, players, hand_count))
-        upper = prefix.gather(2, upper_pos[:, None, :].expand(batch_size, players, hand_count))
+        lower = prefix.gather(
+            2, lower_pos[:, None, :].expand(batch_size, players, hand_count)
+        )
+        upper = prefix.gather(
+            2, upper_pos[:, None, :].expand(batch_size, players, hand_count)
+        )
         denom = weights.sum(dim=2, keepdim=True).clamp_min(1.0e-12)
         return lower / denom, (upper - lower).clamp_min(0.0) / denom
 
@@ -851,7 +928,9 @@ class PBSEnv:
         self.street[river_ids] = 4
         self.winners[river_ids] = live
         sole = live.sum(dim=1) == 1
-        self.winner[river_ids] = torch.where(sole, live.to(torch.long).argmax(dim=1), -1)
+        self.winner[river_ids] = torch.where(
+            sole, live.to(torch.long).argmax(dim=1), -1
+        )
         new_streets[river_ids] = 4
         rewards = self._reward_rows(river_ids, live, rewards)
 
@@ -867,7 +946,9 @@ class PBSEnv:
         self, ids: torch.Tensor, new_streets: torch.Tensor, dealt_cards: torch.Tensor
     ) -> None:
         pos = self.deck_pos[ids]
-        cards = self.deck[ids[:, None], pos[:, None] + torch.arange(3, device=self.device)]
+        cards = self.deck[
+            ids[:, None], pos[:, None] + torch.arange(3, device=self.device)
+        ]
         self.board_indices[ids, :3] = cards
         self.board_onehot[ids, :3] = self.card_onehot_cache[cards]
         self.deck_pos[ids] = pos + 3

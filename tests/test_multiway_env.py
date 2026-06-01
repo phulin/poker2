@@ -104,10 +104,14 @@ def _assert_public_state_matches(ref: NLEnv, pbs: PBSEnv, idx: int = 0) -> None:
 def _assert_legal_bins_match(ref: NLEnv, pbs: PBSEnv) -> None:
     ref_amounts, ref_mask = ref.legal_bins_amounts_and_mask()
     pbs_amounts, pbs_mask = pbs.legal_bins_amounts_and_mask()
+    pbs_subset_amounts = pbs.legal_bins_amounts_for(
+        torch.tensor([0], dtype=torch.long, device=pbs.device)
+    )
     torch.testing.assert_close(
         pbs_amounts[0].cpu(),
         torch.tensor(ref_amounts, dtype=torch.long),
     )
+    torch.testing.assert_close(pbs_subset_amounts[0].cpu(), pbs_amounts[0].cpu())
     torch.testing.assert_close(
         pbs_mask[0].cpu(),
         torch.tensor(ref_mask, dtype=torch.bool),
@@ -272,7 +276,9 @@ def test_pbs_env_matches_nl_env_public_allin_split_runout():
     assert ref.state.terminal is True
     assert ref.state.street == "showdown"
     assert ref.state.winners == (0, 1, 2)
-    torch.testing.assert_close(pbs.board_indices[0].cpu(), torch.tensor([10, 11, 12, 13, 14]))
+    torch.testing.assert_close(
+        pbs.board_indices[0].cpu(), torch.tensor([10, 11, 12, 13, 14])
+    )
     torch.testing.assert_close(rewards, torch.zeros(3))
 
 
@@ -282,7 +288,9 @@ def test_pbs_env_vectorized_mixed_rows_match_independent_references():
 
     scripts = ([1, 1, 1], [4, 1, 1])
     for step_idx in range(3):
-        bins = torch.tensor([scripts[0][step_idx], scripts[1][step_idx]], dtype=torch.long)
+        bins = torch.tensor(
+            [scripts[0][step_idx], scripts[1][step_idx]], dtype=torch.long
+        )
         pbs.step_bins(bins)
         for env_idx, ref in enumerate(refs):
             ref.step_bins(scripts[env_idx][step_idx])
