@@ -33,7 +33,13 @@ def _device_from_config(cfg: Config) -> torch.device:
     return torch.device("cpu")
 
 
-def _init_wandb(cfg: Config, device: torch.device) -> Any:
+def _init_wandb(
+    cfg: Config,
+    device: torch.device,
+    *,
+    group: str | None = None,
+    name: str | None = None,
+) -> Any:
     if not cfg.use_wandb:
         return nullcontext()
 
@@ -54,10 +60,12 @@ def _init_wandb(cfg: Config, device: torch.device) -> Any:
 
     init_kwargs: Dict[str, Any] = {
         "project": cfg.wandb_project,
-        "name": cfg.wandb_name,
+        "name": cfg.wandb_name if name is None else name,
         "tags": cfg.wandb_tags or [],
         "config": asdict(cfg),
     }
+    if group is not None:
+        init_kwargs["group"] = group
     if wandb_run_id_from_checkpoint:
         init_kwargs["id"] = cfg.wandb_run_id or wandb_run_id_from_checkpoint
         init_kwargs["resume"] = "must"
