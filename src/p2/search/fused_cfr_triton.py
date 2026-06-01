@@ -1450,6 +1450,100 @@ def marginal_policy_triton_out_(
     )
 
 
+if triton is not None:
+
+    @triton.jit
+    def _select_actor_beliefs_and_marginal_policy_kernel(
+        beliefs_ptr,  # [total, 2, H]
+        to_act_ptr,  # [top]
+        policy_ptr,  # [total, H]
+        child_offsets_ptr,  # [top], absolute first child
+        child_count_ptr,  # [top]
+        actor_out_ptr,  # [top, H]
+        marginal_out_ptr,  # [total - bottom, H]
+        bottom,
+        H,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        parent = tl.program_id(0)
+        hb = tl.program_id(1)
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        actor = tl.load(to_act_ptr + parent)
+        belief = tl.load(
+            beliefs_ptr + (parent * 2 + actor) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        tl.store(actor_out_ptr + parent * H + offs, belief, mask=mask)
+
+        first = tl.load(child_offsets_ptr + parent)
+        count = tl.load(child_count_ptr + parent)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                child_rel = child - bottom
+                pol = tl.load(
+                    policy_ptr + child * H + offs,
+                    mask=mask,
+                    other=0.0,
+                )
+                tl.store(
+                    marginal_out_ptr + child_rel * H + offs,
+                    belief * pol,
+                    mask=mask,
+                )
+
+
+def select_actor_beliefs_and_marginal_policy_triton_out_(
+    beliefs: torch.Tensor,
+    to_act: torch.Tensor,
+    policy: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    bottom: int,
+    actor_out: torch.Tensor,
+    marginal_out: torch.Tensor,
+    max_children: int,
+    block_h: int = 512,
+) -> None:
+    """Select actor beliefs and write child marginal policies in one pass."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert beliefs.is_contiguous() and beliefs.dim() == 3 and beliefs.shape[1] == 2
+    assert to_act.is_contiguous() and to_act.dim() == 1
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert child_offsets.is_contiguous() and child_offsets.shape == to_act.shape
+    assert child_count.is_contiguous() and child_count.shape == to_act.shape
+    top = to_act.numel()
+    h = beliefs.shape[-1]
+    assert policy.shape == (beliefs.shape[0], h)
+    assert actor_out.is_contiguous() and actor_out.shape == (top, h)
+    assert marginal_out.is_contiguous() and marginal_out.dim() == 2
+    assert marginal_out.shape[1] == h
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    _select_actor_beliefs_and_marginal_policy_kernel[
+        (top, triton.cdiv(h, block_h))
+    ](
+        beliefs,
+        to_act,
+        policy,
+        child_offsets,
+        child_count,
+        actor_out,
+        marginal_out,
+        bottom,
+        h,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
 class ParentBeliefUnblockedStats:
     """Caches S + cardsum at parent shape for both player slices of beliefs.
 
@@ -3340,9 +3434,8 @@ if triton is not None:
             tl.store(reach_ptr + (c * 2 + 1) * H + offs, child1, mask=mask)
 
         if WRITE_AVG:
-            actor = tl.load(to_act_ptr + parent)
             new_scalar = tl.load(new_scalar_ptr)
-            parent_actor = tl.where(actor == 0, parent0, parent1)
+            parent_actor = tl.where(prev_actor == 0, parent0, parent1)
             reach_n = parent_actor * new_scalar
             num_old = tl.load(avg_num_ptr + c * H + offs, mask=mask, other=0.0)
             den_old = tl.load(avg_den_ptr + c * H + offs, mask=mask, other=0.0)
@@ -3485,7 +3578,7 @@ if triton is not None:
 
         parent = tl.load(parent_index_ptr + c)
         prev_actor = tl.load(prev_actor_ptr + c)
-        root = tl.load(root_index_ptr + c)
+        root = parent if ROOT_PARENT else tl.load(root_index_ptr + c)
 
         offs = tl.arange(0, BLOCK_H)
         mask = offs < H
@@ -3522,9 +3615,8 @@ if triton is not None:
             tl.store(child_reach_ptr + (c_rel * 2 + 1) * H + offs, child1, mask=mask)
 
         if WRITE_AVG:
-            actor = tl.load(to_act_ptr + parent)
             new_scalar = tl.load(new_scalar_ptr)
-            parent_actor = tl.where(actor == 0, parent0, parent1)
+            parent_actor = tl.where(prev_actor == 0, parent0, parent1)
             reach_n = parent_actor * new_scalar
             num_old = tl.load(avg_num_ptr + c * H + offs, mask=mask, other=0.0)
             den_old = tl.load(avg_den_ptr + c * H + offs, mask=mask, other=0.0)

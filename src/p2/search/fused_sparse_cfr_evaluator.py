@@ -85,8 +85,7 @@ from p2.search.fused_cfr_triton import (
     _preprocess_unblocked_stats_out,
     unblocked_mass_opp_at_parents_triton,
     unblocked_mass_ratio_indirect_triton,
-    marginal_policy_triton_out_,
-    select_actor_beliefs_triton_out_,
+    select_actor_beliefs_and_marginal_policy_triton_out_,
     select_opponent_beliefs_triton_out_,
 )
 from p2.search.cfr_evaluator import HandRankData, PublicBeliefState, padded_indices
@@ -1871,26 +1870,27 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._prepare_tree_slices()
         bottom, top = self._bottom, self._top
         parent_index_bottom = self._parent_index_bottom
+        child_offsets_top = self._child_offsets_top
+        child_count_top = self._child_count_top
         to_act_top = self._to_act_top
         assert parent_index_bottom is not None
+        assert child_offsets_top is not None
+        assert child_count_top is not None
         assert to_act_top is not None
-        actor_indices = to_act_top
         actor_beliefs, marginal_policy = self._ensure_ev_policy_buffers(
             top,
             parent_index_bottom.numel(),
         )
-        select_actor_beliefs_triton_out_(
+        select_actor_beliefs_and_marginal_policy_triton_out_(
             beliefs,
-            actor_indices,
-            top,
-            actor_beliefs,
-        )
-        marginal_policy_triton_out_(
-            actor_beliefs,
+            to_act_top,
             policy,
-            parent_index_bottom,
+            child_offsets_top,
+            child_count_top,
             bottom,
+            actor_beliefs,
             marginal_policy,
+            max_children=self.num_actions,
         )
 
         numer_s, numer_cardsum = _preprocess_unblocked_stats(marginal_policy)
