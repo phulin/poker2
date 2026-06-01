@@ -37,6 +37,7 @@ from p2.rl.trueskill_tracker import TrueSkillTracker
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
 from p2.search.cfr_evaluator import CFREvaluator
 from p2.search.rebel_data_generator import RebelDataGenerator
+from p2.search.rebel_data_source import LiveRebelDataSource, RebelDataSource
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 from p2.utils.ema_helper import EMAHelper
 from p2.utils.profiling import profile
@@ -329,6 +330,13 @@ class RebelCFRTrainer:
             evaluator=self.cfr_evaluator,
             value_buffer=self.value_buffer,
             policy_buffer=self.policy_buffer,
+        )
+        self.data_source: RebelDataSource = LiveRebelDataSource(
+            self.data_generator,
+            self.value_buffer,
+            self.policy_buffer,
+            value_sample_count=self.K_value,
+            max_return_policy_samples=self.batch_size,
         )
 
         self.aggression_analyzer = AggressionAnalyzer(device=self.device)
@@ -1763,11 +1771,7 @@ class RebelCFRTrainer:
     def _update_model(
         self, step: int
     ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
-        fresh_value_batch, fresh_policy_batch = self.data_generator.generate_data(
-            self.K_value,
-            return_policy_batch=True,
-            max_return_policy_samples=self.batch_size,
-        )
+        fresh_value_batch, fresh_policy_batch = self.data_source.prepare_step(step)
 
         # Warmup: make sure we have enough samples.
         min_policy_samples = max(
@@ -1778,15 +1782,7 @@ class RebelCFRTrainer:
                 else self.batch_size
             ),
         )
-        while (
-            len(self.value_buffer) < self.batch_size
-            or len(self.policy_buffer) < min_policy_samples
-        ):
-            self.data_generator.generate_data(
-                self.K_value,
-                return_value_batch=False,
-                return_policy_batch=False,
-            )
+        self.data_source.ensure_min_samples(self.batch_size, min_policy_samples)
 
         value_fullness = len(self.value_buffer) / self.value_buffer.capacity
         episodes = math.ceil(self.cfg.train.episodes_per_step * value_fullness)
@@ -1840,13 +1836,13 @@ class RebelCFRTrainer:
             value_latent, policy_latent, permuted_latent = None, None, None
             # TODO: think about how to interleave these/ratio in a smarter way.
             # Might need to use different sizes for the two batches.
-            value_batch = self.value_buffer.sample(
+            value_batch = self.data_source.sample_value(
                 self.batch_size, stratify_streets=stratify
             ).to(self.device)
             policy_stratify = (
                 None if self.cfg.train.policy_depth_stratify_sample else stratify
             )
-            policy_batch = self.policy_buffer.sample(
+            policy_batch = self.data_source.sample_policy(
                 self.batch_size, stratify_streets=policy_stratify
             ).to(self.device)
 
@@ -1931,7 +1927,7 @@ class RebelCFRTrainer:
             None if self.cfg.train.policy_depth_stratify_sample else stratify
         )
         for _ in range(self.policy_extra_updates_per_step):
-            extra_policy_batch = self.policy_buffer.sample(
+            extra_policy_batch = self.data_source.sample_policy(
                 self.policy_extra_batch_size,
                 stratify_streets=policy_stratify,
             ).to(self.device)
@@ -2118,7 +2114,7 @@ class RebelCFRTrainer:
         if batch is not None:
             batch_cpu = batch.to(torch.device("cpu"))
             state["batch"] = batch_cpu
-        state["data_generator"] = self.data_generator.state_dict()
+        state["data_generator"] = self.data_source.state_dict()
 
         torch.save(state, path)
         self.save_replay_buffers(path, step)
@@ -2168,7 +2164,7 @@ class RebelCFRTrainer:
         #     self.rng.set_state(ckpt["rng"].to(self.device))
         self._sync_inference_model()
         if "data_generator" in ckpt:
-            self.data_generator.load_state_dict(ckpt["data_generator"])
+            self.data_source.load_state_dict(ckpt["data_generator"])
         replay_loaded = self.load_replay_buffers(path)
         if replay_loaded:
             print(
