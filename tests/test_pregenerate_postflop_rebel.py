@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import torch
 
 from p2.cli import pregenerate_postflop_rebel as pregenerate_cli
@@ -87,6 +89,9 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
     cfg.rebel_pregenerate.policy_target_min = 4
     cfg.rebel_pregenerate.generation_batch_size = 2
     cfg.rebel_pregenerate.max_generation_batches = 3
+    checkpoint = tmp_path / "closing.pt"
+    checkpoint.write_bytes(b"closing leaf checkpoint")
+    cfg.search.closing_leaf_checkpoint = str(checkpoint)
 
     manifest = pregenerate_cli.pregenerate_postflop_rebel(cfg)
 
@@ -99,6 +104,11 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
     assert spot_config["board_texture_stratified"] is True
     assert "recursive_strength" in spot_config["belief_mixture_weights"]
     assert "straight_heavy" in spot_config["board_texture_weights"]
+    assert written["metadata"]["target_model"] == {
+        "role": "closing_leaf",
+        "checkpoint": str(checkpoint),
+        "sha256": hashlib.sha256(b"closing leaf checkpoint").hexdigest(),
+    }
 
 
 def test_pregenerate_postflop_rebel_requires_live_mode(tmp_path):

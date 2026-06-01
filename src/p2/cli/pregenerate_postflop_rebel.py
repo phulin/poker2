@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict
+from pathlib import Path
 
 import hydra
 import torch
@@ -16,6 +18,25 @@ from p2.rl.rebel_batch import RebelBatch
 from p2.search.postflop_spot_sampler import postflop_spot_sampler_metadata
 from p2.search.rebel_solved_dataset import write_rebel_solved_dataset
 from p2.utils.profiling import install_triton_compile_logger_from_env
+
+
+def _sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _target_model_metadata(cfg: Config) -> dict:
+    checkpoint = cfg.search.closing_leaf_checkpoint
+    if checkpoint is None:
+        return {"role": "none", "checkpoint": None, "sha256": None}
+    return {
+        "role": "closing_leaf",
+        "checkpoint": checkpoint,
+        "sha256": _sha256_file(checkpoint),
+    }
 
 
 def _trim_batch(batch: RebelBatch, target_remaining: int) -> RebelBatch:
@@ -124,6 +145,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 "device": str(device),
                 "generation_batches": generation_batches,
             },
+            "target_model": _target_model_metadata(cfg),
             "model_config": asdict(cfg.model),
             "env_config": asdict(cfg.env),
             "search_config": asdict(cfg.search),
