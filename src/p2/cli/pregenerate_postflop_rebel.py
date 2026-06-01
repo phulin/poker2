@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ _ROOT_SOURCE_TO_STREET = {
     "random_river": "river",
     "random_river_prefix": "river",
 }
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -99,6 +101,30 @@ def _quality_metadata(cfg: Config) -> dict[str, object]:
         "sparse_fused": bool(cfg.search.sparse_fused),
         "holdout_value_loss": None,
         "target_model_kl": None,
+    }
+
+
+def _git_text(args: list[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=2.0,
+        )
+    except Exception:
+        return None
+    return result.stdout.strip()
+
+
+def _code_version_metadata() -> dict[str, object]:
+    commit = _git_text(["rev-parse", "HEAD"])
+    status = _git_text(["status", "--porcelain", "--untracked-files=no"])
+    return {
+        "code_version": commit,
+        "code_dirty": None if status is None else bool(status),
     }
 
 
@@ -241,6 +267,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 "seed": cfg.seed,
                 "device": str(device),
                 "generation_batches": generation_batches,
+                **_code_version_metadata(),
             },
             "target_model": _target_model_metadata(cfg),
             "quality": _quality_metadata(cfg),

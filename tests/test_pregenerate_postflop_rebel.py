@@ -108,6 +108,11 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
 
     monkeypatch.setattr(pregenerate_cli, "RebelCFRTrainer", _FakeTrainer)
     monkeypatch.setattr(pregenerate_cli, "write_rebel_solved_dataset", fake_write)
+    monkeypatch.setattr(
+        pregenerate_cli,
+        "_code_version_metadata",
+        lambda: {"code_version": "abc123", "code_dirty": False},
+    )
 
     cfg = Config(device="cpu", use_wandb=False)
     cfg.data.mode = "live"
@@ -154,7 +159,25 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
         "holdout_value_loss": None,
         "target_model_kl": None,
     }
+    assert written["metadata"]["generator"]["code_version"] == "abc123"
+    assert written["metadata"]["generator"]["code_dirty"] is False
     assert written["storage_float_dtype"] == "float16"
+
+
+def test_code_version_metadata_records_commit_and_dirty_state(monkeypatch):
+    def fake_git_text(args: list[str]) -> str | None:
+        if args == ["rev-parse", "HEAD"]:
+            return "commit-sha"
+        if args == ["status", "--porcelain", "--untracked-files=no"]:
+            return " M src/p2/cli/pregenerate_postflop_rebel.py"
+        raise AssertionError(f"unexpected git args: {args}")
+
+    monkeypatch.setattr(pregenerate_cli, "_git_text", fake_git_text)
+
+    assert pregenerate_cli._code_version_metadata() == {
+        "code_version": "commit-sha",
+        "code_dirty": True,
+    }
 
 
 def test_target_model_metadata_records_distilled_source_checkpoint(tmp_path):
