@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from p2.core.structured_config import PregeneratedDatasetConfig
@@ -218,12 +219,56 @@ def test_pregenerated_rebel_data_source_stages_batches_and_state(tmp_path):
     state = source.state_dict()
     assert state["value_cursors"] == [1]
     assert state["policy_cursors"] == [1]
+    assert state["datasets"][0]["path"] == str(tmp_path)
+    assert state["datasets"][0]["manifest"]["value_examples"] == 3
+    assert state["datasets"][0]["manifest"]["policy_examples"] == 3
+    assert state["datasets"][0]["value_cursor"] == 1
+    assert state["datasets"][0]["policy_cursor"] == 1
     source.load_state_dict(
         {"value_cursors": [2], "policy_cursors": [2], "current_step": 13}
     )
     assert source.state_dict()["value_cursors"] == [2]
     assert source.state_dict()["policy_cursors"] == [2]
     assert source.state_dict()["current_step"] == 13
+
+
+def test_pregenerated_rebel_data_source_rejects_manifest_mismatch(tmp_path):
+    write_rebel_solved_dataset(
+        tmp_path,
+        value_batches=[_batch("value", 0, 3)],
+        policy_batches=[_batch("policy", 10, 3)],
+    )
+    value_buffer = RebelValueBuffer(
+        capacity=8,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=torch.device("cpu"),
+    )
+    policy_buffer = RebelPolicyBuffer(
+        capacity=8,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=torch.device("cpu"),
+    )
+    source = PregeneratedRebelDataSource(
+        [PregeneratedDatasetConfig(path=str(tmp_path))],
+        value_buffer,
+        policy_buffer,
+        value_sample_count=2,
+        policy_sample_count=2,
+        num_players=2,
+        num_actions=5,
+        context_length=4,
+        generator=torch.Generator().manual_seed(7),
+        shuffle=False,
+    )
+    state = source.state_dict()
+    state["datasets"][0]["manifest"]["value_examples"] = 999
+
+    with pytest.raises(ValueError, match="checkpoint manifest mismatch"):
+        source.load_state_dict(state)
 
 
 def test_pregenerated_rebel_data_source_honors_step_windows_and_shuffle(tmp_path):

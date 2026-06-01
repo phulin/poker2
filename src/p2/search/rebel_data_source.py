@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -299,12 +300,47 @@ class PregeneratedRebelDataSource(RebelDataSource):
         return {
             "value_cursors": [state.value_cursor for state in self.datasets],
             "policy_cursors": [state.policy_cursor for state in self.datasets],
+            "datasets": [
+                {
+                    "path": str(state.dataset.path),
+                    "manifest": copy.deepcopy(state.dataset.manifest),
+                    "value_cursor": state.value_cursor,
+                    "policy_cursor": state.policy_cursor,
+                }
+                for state in self.datasets
+            ],
             "generator_state": self.generator.get_state(),
             "current_step": self.current_step,
         }
 
     def load_state_dict(self, state: dict) -> None:
+        dataset_states = state.get("datasets")
+        if dataset_states is not None:
+            if len(dataset_states) != len(self.datasets):
+                raise ValueError(
+                    "pregenerated checkpoint dataset count mismatch: "
+                    f"expected {len(self.datasets)}, got {len(dataset_states)}"
+                )
+            for index, (dataset_state, checkpoint_state) in enumerate(
+                zip(self.datasets, dataset_states, strict=True)
+            ):
+                checkpoint_manifest = checkpoint_state.get("manifest")
+                if checkpoint_manifest != dataset_state.dataset.manifest:
+                    raise ValueError(
+                        "pregenerated checkpoint manifest mismatch for "
+                        f"dataset {index}: {dataset_state.dataset.path}"
+                    )
         self.current_step = int(state.get("current_step", self.current_step))
+        if "value_cursors" not in state and dataset_states is not None:
+            state["value_cursors"] = [
+                dataset_state.get("value_cursor", 0)
+                for dataset_state in dataset_states
+            ]
+        if "policy_cursors" not in state and dataset_states is not None:
+            state["policy_cursors"] = [
+                dataset_state.get("policy_cursor", 0)
+                for dataset_state in dataset_states
+            ]
         for dataset_state, cursor in zip(
             self.datasets, state.get("value_cursors", []), strict=False
         ):
