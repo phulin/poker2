@@ -7238,6 +7238,7 @@ class ShowdownActiveCardBlockGraphRunner:
             self.beliefs_in,
             self.NUM_HANDS,
             BLOCK_H=2048,
+            num_warps=4,
         )
 
     def _scatter_indexed_values(
@@ -7250,6 +7251,7 @@ class ShowdownActiveCardBlockGraphRunner:
             latest_values,
             self.NUM_HANDS,
             BLOCK_H=2048,
+            num_warps=4,
         )
 
     def write_indexed(
