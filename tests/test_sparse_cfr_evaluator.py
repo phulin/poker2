@@ -871,6 +871,42 @@ def test_sparse_sample_leaf_uses_acting_players_sampled_hand() -> None:
     )
 
 
+def test_sparse_continuation_value_targets_replace_roots_at_target_depth() -> None:
+    device = get_device()
+    env = make_env(1, device=device)
+    cfg = make_config(env.default_bet_bins)
+    cfg.search.depth = 2
+    cfg.search.continuation_value_target_sampling = True
+    cfg.search.continuation_value_target_min_depth = 1
+    cfg.search.continuation_value_target_max_depth = 1
+    cfg.search.continuation_value_targets_replace_roots = True
+
+    evaluator, _, _ = make_sparse_evaluator(env=env, cfg=cfg, device=device)
+    evaluator.initialize_subgame(env, torch.tensor([0], device=device))
+    evaluator.initialize_policy_and_beliefs()
+
+    evaluator.policy_probs_sample.zero_()
+    root_children = torch.arange(
+        evaluator.child_offsets[0],
+        evaluator.child_offsets[0] + evaluator.child_count[0],
+        device=device,
+    )
+    call_children = root_children[evaluator.action_from_parent[root_children] == 1]
+    assert call_children.numel() == 1
+    evaluator.policy_probs_sample[call_children[0]] = 1.0
+    evaluator.beliefs_sample[:] = evaluator.beliefs
+
+    evaluator.sample_leaves(training_mode=True)
+    value_batch, _, _ = evaluator.training_data()
+
+    assert evaluator.continuation_value_target_indices.tolist() == [
+        int(call_children[0].item())
+    ]
+    assert len(value_batch) == 1
+    assert value_batch.statistics["continuation_value_target"].tolist() == [True]
+    assert value_batch.statistics["node_depth"].tolist() == [1]
+
+
 def test_sparse_allin_call_leaf_does_not_create_descendants() -> None:
     device = get_device()
     env = make_env(1, device=device)

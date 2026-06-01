@@ -356,6 +356,38 @@ class CFREvaluator(ABC):
             )
         )
 
+    def _continuation_value_target_sampling_enabled(self) -> bool:
+        cfg = getattr(self, "cfg", None)
+        search_cfg = getattr(cfg, "search", None)
+        return bool(getattr(search_cfg, "continuation_value_target_sampling", False))
+
+    def _continuation_value_target_replace_roots(self) -> bool:
+        cfg = getattr(self, "cfg", None)
+        search_cfg = getattr(cfg, "search", None)
+        return bool(
+            getattr(search_cfg, "continuation_value_targets_replace_roots", False)
+        )
+
+    def _continuation_value_target_streets(self) -> tuple[int, ...]:
+        cfg = getattr(self, "cfg", None)
+        search_cfg = getattr(cfg, "search", None)
+        streets = getattr(search_cfg, "continuation_value_target_streets", (0,))
+        if streets is None:
+            return ()
+        return tuple(int(street) for street in streets)
+
+    def _continuation_value_target_depth_bounds(self) -> tuple[int, int] | None:
+        cfg = getattr(self, "cfg", None)
+        search_cfg = getattr(cfg, "search", None)
+        min_depth = int(getattr(search_cfg, "continuation_value_target_min_depth", 0))
+        max_depth_cfg = getattr(search_cfg, "continuation_value_target_max_depth", None)
+        max_depth = self.tree_depth if max_depth_cfg is None else int(max_depth_cfg)
+        min_depth = max(0, min_depth)
+        max_depth = min(self.tree_depth, max_depth)
+        if max_depth < min_depth:
+            return None
+        return min_depth, max_depth
+
     def _ensure_allin_payoff_resolver(self) -> AllInPayoffResolver:
         resolver = getattr(self, "allin_payoff_resolver", None)
         if resolver is None:
@@ -2061,20 +2093,47 @@ class CFREvaluator(ABC):
         source_values = (
             self.latest_values if self.use_final_policy_values else self.values_avg
         )
-        value_targets = source_values[:N].clamp(-1.0, 1.0)
+        root_value_targets = source_values[:N].clamp(-1.0, 1.0)
+        root_indices = torch.arange(N, dtype=torch.long, device=self.device)
+        continuation_value_indices = getattr(
+            self,
+            "continuation_value_target_indices",
+            torch.empty(0, dtype=torch.long, device=self.device),
+        )
+        if (
+            self._continuation_value_target_sampling_enabled()
+            and continuation_value_indices.numel() > 0
+        ):
+            if self._continuation_value_target_replace_roots():
+                value_node_indices = continuation_value_indices.contiguous()
+            else:
+                value_node_indices = torch.cat(
+                    (root_indices, continuation_value_indices.contiguous()), dim=0
+                )
+        else:
+            value_node_indices = root_indices
+        value_targets = source_values[value_node_indices].clamp(-1.0, 1.0)
 
         policy_encoder = getattr(self, "policy_feature_encoder", self.feature_encoder)
         value_encoder = getattr(self, "value_feature_encoder", self.feature_encoder)
         policy_features = policy_encoder.encode(
             self.beliefs_avg, pre_chance_node=False
         )[:top]
-        value_features = value_encoder.encode(
-            self.beliefs_avg, pre_chance_node=False
-        )[:top]
+        if torch.equal(value_node_indices, root_indices):
+            value_features_all = value_encoder.encode(
+                self.beliefs_avg, pre_chance_node=False
+            )[:top]
+            value_features = value_features_all[:N]
+        else:
+            value_features_all = value_encoder.encode(
+                self.beliefs_avg, pre_chance_node=False
+            )
+            value_features = value_features_all[value_node_indices]
+        root_value_features = value_features_all[:N]
         bin_amounts, _ = self.env.legal_bins_amounts_and_mask()
         legal_masks = self.legal_mask
-        node_depth = torch.zeros(top, dtype=torch.long, device=self.device)
-        for depth in range(self.tree_depth):
+        node_depth = torch.zeros(self.total_nodes, dtype=torch.long, device=self.device)
+        for depth in range(len(self.depth_offsets) - 1):
             node_depth[self.depth_offsets[depth] : self.depth_offsets[depth + 1]] = (
                 depth
             )
@@ -2087,27 +2146,64 @@ class CFREvaluator(ABC):
             "pot": self.env.pot,
             "bet_amounts": bin_amounts,
             "node_depth": node_depth,
+            "actions_this_round": self.env.actions_this_round,
         }
 
         exploit_stats = self._compute_exploitability()
         exploit_mbbg = self._local_exploitability_mbbg(
             exploit_stats.local_exploitability
         )
+        root_leaf_counts = self._root_leaf_target_source_counts(N)
 
-        value_statistics = {key: statistics[key][:N] for key in statistics}
+        value_statistics = {
+            key: statistics[key][value_node_indices] for key in statistics
+        }
         value_statistics["target_source"] = torch.full(
-            (N,),
+            (value_node_indices.numel(),),
             TARGET_SOURCE_CFR_BACKUP,
             dtype=torch.long,
             device=self.device,
         )
-        value_statistics["local_exploitability"] = exploit_stats.local_exploitability
-        value_statistics["local_exploitability_mbbg"] = exploit_mbbg
-        value_statistics["local_best_response_values"] = (
-            exploit_stats.local_best_response_values
+        root_value_mask = value_node_indices < N
+        value_statistics["local_exploitability"] = torch.zeros(
+            value_node_indices.numel(), dtype=self.float_dtype, device=self.device
         )
-        for key, value in self._root_leaf_target_source_counts(N).items():
-            value_statistics[key] = value
+        value_statistics["local_exploitability_mbbg"] = torch.zeros(
+            value_node_indices.numel(), dtype=self.float_dtype, device=self.device
+        )
+        value_statistics["local_best_response_values"] = torch.zeros(
+            (value_node_indices.numel(),)
+            + tuple(exploit_stats.local_best_response_values.shape[1:]),
+            dtype=self.float_dtype,
+            device=self.device,
+        )
+        if root_value_mask.any():
+            root_value_indices = value_node_indices[root_value_mask]
+            value_statistics["local_exploitability"][root_value_mask] = (
+                exploit_stats.local_exploitability[root_value_indices]
+            )
+            value_statistics["local_exploitability_mbbg"][root_value_mask] = (
+                exploit_mbbg[root_value_indices]
+            )
+            value_statistics["local_best_response_values"][root_value_mask] = (
+                exploit_stats.local_best_response_values[root_value_indices]
+            )
+        continuation_value_mask = torch.zeros(
+            value_node_indices.numel(), dtype=torch.bool, device=self.device
+        )
+        if continuation_value_indices.numel() > 0:
+            continuation_value_mask = torch.isin(
+                value_node_indices,
+                continuation_value_indices,
+            )
+        value_statistics["continuation_value_target"] = continuation_value_mask
+        for key, value in root_leaf_counts.items():
+            stat = torch.zeros(
+                value_node_indices.numel(), dtype=value.dtype, device=self.device
+            )
+            if root_value_mask.any():
+                stat[root_value_mask] = value[value_node_indices[root_value_mask]]
+            value_statistics[key] = stat
 
         # Policy batch gets all valid, non-leaf states.
         # Use valid_mask directly (works for both: sparse has all-ones, dense has computed mask)
@@ -2121,9 +2217,9 @@ class CFREvaluator(ABC):
         ]
 
         value_batch = RebelBatch(
-            features=value_features[:N],
+            features=value_features,
             value_targets=value_targets,
-            legal_masks=legal_masks[:N],
+            legal_masks=legal_masks[value_node_indices],
             statistics=value_statistics,
         )
 
@@ -2140,9 +2236,13 @@ class CFREvaluator(ABC):
                 RuntimeWarning,
                 stacklevel=2,
             )
-        root_nodes = (street_root == 0) & (actions_root == 0)
         if exclude_start:
-            value_batch = value_batch[~root_nodes]
+            value_start_nodes = (
+                (self.env.street[value_node_indices] == 0)
+                & (self.env.actions_this_round[value_node_indices] == 0)
+                & ~value_statistics["continuation_value_target"]
+            )
+            value_batch = value_batch[~value_start_nodes]
 
         policy_batch = RebelBatch(
             features=policy_features[valid_top],
@@ -2158,10 +2258,28 @@ class CFREvaluator(ABC):
         pre_beliefs = self.root_pre_chance_beliefs[:N].reshape(N, -1)
         pre_features_root.beliefs = pre_beliefs
 
-        value_targets_pre = value_targets.clone()
+        value_targets_pre = root_value_targets.clone()
         value_statistics_pre = {
-            key: value_statistics[key].clone() for key in value_statistics
+            key: statistics[key][:N].clone() for key in statistics
         }
+        value_statistics_pre["target_source"] = torch.full(
+            (N,),
+            TARGET_SOURCE_CHANCE_EXPECTATION,
+            dtype=torch.long,
+            device=self.device,
+        )
+        value_statistics_pre["local_exploitability"] = (
+            exploit_stats.local_exploitability.clone()
+        )
+        value_statistics_pre["local_exploitability_mbbg"] = exploit_mbbg.clone()
+        value_statistics_pre["local_best_response_values"] = (
+            exploit_stats.local_best_response_values.clone()
+        )
+        value_statistics_pre["continuation_value_target"] = torch.zeros(
+            N, dtype=torch.bool, device=self.device
+        )
+        for key, value in root_leaf_counts.items():
+            value_statistics_pre[key] = value.clone()
         value_statistics_pre["board"] = self.env.last_board_indices[:N].clone()
         prev_street = torch.where(
             (street_root > 0) & (street_root < 4) & (actions_root == 0),
@@ -2183,7 +2301,7 @@ class CFREvaluator(ABC):
         if turn_river_mask.any():
             expected_turn_river = self.chance_helper.single_card_chance_values(
                 torch.where(turn_river_mask)[0],
-                value_features[:N],
+                root_value_features,
                 self.root_pre_chance_beliefs,
                 self.env.last_board_indices,
             )
@@ -2193,7 +2311,7 @@ class CFREvaluator(ABC):
         if flop_mask.any():
             expected_flop = self.chance_helper.flop_chance_values(
                 torch.where(flop_mask)[0],
-                value_features[:N],
+                root_value_features,
                 self.root_pre_chance_beliefs,
             )
             value_targets_pre[flop_mask] = expected_flop

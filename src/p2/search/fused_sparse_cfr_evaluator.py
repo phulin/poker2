@@ -2533,6 +2533,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def sample_leaves(self, training_mode: bool) -> PublicBeliefState:
         if (
             not self._sample_leaf_enabled
+            or self._continuation_value_target_sampling_enabled()
             or self._sample_leaf_indices_padded is None
             or self._sample_leaf_beliefs_padded is None
             or self._sample_leaf_ready_padded is None

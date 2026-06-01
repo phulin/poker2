@@ -166,6 +166,9 @@ class SparseCFREvaluator(CFREvaluator):
         self.value_feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder | None = None
 
         self.sampled_leaf_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        self.continuation_value_target_indices = torch.empty(
+            0, dtype=torch.long, device=self.device
+        )
         self.t_sample = torch.empty(0, dtype=torch.long, device=self.device)
         self.sample_count = 0
         self.next_pbs: PublicBeliefState | None = None
@@ -419,6 +422,9 @@ class SparseCFREvaluator(CFREvaluator):
 
         N = self.root_nodes
         top = self.depth_offsets[-2]
+        self.continuation_value_target_indices = torch.empty(
+            0, dtype=torch.long, device=self.device
+        )
 
         players = torch.randint(
             0,
@@ -465,13 +471,44 @@ class SparseCFREvaluator(CFREvaluator):
 
         # start with root nodes and descend to leaves
         sampled_nodes = torch.arange(N, device=self.device)
+        target_sampling = (
+            training_mode and self._continuation_value_target_sampling_enabled()
+        )
+        target_enabled = torch.zeros(N, dtype=torch.bool, device=self.device)
+        target_depths = torch.zeros(N, dtype=torch.long, device=self.device)
+        abort_nodes = torch.full((N,), -1, dtype=torch.long, device=self.device)
+        if target_sampling:
+            bounds = self._continuation_value_target_depth_bounds()
+            target_streets = self._continuation_value_target_streets()
+            if bounds is not None and target_streets:
+                min_depth, max_depth = bounds
+                root_street = self.env.street[:N]
+                for street in target_streets:
+                    target_enabled |= root_street == street
+                if target_enabled.any():
+                    depth_draws = torch.randint(
+                        min_depth,
+                        max_depth + 1,
+                        (N,),
+                        generator=self.generator,
+                        device=self.device,
+                    )
+                    target_depths = torch.where(target_enabled, depth_draws, target_depths)
+                    hit_root = (
+                        target_enabled
+                        & (target_depths == 0)
+                        & (~self.env.done[sampled_nodes])
+                        & (~self.allin_call_mask[sampled_nodes])
+                    )
+                    abort_nodes[hit_root] = sampled_nodes[hit_root]
 
         depth = 0
-        active_mask = ~effective_leaf_mask[sampled_nodes]
+        active_mask = ~effective_leaf_mask[sampled_nodes] & (abort_nodes < 0)
         while active_mask.any():
             assert depth <= self.max_depth
             active_nodes = sampled_nodes[active_mask]
             active_count = active_nodes.numel()
+            active_root_indices = torch.where(active_mask)[0]
 
             to_act = self.env.to_act[active_nodes]
             player_mask = players[active_mask]
@@ -501,16 +538,40 @@ class SparseCFREvaluator(CFREvaluator):
             child_actions = child_action_index[active_nodes, actions]
             sampled_nodes[active_mask] = child_offsets + child_actions
 
-            # remove node from the active mask once it's a leaf
-            active_mask = ~effective_leaf_mask[sampled_nodes]
             depth += 1
+            if target_sampling:
+                reached_nodes = sampled_nodes[active_root_indices]
+                target_hit = (
+                    target_enabled[active_root_indices]
+                    & (target_depths[active_root_indices] == depth)
+                    & (~self.env.done[reached_nodes])
+                    & (~self.allin_call_mask[reached_nodes])
+                )
+                if target_hit.any():
+                    hit_roots = active_root_indices[target_hit]
+                    abort_nodes[hit_roots] = reached_nodes[target_hit]
 
-        assert effective_leaf_mask[sampled_nodes].all()
-        assert (~self.env.done[sampled_nodes]).all()
-        assert (~self.allin_call_mask[sampled_nodes]).all()
+            # remove node from the active mask once it's a leaf
+            active_mask = ~effective_leaf_mask[sampled_nodes] & (abort_nodes < 0)
+
+        continue_roots = abort_nodes < 0
+        continue_nodes = sampled_nodes[continue_roots]
+        assert effective_leaf_mask[continue_nodes].all()
+        assert (~self.env.done[continue_nodes]).all()
+        assert (~self.allin_call_mask[continue_nodes]).all()
+
+        if target_sampling:
+            continuation_value_target_indices = abort_nodes[abort_nodes >= 0]
+            if not self._continuation_value_target_replace_roots():
+                continuation_value_target_indices = continuation_value_target_indices[
+                    continuation_value_target_indices >= N
+                ]
+            self.continuation_value_target_indices = (
+                continuation_value_target_indices.contiguous()
+            )
 
         # Don't sample root nodes.
-        sampled_continue = sampled_nodes[sampled_nodes >= N]
+        sampled_continue = continue_nodes[continue_nodes >= N]
         pbs = PublicBeliefState.from_proto(
             env_proto=self.env,
             beliefs=self.beliefs_sample[sampled_continue],

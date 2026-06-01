@@ -322,6 +322,11 @@ class SearchConfig:
     street_model_checkpoints: dict[str, str] = field(default_factory=dict)
     bet_bins_by_depth: list[list[float]] | None = None
     allin_by_depth: list[bool] | None = None
+    continuation_value_target_sampling: bool = False
+    continuation_value_target_streets: list[int] = field(default_factory=lambda: [0])
+    continuation_value_target_min_depth: int = 0
+    continuation_value_target_max_depth: int | None = None
+    continuation_value_targets_replace_roots: bool = False
 
 
 @dataclass

@@ -249,14 +249,14 @@ Replace `sample_leaves` for preflop with two outputs:
 - preflop cutoff samples for training the preflop model;
 - closed-preflop rows for heads-up handoff.
 
-Use stratified quotas rather than a simple Bernoulli hazard:
+Use target-depth continuation sampling rather than a simple Bernoulli hazard:
 
-1. Build candidate masks by depth for nonterminal street-0 nodes.
-2. For each root, sample one path under `policy_probs_sample`.
-3. Along each path, record visited nodes by depth.
-4. Draw cutoff nodes to match `preflop.cutoff.stratified_quotas`.
-5. Always include forced-depth nodes when no earlier cutoff is selected.
-6. Continue a configurable fraction of paths to closed preflop for handoff generation.
+1. For each root, sample a target depth uniformly from the configured range.
+2. Descend one path under `policy_probs_sample`, with the existing epsilon-uniform exploration mix.
+3. Before continuing from a node at the sampled target depth, abort that path and emit that node as a preflop value target.
+4. If a path reaches a fold/all-in/closed-preflop terminal before the target depth, do not turn that terminal into an arbitrary-state `S_preflop` target; route it to the terminal/handoff machinery instead.
+5. When `continuation_value_targets_replace_roots` is enabled, use these generated abort nodes as the value batch instead of the original roots. This keeps value examples balanced by generation-time depth sampling rather than replay-buffer stratification.
+6. Continue non-aborted paths to closed preflop for handoff generation.
 
 This avoids a replay buffer dominated by shallow opening states.
 
@@ -659,7 +659,11 @@ Postflop:
 - `preflop.num_players = 4` for first real experiments, then scale to 6.
 - `preflop.search.depth = 4`.
 - `preflop.search.iterations = 64`.
-- `preflop.cutoff.stratified_quotas = [0.10, 0.20, 0.35, 0.35]`.
+- `search.continuation_value_target_sampling = true`.
+- `search.continuation_value_target_streets = [0]`.
+- `search.continuation_value_target_min_depth = 0`.
+- `search.continuation_value_target_max_depth = 4`.
+- `search.continuation_value_targets_replace_roots = true`.
 - `preflop.invariant.max_players_to_flop = 2` (all-in seats included; jam-or-fold behind an all-in).
 - `preflop.handoff.flop_samples_per_closed_row = 1` during training.
 - `preflop.allin.board_sample_count = 128` for preflop called all-ins at first.
