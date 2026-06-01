@@ -5356,15 +5356,11 @@ if triton is not None:
         card_cumsum_ptr,  # [M, 2, NUM_CARDS, MC]
         extra_index_ptr,  # [M] int64
         sorted_indices_ptr,  # [E, H_ACTIVE]
-        L_idx_ptr,
-        R_idx_ptr,
+        rank_bounds_packed_ptr,
         scale_factor_ptr,  # [M, 2] — potential / scale
-        off_L_c1_ptr,
-        off_L_c2_ptr,
-        off_R_c1_ptr,
-        off_R_c2_ptr,
-        off_last_c1_ptr,
-        off_last_c2_ptr,
+        off_L_pair_ptr,
+        off_R_pair_ptr,
+        off_last_pair_ptr,
         ev_out_ptr,  # [M, 2, NUM_HANDS]
         H_ACTIVE,
         NUM_HANDS,
@@ -5381,39 +5377,40 @@ if triton is not None:
         hand_idx = tl.load(
             sorted_indices_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
         )
-        L = tl.load(L_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
-        R = tl.load(R_idx_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0)
-        off_L_c1 = tl.load(
-            off_L_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
+        rank_bounds = tl.load(
+            rank_bounds_packed_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
         ).to(tl.int32)
-        off_L_c2 = tl.load(
-            off_L_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
-        ).to(tl.int32)
-        off_R_c1 = tl.load(
-            off_R_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
-        ).to(tl.int32)
-        off_R_c2 = tl.load(
-            off_R_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
-        ).to(tl.int32)
-        off_last_c1 = tl.load(
-            off_last_c1_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
-        ).to(tl.int32)
-        off_last_c2 = tl.load(
-            off_last_c2_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=-1
-        ).to(tl.int32)
+        L = rank_bounds & 0xFFFF
+        R = (rank_bounds >> 16) & 0xFFFF
 
-        has_L1 = off_L_c1 >= 0
-        has_L2 = off_L_c2 >= 0
-        has_R1 = off_R_c1 >= 0
-        has_R2 = off_R_c2 >= 0
-        has_last1 = off_last_c1 >= 0
-        has_last2 = off_last_c2 >= 0
-        idx_L_c1 = tl.maximum(off_L_c1, 0)
-        idx_L_c2 = tl.maximum(off_L_c2, 0)
-        idx_R_c1 = tl.maximum(off_R_c1, 0)
-        idx_R_c2 = tl.maximum(off_R_c2, 0)
-        idx_last_c1 = tl.maximum(off_last_c1, 0)
-        idx_last_c2 = tl.maximum(off_last_c2, 0)
+        off_L_pair = tl.load(
+            off_L_pair_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        off_R_pair = tl.load(
+            off_R_pair_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        off_last_pair = tl.load(
+            off_last_pair_ptr + extra * H_ACTIVE + k_offs, mask=mask_k, other=0
+        ).to(tl.int32)
+        enc_L_c1 = off_L_pair & 0xFFFF
+        enc_L_c2 = (off_L_pair >> 16) & 0xFFFF
+        enc_R_c1 = off_R_pair & 0xFFFF
+        enc_R_c2 = (off_R_pair >> 16) & 0xFFFF
+        enc_last_c1 = off_last_pair & 0xFFFF
+        enc_last_c2 = (off_last_pair >> 16) & 0xFFFF
+
+        has_L1 = enc_L_c1 > 0
+        has_L2 = enc_L_c2 > 0
+        has_R1 = enc_R_c1 > 0
+        has_R2 = enc_R_c2 > 0
+        has_last1 = enc_last_c1 > 0
+        has_last2 = enc_last_c2 > 0
+        idx_L_c1 = tl.maximum(enc_L_c1 - 1, 0)
+        idx_L_c2 = tl.maximum(enc_L_c2 - 1, 0)
+        idx_R_c1 = tl.maximum(enc_R_c1 - 1, 0)
+        idx_R_c2 = tl.maximum(enc_R_c2 - 1, 0)
+        idx_last_c1 = tl.maximum(enc_last_c1 - 1, 0)
+        idx_last_c2 = tl.maximum(enc_last_c2 - 1, 0)
 
         for hero in tl.static_range(2):
             p_base = P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1)
@@ -6054,6 +6051,19 @@ def precompute_showdown_active_extras(
     off_last_c1 = _flat_offsets(c1_local, slot_last_c1).to(torch.int16).contiguous()
     off_last_c2 = _flat_offsets(c2_local, slot_last_c2).to(torch.int16).contiguous()
 
+    rank_bounds_packed = (
+        l_idx.to(torch.int32) | (r_idx.to(torch.int32) << 16)
+    ).contiguous()
+
+    def _pack_encoded_offsets(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        a_enc = a.to(torch.int32) + 1
+        b_enc = b.to(torch.int32) + 1
+        return (a_enc | (b_enc << 16)).contiguous()
+
+    off_l_pair = _pack_encoded_offsets(off_l_c1, off_l_c2)
+    off_r_pair = _pack_encoded_offsets(off_r_c1, off_r_c2)
+    off_last_pair = _pack_encoded_offsets(off_last_c1, off_last_c2)
+
     occ_pos = card_positions.to(torch.long)
     valid_occ = occ_pos < active_hands
     safe_occ = occ_pos.clamp(max=active_hands - 1)
@@ -6116,6 +6126,10 @@ def precompute_showdown_active_extras(
         "off_R_c2": off_r_c2,
         "off_last_c1": off_last_c1,
         "off_last_c2": off_last_c2,
+        "rank_bounds_packed": rank_bounds_packed,
+        "off_L_pair": off_l_pair,
+        "off_R_pair": off_r_pair,
+        "off_last_pair": off_last_pair,
         "occ_slot_L": occ_slot_l.contiguous(),
         "occ_slot_R": occ_slot_r.contiguous(),
         "card_slot_count": card_slot_count,
@@ -7150,15 +7164,11 @@ class ShowdownActiveCardBlockGraphRunner:
             self.cum_both,
             extra_indices,
             e["sorted_indices"],
-            e["L_idx"],
-            e["R_idx"],
+            e["rank_bounds_packed"],
             e["scale_factor"],
-            e["off_L_c1"],
-            e["off_L_c2"],
-            e["off_R_c1"],
-            e["off_R_c2"],
-            e["off_last_c1"],
-            e["off_last_c2"],
+            e["off_L_pair"],
+            e["off_R_pair"],
+            e["off_last_pair"],
             self.ev_out,
             self.H,
             self.NUM_HANDS,
