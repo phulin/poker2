@@ -46,6 +46,8 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
             net="S_river",
             num_steps=3,
             closing_checkpoint="outputs/E_turn.pt",
+            data_overrides={"live_root_source": "random_river"},
+            search_overrides={"iterations": 17},
         )
     }
 
@@ -57,6 +59,8 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
     assert stage_cfg.num_steps == 3
     assert stage_cfg.checkpoint_dir == str(tmp_path / "river")
     assert stage_cfg.search.closing_leaf_checkpoint == "outputs/E_turn.pt"
+    assert stage_cfg.data.live_root_source == "random_river"
+    assert stage_cfg.search.iterations == 17
     assert kwargs["start_step"] == 0
     assert kwargs["stop_step"] == 3
     assert kwargs["stage_tag"] == "river"
@@ -82,3 +86,23 @@ def test_curriculum_distill_substep_is_explicitly_not_implemented(tmp_path) -> N
 
     with pytest.raises(NotImplementedError, match="E_X distiller"):
         curriculum_cli.train_rebel_curriculum(cfg)
+
+
+def test_curriculum_substep_rejects_unknown_overrides(tmp_path) -> None:
+    cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
+    cfg.curriculum.substeps = {
+        "river": CurriculumSubstepConfig(
+            kind="train",
+            net="S_river",
+            num_steps=1,
+            data_overrides={"not_a_data_field": "x"},
+        )
+    }
+
+    with pytest.raises(ValueError, match="Unknown river.data override"):
+        curriculum_cli._stage_config(
+            cfg,
+            "river",
+            cfg.curriculum.substeps["river"],
+            resume_from=None,
+        )

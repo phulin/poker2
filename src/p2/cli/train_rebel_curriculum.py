@@ -34,6 +34,13 @@ def _stage_wandb_name(cfg: Config, substep_name: str) -> str | None:
     return substep_name
 
 
+def _apply_overrides(target: object, overrides: dict[str, Any], *, label: str) -> None:
+    for key, value in overrides.items():
+        if not hasattr(target, key):
+            raise ValueError(f"Unknown {label} override: {key}")
+        setattr(target, key, value)
+
+
 def _checkpoint_metadata(
     substep_name: str, substep: CurriculumSubstepConfig
 ) -> dict[str, object]:
@@ -93,6 +100,12 @@ def _stage_config(
     )
     stage_cfg.resume_from = resume_from
     stage_cfg.wandb_name = _stage_wandb_name(cfg, substep_name)
+    _apply_overrides(
+        stage_cfg.data, substep.data_overrides, label=f"{substep_name}.data"
+    )
+    _apply_overrides(
+        stage_cfg.search, substep.search_overrides, label=f"{substep_name}.search"
+    )
     closing_checkpoint = substep.closing_checkpoint
     if closing_checkpoint is None and promoted is not None and substep.closing_net:
         closing_checkpoint = promoted.get(substep.closing_net)
