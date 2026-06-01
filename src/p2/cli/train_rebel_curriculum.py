@@ -244,7 +244,7 @@ def _run_train_substep(
             stop_step=stage_cfg.num_steps,
             stage_tag=substep_name,
             checkpoint_metadata=_checkpoint_metadata(substep_name, substep),
-    )
+        )
 
     final_path = os.path.join(stage_cfg.checkpoint_dir, "rebel_final.pt")
     promoted_path = _promote_checkpoint(cfg, substep, final_path)
