@@ -3,6 +3,7 @@ import torch
 
 from p2.core.structured_config import (
     Config,
+    PregeneratedDatasetConfig,
     PolicyLossType,
     PolicyNodeWeighting,
     ValueHeadType,
@@ -20,6 +21,7 @@ from p2.models.model_output import ModelOutput
 from p2.rl.cfr_trainer import RebelCFRTrainer, _value_samples_per_step
 from p2.rl.losses import RebelSupervisedLoss
 from p2.rl.rebel_batch import RebelBatch
+from p2.search.rebel_solved_dataset import write_rebel_solved_dataset
 
 
 def make_env(num_envs: int = 4) -> HUNLTensorEnv:
@@ -44,11 +46,11 @@ def test_value_samples_per_step_allows_fractional_reuse_goal():
         _value_samples_per_step(batch_size=512, value_reuse_goal=0.0)
 
 
-def test_rebel_cfr_trainer_rejects_unimplemented_data_modes():
+def test_rebel_cfr_trainer_rejects_unimplemented_hybrid_mode():
     cfg = Config(device="cpu")
-    cfg.data.mode = "pregenerated"
+    cfg.data.mode = "hybrid"
 
-    with pytest.raises(NotImplementedError, match="data.mode=live"):
+    with pytest.raises(NotImplementedError, match="data.mode=live or"):
         RebelCFRTrainer(cfg, torch.device("cpu"))
 
 
@@ -69,6 +71,61 @@ def _tiny_rebel_cfg() -> Config:
     cfg.search.warm_start_iterations = 0
     cfg.search.dcfr_plus_delay = 0
     return cfg
+
+
+def _tiny_solved_batch(cfg: Config, *, stream: str, start: int, count: int) -> RebelBatch:
+    rows = torch.arange(start, start + count)
+    features = MLPFeatures(
+        context=torch.stack(
+            [rows.float(), rows.float() + 1.0, rows.float() + 2.0, rows.float() + 3.0],
+            dim=1,
+        ),
+        street=rows.remainder(4).long(),
+        to_act=rows.remainder(2).long(),
+        board=torch.full((count, 5), -1, dtype=torch.long),
+        beliefs=torch.full((count, 2 * NUM_HANDS), 1.0 / NUM_HANDS),
+    )
+    kwargs = {}
+    if stream == "value":
+        kwargs["value_targets"] = torch.zeros(count, 2, NUM_HANDS)
+    else:
+        policy_targets = torch.zeros(count, NUM_HANDS, cfg.model.num_actions)
+        policy_targets[..., 1] = 1.0
+        kwargs["policy_targets"] = policy_targets
+    return RebelBatch(
+        features=features,
+        legal_masks=torch.ones(count, cfg.model.num_actions, dtype=torch.bool),
+        statistics={"node_depth": torch.zeros(count, dtype=torch.long)},
+        **kwargs,
+    )
+
+
+def test_rebel_cfr_trainer_runs_pregenerated_mode_one_step(tmp_path):
+    cfg = _tiny_rebel_cfg()
+    cfg.data.mode = "pregenerated"
+    cfg.num_steps = 1
+    cfg.train.batch_size = 2
+    cfg.train.episodes_per_step = 1
+    cfg.train.replay_buffer_batches = 2
+    cfg.train.value_reuse_goal = 1
+    cfg.data.pregenerated.value_batch_size = 2
+    cfg.data.pregenerated.policy_batch_size = 2
+    cfg.data.pregenerated.datasets = [PregeneratedDatasetConfig(path=str(tmp_path))]
+    write_rebel_solved_dataset(
+        tmp_path,
+        value_batches=[_tiny_solved_batch(cfg, stream="value", start=0, count=4)],
+        policy_batches=[_tiny_solved_batch(cfg, stream="policy", start=10, count=4)],
+    )
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    metrics = trainer.train_step(0)
+
+    assert metrics["step"] == 1
+    assert torch.isfinite(torch.tensor(metrics["value_loss"]))
+    assert torch.isfinite(torch.tensor(metrics["policy_loss"]))
+    assert trainer.data_generator is None
+    assert len(trainer.value_buffer) >= cfg.train.batch_size
+    assert len(trainer.policy_buffer) >= cfg.train.batch_size
 
 
 def test_rebel_cfr_trainer_wires_random_postflop_root_sources():

@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import torch
+
+from p2.core.structured_config import PregeneratedDatasetConfig
+from p2.env.card_utils import NUM_HANDS
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.rl.rebel_batch import RebelBatch
+from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
 from p2.search.rebel_data_source import LiveRebelDataSource
+from p2.search.rebel_data_source import PregeneratedRebelDataSource
+from p2.search.rebel_solved_dataset import write_rebel_solved_dataset
 
 
 class _FakeBuffer:
@@ -74,3 +83,82 @@ def test_live_rebel_data_source_delegates_generation_sampling_and_state():
     assert source.state_dict() == {"cursor": 3}
     source.load_state_dict({"cursor": 4})
     assert generator.loaded_state == {"cursor": 4}
+
+
+def _batch(stream: str, start: int, count: int) -> RebelBatch:
+    rows = torch.arange(start, start + count)
+    features = MLPFeatures(
+        context=torch.stack(
+            [rows.float(), rows.float() + 1.0, rows.float() + 2.0, rows.float() + 3.0],
+            dim=1,
+        ),
+        street=rows.remainder(4).long(),
+        to_act=rows.remainder(2).long(),
+        board=torch.full((count, 5), -1, dtype=torch.long),
+        beliefs=torch.full((count, 2 * NUM_HANDS), 1.0 / NUM_HANDS),
+    )
+    kwargs = {}
+    if stream == "value":
+        kwargs["value_targets"] = torch.full((count, 2, NUM_HANDS), float(start))
+    else:
+        policy_targets = torch.zeros(count, NUM_HANDS, 5)
+        policy_targets[..., 1] = 1.0
+        kwargs["policy_targets"] = policy_targets
+    return RebelBatch(
+        features=features,
+        legal_masks=torch.ones(count, 5, dtype=torch.bool),
+        statistics={"node_depth": rows},
+        **kwargs,
+    )
+
+
+def test_pregenerated_rebel_data_source_stages_batches_and_state(tmp_path):
+    write_rebel_solved_dataset(
+        tmp_path,
+        value_batches=[_batch("value", 0, 3)],
+        policy_batches=[_batch("policy", 10, 3)],
+    )
+    value_buffer = RebelValueBuffer(
+        capacity=8,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=torch.device("cpu"),
+    )
+    policy_buffer = RebelPolicyBuffer(
+        capacity=8,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=torch.device("cpu"),
+    )
+    source = PregeneratedRebelDataSource(
+        [PregeneratedDatasetConfig(path=str(tmp_path))],
+        value_buffer,
+        policy_buffer,
+        value_sample_count=2,
+        policy_sample_count=2,
+        num_players=2,
+        num_actions=5,
+        context_length=4,
+        generator=torch.Generator().manual_seed(7),
+    )
+
+    fresh_value, fresh_policy = source.prepare_step(0)
+    assert len(fresh_value) == 2
+    assert len(fresh_policy) == 2
+    assert len(value_buffer) == 2
+    assert len(policy_buffer) == 2
+
+    source.ensure_min_samples(value_samples=4, policy_samples=4)
+    assert len(value_buffer) >= 4
+    assert len(policy_buffer) >= 4
+    assert len(source.sample_value(2, None)) == 2
+    assert len(source.sample_policy(2, None)) == 2
+
+    state = source.state_dict()
+    assert state["value_cursors"] == [1]
+    assert state["policy_cursors"] == [1]
+    source.load_state_dict({"value_cursors": [2], "policy_cursors": [2]})
+    assert source.state_dict()["value_cursors"] == [2]
+    assert source.state_dict()["policy_cursors"] == [2]
