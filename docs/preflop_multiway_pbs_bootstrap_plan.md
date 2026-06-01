@@ -3,7 +3,7 @@
 ## Goal
 Use `PBSEnv` to solve and train multiway preflop public-belief states, then hand off only heads-up flop roots to the existing postflop ReBeL/CFR stack. The preflop model and main postflop model should be separate:
 
-- Preflop model: trained only on preflop public states, including arbitrary-depth cutoffs.
+- Preflop model (`S_preflop` / `S_0`): trained only on preflop public states, including arbitrary-depth cutoffs. Unlike postflop `S_X` nets, `S_0` is an arbitrary preflop public-state model, not only a start-of-street model.
 - Main model: trained only on flop, turn, river, and showdown-adjacent heads-up states.
 - Handoff boundary: a two-player flop `PublicBeliefState` generated from a multiway preflop solve.
 
@@ -84,6 +84,11 @@ preflop:
     cfr_type: linear
     cfr_avg: true
     sample_epsilon: 0.15
+    continuation_value_target_sampling: true
+    continuation_value_target_streets: [0]
+    continuation_value_target_min_depth: 0
+    continuation_value_target_max_depth: 5
+    continuation_value_targets_replace_roots: true
     bet_bins_by_depth:
       - [0.5, 1.0, 2.0]
       - [0.5, 1.0, 2.0, 4.0]
@@ -91,12 +96,6 @@ preflop:
       - [1.0, 2.0]
       - []
     allin_by_depth: [true, true, true, false, false]
-  cutoff:
-    min_depth: 1
-    force_depth: 5
-    stratified_quotas: [0.05, 0.15, 0.25, 0.30, 0.25]
-    include_root_values: true
-    target_kind: avg_policy
   invariant:
     max_players_to_flop: 2         # legal-action cap: ≤2 non-folded seats (all-in included) reach any flop
   handoff:
@@ -181,7 +180,7 @@ Then classify leaves:
 - `fold_terminal`: `env.done` and exactly one live player.
 - `allin_terminal`: betting cannot continue and at least two live/all-in players need showdown EV.
 - `closed_preflop`: `street` advanced from `0` to `1` (always exactly 2 non-folded seats by the invariant).
-- `depth_cutoff`: depth reached `preflop.cutoff.force_depth`.
+- `depth_cutoff`: depth reached `preflop.search.depth`.
 - `sampled_cutoff_candidate`: nonterminal street-0 nodes at allowed depths.
 
 For `closed_preflop`, do not expand flop actions in this evaluator. Mark as a handoff leaf.
@@ -251,7 +250,7 @@ Replace `sample_leaves` for preflop with two outputs:
 
 Use target-depth continuation sampling rather than a simple Bernoulli hazard:
 
-1. For each root, sample a target depth uniformly from the configured range.
+1. For each root, sample a target depth uniformly from the configured `continuation_value_target_*` range.
 2. Descend one path under `policy_probs_sample`, with the existing epsilon-uniform exploration mix.
 3. Before continuing from a node at the sampled target depth, abort that path and emit that node as a preflop value target.
 4. If a path reaches a fold/all-in/closed-preflop terminal before the target depth, do not turn that terminal into an arbitrary-state `S_preflop` target; route it to the terminal/handoff machinery instead.
@@ -524,7 +523,7 @@ Acceptance:
 
 ### Phase 3: Preflop Model And Feature Encoder
 - Add preflop context enums and encoder.
-- Add `BetterPreflopFFN` or split policy/value modules.
+- Add `BetterPreflopFFN` or split policy/value modules for `S_preflop` / `S_0`.
 - Add replay/loss smoke tests for `P in {3, 4, 6}`.
 
 Acceptance:
@@ -540,7 +539,7 @@ Acceptance:
 
 Acceptance:
 - Evaluator produces preflop policy/value batches.
-- Cutoff depth histogram follows configured quotas.
+- Cutoff depth histogram follows the configured target-depth sampling range.
 - Closed-preflop leaves do not expand flop actions.
 
 ### Phase 5: All-In Resolver

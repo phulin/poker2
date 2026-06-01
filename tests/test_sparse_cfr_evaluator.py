@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch.testing import assert_close
 
@@ -25,6 +26,7 @@ from p2.rl.target_provenance import (
     TARGET_SOURCE_CLOSING_NET,
     TARGET_SOURCE_EXACT_TERMINAL,
 )
+from p2.search.preflop_sparse_cfr_evaluator import PreflopSparseCFREvaluator
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
@@ -493,6 +495,69 @@ def test_evaluate_pbs_multiway_cfr_smoke() -> None:
     assert value_batch.features.beliefs.shape[1] == num_players * NUM_HANDS
     assert augmented_value_batch.features.beliefs.shape[1] == num_players * NUM_HANDS
     assert policy_batch.features.beliefs.shape[1] == num_players * NUM_HANDS
+
+
+def test_preflop_sparse_evaluator_enforces_pbs_preflop_roots() -> None:
+    device = get_device()
+    num_players = 3
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.allin_call_terminal_abstraction = False
+    env = PBSEnv(
+        num_envs=1,
+        num_players=num_players,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(1, dtype=torch.long, device=device),
+        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+    )
+    model = MockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = PreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+    beliefs = torch.full((1, num_players, NUM_HANDS), 1.0 / NUM_HANDS)
+
+    evaluator.initialize_subgame(env, torch.arange(1, device=device), beliefs)
+
+    assert evaluator._continuation_value_target_sampling_enabled()
+    assert evaluator._continuation_value_target_replace_roots()
+    assert evaluator._continuation_value_target_streets() == (0,)
+
+    env.street[0] = 1
+    with pytest.raises(ValueError, match="street-0"):
+        evaluator.initialize_subgame(env, torch.arange(1, device=device), beliefs)
+
+    hunl_env = make_env(1, device=device)
+    with pytest.raises(TypeError, match="PBSEnv"):
+        evaluator.initialize_subgame(hunl_env, torch.arange(1, device=device))
+
+
+def test_preflop_sparse_evaluator_rejects_fused_config() -> None:
+    device = get_device()
+    cfg = make_config([0.5])
+    cfg.search.sparse_fused = True
+    model = MockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        device=device,
+    )
+
+    with pytest.raises(ValueError, match="non-fused sparse CFR"):
+        PreflopSparseCFREvaluator(
+            model=model,  # type: ignore[arg-type]
+            device=device,
+            cfg=cfg,
+        )
 
 
 def test_initialize_policy_and_beliefs() -> None:
