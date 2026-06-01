@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 from p2.env.card_utils import NUM_HANDS, board_allowed_hands
@@ -9,6 +11,16 @@ from p2.search.cfr_evaluator import PublicBeliefState
 
 
 STREET_TO_BOARD_CARDS = {1: 3, 2: 4, 3: 5}
+CLOSED_STREET_TO_NEXT_STREET = {0: 1, 1: 2, 2: 3}
+
+
+@dataclass(frozen=True)
+class ChanceRootSample:
+    """Closed-street target root with post-chance context and pre-chance beliefs."""
+
+    pbs: PublicBeliefState
+    pre_chance_beliefs: torch.Tensor
+    closed_street: int
 
 
 def _sample_unique_cards(
@@ -136,4 +148,41 @@ def sample_river_start_roots(
 ) -> PublicBeliefState:
     return sample_postflop_start_roots(
         env_proto, batch_size=batch_size, street=3, generator=generator
+    )
+
+
+@torch.no_grad()
+def sample_end_of_street_chance_roots(
+    env_proto: HUNLTensorEnv | PBSEnv,
+    *,
+    batch_size: int,
+    closed_street: int,
+    generator: torch.Generator | None = None,
+) -> ChanceRootSample:
+    """Sample roots for end-of-street chance-value targets.
+
+    Chance targets are represented with a post-chance next-street environment
+    plus separate pre-chance beliefs over the previous board. For example,
+    closed flop roots use a turn environment and flop-legal beliefs.
+    """
+
+    if closed_street not in CLOSED_STREET_TO_NEXT_STREET:
+        raise ValueError(
+            f"closed_street must be one of {sorted(CLOSED_STREET_TO_NEXT_STREET)}"
+        )
+
+    next_street = CLOSED_STREET_TO_NEXT_STREET[closed_street]
+    pbs = sample_postflop_start_roots(
+        env_proto,
+        batch_size=batch_size,
+        street=next_street,
+        generator=generator,
+    )
+    pre_chance_beliefs = _uniform_board_legal_beliefs(
+        pbs.env.last_board_indices, num_players=2
+    ).to(device=env_proto.device)
+    return ChanceRootSample(
+        pbs=pbs,
+        pre_chance_beliefs=pre_chance_beliefs,
+        closed_street=closed_street,
     )

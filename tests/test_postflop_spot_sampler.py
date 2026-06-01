@@ -5,6 +5,7 @@ import torch
 from p2.env.card_utils import board_allowed_hands
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.search.postflop_spot_sampler import (
+    sample_end_of_street_chance_roots,
     sample_flop_start_roots,
     sample_postflop_start_roots,
     sample_river_start_roots,
@@ -95,3 +96,65 @@ def test_sample_postflop_start_roots_rejects_unsupported_street():
         assert "street must be" in str(exc)
     else:
         raise AssertionError("Expected unsupported street to raise ValueError")
+
+
+def test_sample_end_of_street_chance_roots_builds_pre_chance_beliefs():
+    device = torch.device("cpu")
+    env = HUNLTensorEnv(
+        num_envs=2,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=device,
+        float_dtype=torch.float32,
+    )
+    generator = torch.Generator(device=device).manual_seed(321)
+
+    for closed_street, next_street, board_cards in (
+        (0, 1, 3),
+        (1, 2, 4),
+        (2, 3, 5),
+    ):
+        sample = sample_end_of_street_chance_roots(
+            env,
+            batch_size=7,
+            closed_street=closed_street,
+            generator=generator,
+        )
+
+        assert sample.closed_street == closed_street
+        _assert_street_start_root(
+            sample.pbs, street=next_street, board_cards=board_cards
+        )
+        assert sample.pre_chance_beliefs.shape == (7, 2, 1326)
+
+        previous_board = sample.pbs.env.last_board_indices
+        previous_allowed = board_allowed_hands(previous_board)
+        assert torch.equal(
+            sample.pre_chance_beliefs > 0,
+            previous_allowed[:, None, :].expand_as(sample.pre_chance_beliefs),
+        )
+        torch.testing.assert_close(
+            sample.pre_chance_beliefs.sum(dim=-1),
+            torch.ones(7, 2),
+            atol=1e-6,
+            rtol=0.0,
+        )
+
+
+def test_sample_end_of_street_chance_roots_rejects_unsupported_street():
+    env = HUNLTensorEnv(
+        num_envs=1,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=torch.device("cpu"),
+        float_dtype=torch.float32,
+    )
+
+    try:
+        sample_end_of_street_chance_roots(env, batch_size=1, closed_street=3)
+    except ValueError as exc:
+        assert "closed_street must be" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported closed street to raise ValueError")
