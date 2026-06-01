@@ -29,6 +29,13 @@ HAND_STATIC_FEATURE_DIM = 8
 HAND_DYNAMIC_FEATURE_DIM = 15
 
 
+def _is_cuda_graph_capturing(tensor: torch.Tensor) -> bool:
+    if tensor.device.type != "cuda" or not torch.cuda.is_available():
+        return False
+    is_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
+    return bool(is_capturing is not None and is_capturing())
+
+
 class ResidualBlock(nn.Module):
     def __init__(self, inner: nn.Module, alpha: float) -> None:
         super().__init__()
@@ -1182,7 +1189,7 @@ class BetterStreetValueFFN(BetterFFN):
 
         phase = features.context[:, ValueScalarContext.CHANCE_PHASE.value]
         pre_mask = (phase >= 0.5).view(-1, 1, 1)
-        if torch.compiler.is_compiling():
+        if torch.compiler.is_compiling() or _is_cuda_graph_capturing(features.context):
             pre = self.forward_pre(
                 features,
                 static_base_features=static_base_features,

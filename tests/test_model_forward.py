@@ -11,6 +11,7 @@ from p2.env.hunl_env import HUNLEnv
 from p2.env.types import GameState, PlayerState
 from p2.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
 from p2.models.cnn.cnn_embedding_data import CNNEmbeddingData
+import p2.models.mlp.better_ffn as better_ffn_module
 from p2.models.mlp.better_features import (
     ChancePhase,
     ValueScalarContext,
@@ -511,6 +512,49 @@ def test_better_street_value_auto_matches_phase_heads():
         to_act=torch.zeros(batch_size, dtype=torch.long),
         board=torch.full((batch_size, 5), -1, dtype=torch.long),
         beliefs=beliefs.view(batch_size, -1),
+    )
+
+    auto = model.forward_value(features).hand_values
+    pre = model.forward_value(features[:1], value_head="pre").hand_values
+    post = model.forward_value(features[1:], value_head="post").hand_values
+
+    assert auto is not None
+    torch.testing.assert_close(auto[:1], pre)
+    torch.testing.assert_close(auto[1:], post)
+
+
+def test_better_street_value_auto_uses_graph_safe_dispatch(monkeypatch):
+    batch_size = 2
+    num_players = 2
+    model = BetterStreetValueFFN(
+        num_actions=1,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+    )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(4))
+    beliefs = torch.full(
+        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    )
+    context = torch.zeros(batch_size, value_context_length(num_players))
+    context[:, ValueScalarContext.CHANCE_PHASE.value] = torch.tensor(
+        [ChancePhase.PRE_CHANCE.value, ChancePhase.POST_CHANCE.value],
+        dtype=torch.float32,
+    )
+    features = MLPFeatures(
+        context=context,
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+
+    monkeypatch.setattr(
+        better_ffn_module, "_is_cuda_graph_capturing", lambda tensor: True
     )
 
     auto = model.forward_value(features).hand_values
