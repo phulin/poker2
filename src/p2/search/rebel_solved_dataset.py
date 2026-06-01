@@ -1,0 +1,323 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any, Literal
+
+import torch
+
+from p2.env.card_utils import NUM_HANDS
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.rl.rebel_batch import RebelBatch
+
+
+FORMAT_VERSION = "p2.rebel.solved_postflop.v1"
+MANIFEST_NAME = "manifest.json"
+StreamName = Literal["value", "policy"]
+
+
+def rebel_batch_to_tensors(batch: RebelBatch) -> dict[str, torch.Tensor]:
+    """Serialize a RebelBatch into plain tensors for shard storage."""
+
+    tensors = {
+        "features.context": batch.features.context.detach().cpu(),
+        "features.street": batch.features.street.detach().cpu(),
+        "features.to_act": batch.features.to_act.detach().cpu(),
+        "features.board": batch.features.board.detach().cpu(),
+        "features.beliefs": batch.features.beliefs.detach().cpu(),
+        "legal_masks": batch.legal_masks.detach().cpu(),
+    }
+    if batch.value_targets is not None:
+        tensors["value_targets"] = batch.value_targets.detach().cpu()
+    if batch.policy_targets is not None:
+        tensors["policy_targets"] = batch.policy_targets.detach().cpu()
+    for key, value in batch.statistics.items():
+        tensors[f"statistics.{key}"] = value.detach().cpu()
+    return tensors
+
+
+def rebel_batch_from_tensors(
+    tensors: Mapping[str, torch.Tensor],
+    *,
+    device: torch.device | None = None,
+) -> RebelBatch:
+    """Deserialize a tensor-only shard payload into a RebelBatch."""
+
+    if device is None:
+        device = torch.device("cpu")
+    statistics_prefix = "statistics."
+    statistics = {
+        key[len(statistics_prefix) :]: value.to(device)
+        for key, value in tensors.items()
+        if key.startswith(statistics_prefix)
+    }
+    return RebelBatch(
+        features=MLPFeatures(
+            context=tensors["features.context"].to(device),
+            street=tensors["features.street"].to(device),
+            to_act=tensors["features.to_act"].to(device),
+            board=tensors["features.board"].to(device),
+            beliefs=tensors["features.beliefs"].to(device),
+        ),
+        legal_masks=tensors["legal_masks"].to(device),
+        value_targets=(
+            tensors["value_targets"].to(device)
+            if "value_targets" in tensors
+            else None
+        ),
+        policy_targets=(
+            tensors["policy_targets"].to(device)
+            if "policy_targets" in tensors
+            else None
+        ),
+        statistics=statistics,
+    )
+
+
+def _slice_tensors(
+    tensors: Mapping[str, torch.Tensor], start: int, end: int
+) -> dict[str, torch.Tensor]:
+    return {key: value[start:end] for key, value in tensors.items()}
+
+
+def _index_tensors(
+    tensors: Mapping[str, torch.Tensor], indices: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    return {key: value.index_select(0, indices) for key, value in tensors.items()}
+
+
+def _concat_tensors(chunks: Sequence[Mapping[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    if not chunks:
+        raise ValueError("Cannot concatenate an empty tensor chunk list")
+    keys = set(chunks[0].keys())
+    if any(set(chunk.keys()) != keys for chunk in chunks):
+        raise ValueError("Shard tensor keys do not match")
+    return {key: torch.cat([chunk[key] for chunk in chunks], dim=0) for key in keys}
+
+
+def _stream_target_key(stream: StreamName) -> str:
+    return "value_targets" if stream == "value" else "policy_targets"
+
+
+def _validate_stream_batch(batch: RebelBatch, stream: StreamName) -> None:
+    if stream == "value":
+        if batch.value_targets is None or batch.policy_targets is not None:
+            raise ValueError("value stream shards must contain value targets only")
+        return
+    if batch.policy_targets is None or batch.value_targets is not None:
+        raise ValueError("policy stream shards must contain policy targets only")
+
+
+def _write_stream(
+    root: Path,
+    stream: StreamName,
+    batches: Sequence[RebelBatch],
+) -> tuple[list[dict[str, Any]], int]:
+    stream_dir = root / stream
+    stream_dir.mkdir(parents=True, exist_ok=True)
+    shards: list[dict[str, Any]] = []
+    start = 0
+    for shard_idx, batch in enumerate(batches):
+        _validate_stream_batch(batch, stream)
+        end = start + len(batch)
+        rel_path = f"{stream}/shard_{shard_idx:06d}.pt"
+        torch.save(rebel_batch_to_tensors(batch), root / rel_path)
+        shards.append({"file": rel_path, "start": start, "end": end})
+        start = end
+    return shards, start
+
+
+def write_rebel_solved_dataset(
+    output_dir: str | Path,
+    *,
+    value_batches: Sequence[RebelBatch] = (),
+    policy_batches: Sequence[RebelBatch] = (),
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write bounded solved ReBeL examples as tensor-only shards."""
+
+    root = Path(output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    manifest_path = root / MANIFEST_NAME
+    if manifest_path.exists():
+        raise FileExistsError(f"{manifest_path} already exists")
+
+    value_shards, value_examples = _write_stream(root, "value", value_batches)
+    policy_shards, policy_examples = _write_stream(root, "policy", policy_batches)
+    example_batch = next(iter(value_batches), None) or next(iter(policy_batches), None)
+    if example_batch is None:
+        raise ValueError("At least one value or policy batch is required")
+
+    manifest: dict[str, Any] = {
+        "format": FORMAT_VERSION,
+        "num_players": example_batch.features.num_players,
+        "hands": NUM_HANDS,
+        "num_actions": int(example_batch.legal_masks.shape[-1]),
+        "context_length": int(example_batch.features.context.shape[-1]),
+        "value_examples": int(value_examples),
+        "policy_examples": int(policy_examples),
+        "shards": {"value": value_shards, "policy": policy_shards},
+    }
+    if metadata is not None:
+        manifest.update(dict(metadata))
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest
+
+
+class RebelSolvedDataset:
+    """Reader for bounded postflop solved-example datasets."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        num_players: int | None = None,
+        num_actions: int | None = None,
+        context_length: int | None = None,
+    ) -> None:
+        self.path = Path(path)
+        manifest_path = self.path / MANIFEST_NAME if self.path.is_dir() else self.path
+        self.root = manifest_path.parent
+        self.manifest = json.loads(manifest_path.read_text())
+        self._validate_manifest(
+            manifest_path,
+            num_players=num_players,
+            num_actions=num_actions,
+            context_length=context_length,
+        )
+        self.examples = {
+            "value": int(self.manifest.get("value_examples", 0)),
+            "policy": int(self.manifest.get("policy_examples", 0)),
+        }
+        self.shards = {
+            "value": list(self.manifest.get("shards", {}).get("value", [])),
+            "policy": list(self.manifest.get("shards", {}).get("policy", [])),
+        }
+        self._loaded: dict[StreamName, tuple[int, dict[str, torch.Tensor]] | None] = {
+            "value": None,
+            "policy": None,
+        }
+
+    def _validate_manifest(
+        self,
+        manifest_path: Path,
+        *,
+        num_players: int | None,
+        num_actions: int | None,
+        context_length: int | None,
+    ) -> None:
+        if self.manifest.get("format") != FORMAT_VERSION:
+            raise ValueError(f"unsupported solved dataset format in {manifest_path}")
+        if int(self.manifest.get("hands", -1)) != NUM_HANDS:
+            raise ValueError(f"expected {NUM_HANDS} hands")
+        checks = {
+            "num_players": num_players,
+            "num_actions": num_actions,
+            "context_length": context_length,
+        }
+        for key, expected in checks.items():
+            if expected is None:
+                continue
+            actual = int(self.manifest.get(key, -1))
+            if actual != int(expected):
+                raise ValueError(
+                    f"manifest {key} mismatch: expected {expected}, got {actual}"
+                )
+
+    def __len__(self) -> int:
+        return self.examples["value"] + self.examples["policy"]
+
+    def stream_len(self, stream: StreamName) -> int:
+        return self.examples[stream]
+
+    def _load_shard(self, stream: StreamName, shard_idx: int) -> dict[str, torch.Tensor]:
+        loaded = self._loaded[stream]
+        if loaded is None or loaded[0] != shard_idx:
+            shard_path = self.root / self.shards[stream][shard_idx]["file"]
+            tensors = torch.load(shard_path, map_location="cpu", weights_only=True)
+            target_key = _stream_target_key(stream)
+            if target_key not in tensors:
+                raise ValueError(f"{stream} shard missing {target_key}")
+            self._loaded[stream] = (shard_idx, tensors)
+        loaded = self._loaded[stream]
+        assert loaded is not None
+        return loaded[1]
+
+    def _shard_index_for_row(self, stream: StreamName, row: int) -> int:
+        if row < 0 or row >= self.examples[stream]:
+            raise IndexError(f"{stream} row {row} outside solved dataset")
+        for shard_idx, shard in enumerate(self.shards[stream]):
+            if int(shard["start"]) <= row < int(shard["end"]):
+                return shard_idx
+        raise IndexError(f"no {stream} shard contains row {row}")
+
+    def get_batch(
+        self,
+        stream: StreamName,
+        start: int,
+        count: int,
+        *,
+        device: torch.device | None = None,
+        wrap: bool = False,
+    ) -> RebelBatch:
+        if count <= 0 or start < 0:
+            raise ValueError("start must be nonnegative and count must be positive")
+        total = self.examples[stream]
+        if total == 0:
+            raise ValueError(f"{stream} stream is empty")
+        if not wrap and start + count > total:
+            raise IndexError(
+                f"{stream} data exhausted: requested [{start}, {start + count}), "
+                f"dataset has {total}"
+            )
+
+        chunks: list[dict[str, torch.Tensor]] = []
+        remaining = count
+        cursor = start
+        while remaining > 0:
+            row = cursor % total if wrap else cursor
+            shard_idx = self._shard_index_for_row(stream, row)
+            shard = self.shards[stream][shard_idx]
+            shard_start = int(shard["start"])
+            shard_end = int(shard["end"])
+            local_start = row - shard_start
+            take = min(remaining, shard_end - row)
+            chunks.append(
+                _slice_tensors(
+                    self._load_shard(stream, shard_idx),
+                    local_start,
+                    local_start + take,
+                )
+            )
+            remaining -= take
+            cursor += take
+
+        tensors = chunks[0] if len(chunks) == 1 else _concat_tensors(chunks)
+        return rebel_batch_from_tensors(tensors, device=device)
+
+    def sample_batch(
+        self,
+        stream: StreamName,
+        count: int,
+        *,
+        generator: torch.Generator | None = None,
+        device: torch.device | None = None,
+    ) -> RebelBatch:
+        total = self.examples[stream]
+        if count <= 0:
+            raise ValueError("count must be positive")
+        if total == 0:
+            raise ValueError(f"{stream} stream is empty")
+        rows = torch.randint(0, total, (count,), generator=generator)
+        chunks = []
+        for shard_idx, shard in enumerate(self.shards[stream]):
+            shard_start = int(shard["start"])
+            shard_end = int(shard["end"])
+            mask = (rows >= shard_start) & (rows < shard_end)
+            if not mask.any():
+                continue
+            local_rows = rows[mask] - shard_start
+            chunks.append(_index_tensors(self._load_shard(stream, shard_idx), local_rows))
+        tensors = chunks[0] if len(chunks) == 1 else _concat_tensors(chunks)
+        return rebel_batch_from_tensors(tensors, device=device)
