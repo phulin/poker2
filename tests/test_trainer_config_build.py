@@ -110,10 +110,25 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     )
 
     assert turn_cfg.data.live_root_source == "random_turn"
-    assert turn_cfg.curriculum.stages == ["turn"]
+    assert turn_cfg.curriculum.stages == ["distill_E_turn", "turn"]
+    assert turn_cfg.curriculum.substeps["distill_E_turn"].kind == "distill"
+    assert turn_cfg.curriculum.substeps["distill_E_turn"].net == "E_turn"
+    assert turn_cfg.curriculum.substeps["distill_E_turn"].from_net == "S_river"
+    assert turn_cfg.curriculum.substeps["distill_E_turn"].chance == "single_card"
     assert turn_cfg.curriculum.substeps["turn"].closing_net == "E_turn"
     assert turn_cfg.curriculum.substeps["turn"].closing_checkpoint is None
     assert flop_cfg.data.live_root_source == "random_flop"
-    assert flop_cfg.curriculum.stages == ["flop"]
+    assert flop_cfg.curriculum.stages == [
+        "distill_E_flop",
+        "flop",
+        "distill_E_preflop",
+    ]
+    assert flop_cfg.curriculum.substeps["distill_E_flop"].kind == "distill"
+    assert flop_cfg.curriculum.substeps["distill_E_flop"].net == "E_flop"
+    assert flop_cfg.curriculum.substeps["distill_E_flop"].from_net == "S_turn"
+    assert flop_cfg.curriculum.substeps["distill_E_flop"].chance == "single_card"
     assert flop_cfg.curriculum.substeps["flop"].closing_net == "E_flop"
     assert flop_cfg.curriculum.substeps["flop"].closing_checkpoint is None
+    assert flop_cfg.curriculum.substeps["distill_E_preflop"].net == "E_preflop"
+    assert flop_cfg.curriculum.substeps["distill_E_preflop"].from_net == "S_flop"
+    assert flop_cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"

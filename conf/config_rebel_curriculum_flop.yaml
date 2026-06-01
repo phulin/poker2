@@ -1,8 +1,8 @@
-# Initial postflop curriculum entry point for the implemented flop train stage.
+# Postflop curriculum entry point for distilling `E_flop`, training `S_flop`,
+# then distilling the preflop handoff net `E_preflop`.
 #
-# This config assumes `E_flop` leaf routing is added before full-quality flop
-# training. It is useful now for exercising random flop root generation and
-# train-stage orchestration.
+# Requires a promoted `S_turn` checkpoint in the curriculum state, or an
+# explicit checkpoint override on `curriculum.distill_E_flop.checkpoint`.
 
 defaults:
   - config_rebel_cfr
@@ -18,12 +18,24 @@ data:
   live_root_source: random_flop
 
 curriculum:
-  stages: [flop]
+  stages: [distill_E_flop, flop, distill_E_preflop]
   wandb_group: rebel_postflop_curriculum
   promote_dir: checkpoints-rebel-curriculum/promoted
+  distill_E_flop:
+    kind: distill
+    net: E_flop
+    from: S_turn
+    chance: single_card
+    num_steps: ${num_steps}
   flop:
     kind: train
     net: S_flop
     closing_net: E_flop
     closing_checkpoint: null
+    num_steps: ${num_steps}
+  distill_E_preflop:
+    kind: distill
+    net: E_preflop
+    from: S_flop
+    chance: sample_flops
     num_steps: ${num_steps}

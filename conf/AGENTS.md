@@ -11,8 +11,8 @@ Hydra configuration files for PPO/K-best training, transformer variants, and ReB
 - `config_transformer_cfr.yaml`: Transformer configuration with CFR-related settings.
 - `config_rebel_cfr.yaml`: Main ReBeL CFR training configuration, including the per-depth sparse search bet schedule and preflop all-in table path.
 - `config_rebel_curriculum_river.yaml`: Initial postflop curriculum config for the implemented live random-river `S_river` train stage.
-- `config_rebel_curriculum_turn.yaml`: Initial postflop curriculum config for the live random-turn `S_turn` train stage placeholder, pending `E_turn` leaf routing.
-- `config_rebel_curriculum_flop.yaml`: Initial postflop curriculum config for the live random-flop `S_flop` train stage placeholder, pending `E_flop` leaf routing.
+- `config_rebel_curriculum_turn.yaml`: Postflop curriculum config for `distill_E_turn` from promoted `S_river`, then live random-turn `S_turn` training with `E_turn` closing leaves.
+- `config_rebel_curriculum_flop.yaml`: Postflop curriculum config for `distill_E_flop` from promoted `S_turn`, live random-flop `S_flop` training with `E_flop` closing leaves, then `distill_E_preflop`.
 - `config_rebel_debug.yaml`: Faster ReBeL debug configuration.
 
 ### Subdirectories

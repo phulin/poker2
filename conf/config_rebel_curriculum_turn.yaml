@@ -1,8 +1,7 @@
-# Initial postflop curriculum entry point for the implemented turn train stage.
+# Postflop curriculum entry point for distilling `E_turn` then training `S_turn`.
 #
-# This config assumes `E_turn` leaf routing is added before full-quality turn
-# training. It is useful now for exercising random turn root generation and
-# train-stage orchestration.
+# Requires a promoted `S_river` checkpoint in the curriculum state, or an
+# explicit checkpoint override on `curriculum.distill_E_turn.checkpoint`.
 
 defaults:
   - config_rebel_cfr
@@ -18,9 +17,15 @@ data:
   live_root_source: random_turn
 
 curriculum:
-  stages: [turn]
+  stages: [distill_E_turn, turn]
   wandb_group: rebel_postflop_curriculum
   promote_dir: checkpoints-rebel-curriculum/promoted
+  distill_E_turn:
+    kind: distill
+    net: E_turn
+    from: S_river
+    chance: single_card
+    num_steps: ${num_steps}
   turn:
     kind: train
     net: S_turn
