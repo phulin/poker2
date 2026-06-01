@@ -38,10 +38,11 @@ Costs / caveats:
 Net inventory: `S_river` (exact river terminals, no `E_river`), `E_turn`←`S_river`, `S_turn`, `E_flop`←`S_turn`, `S_flop`, `E_preflop`←`S_flop` (feeds the preflop handoff).
 
 ### Data path: live is the main path
-Live, in-loop CFR data generation stays the **production** training path for every postflop street. In live mode, roots are generated on the fly by random legal street-start / later legal-prefix postflop spot samplers, not by advancing a self-play `current_pbs` trajectory. CFR still runs inside the optimizer loop for those sampled roots, and the replay buffer still amortizes recent solves. On-disk solved-example datasets are too large to be the backbone (see "Storage Reality" below), so the trainer supports two data modes:
+Live, in-loop CFR data generation stays the **production** training path for every postflop street. In live mode, roots are generated on the fly by random legal street-start / later legal-prefix postflop spot samplers, not by advancing a self-play `current_pbs` trajectory. CFR still runs inside the optimizer loop for those sampled roots, and the replay buffer still amortizes recent solves. On-disk solved-example datasets are too large to be the backbone (see "Storage Reality" below), so the trainer supports three data modes:
 
 - `live` — used for the real, full-scale runs. All streets sample random legal postflop roots in-loop, solve them with CFR, and feed the existing replay buffers.
 - `pregenerated` — used for **small, fast, fixed-data hyperparameter sweeps only**. Solved examples are written to disk at experiment scale (not the 50M+ production scale) so HP runs see identical data and skip the solver. This mode must never be assumed to fit a full run on disk.
+- `hybrid` — live training with fixed pregenerated holdout batches for fresh validation metrics.
 
 The optional "pregeneration" being added is therefore only the bounded offline dataset path for HP testing and holdouts. The staged train/distill curriculum itself is live by default and uses random spot generation at production scale.
 
@@ -85,7 +86,7 @@ When offline datasets are used (HP mode or holdouts), store already-solved `Rebe
 - policy examples: features, legal mask, `[B, 1326, A]` policy targets, statistics;
 - optional root snapshots: serialized public env state and beliefs used to create those examples.
 
-These bounded datasets give reproducible HP comparisons and fixed-provenance holdouts; they are not the path for a full run.
+These bounded datasets give reproducible HP comparisons and fixed-provenance holdouts; they are not the path for a full run. For holdout evaluation during live training, use `data.mode=hybrid` so the optimizer still trains from live random roots while metrics are computed on fixed solved examples.
 
 ## Target Architecture
 
