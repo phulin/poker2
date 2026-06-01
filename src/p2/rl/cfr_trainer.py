@@ -35,7 +35,7 @@ from p2.rl.optimizers import build_optimizer
 from p2.rl.rebel_batch import RebelBatch
 from p2.rl.trueskill_tracker import TrueSkillTracker
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
-from p2.search.cfr_evaluator import CFREvaluator
+from p2.search.cfr_evaluator import CFREvaluator, PublicBeliefState
 from p2.search.postflop_spot_sampler import sample_postflop_start_roots
 from p2.search.rebel_data_generator import RebelDataGenerator
 from p2.search.rebel_data_source import LiveRebelDataSource, RebelDataSource
@@ -345,12 +345,15 @@ class RebelCFRTrainer:
         }
         if cfg.data.live_root_source in random_street_sources:
             street = random_street_sources[cfg.data.live_root_source]
-            root_sampler = lambda batch_size: sample_postflop_start_roots(
-                self.env,
-                batch_size=batch_size,
-                street=street,
-                generator=self.rng,
-            )
+
+            def root_sampler(batch_size: int) -> PublicBeliefState:
+                return sample_postflop_start_roots(
+                    self.env,
+                    batch_size=batch_size,
+                    street=street,
+                    generator=self.rng,
+                )
+
         elif cfg.data.live_root_source != "self_play":
             raise ValueError(
                 "data.live_root_source must be 'self_play', 'random_flop', "
@@ -1817,6 +1820,101 @@ class RebelCFRTrainer:
             "entropy_loss": loss_dict["entropy"].detach(),
             "total_loss": total_loss.detach(),
             "update_norm": update_norm.detach(),
+        }
+
+    def train_value_batch(
+        self, value_batch: RebelBatch, step: int
+    ) -> dict[str, Any]:
+        """Run one value-only supervised update for distillation workloads."""
+
+        self._apply_schedules(step)
+        value_batch = value_batch.to(self.device)
+        self.model.train()
+
+        suit_permutations_idxs = torch.randint(
+            0,
+            24,
+            (len(value_batch),),
+            generator=self.rng,
+            device=self.device,
+        )
+        suit_permutations = suit_permutations_tensor(device=self.device)[
+            suit_permutations_idxs
+        ]
+        permuted_batch, suit_permutations_idxs = value_batch.with_permuted_targets(
+            suit_permutations=suit_permutations,
+            suit_permutation_idxs=suit_permutations_idxs,
+            num_players=self.num_players,
+        )
+
+        self.optimizer.zero_grad(set_to_none=True)
+        with self._model_autocast():
+            if isinstance(self.model, BetterTRM):
+                value_output_orig = self.model(
+                    value_batch.features,
+                    include_policy=False,
+                )
+                value_output_permuted = self.model(
+                    permuted_batch.features,
+                    include_policy=False,
+                )
+            else:
+                value_count = len(value_batch)
+                value_output_both = self.model(
+                    MLPFeatures.cat([value_batch.features, permuted_batch.features]),
+                    include_policy=False,
+                )
+                value_output_orig = value_output_both[:value_count]
+                value_output_permuted = value_output_both[value_count:]
+
+        loss_dict = self.loss_fn._call_forward_value(
+            value_output_permuted, permuted_batch
+        )
+        permutation_loss = self._compute_permutation_loss(
+            value_output_orig, value_output_permuted, suit_permutations_idxs
+        )
+        total_loss = (
+            loss_dict["total_loss"] + self.loss_fn.permutation_weight * permutation_loss
+        )
+        total_loss.backward()
+
+        if self.CHECK_GRADS:
+            grad_finite = torch.stack(
+                [
+                    p.grad.isfinite().all()
+                    for p in self.model.parameters()
+                    if p.grad is not None
+                ]
+            ).all()
+            assert grad_finite.item(), "NaN/Inf in model gradients"
+
+        grad_norm = self._clip_grads()
+        self.optimizer.step()
+
+        if self.ema_helper is not None:
+            self.ema_helper.update(self.model)
+        self._sync_inference_model()
+
+        current_lr = self.optimizer.param_groups[0]["lr"]
+        update_norm = current_lr * grad_norm
+        street = value_batch.statistics.get("street")
+        evaluator_street = (
+            float(street.float().mean().item()) if street is not None else None
+        )
+        total_loss_detached = total_loss.detach()
+        value_loss = loss_dict["value_loss"].detach()
+        return {
+            "step": step + 1,
+            "loss": float(total_loss_detached.item()),
+            "total_loss": float(total_loss_detached.item()),
+            "policy_loss": None,
+            "value_loss": float(value_loss.item()),
+            "permutation_loss": float(permutation_loss.detach().item()),
+            "update_norm": float(update_norm.detach().item()),
+            "local_exploitability": None,
+            "local_exploitability_mbbg": None,
+            "evaluator_street": evaluator_street,
+            "learning_rate": current_lr,
         }
 
     @profile

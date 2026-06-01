@@ -7,7 +7,7 @@ import copy
 import json
 import os
 import shutil
-from dataclasses import asdict
+import time
 from typing import Any
 
 import hydra
@@ -22,7 +22,13 @@ from p2.cli.train_rebel import (
 )
 from p2.core.structured_config import Config, CurriculumSubstepConfig
 from p2.rl.cfr_trainer import RebelCFRTrainer
-from p2.rl.rebel_loop import run_training_loop
+from p2.rl.rebel_loop import (
+    cleanup_old_checkpoints,
+    print_rebel_training_stats,
+    run_training_loop,
+)
+from p2.search.end_of_street_distillation import build_end_of_street_value_batch
+from p2.search.postflop_spot_sampler import sample_end_of_street_chance_roots
 from p2.utils.profiling import install_triton_compile_logger_from_env
 
 
@@ -49,6 +55,18 @@ def _save_curriculum_state(cfg: Config, promoted: dict[str, str]) -> None:
         json.dump({"promoted": promoted}, fh, indent=2, sort_keys=True)
         fh.write("\n")
     os.replace(tmp_path, _state_path(cfg))
+
+
+def _load_curriculum_state(cfg: Config) -> dict[str, str]:
+    path = _state_path(cfg)
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        state = json.load(fh)
+    promoted = state.get("promoted", {})
+    if not isinstance(promoted, dict):
+        return {}
+    return {str(key): str(value) for key, value in promoted.items()}
 
 
 def _promote_checkpoint(
@@ -149,6 +167,33 @@ def _stage_config(
     return stage_cfg
 
 
+def _source_checkpoint(
+    substep: CurriculumSubstepConfig, promoted: dict[str, str]
+) -> str:
+    if substep.checkpoint is not None:
+        return substep.checkpoint
+    if substep.from_net is not None and substep.from_net in promoted:
+        return promoted[substep.from_net]
+    raise ValueError(
+        "Distill substep requires either `checkpoint` or a promoted `from_net`; "
+        f"got net={substep.net!r}, from_net={substep.from_net!r}"
+    )
+
+
+def _closed_street_for_end_net(net: str) -> int:
+    mapping = {"E_preflop": 0, "E_flop": 1, "E_turn": 2}
+    if net not in mapping:
+        raise ValueError(
+            "Distill net must be one of E_preflop, E_flop, or E_turn; "
+            f"got {net!r}"
+        )
+    return mapping[net]
+
+
+def _value_model(model: torch.nn.Module) -> torch.nn.Module:
+    return getattr(model, "value_model", model)
+
+
 def _run_train_substep(
     cfg: Config,
     substep_name: str,
@@ -207,6 +252,126 @@ def _run_train_substep(
     return promoted_path
 
 
+def _run_distill_substep(
+    cfg: Config,
+    substep_name: str,
+    substep: CurriculumSubstepConfig,
+    *,
+    device: torch.device,
+    resume_from: str | None,
+    promoted: dict[str, str],
+) -> str:
+    stage_cfg = _stage_config(
+        cfg,
+        substep_name,
+        substep,
+        resume_from=resume_from,
+        promoted=promoted,
+    )
+    os.makedirs(stage_cfg.checkpoint_dir, exist_ok=True)
+
+    source_checkpoint = _source_checkpoint(substep, promoted)
+    closed_street = _closed_street_for_end_net(substep.net)
+    chance = substep.chance or "auto"
+    metadata = _checkpoint_metadata(substep_name, substep)
+    metadata["curriculum_source_checkpoint"] = source_checkpoint
+
+    run_cm = _init_wandb(
+        stage_cfg,
+        device,
+        group=cfg.curriculum.wandb_group,
+        name=stage_cfg.wandb_name,
+    )
+    with run_cm as run:
+        trainer = RebelCFRTrainer(cfg=stage_cfg, device=device)
+        _log_model_parameter_summary(trainer.model, run)
+        if isinstance(run, wandb.Run):
+            run.watch(trainer.model, log_freq=100)
+
+        start_step = 0
+        if resume_from and os.path.exists(resume_from):
+            print(f"Resuming curriculum distill substep {substep_name}: {resume_from}")
+            start_step = trainer.load_checkpoint(resume_from) + 1
+            print(f"Resumed {substep_name} at step {start_step}")
+
+        source_model = trainer._load_closing_leaf_model(source_checkpoint)
+        value_model = _value_model(trainer.model)
+
+        loop_start = time.time()
+        for step in range(start_step, stage_cfg.num_steps):
+            step_start = time.time()
+            sample = sample_end_of_street_chance_roots(
+                trainer.env,
+                batch_size=stage_cfg.train.batch_size,
+                closed_street=closed_street,
+                generator=trainer.rng,
+            )
+            value_encoder = value_model.create_feature_encoder(
+                env=sample.pbs.env,
+                device=device,
+                dtype=trainer.float_dtype,
+            )
+            batch = build_end_of_street_value_batch(
+                sample,
+                value_encoder=value_encoder,
+                target_model=source_model,
+                chance=chance,
+                float_dtype=trainer.float_dtype,
+                generator=trainer.rng,
+            )
+            metrics = trainer.train_value_batch(batch, step)
+            step_elapsed = time.time() - step_start
+            total_elapsed = time.time() - loop_start
+            print_rebel_training_stats(
+                metrics, step, stage_cfg.num_steps, step_elapsed, total_elapsed
+            )
+
+            if stage_cfg.use_wandb:
+                metrics["step_time_s"] = step_elapsed
+                run.log(metrics, step=metrics["step"])
+
+            if (
+                stage_cfg.checkpoint_interval > 0
+                and (step + 1) % stage_cfg.checkpoint_interval == 0
+            ):
+                ckpt_path = os.path.join(
+                    stage_cfg.checkpoint_dir, f"rebel_step_{step + 1}.pt"
+                )
+                wandb_run_id = run.id if run else None
+                trainer.save_checkpoint(
+                    ckpt_path,
+                    step,
+                    wandb_run_id=wandb_run_id,
+                    save_optimizer=False,
+                    save_dtype=torch.bfloat16,
+                    metadata=metadata,
+                )
+                trainer.save_checkpoint(
+                    os.path.join(stage_cfg.checkpoint_dir, "rebel_latest.pt"),
+                    step,
+                    wandb_run_id=wandb_run_id,
+                    save_optimizer=True,
+                    save_dtype=None,
+                    metadata=metadata,
+                )
+                if stage_cfg.economize_checkpoints:
+                    cleanup_old_checkpoints(stage_cfg.checkpoint_dir, ckpt_path)
+                print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
+
+        final_path = os.path.join(stage_cfg.checkpoint_dir, "rebel_final.pt")
+        trainer.save_checkpoint(
+            final_path,
+            stage_cfg.num_steps,
+            save_optimizer=False,
+            save_dtype=None,
+            metadata=metadata,
+        )
+
+    promoted_path = _promote_checkpoint(cfg, substep, final_path)
+    print(f"Promoted distill substep {substep_name}: {promoted_path}")
+    return promoted_path
+
+
 def train_rebel_curriculum(cfg: Config) -> None:
     if install_triton_compile_logger_from_env():
         print("Triton compile logging enabled via P2_TRITON_COMPILE_LOG=1")
@@ -223,7 +388,7 @@ def train_rebel_curriculum(cfg: Config) -> None:
     stage_names = _stage_names(cfg)
     resume_metadata = _read_checkpoint_metadata(cfg.resume_from or "", device)
     start_index = _resume_start_index(stage_names, resume_metadata)
-    promoted: dict[str, str] = {}
+    promoted: dict[str, str] = _load_curriculum_state(cfg)
 
     for index, substep_name in enumerate(stage_names[start_index:], start=start_index):
         substep = cfg.curriculum.substeps[substep_name]
@@ -239,11 +404,15 @@ def train_rebel_curriculum(cfg: Config) -> None:
             )
             _save_curriculum_state(cfg, promoted)
         elif substep.kind == "distill":
-            raise NotImplementedError(
-                "Curriculum distill substeps require the E_X distiller and "
-                "chance-target dataset path, which are not implemented yet. "
-                f"Blocked at substep {substep_name}: {asdict(substep)}"
+            promoted[substep.net] = _run_distill_substep(
+                cfg,
+                substep_name,
+                substep,
+                device=device,
+                resume_from=resume_from,
+                promoted=promoted,
             )
+            _save_curriculum_state(cfg, promoted)
         else:
             raise ValueError(
                 f"Unsupported curriculum substep kind for {substep_name}: "

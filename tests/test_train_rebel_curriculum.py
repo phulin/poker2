@@ -82,7 +82,26 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
     assert state == {"promoted": {"S_river": str(promoted_path)}}
 
 
-def test_curriculum_distill_substep_is_explicitly_not_implemented(tmp_path) -> None:
+def test_curriculum_distill_substep_uses_promoted_source_checkpoint(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+    promoted_dir = tmp_path / "promoted"
+    promoted_dir.mkdir()
+    source_path = promoted_dir / "S_river.pt"
+    source_path.write_bytes(b"checkpoint")
+    (promoted_dir / "curriculum_state.json").write_text(
+        json.dumps({"promoted": {"S_river": str(source_path)}})
+    )
+
+    def fake_run_distill(cfg, substep_name, substep, **kwargs):
+        calls.append((cfg, substep_name, substep, kwargs))
+        promoted_path = promoted_dir / f"{substep.net}.pt"
+        promoted_path.write_bytes(b"distilled")
+        return str(promoted_path)
+
+    monkeypatch.setattr(curriculum_cli, "_run_distill_substep", fake_run_distill)
+
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     cfg.curriculum.stages = ["distill_E_turn"]
     cfg.curriculum.substeps = {
@@ -95,8 +114,20 @@ def test_curriculum_distill_substep_is_explicitly_not_implemented(tmp_path) -> N
         )
     }
 
-    with pytest.raises(NotImplementedError, match="E_X distiller"):
-        curriculum_cli.train_rebel_curriculum(cfg)
+    curriculum_cli.train_rebel_curriculum(cfg)
+
+    assert len(calls) == 1
+    _, substep_name, substep, kwargs = calls[0]
+    assert substep_name == "distill_E_turn"
+    assert substep.net == "E_turn"
+    assert kwargs["promoted"]["S_river"] == str(source_path)
+    state = json.loads((promoted_dir / "curriculum_state.json").read_text())
+    assert state == {
+        "promoted": {
+            "S_river": str(source_path),
+            "E_turn": str(promoted_dir / "E_turn.pt"),
+        }
+    }
 
 
 def test_curriculum_substep_rejects_unknown_overrides(tmp_path) -> None:

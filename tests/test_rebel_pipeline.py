@@ -635,6 +635,24 @@ def test_rebel_cfr_trainer_single_step_cpu():
         before_policy_only, next(trainer.model.parameters()).detach()
     )
 
+    value_only_batch = RebelBatch(
+        features=features.clone(),
+        value_targets=torch.full_like(value_targets, 0.1),
+        legal_masks=legal_masks,
+    )
+    before_value_only = [
+        param.detach().clone() for param in trainer.model.parameters()
+    ]
+    value_only_stats = trainer.train_value_batch(value_only_batch, step=0)
+
+    assert value_only_stats["policy_loss"] is None
+    assert torch.isfinite(torch.tensor(value_only_stats["value_loss"]))
+    assert torch.isfinite(torch.tensor(value_only_stats["total_loss"]))
+    assert any(
+        not torch.equal(before, after.detach())
+        for before, after in zip(before_value_only, trainer.model.parameters())
+    )
+
 
 def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
     cfg = Config()
