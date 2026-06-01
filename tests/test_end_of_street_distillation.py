@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import pytest
+import torch
+
+from p2.env.card_utils import NUM_HANDS, board_allowed_hands
+from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.models.mlp.better_feature_encoder import BetterStreetValueFeatureEncoder
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.search.end_of_street_distillation import build_end_of_street_value_batch
+from p2.search.postflop_spot_sampler import sample_end_of_street_chance_roots
+
+
+class BoardCardCountModel(torch.nn.Module):
+    def forward_post(
+        self,
+        features: MLPFeatures,
+        static_base_features: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del static_base_features
+        counts = (features.board >= 0).sum(dim=1).to(features.beliefs.dtype)
+        return counts[:, None, None].expand(-1, 2, NUM_HANDS).clone()
+
+
+def _env() -> HUNLTensorEnv:
+    return HUNLTensorEnv(
+        num_envs=2,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=torch.device("cpu"),
+        float_dtype=torch.float32,
+    )
+
+
+def test_build_end_of_street_value_batch_uses_pre_chance_features_and_targets():
+    env = _env()
+    generator = torch.Generator(device=env.device).manual_seed(11)
+    target_model = BoardCardCountModel()
+
+    for closed_street, expected_post_cards in ((1, 4), (2, 5)):
+        sample = sample_end_of_street_chance_roots(
+            env,
+            batch_size=3,
+            closed_street=closed_street,
+            generator=generator,
+        )
+        encoder = BetterStreetValueFeatureEncoder(
+            sample.pbs.env, device=env.device, dtype=torch.float32
+        )
+
+        batch = build_end_of_street_value_batch(
+            sample,
+            value_encoder=encoder,
+            target_model=target_model,
+            generator=generator,
+        )
+
+        assert batch.policy_targets is None
+        assert batch.value_targets is not None
+        assert torch.equal(batch.features.board, sample.pbs.env.last_board_indices)
+        assert torch.equal(
+            batch.features.street,
+            torch.full((3,), closed_street, dtype=batch.features.street.dtype),
+        )
+        assert torch.equal(batch.statistics["street"], torch.full((3,), closed_street))
+        assert torch.equal(batch.statistics["stage"], torch.full((3,), 2 * closed_street + 1))
+
+        previous_allowed = board_allowed_hands(sample.pbs.env.last_board_indices)
+        expected_targets = torch.where(
+            previous_allowed[:, None, :],
+            torch.full((3, 2, NUM_HANDS), float(expected_post_cards)),
+            torch.zeros(3, 2, NUM_HANDS),
+        )
+        torch.testing.assert_close(batch.value_targets, expected_targets)
+
+
+def test_build_end_of_street_value_batch_supports_sampled_flop_targets():
+    env = _env()
+    generator = torch.Generator(device=env.device).manual_seed(22)
+    sample = sample_end_of_street_chance_roots(
+        env,
+        batch_size=2,
+        closed_street=0,
+        generator=generator,
+    )
+    encoder = BetterStreetValueFeatureEncoder(
+        sample.pbs.env, device=env.device, dtype=torch.float32
+    )
+
+    batch = build_end_of_street_value_batch(
+        sample,
+        value_encoder=encoder,
+        target_model=BoardCardCountModel(),
+        generator=generator,
+    )
+
+    assert torch.equal(batch.features.board, sample.pbs.env.last_board_indices)
+    assert torch.equal(batch.features.street, torch.zeros(2, dtype=batch.features.street.dtype))
+    torch.testing.assert_close(
+        batch.value_targets,
+        torch.full((2, 2, NUM_HANDS), 3.0),
+    )
+
+
+def test_build_end_of_street_value_batch_rejects_wrong_chance_mode():
+    env = _env()
+    sample = sample_end_of_street_chance_roots(
+        env,
+        batch_size=1,
+        closed_street=0,
+        generator=torch.Generator(device=env.device).manual_seed(33),
+    )
+    encoder = BetterStreetValueFeatureEncoder(
+        sample.pbs.env, device=env.device, dtype=torch.float32
+    )
+
+    with pytest.raises(ValueError, match="requires chance='sample_flops'"):
+        build_end_of_street_value_batch(
+            sample,
+            value_encoder=encoder,
+            target_model=BoardCardCountModel(),
+            chance="single_card",
+        )

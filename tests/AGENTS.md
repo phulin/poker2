@@ -9,6 +9,7 @@ Python unit and integration tests for environments, rules, models, training util
 - `test_showdown_per_hand_equity.py`: Per-hand exact, A+xB, tiered approximation, and blocked-hand showdown equity vector coverage.
 - `test_allin_equity_model.py`: Preflop all-in random batch generation, browser-friendly LeakyReLU/RMSNorm model shape checks, pregenerated dataset helpers, and random/exhaustive all-in target sampler smoke coverage.
 - `test_*cfr*.py`, `test_allin_payoff.py`, `test_chance_node_helper.py`, `test_rebel_data_generator.py`, `test_rebel_pipeline.py`, `test_sparse_cfr_evaluator.py`, `test_high_exploitability_save.py`: Sparse CFR/search, all-in payoff kernels, and ReBeL pipeline coverage.
+- `test_end_of_street_distillation.py`: End-of-street `E_X` distillation target-batch coverage for pre-chance features and chance-mode validation.
 - `test_postflop_spot_sampler.py`: Random postflop public-root sampler invariants for flop/turn/river street-start roots, closed-street chance-target roots, and board-legal beliefs.
 - `test_rebel_data_source.py`: ReBeL data-source abstraction delegation coverage for live generator-backed training data.
 - `test_train_rebel_curriculum.py`: Curriculum CLI orchestration coverage for train substep routing, per-substep checkpoint dirs, metadata, and explicit unsupported distill behavior.
