@@ -142,6 +142,7 @@ def test_pregenerated_rebel_data_source_stages_batches_and_state(tmp_path):
         num_actions=5,
         context_length=4,
         generator=torch.Generator().manual_seed(7),
+        shuffle=False,
     )
 
     fresh_value, fresh_policy = source.prepare_step(0)
@@ -159,6 +160,66 @@ def test_pregenerated_rebel_data_source_stages_batches_and_state(tmp_path):
     state = source.state_dict()
     assert state["value_cursors"] == [1]
     assert state["policy_cursors"] == [1]
-    source.load_state_dict({"value_cursors": [2], "policy_cursors": [2]})
+    source.load_state_dict(
+        {"value_cursors": [2], "policy_cursors": [2], "current_step": 13}
+    )
     assert source.state_dict()["value_cursors"] == [2]
     assert source.state_dict()["policy_cursors"] == [2]
+    assert source.state_dict()["current_step"] == 13
+
+
+def test_pregenerated_rebel_data_source_honors_step_windows_and_shuffle(tmp_path):
+    early = tmp_path / "early"
+    late = tmp_path / "late"
+    write_rebel_solved_dataset(
+        early,
+        value_batches=[_batch("value", 0, 5)],
+        policy_batches=[_batch("policy", 100, 5)],
+    )
+    write_rebel_solved_dataset(
+        late,
+        value_batches=[_batch("value", 50, 5)],
+        policy_batches=[_batch("policy", 150, 5)],
+    )
+    value_buffer = RebelValueBuffer(
+        capacity=16,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=torch.device("cpu"),
+    )
+    policy_buffer = RebelPolicyBuffer(
+        capacity=16,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=torch.device("cpu"),
+    )
+    source = PregeneratedRebelDataSource(
+        [
+            PregeneratedDatasetConfig(path=str(early), min_step=0, max_step=10),
+            PregeneratedDatasetConfig(path=str(late), min_step=10),
+        ],
+        value_buffer,
+        policy_buffer,
+        value_sample_count=3,
+        policy_sample_count=3,
+        num_players=2,
+        num_actions=5,
+        context_length=4,
+        generator=torch.Generator().manual_seed(11),
+        shuffle=True,
+    )
+
+    early_value, early_policy = source.prepare_step(9)
+    assert (early_value.features.context[:, 0] < 5).all()
+    assert (early_policy.features.context[:, 0] >= 100).all()
+    assert (early_policy.features.context[:, 0] < 105).all()
+    # Shuffled pregenerated sampling should not advance sequential cursors.
+    assert source.state_dict()["value_cursors"] == [0, 0]
+    assert source.state_dict()["policy_cursors"] == [0, 0]
+
+    late_value, late_policy = source.prepare_step(10)
+    assert (late_value.features.context[:, 0] >= 50).all()
+    assert (late_value.features.context[:, 0] < 55).all()
+    assert (late_policy.features.context[:, 0] >= 150).all()

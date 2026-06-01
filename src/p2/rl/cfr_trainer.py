@@ -409,6 +409,7 @@ class RebelCFRTrainer:
                 },
                 street_support=[0, 1, 2, 3],
                 generator=dataset_rng,
+                shuffle=cfg.data.pregenerated.shuffle,
                 pin_memory=cfg.data.pregenerated.pin_memory,
                 async_shard_prefetch=cfg.data.pregenerated.async_shard_prefetch,
             )

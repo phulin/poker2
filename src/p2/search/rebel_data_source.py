@@ -104,8 +104,15 @@ class _PregeneratedDatasetState:
     dataset: RebelSolvedDataset
     value_weight: float
     policy_weight: float
+    min_step: int = 0
+    max_step: int | None = None
     value_cursor: int = 0
     policy_cursor: int = 0
+
+    def active_at(self, step: int) -> bool:
+        return step >= self.min_step and (
+            self.max_step is None or step < self.max_step
+        )
 
 
 class PregeneratedRebelDataSource(RebelDataSource):
@@ -126,6 +133,7 @@ class PregeneratedRebelDataSource(RebelDataSource):
         action_schedule: dict[str, Any] | None = None,
         street_support: list[int] | None = None,
         generator: torch.Generator | None = None,
+        shuffle: bool = True,
         pin_memory: bool = False,
         async_shard_prefetch: bool = False,
     ) -> None:
@@ -137,6 +145,8 @@ class PregeneratedRebelDataSource(RebelDataSource):
         self.value_sample_count = int(value_sample_count)
         self.policy_sample_count = int(policy_sample_count)
         self.generator = generator or torch.Generator(device="cpu")
+        self.shuffle = bool(shuffle)
+        self.current_step = 0
         self.datasets = [
             _PregeneratedDatasetState(
                 dataset=RebelSolvedDataset(
@@ -152,6 +162,12 @@ class PregeneratedRebelDataSource(RebelDataSource):
                 ),
                 value_weight=float(dataset_cfg.value_weight),
                 policy_weight=float(dataset_cfg.policy_weight),
+                min_step=int(dataset_cfg.min_step),
+                max_step=(
+                    int(dataset_cfg.max_step)
+                    if dataset_cfg.max_step is not None
+                    else None
+                ),
             )
             for dataset_cfg in dataset_configs
         ]
@@ -171,16 +187,28 @@ class PregeneratedRebelDataSource(RebelDataSource):
         weights = []
         for state in self.datasets:
             weight = state.value_weight if stream == "value" else state.policy_weight
-            available = state.dataset.stream_len(stream) > 0
+            available = (
+                state.active_at(self.current_step)
+                and state.dataset.stream_len(stream) > 0
+            )
             weights.append(max(0.0, weight) if available else 0.0)
         weights_tensor = torch.tensor(weights, dtype=torch.float32)
         if weights_tensor.sum() <= 0:
-            raise ValueError(f"pregenerated {stream} stream has no available examples")
+            raise ValueError(
+                f"pregenerated {stream} stream has no active examples at "
+                f"step {self.current_step}"
+            )
         return int(torch.multinomial(weights_tensor, 1, generator=self.generator).item())
 
     def _next_batch(self, stream: str, count: int) -> RebelBatch:
         index = self._choose_dataset(stream)
         state = self.datasets[index]
+        if self.shuffle:
+            return state.dataset.sample_batch(
+                stream,
+                count,
+                generator=self.generator,
+            )
         cursor_attr = "value_cursor" if stream == "value" else "policy_cursor"
         cursor = int(getattr(state, cursor_attr))
         batch = state.dataset.get_batch(stream, cursor, count, wrap=True)
@@ -189,7 +217,7 @@ class PregeneratedRebelDataSource(RebelDataSource):
         return batch
 
     def prepare_step(self, step: int) -> tuple[RebelBatch | None, RebelBatch | None]:
-        del step
+        self.current_step = int(step)
         value_batch = self._next_batch("value", self.value_sample_count)
         policy_batch = self._next_batch("policy", self.policy_sample_count)
         self.value_buffer.add_batch(value_batch)
@@ -221,9 +249,11 @@ class PregeneratedRebelDataSource(RebelDataSource):
             "value_cursors": [state.value_cursor for state in self.datasets],
             "policy_cursors": [state.policy_cursor for state in self.datasets],
             "generator_state": self.generator.get_state(),
+            "current_step": self.current_step,
         }
 
     def load_state_dict(self, state: dict) -> None:
+        self.current_step = int(state.get("current_step", self.current_step))
         for dataset_state, cursor in zip(
             self.datasets, state.get("value_cursors", []), strict=False
         ):

@@ -11,7 +11,7 @@ Python unit and integration tests for environments, rules, models, training util
 - `test_*cfr*.py`, `test_allin_payoff.py`, `test_chance_node_helper.py`, `test_rebel_data_generator.py`, `test_rebel_pipeline.py`, `test_sparse_cfr_evaluator.py`, `test_high_exploitability_save.py`: Sparse CFR/search, all-in payoff kernels, and ReBeL pipeline coverage.
 - `test_end_of_street_distillation.py`: End-of-street `E_X` distillation target-batch coverage for pre-chance features and chance-mode validation.
 - `test_postflop_spot_sampler.py`: Random postflop public-root sampler invariants for flop/turn/river street-start roots, closed-street chance-target roots, board texture stratification, randomized board-legal beliefs, and conservative pot/SPR templates.
-- `test_rebel_data_source.py`: ReBeL data-source abstraction coverage for live generator-backed and pregenerated solved-dataset-backed training data.
+- `test_rebel_data_source.py`: ReBeL data-source abstraction coverage for live generator-backed and pregenerated solved-dataset-backed training data, including pregenerated step windows and shuffled sampling.
 - `test_rebel_solved_dataset.py`: Tensor-only solved ReBeL dataset serialization, manifest validation, wrapped reads, random sampling, and async prefetch coverage.
 - `test_pregenerate_postflop_rebel.py`: Bounded postflop pregeneration CLI coverage for live-mode validation and trimmed solved-batch writer calls.
 - `test_train_rebel_curriculum.py`: Curriculum CLI orchestration coverage for train/distill substep routing, per-substep checkpoint dirs, promotion state, and metadata.
