@@ -820,6 +820,12 @@ def test_rebel_cfr_trainer_single_step_cpu():
         value_targets=torch.full_like(value_targets, 0.1),
         legal_masks=legal_masks,
     )
+    before_policy_head_value_only = [
+        param.detach().clone() for param in trainer.model.policy_head.parameters()
+    ]
+    before_value_head_value_only = [
+        param.detach().clone() for param in trainer.model.hand_value_head.parameters()
+    ]
     before_value_only = [
         param.detach().clone() for param in trainer.model.parameters()
     ]
@@ -831,6 +837,22 @@ def test_rebel_cfr_trainer_single_step_cpu():
     assert any(
         not torch.equal(before, after.detach())
         for before, after in zip(before_value_only, trainer.model.parameters())
+    )
+    assert all(
+        torch.equal(before, after.detach())
+        for before, after in zip(
+            before_policy_head_value_only,
+            trainer.model.policy_head.parameters(),
+            strict=True,
+        )
+    )
+    assert any(
+        not torch.equal(before, after.detach())
+        for before, after in zip(
+            before_value_head_value_only,
+            trainer.model.hand_value_head.parameters(),
+            strict=True,
+        )
     )
 
 
