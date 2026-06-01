@@ -3,10 +3,37 @@
 ## Goal
 Add a backward-bootstrapped postflop curriculum to heads-up ReBeL training, driven by a single orchestrator script. The curriculum bootstraps backward:
 
-1. Train on random river beliefs and river public spots.
-2. Use the river-trained network to generate and train turn data.
-3. Use the turn+river network to generate and train flop data.
-4. Keep preflop separate: use the multiway preflop model and handoff design from `preflop_multiway_pbs_bootstrap_plan.md`.
+1. Train `S_river` on random river beliefs and river public spots (exact river terminals).
+2. Distill `E_turn` from frozen `S_river` (expectation over the river card), then train `S_turn` with `E_turn` as turn-closing terminal values.
+3. Distill `E_flop` from frozen `S_turn`, then train `S_flop` with `E_flop` as flop-closing terminal values.
+4. Distill `E_preflop` from frozen `S_flop` to feed the preflop handoff; keep preflop itself separate per `preflop_multiway_pbs_bootstrap_plan.md`.
+
+### Model factoring: start-of-street and end-of-street nets per street
+Use **distinct networks per postflop street**, not one cumulative model conditioned on a street embedding. This is the DeepStack factoring and is what makes the backward curriculum clean. Per street `X` there are two nets with different roles:
+
+- **Start-of-street net `S_X`** — post-chance (the street-`X` card(s) are dealt, betting about to begin). Predicts counterfactual values **and** policy. Used to resolve street `X` at play time and to value within-street depth-limited leaves during street-`X` CFR (normal ReBeL self-bootstrap on the net being trained).
+- **End-of-street net `E_X`** — pre-chance (street-`X` betting closed, the next card not yet dealt). Predicts the **chance-averaged** counterfactual value only (no policy). Used as the **terminal leaf value at street-`X`-closing nodes inside street-`X`'s CFR iterations**.
+
+Distillation chain (backward):
+
+- `S_X` is trained by running street-`X` CFR, whose closing leaves are valued by the frozen `E_X`, and whose terminal leaves use exact fold/showdown/all-in values.
+- `E_X` is **distilled from the frozen `S_{X+1}`**: sample end-of-`X` (pre-chance) public belief states and regress `E_X` onto the chance expectation over the dealt card of `S_{X+1}`. `ChanceNodeHelper` runs the 44-card enumeration / 256-flop sample **once, to build `E_X`'s targets** — never inside prior-street CFR iterations. Street-`X` CFR then costs one `E_X` eval per closing leaf instead of `enumerate × S_{X+1}` evals per leaf per iteration.
+
+Why two nets, not one frozen next-street net at the boundary: the inner CFR loop must not enumerate the chance node every iteration. `E_X` amortizes that enumeration into a single cheap eval. (Mechanically this isolates the pre-chance head the current single net already approximates via the `pre_chance_node` flag in `_street_for_phase`.)
+
+Properties:
+
+- Once promoted, `S_X` and `E_X` are **frozen forever**. No self-bootstrap feedback loop across streets and no forgetting to defend against.
+- During a stage's solve the evaluator holds the **current-street `S_X`** (training) plus the **frozen `E_X`** (closing leaves). Distilling `E_X` additionally loads the frozen `S_{X+1}`.
+- At play/resolve time, search dispatches by street through a small `street → net` registry.
+
+Costs / caveats:
+
+- The evaluator and `ChanceNodeHelper` currently hold a single `model` (`sparse_cfr_evaluator.py`, `chance_node_helper.py`); they must take an `(S_X, E_X)` pair with leaf routing by phase (within-street → `S_X`, street-closing → `E_X`).
+- Boundary approximation compounds: `S_{X+1}` error → distilled into `E_X` → consumed by `S_X` training. Keep exact terminals mixed in and validate `E_X` against fresh chance-enumerated `S_{X+1}` values on a holdout.
+- Cross-street weight sharing is given up; transfer flows through `E_X` targets instead.
+
+Net inventory: `S_river` (exact river terminals, no `E_river`), `E_turn`←`S_river`, `S_turn`, `E_flop`←`S_turn`, `S_flop`, `E_preflop`←`S_flop` (feeds the preflop handoff).
 
 ### Data path: live is the main path
 Live, in-loop CFR data generation stays the **production** training path for every postflop street. On-disk solved-example datasets are too large to be the backbone (see "Storage Reality" below), so the trainer supports two data modes:
@@ -14,7 +41,7 @@ Live, in-loop CFR data generation stays the **production** training path for eve
 - `live` — used for the real, full-scale runs. All streets generate examples in-loop and feed the existing replay buffers. CFR stays in the optimizer loop; the replay buffer amortizes recent solves.
 - `pregenerated` — used for **small, fast, fixed-data hyperparameter sweeps only**. Solved examples are written to disk at experiment scale (not the 50M+ production scale) so HP runs see identical data and skip the solver. This mode must never be assumed to fit a full run on disk.
 
-The "pregeneration" being added is therefore two things: (a) the optional bounded offline dataset path for HP testing, and (b) the staged teacher curriculum itself, both owned by one orchestrator script.
+The "pregeneration" being added is therefore two things: (a) the optional bounded offline dataset path for HP testing, and (b) the staged train/distill curriculum itself, both owned by one orchestrator script.
 
 ### Storage Reality
 On-disk solved datasets do not scale to a full run. Per postflop example the belief vector and value target each cost `2 × 1326 ≈ 2652` floats:
@@ -30,7 +57,8 @@ Crucially, storing *roots* does not help: a root carries `beliefs[2, 1326]`, the
 - Do not train the postflop model on preflop examples.
 - Do not attempt to store full-run solved datasets on disk. The `pregenerated` mode is for small HP-sweep runs only.
 - Do not start with arbitrary incoherent mid-street state mutation. Random public spots must be generated by either a legal state sampler or constrained street-start state constructors.
-- Do not add a separate frozen-teacher network slot to the evaluator. Next-street leaf values come from the model evaluated at chance-node children via the existing `ChanceNodeHelper`; curriculum freezing happens at stage/checkpoint boundaries, not inside the solver.
+- Do not enumerate/sample the chance node inside prior-street CFR iterations. The chance expectation is amortized once into a frozen end-of-street net (`E_X`); CFR reads `E_X` at closing leaves. `ChanceNodeHelper` is used to build `E_X`'s training targets, not in the inner loop.
+- Do not use a cumulative single net conditioned on street. Each `S_X`/`E_X` is its own net, frozen once promoted.
 
 ## Current Starting Point
 The current trainer is tightly coupled:
@@ -86,10 +114,10 @@ Extract these guts into a reusable runner so both the single-run CLI and the cur
 ### Curriculum Orchestrator
 Add a new script (e.g. `src/p2/cli/train_rebel_curriculum.py`) that owns the river→turn→flop process and reuses `run_training_loop`:
 
-- Accepts a **superset** of train_rebel's `Config` (every option train_rebel takes) plus a `curriculum:` subtree (stage list, per-stage step budgets, per-stage data/search overrides, teacher-handoff checkpoint paths).
-- For each stage: configure the trainer (street config, chance-node mode, teacher checkpoint as initialization), run the loop to that stage's step budget, promote/freeze the resulting checkpoint, hand it to the next stage.
+- Accepts a **superset** of train_rebel's `Config` (every option train_rebel takes) plus a `curriculum:` subtree (the ordered train/distill sub-steps, per-sub-step step budgets, per-sub-step data/search overrides, and the frozen-net handoff paths `S_X`/`E_X`).
+- For each sub-step: `train` sub-steps configure the trainer for street `X` (load frozen `E_X` as the closing-leaf net, train `S_X` to its step budget, promote it); `distill` sub-steps regress `E_X` onto the chance expectation of a frozen `S_{X+1}` and promote `E_X`. Each promoted net is frozen and handed to the next sub-step.
 - **Same wandb level as train_rebel**, structured as **one run per stage tied by a wandb `group`** (matches per-stage promotion gates and clean intra-stage resume).
-- **Resume must be stage-aware.** Checkpoints already carry metadata via `save_checkpoint`; add a `curriculum_stage` marker so a resumed orchestrator restarts the correct stage at the correct intra-stage step. Extend the existing run-id extraction in `_init_wandb` (it already reads checkpoint metadata) to recover the per-stage wandb run.
+- **Resume must be sub-step-aware.** Checkpoints already carry metadata via `save_checkpoint`; add a `curriculum_substep` marker so a resumed orchestrator restarts the correct train/distill sub-step at the correct intra-sub-step step. Extend the existing run-id extraction in `_init_wandb` (it already reads checkpoint metadata) to recover the per-sub-step wandb run.
 
 ### Offline Data Components (for `pregenerated` mode + holdouts only)
 Add a postflop offline data package, likely under `src/p2/rebel_data/` or `src/p2/search/offline/`:
@@ -224,9 +252,28 @@ The manifest is the guardrail against stale or mixed-quality data:
 }
 ```
 
-For bounded turn/flop datasets, `target_model` records the stage checkpoint the model held while valuing chance-node leaves, so the dataset can be regenerated reproducibly.
+For bounded turn/flop datasets, `target_model` records the frozen `E_X` used at closing leaves (and the `S_{X+1}` it was distilled from), so the dataset can be regenerated reproducibly.
 
 ## Random Spot Generation
+
+### DeepStack Procedure (baseline)
+Follow the DeepStack training-situation procedure (paper SOM) as the baseline spot generator, since `S_X`/`E_X` here are the same kind of counterfactual-value nets. A situation at the start of a street is fully specified by **pot size, both players' ranges, and the dealt public cards** — the betting history is not needed because pot + ranges are a sufficient statistic. This is exactly the start-of-street (post-chance) root for `S_X` and the pre-chance state for `E_X`.
+
+**Pot size.** Sample pot from a fixed mixture of intervals, each chosen with uniform probability, then a uniform integer within the chosen interval. DeepStack's intervals (100bb = 20000 chips, in chips) are approximately `{[100,200), [200,400), [400,2000), [2000,6000), [6000,19950]}`. Re-bucket these to our stack/blind scale. The net's actual input is **pot as a fraction of total stacks**, and **counterfactual value targets are expressed as fractions of the pot** — both normalizations are important for generalization and should be kept.
+
+**Ranges — recursive coverage generator `R(S, p)`.** Ranges must cover the space of ranges CFR could encounter *during re-solving*, not just equilibrium ranges. DeepStack's recursive procedure assigns probability mass `p` across a hand set `S`:
+
+1. If `|S| == 1`, assign `Pr(s) = p`.
+2. Otherwise:
+   a. draw `p1 ~ Uniform(0, p)`, set `p2 = p - p1`;
+   b. split `S` into `S1` (weaker half) and `S2` (stronger half) by **hand strength** (probability of beating a uniformly random hand given the current board), with `|S1| = floor(|S|/2)`;
+   c. recurse `R(S1, p1)` and `R(S2, p2)`.
+
+A full range is `R(all legal hands, 1)`. This produces ranges polarized/condensed across the strength ordering at random granularities, covering the polarized/capped/asymmetric cases by construction. Generate ranges per player independently, then zero board-blocked hands and renormalize.
+
+**Targets.** Solve each situation with CFR⁺-style iterations restricted to fold / call / pot-sized bet / all-in (no card abstraction); `S_X` targets come from these solves, `E_X` targets from the frozen `S_{X+1}` chance expectation. DeepStack used 10M turn and 1M flop situations; the auxiliary end-of-preflop net used 10M situations with targets from enumerating all 22,100 flops — our `E_preflop` distillation mirrors this (sampled rather than fully enumerated).
+
+The `R(S, p)` generator must be tensorized over `[B, 2, 1326]` (precompute per-board hand-strength orderings; do the recursive split as a batched bisection, no per-hand Python loops). The mixture sampler below is a **complement** to `R(S, p)`, not a replacement — keep both and stratify.
 
 ### Start With Street-Start Roots
 For the first river implementation, generate roots at the beginning of river betting:
@@ -243,9 +290,7 @@ This avoids incoherent mid-street state construction while still producing polic
 After street-start roots pass validation, add a legal mid-street spot sampler by replaying random legal action prefixes from a street-start state. Do not mutate pot/stacks/actions fields independently.
 
 ### River Belief Distribution
-Random river beliefs should be broad enough that the network learns public-belief reasoning, not just uniform-range showdowns.
-
-Use a mixture sampler:
+Random river beliefs should be broad enough that the network learns public-belief reasoning, not just uniform-range showdowns. The DeepStack `R(S, p)` generator above is the primary source; add this mixture sampler alongside it for explicit coverage of named range shapes:
 
 - uniform board-legal ranges;
 - Dirichlet or exponential random ranges with concentration buckets;
@@ -287,7 +332,7 @@ Later versions should source roots from solved turn/flop handoffs and preflop ha
 Before training any curriculum stage:
 
 1. Extract `run_training_loop` from `train_rebel.py` and reduce `train_rebel.py` to a thin wrapper (no behavior change; gate with an existing-behavior test).
-2. Add the curriculum orchestrator script that drives stages via `run_training_loop`, with stage-aware resume and one-wandb-run-per-stage grouping.
+2. Add the curriculum orchestrator script that drives train/distill sub-steps via `run_training_loop`, with sub-step-aware resume and one-wandb-run-per-sub-step grouping.
 3. Add the `data.mode: live|pregenerated|hybrid` switch and the `RebelDataSource` abstraction with `live` as the default.
 
 Optional offline plumbing (only needed before the first HP sweep, not before live curriculum training):
@@ -299,8 +344,8 @@ Optional offline plumbing (only needed before the first HP sweep, not before liv
 
 This stage should not change model quality. It only moves the loop/data boundaries.
 
-### Stage 1: River
-Train the river network live. River CFR is the cheapest street: leaves are exact terminal fold/showdown/all-in values, no chance node ahead, no learned leaf model. This is why river can stay live at full scale even though it cannot be pregenerated to disk.
+### Stage 1: River (`S_river`)
+Train `S_river` live. River CFR is the cheapest street: leaves are exact terminal fold/showdown/all-in values, no chance node ahead, no learned leaf net. There is no `E_river`. This is why river can stay live at full scale even though it cannot be pregenerated to disk.
 
 Data generation (live):
 
@@ -316,18 +361,28 @@ Holdout / HP mode (bounded, optional):
 
 Training:
 
-1. Train the normal postflop `BetterFFN`/`BetterTRM` model from river data.
+1. Train the postflop `BetterFFN`/`BetterTRM` net from river data.
 2. Use suit permutation exactly as live training does.
 3. Track value loss by river spot bucket and policy KL by node depth/reach.
-4. Promote a checkpoint only when the holdout improves and the model is stable across board textures.
+4. Promote `S_river` only when the holdout improves and the net is stable across board textures.
 
 Output:
 
-- `M_river`: promoted river checkpoint, used to initialize the turn stage.
+- `S_river`: promoted, frozen river start-of-street net.
 - `D_river_val`: bounded holdout; optional bounded `D_river_train` for HP sweeps.
 
-### Stage 2: Turn
-Value river leaves through the chance node, exactly as the existing solver does. The river card is a single-card chance node, so `ChanceNodeHelper.single_card_chance_values` enumerates it (all legal next cards) and evaluates the **current model** at the post-chance river states. There is no separate frozen-teacher network: the turn stage is initialized from the promoted `M_river` checkpoint, and the model evaluated at chance leaves carries that river knowledge forward. Stage freezing is the checkpoint handoff plus replay weighting, not a second network in the evaluator.
+### Stage 1.5: Distill `E_turn` from frozen `S_river`
+Build the turn-closing terminal-value net so turn CFR never enumerates the river card in its inner loop.
+
+1. Sample end-of-turn (pre-chance) public belief states: `street == 2`, four board cards, turn betting closed, board-legal beliefs.
+2. For each, compute the target as the river-card chance expectation of frozen `S_river` via `single_card_chance_values` (one enumeration per state, done here once).
+3. Regress the value-only `E_turn` net onto those targets.
+4. Validate `E_turn` against freshly enumerated `S_river` expectations on a holdout; keep exact terminals mixed in where the turn-closing node is already terminal (e.g. all-in).
+
+Output: `E_turn`, frozen, consumed as turn-closing leaf values in Stage 2.
+
+### Stage 2: Turn (`S_turn`)
+Train `S_turn` live. Turn-closing leaves are valued by the frozen `E_turn` (one eval per leaf); within-turn depth-limited leaves are valued by `S_turn` itself (normal ReBeL bootstrap). No chance enumeration happens inside the CFR loop.
 
 Data generation (live by default):
 
@@ -338,46 +393,39 @@ Data generation (live by default):
    - board-legal random beliefs.
 2. Run CFR through bounded turn betting.
 3. At terminal leaves, use exact fold/showdown/all-in values.
-4. At round-closed leaves that advance to river, value them through single-card chance enumeration (`single_card_chance_values`) with the current model.
-5. Use the existing pre-chance/post-chance value-example pattern, and record target provenance:
+4. At turn-closing (round-closed) leaves, read values directly from frozen `E_turn`.
+5. Record target provenance:
    - `target_source=terminal_exact`;
-   - `target_source=river_chance_model`;
+   - `target_source=E_turn`;
    - `target_source=turn_cfr_backup`.
-6. Tag turn and river-boundary value examples separately by source.
 
 Training:
 
-1. Continue training the cumulative postflop model (initialized from `M_river`) on a live mix of river and turn spots.
-2. Keep river spot weight high enough in the live mix / replay buffers to avoid forgetting.
-3. Validate on:
-   - river holdout from Stage 1;
+1. Train `S_turn` (a fresh net) on turn spots only — no need to mix river or guard against forgetting, since `S_river`/`E_turn` are frozen.
+2. Validate on:
    - a bounded turn holdout;
+   - `E_turn` boundary agreement with fresh `S_river` enumerations;
    - a small fresh live-solve probe set for sanity only.
-4. Promote `M_turn` when turn improves without river regression.
+3. Promote `S_turn` when the turn holdout improves and boundary values are stable.
 
-Recommended live spot-mix weights during the turn stage:
-
-```yaml
-curriculum:
-  stage: turn
-  spot_mix:
-    river:
-      value_weight: 0.35
-      policy_weight: 0.25
-    turn:
-      value_weight: 0.65
-      policy_weight: 0.75
-```
-
-(For `pregenerated` HP sweeps the same weights apply to bounded `river_v1`/`turn_v1` datasets.)
+Because each street net trains on its own street only, there is no cross-street spot-mix to tune for the turn stage.
 
 Output:
 
-- `M_turn`: promoted turn+river checkpoint, used to initialize the flop stage.
-- `D_turn_val`: bounded holdout; the manifest records the river-stage checkpoint used at chance leaves.
+- `S_turn`: promoted, frozen turn start-of-street net.
+- `D_turn_val`: bounded holdout; the manifest records `E_turn` (and the `S_river` it was distilled from) as the boundary value source.
 
-### Stage 3: Flop
-Value turn leaves through the chance node. The flop's next card is a single-card (turn) chance node and is enumerated; the flop chance node itself (three cards) is **sampled**, not enumerated — `ChanceNodeHelper.flop_chance_values` samples `FLOP_SAMPLE_SIZE` flops rather than enumerating all 22,100. As in Stage 2, leaves are valued by the current model (initialized from `M_turn`), not a separate frozen network.
+### Stage 2.5: Distill `E_flop` from frozen `S_turn`
+Same pattern as Stage 1.5, one street earlier:
+
+1. Sample end-of-flop (pre-chance) public belief states: `street == 1`, three board cards, flop betting closed.
+2. Compute targets as the turn-card chance expectation of frozen `S_turn` via `single_card_chance_values` (single-card turn chance, enumerated once here).
+3. Regress `E_flop` onto those targets; validate against fresh enumerations; mix in exact terminals where applicable.
+
+Output: `E_flop`, frozen, consumed as flop-closing leaf values in Stage 3.
+
+### Stage 3: Flop (`S_flop`)
+Train `S_flop` live. Flop-closing leaves are valued by the frozen `E_flop` (one eval per leaf); within-flop depth-limited leaves are valued by `S_flop` itself. The turn card at the flop boundary is a single-card chance node already amortized into `E_flop`, so flop CFR does no chance enumeration in its inner loop.
 
 Data generation (live by default):
 
@@ -388,31 +436,38 @@ Data generation (live by default):
    - board-legal random beliefs.
 2. Run bounded flop CFR.
 3. At terminal leaves, use exact fold/showdown/all-in values.
-4. At round-closed leaves that advance to turn, value them through single-card chance enumeration with the current model; sample flops via `flop_chance_values` where a flop chance node is involved.
+4. At flop-closing (round-closed) leaves, read values directly from frozen `E_flop`.
 5. Record target provenance and depth/street coverage.
 6. Add an additional flop-root source from the multiway preflop handoff builder once that path exists.
 
 Training:
 
-1. Continue training the cumulative postflop model (initialized from `M_turn`) on a live mix of river, turn, and flop spots.
-2. Oversample later-street validation during early flop training to catch forgetting.
+1. Train `S_flop` (a fresh net) on flop spots only.
+2. Validate on a bounded flop holdout and on `E_flop` boundary agreement with fresh `S_turn` enumerations.
 3. Add real handoff flop roots only after random flop roots are stable.
-4. Promote `M_flop` when it improves flop holdout and preserves turn/river quality.
+4. Promote `S_flop` when the flop holdout improves and boundary values are stable.
 
 Output:
 
-- `M_postflop`: final heads-up flop/turn/river model.
-- `D_flop_val`: bounded holdout; the manifest records the turn-stage checkpoint used at chance leaves.
+- `S_flop`: promoted, frozen flop start-of-street net. Together with `S_turn`, `S_river` it is the heads-up postflop model set used at play time (`street → net` dispatch).
+- `D_flop_val`: bounded holdout; the manifest records `E_flop` (and its `S_turn` source) as the boundary value source.
+
+### Stage 3.5: Distill `E_preflop` from frozen `S_flop`
+The flop chance node deals **three** cards, so this distillation **samples** flops (`ChanceNodeHelper.flop_chance_values`, `FLOP_SAMPLE_SIZE` flops) rather than enumerating all 22,100. `E_preflop` provides flop-boundary terminal values to the multiway preflop CFR via the handoff in `preflop_multiway_pbs_bootstrap_plan.md`.
 
 ## Preflop Handoff
 Preflop remains a separate multiway project.
 
+**Multiway preflop, forced fold via a legal-action invariant.** Preflop is solved multiway, and the postflop handoff is always heads-up. The forced fold is implemented **inside** the preflop CFR as a constraint on the legal-action set, not as a post-hoc reduction (see "Forced Fold Via A Legal-Action Invariant" in `preflop_multiway_pbs_bootstrap_plan.md`): a player facing the action when two others are already matched at the current bet level may only re-raise / all-in / fold, never flat-call. So a non-all-in round can only close with ≤ 2 matched seats and the flop is always reached heads-up.
+
+Why this is the unbiased choice: every fold is a voluntary, EV-maximizing player decision, so there is no artificial payoff to assign at the boundary and no incentive distortion to correct. The only closed-preflop boundary is heads-up, valued by `E_preflop` (distilled from `S_flop`). The cost is an explicit, logged abstraction — squeeze-or-fold removes multiway limped/called pots and inflates 3-bet frequencies relative to real poker. Multiway all-in showdowns are still allowed and resolved by the side-pot equity resolver.
+
 Use the plan in `preflop_multiway_pbs_bootstrap_plan.md`:
 
-1. Multiway preflop model solves preflop `PBSEnv` states.
-2. `PreflopHandoffBuilder` emits heads-up flop `PublicBeliefState`s.
+1. Multiway preflop model solves preflop `PBSEnv` states under the legal-action invariant.
+2. `PreflopHandoffBuilder` compacts the two live seats of a closed preflop row into a heads-up flop `PublicBeliefState`.
 3. Those flop roots become an additional root source for the flop stage.
-4. The postflop model trains only on generated flop/turn/river examples, never direct preflop examples.
+4. The postflop nets train only on flop/turn/river examples, never direct preflop examples.
 
 The postflop dataset manifest should tag these rows:
 
@@ -430,18 +485,18 @@ Add a `curriculum` subtree consumed by the orchestrator (a superset of the train
 
 ```yaml
 curriculum:
-  stages: [river, turn, flop]   # run in order; resume re-enters the active stage
-  wandb_group: rebel_postflop_curriculum   # one run per stage, shared group
-  river:
-    num_steps: 200000
-    init_from: null             # cold start
-  turn:
-    num_steps: 150000
-    init_from: ${stage:river}   # promoted river checkpoint
-  flop:
-    num_steps: 150000
-    init_from: ${stage:turn}
+  # alternating train / distill sub-steps, run in order; resume re-enters the active sub-step
+  stages: [river, distill_E_turn, turn, distill_E_flop, flop, distill_E_preflop]
+  wandb_group: rebel_postflop_curriculum   # one run per sub-step, shared group
+  river:           { kind: train,   net: S_river, num_steps: 200000 }
+  distill_E_turn:  { kind: distill, net: E_turn,  from: S_river, chance: single_card, num_steps: 20000 }
+  turn:            { kind: train,   net: S_turn,  closing_net: E_turn, num_steps: 150000 }
+  distill_E_flop:  { kind: distill, net: E_flop,  from: S_turn,  chance: single_card, num_steps: 20000 }
+  flop:            { kind: train,   net: S_flop,  closing_net: E_flop, num_steps: 150000 }
+  distill_E_preflop: { kind: distill, net: E_preflop, from: S_flop, chance: sample_flops, num_steps: 30000 }
 ```
+
+`train` sub-steps run street CFR + supervised training (the `S_X` nets need value+policy); `distill` sub-steps are value-only supervised regression of `E_X` onto chance expectations of a frozen `from` net, with `chance` selecting single-card enumeration vs flop sampling.
 
 Add a data subtree to the ReBeL config. `live` is the production default; `pregenerated` is for bounded HP sweeps only:
 
@@ -513,8 +568,8 @@ Start pregeneration with non-fused sparse CFR for correctness. Add fused sparse 
 ### Phase 1: Loop Refactor + Orchestrator
 1. Extract `run_training_loop` from `train_rebel.py`; reduce `train_rebel.py` to a thin wrapper.
 2. Add a test that the wrapper trains/checkpoints/resumes identically to the old loop.
-3. Add the curriculum orchestrator script (stage list, per-stage step budgets, teacher-checkpoint handoff).
-4. Implement stage-aware resume (a `curriculum_stage` marker in checkpoint metadata) and one-wandb-run-per-stage grouping.
+3. Add the curriculum orchestrator script (ordered train/distill sub-steps, per-sub-step budgets, frozen `S_X`/`E_X` handoff).
+4. Implement sub-step-aware resume (a `curriculum_substep` marker in checkpoint metadata) and one-wandb-run-per-sub-step grouping.
 
 ### Phase 2: Data Source Refactor
 1. Extract a `RebelDataSource` interface.
@@ -540,7 +595,7 @@ Start pregeneration with non-fused sparse CFR for correctness. Add fused sparse 
 1. Implement board-legal belief mixture sampling (tensorized, on-the-fly).
 2. Implement conservative legal river street-start public spot templates.
 3. Materialize `PublicBeliefState` roots inside the live generator.
-4. Run the live river stage via the orchestrator to produce `M_river`.
+4. Run the live river stage via the orchestrator to produce `S_river`.
 5. Add bounded holdout/HP-sweep dataset generation support.
 
 ### Phase 5: Offline Trainer (bounded mode)
@@ -550,19 +605,17 @@ Start pregeneration with non-fused sparse CFR for correctness. Add fused sparse 
 4. Make `pregenerated`-mode checkpoints not require the live generator state.
 5. Add a tiny end-to-end offline train test.
 
-### Phase 6: Turn Stage
-1. Initialize the trainer from promoted `M_river`.
-2. Generate turn roots and solve bounded turn subgames (live).
-3. Value river/new-street cutoffs via `single_card_chance_values` with the current model (no separate teacher net).
-4. Record target provenance per row.
-5. Train cumulative river+turn model and promote `M_turn`.
+### Phase 6: Turn (distill `E_turn`, then train `S_turn`)
+1. Add the `E_X` distiller: sample end-of-street pre-chance PBS, build targets via `ChanceNodeHelper` over a frozen `S_{X+1}`, regress a value-only net.
+2. Distill `E_turn` from frozen `S_river` (single-card river enumeration).
+3. Train `S_turn` live: turn-closing leaves read frozen `E_turn`, within-turn depth leaves use `S_turn`; exact terminals where applicable.
+4. Record target provenance per row; promote `S_turn`.
 
-### Phase 7: Flop Stage
-1. Initialize the trainer from promoted `M_turn`.
-2. Generate random flop roots and solve bounded flop subgames (live).
-3. Value turn/new-street cutoffs with the current model; sample flops via `flop_chance_values` where a flop chance node is involved.
-4. Train cumulative flop+turn+river model and promote `M_flop` / `M_postflop`.
-5. Add preflop-handoff flop roots after random flop validation is stable.
+### Phase 7: Flop (distill `E_flop`, then train `S_flop`) + `E_preflop`
+1. Distill `E_flop` from frozen `S_turn` (single-card turn enumeration).
+2. Train `S_flop` live: flop-closing leaves read frozen `E_flop`; promote `S_flop`.
+3. Distill `E_preflop` from frozen `S_flop` by **sampling flops** (`flop_chance_values`) for the preflop handoff.
+4. Add preflop-handoff flop roots to the flop spot sampler after random flop validation is stable.
 
 ### Phase 8: Optimization
 1. Add fused sparse CFR support for live and offline generation.
@@ -593,14 +646,15 @@ Start pregeneration with non-fused sparse CFR for correctness. Add fused sparse 
 - CFR-generated policy targets are normalized over legal actions per hand.
 - Value targets are finite, clipped only where intended, and scale-consistent.
 
-### Turn/Flop Chance-Leaf Targets
-- New-street leaf values match direct model inference at the post-chance states for sampled rows.
-- Single-card chance enumeration covers all legal next cards; flop sampling draws `FLOP_SAMPLE_SIZE` distinct legal flops.
-- For bounded holdout/HP datasets, the manifest records the stage checkpoint used at chance leaves, and same-seed + same-checkpoint regeneration reproduces close numerical targets.
+### End-of-Street Distillation (`E_X`)
+- `E_X` targets match the chance expectation of frozen `S_{X+1}`: single-card enumeration covers all legal next cards; flop sampling draws `FLOP_SAMPLE_SIZE` distinct legal flops.
+- A trained `E_X` agrees with freshly enumerated `S_{X+1}` expectations on a holdout within tolerance.
+- During street-`X` CFR, closing-leaf values come from `E_X` only (no chance enumeration in the inner loop); within-street depth leaves come from `S_X`.
+- For bounded holdout/HP datasets, the manifest records the frozen `E_X` (and its `S_{X+1}` source); same-seed + same-net regeneration reproduces close numerical targets.
 
 ### Trainer / Loop Refactor
 - The thin `train_rebel.py` wrapper trains, checkpoints, and resumes identically to the pre-refactor loop (golden-run comparison).
-- The orchestrator resumes mid-curriculum into the correct stage at the correct intra-stage step, recovering the per-stage wandb run.
+- The orchestrator resumes mid-curriculum into the correct sub-step at the correct intra-sub-step step, recovering the per-sub-step wandb run.
 - Existing live mode remains unchanged.
 - `pregenerated`-mode training on a fixed tiny dataset gives deterministic loss for a fixed seed and resumes with the same dataset cursor and optimizer state.
 - Suit permutation changes board, beliefs, value targets, and policy targets consistently.
@@ -630,11 +684,12 @@ Promote a stage checkpoint only when:
 - action mix is not collapsing in major spot buckets;
 - target mean/std by street and bucket is stable across generation batches.
 
-For the backward curriculum:
+For the backward curriculum (each net is frozen once promoted, so there is no prior-street regression to guard against — only its own holdout and its boundary net):
 
-- `M_river` is promoted only on river holdout.
-- `M_turn` is promoted only if turn improves and river does not regress.
-- `M_postflop` is promoted only if flop improves and turn/river do not regress.
+- `S_river` is promoted on river holdout.
+- `E_turn` is promoted on boundary agreement with `S_river`; `S_turn` on turn holdout.
+- `E_flop` is promoted on boundary agreement with `S_turn`; `S_flop` on flop holdout.
+- `E_preflop` is promoted on boundary agreement with `S_flop` (flop-sampled).
 
 ## Main Risks
 
@@ -646,21 +701,15 @@ Random roots can become unlike real poker roots. Mitigation:
 - add roots from sampled prior-stage continuations;
 - eventually mix preflop-handoff flop roots.
 
-### Chance-Leaf / Self-Bootstrap Bias
-Turn and flop targets inherit errors from the model used at chance leaves, and since that model is the cumulative student (initialized from the prior stage), a degrading student can poison its own leaf values. Mitigation:
+### Boundary Approximation Compounding
+Each `S_X` trains against `E_X`, which was distilled from `S_{X+1}`, which itself approximated `S_{X+2}` — errors compound backward (river → turn → flop → preflop). Because every net is frozen once promoted, there is no self-bootstrap feedback loop, but stale or biased `E_X` still propagates. Mitigation:
 
-- initialize each stage from the promoted prior-stage checkpoint;
+- gate each `E_X` on holdout agreement with fresh chance-enumerated `S_{X+1}` values before training the street that consumes it;
 - keep exact terminal rows mixed in (they are bias-free);
-- keep prior-street spot weight high enough that the student does not forget the streets it values at leaves;
-- gate promotion on prior-stage holdouts;
-- validate chance-leaf values against small fresh solves.
+- re-distill `E_X` and retrain downstream streets if an upstream net is later improved;
+- validate `S_X` closing-leaf reads against small fresh solves that enumerate the chance node directly.
 
-### Forgetting Later Streets
-Moving from river to turn to flop can damage later-street predictions. Mitigation:
-
-- train cumulative models;
-- keep later-street dataset weights;
-- gate promotion on previous-stage holdouts.
+(There is no separate "forgetting" risk: a promoted net is never trained again, so earlier streets cannot be degraded by later training.)
 
 ### Storage Scale
 Full-run solved datasets do not fit on disk (see Storage Reality): beliefs and value targets are each `2 × 1326` floats, and policy targets are `[B, 1326, A]`. Mitigation:
@@ -680,12 +729,12 @@ Refactoring the loop and adding stage orchestration can disturb live training. M
 
 ## Suggested Milestones
 1. `run_training_loop` extraction + thin `train_rebel.py` wrapper (golden-run equivalence).
-2. Curriculum orchestrator with stage-aware resume and per-stage grouped wandb runs.
+2. Curriculum orchestrator with sub-step-aware resume and per-sub-step grouped wandb runs.
 3. `RebelDataSource` abstraction with no behavior change.
-4. River spot/belief samplers and the live river stage → `M_river`.
+4. River spot/belief samplers and the live river stage → `S_river`.
 5. Bounded `RebelBatch` writer/reader + manifest validation (for HP sweeps/holdouts).
 6. Tiny `pregenerated`-mode trainer test using synthetic batches.
-7. Turn stage initialized from `M_river`, valuing river leaves via chance enumeration → promoted `M_turn`.
-8. Flop stage initialized from `M_turn`, sampling flop chance nodes → promoted `M_postflop`.
-9. Cumulative flop+turn+river quality holds across all holdouts.
+7. `E_X` distiller; distill `E_turn` from `S_river`, then train `S_turn`.
+8. Distill `E_flop` from `S_turn`, then train `S_flop`.
+9. Distill `E_preflop` from `S_flop` (flop-sampled) for the preflop handoff.
 10. Add multiway preflop handoff flop roots as an additional flop root source.
