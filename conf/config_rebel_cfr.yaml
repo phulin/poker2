@@ -21,7 +21,7 @@ train:
   warmup_steps: 0
 
   weight_decay: 0.01
-  optimizer: adamw # override to muon for PyTorch Muon on 2D linear weights
+  optimizer: adamw # override to muon or normuon for 2D linear weights
   adamw_learning_rate: null # if set, one LR for all AdamW params
   policy_head_muon_learning_rate: 0.02
   batch_size: 4096

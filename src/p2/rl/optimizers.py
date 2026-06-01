@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
+from functools import lru_cache
 from typing import Any
 
 import torch
@@ -62,6 +64,200 @@ class SplitOptimizer:
 
 
 TrainOptimizer = torch.optim.Optimizer | SplitOptimizer
+
+
+def _normuon_ns5(
+    matrix: torch.Tensor,
+    *,
+    eps: torch.Tensor,
+    ns_steps: int,
+) -> torch.Tensor:
+    original_dtype = matrix.dtype
+    if matrix.dtype in {torch.float16, torch.bfloat16}:
+        matrix = matrix.float()
+
+    transposed = matrix.shape[0] > matrix.shape[1]
+    if transposed:
+        matrix = matrix.transpose(0, 1)
+
+    x = matrix / (torch.linalg.vector_norm(matrix) + eps)
+    a = 3.4445
+    b = -4.7750
+    c = 2.0315
+    for _ in range(ns_steps):
+        xx_t = x @ x.transpose(0, 1)
+        x = a * x + (b * xx_t + c * (xx_t @ xx_t)) @ x
+
+    if transposed:
+        x = x.transpose(0, 1)
+    return x.to(original_dtype)
+
+
+def _normuon_matrix_update(
+    param: torch.Tensor,
+    grad: torch.Tensor,
+    momentum: torch.Tensor,
+    row_second_moment: torch.Tensor,
+    lr_tensor: torch.Tensor,
+    weight_decay_tensor: torch.Tensor,
+    beta1_tensor: torch.Tensor,
+    beta2_tensor: torch.Tensor,
+    eps_tensor: torch.Tensor,
+    ns_eps_tensor: torch.Tensor,
+    ns_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    momentum = beta1_tensor * momentum + (1.0 - beta1_tensor) * grad
+    orthogonal_update = _normuon_ns5(
+        momentum,
+        eps=ns_eps_tensor,
+        ns_steps=ns_steps,
+    )
+    row_mean_square = orthogonal_update.square().mean(dim=1)
+    row_second_moment = (
+        beta2_tensor * row_second_moment + (1.0 - beta2_tensor) * row_mean_square
+    )
+    normalized_update = orthogonal_update / (
+        row_second_moment.sqrt()[:, None] + eps_tensor
+    )
+    update_norm = torch.linalg.vector_norm(normalized_update).clamp_min(eps_tensor)
+    scaled_lr = (
+        lr_tensor
+        * 0.2
+        * math.sqrt(float(param.shape[0] * param.shape[1]))
+        / update_norm
+    )
+    param = param * (1.0 - lr_tensor * weight_decay_tensor)
+    param = param - scaled_lr * normalized_update
+    return param, momentum, row_second_moment
+
+
+@lru_cache(maxsize=2)
+def _normuon_update_fn(compile_update: bool) -> Any:
+    if not compile_update:
+        return _normuon_matrix_update
+    return torch.compile(_normuon_matrix_update, fullgraph=True)
+
+
+class NorMuon(torch.optim.Optimizer):
+    """NorMuon optimizer for 2D matrix parameters.
+
+    The per-matrix computation follows the supplied algorithm and is factored
+    into a pure tensor function so CUDA training can compile it with
+    ``torch.compile``.
+    """
+
+    def __init__(
+        self,
+        params: Iterable[nn.Parameter],
+        *,
+        lr: float = 1e-3,
+        weight_decay: float = 0.0,
+        beta1: float = 0.95,
+        beta2: float = 0.95,
+        eps: float = 1e-8,
+        ns_eps: float = 1e-7,
+        ns_steps: int = 5,
+        compile_update: bool = False,
+    ) -> None:
+        if lr <= 0.0:
+            raise ValueError("NorMuon lr must be positive")
+        if weight_decay < 0.0:
+            raise ValueError("NorMuon weight_decay must be non-negative")
+        if beta1 < 0.0 or beta1 >= 1.0:
+            raise ValueError("NorMuon beta1 must be in [0, 1)")
+        if beta2 < 0.0 or beta2 >= 1.0:
+            raise ValueError("NorMuon beta2 must be in [0, 1)")
+        if eps <= 0.0:
+            raise ValueError("NorMuon eps must be positive")
+        if ns_eps <= 0.0:
+            raise ValueError("NorMuon ns_eps must be positive")
+        if ns_steps <= 0:
+            raise ValueError("NorMuon ns_steps must be positive")
+        defaults = {
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "beta1": beta1,
+            "beta2": beta2,
+            "eps": eps,
+            "ns_eps": ns_eps,
+            "ns_steps": ns_steps,
+            "compile_update": compile_update,
+        }
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure: Any | None = None) -> Any | None:
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        else:
+            loss = None
+
+        for group in self.param_groups:
+            update_fn = _normuon_update_fn(bool(group["compile_update"]))
+            lr = float(group["lr"])
+            weight_decay = float(group["weight_decay"])
+            beta1 = float(group["beta1"])
+            beta2 = float(group["beta2"])
+            eps = float(group["eps"])
+            ns_eps = float(group["ns_eps"])
+            ns_steps = int(group["ns_steps"])
+            for param in group["params"]:
+                if param.grad is None:
+                    continue
+                if param.ndim != 2:
+                    raise RuntimeError("NorMuon only supports 2D matrix parameters")
+                grad = param.grad
+                if grad.is_sparse:
+                    raise RuntimeError("NorMuon does not support sparse gradients")
+                state = self.state[param]
+                if len(state) == 0:
+                    state["momentum"] = torch.zeros_like(param)
+                    state["row_second_moment"] = torch.zeros(
+                        param.shape[0],
+                        dtype=param.dtype,
+                        device=param.device,
+                    )
+
+                lr_tensor = torch.tensor(lr, dtype=param.dtype, device=param.device)
+                weight_decay_tensor = torch.tensor(
+                    weight_decay,
+                    dtype=param.dtype,
+                    device=param.device,
+                )
+                beta1_tensor = torch.tensor(
+                    beta1,
+                    dtype=param.dtype,
+                    device=param.device,
+                )
+                beta2_tensor = torch.tensor(
+                    beta2,
+                    dtype=param.dtype,
+                    device=param.device,
+                )
+                eps_tensor = torch.tensor(eps, dtype=param.dtype, device=param.device)
+                ns_eps_tensor = torch.tensor(
+                    ns_eps,
+                    dtype=param.dtype,
+                    device=param.device,
+                )
+                new_param, new_momentum, new_row_second_moment = update_fn(
+                    param,
+                    grad,
+                    state["momentum"],
+                    state["row_second_moment"],
+                    lr_tensor,
+                    weight_decay_tensor,
+                    beta1_tensor,
+                    beta2_tensor,
+                    eps_tensor,
+                    ns_eps_tensor,
+                    ns_steps,
+                )
+                param.copy_(new_param)
+                state["momentum"].copy_(new_momentum)
+                state["row_second_moment"].copy_(new_row_second_moment)
+        return loss
 
 
 _NORM_MODULES = (
@@ -162,6 +358,26 @@ def _muon(
     )
 
 
+def _normuon(
+    params: Iterable[nn.Parameter],
+    train_cfg: TrainingConfig,
+    lr: float,
+    *,
+    compile_update: bool,
+) -> NorMuon:
+    return NorMuon(
+        params,
+        lr=lr,
+        weight_decay=train_cfg.weight_decay,
+        beta1=getattr(train_cfg, "normuon_beta1", train_cfg.muon_momentum),
+        beta2=getattr(train_cfg, "normuon_beta2", 0.95),
+        eps=getattr(train_cfg, "normuon_eps", 1e-8),
+        ns_eps=train_cfg.muon_eps,
+        ns_steps=train_cfg.muon_ns_steps,
+        compile_update=compile_update,
+    )
+
+
 def build_optimizer(
     model: nn.Module,
     train_cfg: TrainingConfig,
@@ -194,9 +410,10 @@ def build_optimizer(
             lr=adamw_lr,
             no_decay_param_ids=no_decay_param_ids,
         )
-    if optimizer_name != "muon":
+    if optimizer_name not in {"muon", "normuon"}:
         raise ValueError(
-            f"train.optimizer must be one of: adamw, muon; got {train_cfg.optimizer!r}"
+            "train.optimizer must be one of: adamw, muon, normuon; "
+            f"got {train_cfg.optimizer!r}"
         )
 
     policy_head_muon_lr = float(train_cfg.policy_head_muon_learning_rate)
@@ -225,15 +442,34 @@ def build_optimizer(
 
     optimizers: list[tuple[str, torch.optim.Optimizer]] = []
     if matrix_params:
-        optimizers.append(
-            ("muon", _muon(matrix_params, train_cfg, train_cfg.learning_rate))
-        )
+        if optimizer_name == "muon":
+            matrix_optimizer = _muon(
+                matrix_params,
+                train_cfg,
+                train_cfg.learning_rate,
+            )
+        else:
+            matrix_optimizer = _normuon(
+                matrix_params,
+                train_cfg,
+                train_cfg.learning_rate,
+                compile_update=device.type == "cuda",
+            )
+        optimizers.append((optimizer_name, matrix_optimizer))
     if policy_head_matrix_params:
-        policy_head_optimizer = _muon(
-            policy_head_matrix_params,
-            train_cfg,
-            policy_head_muon_lr,
-        )
+        if optimizer_name == "muon":
+            policy_head_optimizer = _muon(
+                policy_head_matrix_params,
+                train_cfg,
+                policy_head_muon_lr,
+            )
+        else:
+            policy_head_optimizer = _normuon(
+                policy_head_matrix_params,
+                train_cfg,
+                policy_head_muon_lr,
+                compile_update=device.type == "cuda",
+            )
         for param_group in policy_head_optimizer.param_groups:
             param_group["lr_role"] = "policy_head_muon"
         optimizers.append(("policy_head_muon", policy_head_optimizer))

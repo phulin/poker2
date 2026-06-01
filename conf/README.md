@@ -58,7 +58,7 @@ This directory contains Hydra configuration files for P2 training. Each file is 
 ### `allin/config.yaml` - All-In Equity Training Configuration
 - **Purpose**: Standalone preflop all-in equity model training
 - **Batch Size**: 64
-- **Optimizer**: Muon with AdamW fallback parameter groups
+- **Optimizer**: Muon or NorMuon with AdamW fallback parameter groups
 - **Wandb**: Enabled by default under `p2-allin-equity`
 
 ## Usage
@@ -132,7 +132,7 @@ python src/p2/cli/train_kbest.py --config-name=config_custom
 ### Training Parameters (`train:` section)
 - `learning_rate`: Learning rate for optimizer
 - `warmup_steps`: Linear learning-rate warmup steps before the configured decay schedule; `0` disables warmup
-- `optimizer`: ReBeL trainer optimizer backend (`adamw`, or `muon` to use PyTorch Muon for 2D linear weights and AdamW for the remaining parameters)
+- `optimizer`: ReBeL trainer optimizer backend (`adamw`, `muon`, or `normuon` to use matrix-only Muon/NorMuon with AdamW for the remaining parameters)
 - `adamw_learning_rate`: Optional initial learning rate for all AdamW parameter groups; `null` uses `learning_rate`
 - `policy_head_muon_learning_rate`: Initial ReBeL `muon` mode learning rate for policy-head 2D linear weights; scaled by the main learning-rate schedule during training
 - `policy_depth_stratify_decimate`: Preserve policy replay depth mix during decimation using policy node depth

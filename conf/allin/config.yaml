@@ -19,6 +19,9 @@ muon_nesterov: true
 muon_eps: 0.0000001
 muon_ns_steps: 5
 muon_adjust_lr_fn: null
+normuon_beta1: 0.95
+normuon_beta2: 0.95
+normuon_eps: 0.00000001
 policy_head_muon_learning_rate: 0.0003
 lr_decay: linear
 lr_warmup_steps: 0
@@ -33,7 +36,7 @@ layers: 4
 film_rank: 64
 transformer_heads: 8
 dense_output_residual: false
-mask_folded_player_tokens: false
+mask_folded_player_tokens: true
 target_mode: eligible_pot_share
 compile_model: true
 compile_dynamic: true

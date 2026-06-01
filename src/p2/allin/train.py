@@ -46,6 +46,9 @@ class AllInTrainConfig:
     muon_eps: float = 1.0e-7
     muon_ns_steps: int = 5
     muon_adjust_lr_fn: str | None = None
+    normuon_beta1: float = 0.95
+    normuon_beta2: float = 0.95
+    normuon_eps: float = 1.0e-8
     policy_head_muon_learning_rate: float = 3.0e-4
     lr_decay: str = "cosine"
     lr_warmdown_start_step: int = 1

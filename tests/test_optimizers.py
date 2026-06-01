@@ -4,7 +4,12 @@ import torch.nn as nn
 
 from p2.core.structured_config import LrSchedule, TrainingConfig
 from p2.rl.cfr_trainer import RebelCFRTrainer
-from p2.rl.optimizers import SplitOptimizer, build_optimizer
+from p2.rl.optimizers import (
+    NorMuon,
+    SplitOptimizer,
+    _normuon_matrix_update,
+    build_optimizer,
+)
 
 
 def _adamw_param_groups(optimizer: torch.optim.AdamW):
@@ -145,6 +150,45 @@ def test_muon_optimizer_uses_separate_policy_head_lr():
     assert optimizer.optimizers[1][1].param_groups[0]["lr_role"] == "policy_head_muon"
 
 
+def test_normuon_optimizer_splits_matrix_params_from_other_params():
+    model = nn.Sequential(
+        nn.Embedding(8, 4),
+        nn.Linear(4, 3),
+        nn.LayerNorm(3),
+    )
+    cfg = TrainingConfig(
+        optimizer="normuon",
+        learning_rate=1e-3,
+        adamw_learning_rate=3e-4,
+        weight_decay=0.01,
+        normuon_beta1=0.9,
+        normuon_beta2=0.99,
+        normuon_eps=1e-6,
+    )
+
+    optimizer = build_optimizer(model, cfg, torch.device("cpu"))
+
+    assert isinstance(optimizer, SplitOptimizer)
+    assert [name for name, _ in optimizer.optimizers] == ["normuon", "adamw"]
+    assert isinstance(optimizer.optimizers[0][1], NorMuon)
+    normuon_group = optimizer.optimizers[0][1].param_groups[0]
+    assert normuon_group["params"][0] is model[1].weight
+    assert normuon_group["beta1"] == 0.9
+    assert normuon_group["beta2"] == 0.99
+    assert normuon_group["eps"] == 1e-6
+    adamw = optimizer.optimizers[1][1]
+    decay_groups, no_decay_groups = _adamw_param_groups(adamw)
+    assert all(group["lr"] == 3e-4 for group in adamw.param_groups)
+    assert set(decay_groups[0]["params"]) == {
+        model[0].weight,
+        model[1].bias,
+    }
+    assert set(no_decay_groups[0]["params"]) == {
+        model[2].weight,
+        model[2].bias,
+    }
+
+
 def test_adamw_excludes_norm_params_from_weight_decay():
     class Model(nn.Module):
         def __init__(self) -> None:
@@ -247,6 +291,64 @@ def test_muon_split_optimizer_state_dict_round_trips():
     new_optimizer.load_state_dict(optimizer.state_dict())
 
     assert optimizer.state_dict()["optimizer_order"] == ["muon", "adamw"]
+
+
+def test_normuon_split_optimizer_steps_matrix_and_non_matrix_params():
+    model = nn.Sequential(nn.Linear(4, 3), nn.LayerNorm(3))
+    cfg = TrainingConfig(optimizer="normuon", learning_rate=1e-3, weight_decay=0.0)
+    optimizer = build_optimizer(model, cfg, torch.device("cpu"))
+    before = {name: param.detach().clone() for name, param in model.named_parameters()}
+
+    loss = model(torch.randn(8, 4)).square().mean()
+    loss.backward()
+    optimizer.step()
+
+    for name, param in model.named_parameters():
+        assert not torch.equal(before[name], param.detach())
+
+
+def test_normuon_split_optimizer_state_dict_round_trips():
+    cfg = TrainingConfig(optimizer="normuon", learning_rate=1e-3, weight_decay=0.0)
+    model = nn.Sequential(nn.Linear(4, 3), nn.LayerNorm(3))
+    optimizer = build_optimizer(model, cfg, torch.device("cpu"))
+
+    loss = model(torch.randn(8, 4)).square().mean()
+    loss.backward()
+    optimizer.step()
+
+    new_model = nn.Sequential(nn.Linear(4, 3), nn.LayerNorm(3))
+    new_optimizer = build_optimizer(new_model, cfg, torch.device("cpu"))
+    new_optimizer.load_state_dict(optimizer.state_dict())
+
+    assert optimizer.state_dict()["optimizer_order"] == ["normuon", "adamw"]
+
+
+def test_normuon_matrix_update_is_torch_compileable():
+    compiled_update = torch.compile(_normuon_matrix_update, fullgraph=True)
+    param = torch.randn(3, 4)
+    grad = torch.randn_like(param)
+    momentum = torch.zeros_like(param)
+    row_second_moment = torch.zeros(param.shape[0])
+    scalar = torch.tensor(1.0e-3)
+
+    next_param, next_momentum, next_row_second_moment = compiled_update(
+        param,
+        grad,
+        momentum,
+        row_second_moment,
+        scalar,
+        torch.tensor(0.01),
+        torch.tensor(0.95),
+        torch.tensor(0.99),
+        torch.tensor(1.0e-8),
+        torch.tensor(1.0e-7),
+        5,
+    )
+
+    assert next_param.shape == param.shape
+    assert next_momentum.shape == momentum.shape
+    assert next_row_second_moment.shape == row_second_moment.shape
+    assert torch.isfinite(next_param).all()
 
 
 def test_default_optimizer_is_adamw():
