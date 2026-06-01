@@ -13,7 +13,8 @@ Python unit and integration tests for environments, rules, models, training util
 - `test_postflop_spot_sampler.py`: Random postflop public-root sampler invariants for flop/turn/river street-start roots, closed-street chance-target roots, and board-legal beliefs.
 - `test_rebel_data_source.py`: ReBeL data-source abstraction coverage for live generator-backed and pregenerated solved-dataset-backed training data.
 - `test_rebel_solved_dataset.py`: Tensor-only solved ReBeL dataset serialization, manifest validation, wrapped reads, and random sampling coverage.
-- `test_train_rebel_curriculum.py`: Curriculum CLI orchestration coverage for train substep routing, per-substep checkpoint dirs, metadata, and explicit unsupported distill behavior.
+- `test_pregenerate_postflop_rebel.py`: Bounded postflop pregeneration CLI coverage for live-mode validation and trimmed solved-batch writer calls.
+- `test_train_rebel_curriculum.py`: Curriculum CLI orchestration coverage for train/distill substep routing, per-substep checkpoint dirs, promotion state, and metadata.
 - `test_model_*.py`, `test_transformer_model.py`, `test_mlp_features.py`, `test_structured_embedding_data.py`, `test_kv_caching.py`, `test_encoders.py`, `test_activation_utils.py`, `test_state_encoder_perspective.py`: Model, encoder, and feature coverage.
 - `test_losses.py`, `test_rl.py`, `test_rebel_replay.py`, `test_rebel_batch.py`, `test_vectorized_replay.py`, `test_kbest*.py`, `test_dred_pool.py`, `test_kmedoids.py`, `test_elo_calculator.py`: RL, replay, loss, opponent pool, and rating coverage.
 - `test_rebel_loop.py`: Shared ReBeL loop runner control-flow coverage for checkpoints, stats, final save, and TrueSkill snapshots without invoking real CFR.

@@ -1,0 +1,26 @@
+# Bounded postflop ReBeL solved-example pregeneration for HP sweeps/holdouts.
+
+defaults:
+  - config_rebel_cfr
+  - _self_
+
+use_wandb: false
+device: cuda
+checkpoint_dir: checkpoints-rebel-pregenerate
+
+data:
+  mode: live
+  live_root_source: random_river
+
+rebel_pregenerate:
+  output_dir: outputs/rebel_postflop/river_v1
+  stage: river
+  value_target_min: 100000
+  policy_target_min: 1000000
+  generation_batch_size: 512
+  max_generation_batches: null
+  root_source: random_river
+
+search:
+  sparse: true
+  sparse_fused: false

@@ -415,6 +415,17 @@ class CurriculumConfig:
 
 
 @dataclass
+class RebelPregenerateConfig:
+    output_dir: str = "outputs/rebel_postflop/river_v1"
+    stage: str = "river"
+    value_target_min: int = 100_000
+    policy_target_min: int = 1_000_000
+    generation_batch_size: int = 512
+    max_generation_batches: int | None = None
+    root_source: str | None = None
+
+
+@dataclass
 class Config:
     # Training parameters
     num_steps: int = 2000
@@ -453,6 +464,9 @@ class Config:
     trueskill: TrueSkillConfig = field(default_factory=TrueSkillConfig)
     data: DataConfig = field(default_factory=DataConfig)
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
+    rebel_pregenerate: RebelPregenerateConfig = field(
+        default_factory=RebelPregenerateConfig
+    )
 
     def __post_init__(self):
         if self.wandb_tags is None:
@@ -533,6 +547,9 @@ class Config:
         }
         curriculum_clean["substeps"] = substeps
         container["curriculum"] = CurriculumConfig(**curriculum_clean)
+        container["rebel_pregenerate"] = RebelPregenerateConfig(
+            **container.get("rebel_pregenerate", {})
+        )
         return cls(**container)
 
 

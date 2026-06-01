@@ -132,3 +132,17 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].net == "E_preflop"
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].from_net == "S_flop"
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"
+
+
+def test_rebel_pregenerate_postflop_config_loads_from_yaml():
+    cfg = Config.from_dict_config(
+        OmegaConf.load("conf/config_rebel_pregenerate_postflop.yaml")
+    )
+
+    assert cfg.data.mode == "live"
+    assert cfg.data.live_root_source == "random_river"
+    assert cfg.rebel_pregenerate.output_dir == "outputs/rebel_postflop/river_v1"
+    assert cfg.rebel_pregenerate.stage == "river"
+    assert cfg.rebel_pregenerate.root_source == "random_river"
+    assert cfg.rebel_pregenerate.value_target_min == 100000
+    assert cfg.rebel_pregenerate.policy_target_min == 1000000

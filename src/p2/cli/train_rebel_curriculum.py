@@ -206,7 +206,7 @@ def _run_train_substep(
     if cfg.data.mode != "live":
         raise NotImplementedError(
             "Curriculum train substeps currently support data.mode=live only; "
-            "pregenerated mode depends on the RebelDataSource refactor."
+            "use train_rebel.py with data.mode=pregenerated for bounded HP sweeps."
         )
 
     stage_cfg = _stage_config(
