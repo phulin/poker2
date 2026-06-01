@@ -407,10 +407,6 @@ def build_optimizer(
             f"got {train_cfg.optimizer!r}"
         )
 
-    policy_head_muon_lr = float(train_cfg.policy_head_muon_learning_rate)
-    if policy_head_muon_lr <= 0.0:
-        raise ValueError("train.policy_head_muon_learning_rate must be positive")
-
     matrix_params: list[nn.Parameter] = []
     policy_head_matrix_params: list[nn.Parameter] = []
     other_params: list[nn.Parameter] = []
@@ -448,6 +444,15 @@ def build_optimizer(
             )
         optimizers.append((optimizer_name, matrix_optimizer))
     if policy_head_matrix_params:
+        policy_head_muon_lr = float(
+            getattr(
+                train_cfg,
+                "policy_head_muon_learning_rate",
+                train_cfg.learning_rate,
+            )
+        )
+        if policy_head_muon_lr <= 0.0:
+            raise ValueError("train.policy_head_muon_learning_rate must be positive")
         if optimizer_name == "muon":
             policy_head_optimizer = _muon(
                 policy_head_matrix_params,

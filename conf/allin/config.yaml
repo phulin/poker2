@@ -22,7 +22,6 @@ muon_adjust_lr_fn: null
 normuon_beta1: 0.95
 normuon_beta2: 0.95
 normuon_eps: 0.00000001
-policy_head_muon_learning_rate: 0.0003
 lr_decay: linear
 lr_warmup_steps: 0
 lr_warmdown_start_step: 1

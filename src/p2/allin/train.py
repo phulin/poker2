@@ -49,7 +49,6 @@ class AllInTrainConfig:
     normuon_beta1: float = 0.95
     normuon_beta2: float = 0.95
     normuon_eps: float = 1.0e-8
-    policy_head_muon_learning_rate: float = 3.0e-4
     lr_decay: str = "cosine"
     lr_warmup_steps: int = 0
     lr_warmdown_start_step: int = 1
@@ -560,8 +559,6 @@ def _base_lr_for_group(param_group: dict[str, Any], cfg: TrainConfig) -> float:
     role = param_group.get("lr_role")
     if role == "adamw":
         return float(cfg.adamw_learning_rate)
-    if role == "policy_head_muon":
-        return float(cfg.policy_head_muon_learning_rate)
     return float(cfg.learning_rate)
 
 
