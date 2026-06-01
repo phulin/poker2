@@ -2,7 +2,7 @@
 CFR/DCFR search, public-belief state handling, ReBeL data generation, evaluator orchestration, chance-node logic, and fused Triton kernels.
 
 ### Source files
-- `cfr_evaluator.py`: PublicBeliefState, exploitability stats, hand-rank data, evaluator interface, and shared split policy/value model dispatch.
+- `cfr_evaluator.py`: PublicBeliefState, exploitability stats, hand-rank data, evaluator interface, and shared split policy/value model dispatch, including optional closing-leaf value model routing.
 - `allin_payoff.py`: Preflop/flop/turn all-in call payoff table generation, lookup, eager references, and fused Triton writeback kernels.
 - `dcfr.py`: Standalone DCFR utilities and regret matching.
 - `cfr_manager.py`: High-level CFRManager orchestration.

@@ -31,10 +31,16 @@ class SparseCFREvaluator(CFREvaluator):
         device: torch.device,
         cfg: Config,
         generator: torch.Generator | None = None,
+        closing_leaf_model: BaseMLPModel | None = None,
     ) -> None:
         self.model = model
         self.policy_model = getattr(model, "policy_model", model)
         self.value_model = getattr(model, "value_model", model)
+        self.closing_leaf_value_model = (
+            getattr(closing_leaf_model, "value_model", closing_leaf_model)
+            if closing_leaf_model is not None
+            else None
+        )
         self.device = device
         self.cfg = cfg
 

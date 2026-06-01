@@ -1584,12 +1584,10 @@ class CFREvaluator(ABC):
         else:
             return hand_values
 
-    def _set_model_values_impl(
-        self, t: int, beliefs: torch.Tensor, features: MLPFeatures
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Set model values for non-terminal leaves
+    def _eval_value_model(
+        self, value_model, features: MLPFeatures, *, use_pre_head: bool
+    ) -> torch.Tensor:
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            value_model = getattr(self, "value_model", self.model)
             if isinstance(value_model, BetterTRM):
                 # Note self.latent gets reinitialized for each subgame.
                 model_output = value_model(
@@ -1599,13 +1597,59 @@ class CFREvaluator(ABC):
                 )
                 self.latent = model_output.latent
             else:
-                if self._uses_street_cutoff_schedule() and hasattr(
-                    value_model, "forward_pre"
-                ):
+                if use_pre_head and hasattr(value_model, "forward_pre"):
                     hand_values = value_model.forward_pre(features).to(self.float_dtype)
                 else:
                     model_output = value_model(features, include_policy=False)
                     hand_values = model_output.hand_values.to(self.float_dtype)
+        return hand_values
+
+    def _model_leaf_values(self, features: MLPFeatures) -> torch.Tensor:
+        value_model = getattr(self, "value_model", self.model)
+        closing_value_model = getattr(self, "closing_leaf_value_model", None)
+        if closing_value_model is None:
+            return self._eval_value_model(
+                value_model,
+                features,
+                use_pre_head=(
+                    self._uses_street_cutoff_schedule()
+                    and hasattr(value_model, "forward_pre")
+                ),
+            )
+
+        model_indices = self.model_indices
+        closing_mask = self.new_street_mask[model_indices]
+        hand_values = torch.empty(
+            len(features),
+            self.num_players,
+            NUM_HANDS,
+            device=features.context.device,
+            dtype=self.float_dtype,
+        )
+        if (~closing_mask).any():
+            same_street_values = self._eval_value_model(
+                value_model,
+                features[~closing_mask],
+                use_pre_head=(
+                    self._uses_street_cutoff_schedule()
+                    and hasattr(value_model, "forward_pre")
+                ),
+            )
+            hand_values[~closing_mask] = same_street_values
+        if closing_mask.any():
+            closing_values = self._eval_value_model(
+                closing_value_model,
+                features[closing_mask],
+                use_pre_head=True,
+            )
+            hand_values[closing_mask] = closing_values
+        return hand_values
+
+    def _set_model_values_impl(
+        self, t: int, beliefs: torch.Tensor, features: MLPFeatures
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Set model values for non-terminal leaves
+        hand_values = self._model_leaf_values(features)
 
         if (
             not self.cfr_avg

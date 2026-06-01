@@ -120,6 +120,41 @@ class PreOnlyMockModel(MockModel):
         )
 
 
+class ConstantValueModel:
+    def __init__(self, value: float, *, num_players: int = 2) -> None:
+        self.value = float(value)
+        self.num_players = num_players
+        self.enforce_zero_sum = False
+        self.call_contexts: list[torch.Tensor] = []
+        self.forward_pre_contexts: list[torch.Tensor] = []
+
+    def __call__(
+        self, features: MLPFeatures, include_policy: bool = False
+    ) -> ModelOutput:
+        self.call_contexts.append(features.context.detach().clone())
+        batch = len(features)
+        hand_values = torch.full(
+            (batch, self.num_players, NUM_HANDS),
+            self.value,
+            device=features.context.device,
+            dtype=features.context.dtype,
+        )
+        return ModelOutput(
+            policy_logits=None,
+            value=torch.zeros(batch, device=features.context.device),
+            hand_values=hand_values,
+        )
+
+    def forward_pre(self, features: MLPFeatures) -> torch.Tensor:
+        self.forward_pre_contexts.append(features.context.detach().clone())
+        return torch.full(
+            (len(features), self.num_players, NUM_HANDS),
+            self.value,
+            device=features.context.device,
+            dtype=features.context.dtype,
+        )
+
+
 class DeterministicModel:
     """Deterministic policy/value head used for sparse vs rebel parity tests."""
 
@@ -254,6 +289,49 @@ def test_sparse_evaluator_initialization() -> None:
     assert evaluator.total_nodes == 0  # Not initialized yet
     assert len(evaluator.depth_offsets) == 1
     assert evaluator.depth_offsets[0] == 0
+
+
+def test_model_leaf_values_route_new_street_leaves_to_closing_model() -> None:
+    evaluator = object.__new__(SparseCFREvaluator)
+    current_model = ConstantValueModel(1.0)
+    closing_model = ConstantValueModel(2.0)
+    evaluator.model = current_model
+    evaluator.value_model = current_model
+    evaluator.closing_leaf_value_model = closing_model
+    evaluator.float_dtype = torch.float32
+    evaluator.num_players = 2
+    evaluator.cfr_avg = False
+    evaluator.latest_values = torch.zeros(3, 2, NUM_HANDS)
+    evaluator.model_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+    evaluator.new_street_mask = torch.tensor([False, True, False])
+    evaluator.action_schedule = None
+    evaluator.last_model_values = None
+
+    features = MLPFeatures(
+        context=torch.arange(3, dtype=torch.float32).view(3, 1),
+        street=torch.zeros(3, dtype=torch.long),
+        to_act=torch.zeros(3, dtype=torch.long),
+        board=torch.full((3, 5), -1, dtype=torch.long),
+        beliefs=torch.zeros(3, 2 * NUM_HANDS),
+    )
+    beliefs = torch.zeros(3, 2, NUM_HANDS)
+
+    new_values, last_model_values = evaluator._set_model_values_impl(
+        0, beliefs, features
+    )
+
+    torch.testing.assert_close(new_values[0], torch.ones(2, NUM_HANDS))
+    torch.testing.assert_close(new_values[1], torch.full((2, NUM_HANDS), 2.0))
+    torch.testing.assert_close(new_values[2], torch.ones(2, NUM_HANDS))
+    torch.testing.assert_close(
+        last_model_values[:, 0, 0], torch.tensor([1.0, 2.0, 1.0])
+    )
+    torch.testing.assert_close(
+        current_model.call_contexts[0].flatten(), torch.tensor([0.0, 2.0])
+    )
+    torch.testing.assert_close(
+        closing_model.forward_pre_contexts[0].flatten(), torch.tensor([1.0])
+    )
 
 
 def test_initialize_subgame() -> None:
