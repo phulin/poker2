@@ -136,6 +136,40 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"
 
 
+def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
+    cfg = Config.from_dict_config(
+        OmegaConf.load("conf/config_rebel_curriculum_postflop.yaml")
+    )
+
+    assert cfg.data.mode == "live"
+    assert cfg.curriculum.stages == [
+        "river",
+        "distill_E_turn",
+        "turn",
+        "distill_E_flop",
+        "flop",
+        "distill_E_preflop",
+    ]
+    assert cfg.curriculum.substeps["river"].num_steps == 200000
+    assert cfg.curriculum.substeps["distill_E_turn"].num_steps == 20000
+    assert cfg.curriculum.substeps["turn"].num_steps == 150000
+    assert cfg.curriculum.substeps["distill_E_flop"].num_steps == 20000
+    assert cfg.curriculum.substeps["flop"].num_steps == 150000
+    assert cfg.curriculum.substeps["distill_E_preflop"].num_steps == 30000
+    assert cfg.curriculum.substeps["river"].data_overrides == {
+        "live_root_source": "random_river"
+    }
+    assert cfg.curriculum.substeps["turn"].data_overrides == {
+        "live_root_source": "random_turn"
+    }
+    assert cfg.curriculum.substeps["flop"].data_overrides == {
+        "live_root_source": "random_flop"
+    }
+    assert cfg.curriculum.substeps["turn"].closing_net == "E_turn"
+    assert cfg.curriculum.substeps["flop"].closing_net == "E_flop"
+    assert cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"
+
+
 def test_rebel_pregenerate_postflop_config_loads_from_yaml():
     cfg = Config.from_dict_config(
         OmegaConf.load("conf/config_rebel_pregenerate_postflop.yaml")

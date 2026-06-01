@@ -1,0 +1,68 @@
+# Full fixed-schedule postflop curriculum: train river, distill/train turn,
+# distill/train flop, then distill the preflop handoff net.
+
+defaults:
+  - config_rebel_cfr
+  - _self_
+
+checkpoint_dir: checkpoints-rebel-curriculum
+wandb_project: poker-rebel-postflop-curriculum
+wandb_tags: ["rebel", "cfr", "postflop-curriculum", "fixed-schedule"]
+
+data:
+  mode: live
+  live_root_source: random_river
+
+curriculum:
+  stages: [river, distill_E_turn, turn, distill_E_flop, flop, distill_E_preflop]
+  wandb_group: rebel_postflop_curriculum
+  promote_dir: checkpoints-rebel-curriculum/promoted
+
+  # Fixed schedules. Override these on the command line for real runs.
+  river_steps: 200000
+  distill_E_turn_steps: 20000
+  turn_steps: 150000
+  distill_E_flop_steps: 20000
+  flop_steps: 150000
+  distill_E_preflop_steps: 30000
+
+  river:
+    kind: train
+    net: S_river
+    num_steps: ${curriculum.river_steps}
+    data_overrides:
+      live_root_source: random_river
+  distill_E_turn:
+    kind: distill
+    net: E_turn
+    from: S_river
+    chance: single_card
+    num_steps: ${curriculum.distill_E_turn_steps}
+  turn:
+    kind: train
+    net: S_turn
+    closing_net: E_turn
+    closing_checkpoint: null
+    num_steps: ${curriculum.turn_steps}
+    data_overrides:
+      live_root_source: random_turn
+  distill_E_flop:
+    kind: distill
+    net: E_flop
+    from: S_turn
+    chance: single_card
+    num_steps: ${curriculum.distill_E_flop_steps}
+  flop:
+    kind: train
+    net: S_flop
+    closing_net: E_flop
+    closing_checkpoint: null
+    num_steps: ${curriculum.flop_steps}
+    data_overrides:
+      live_root_source: random_flop
+  distill_E_preflop:
+    kind: distill
+    net: E_preflop
+    from: S_flop
+    chance: sample_flops
+    num_steps: ${curriculum.distill_E_preflop_steps}
