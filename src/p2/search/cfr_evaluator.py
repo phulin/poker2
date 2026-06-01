@@ -327,7 +327,8 @@ class CFREvaluator(ABC):
     def _uses_street_cutoff_schedule(self) -> bool:
         schedule = getattr(self, "action_schedule", None)
         return bool(
-            schedule is not None and getattr(schedule, "bet_bins_by_depth", None) is not None
+            schedule is not None
+            and getattr(schedule, "bet_bins_by_depth", None) is not None
         )
 
     def _validate_model_leaf_phases(self) -> None:
@@ -443,7 +444,9 @@ class CFREvaluator(ABC):
         if not self._allin_abstraction_enabled() or self.total_nodes <= self.root_nodes:
             return
 
-        child_indices = torch.arange(self.root_nodes, self.total_nodes, device=self.device)
+        child_indices = torch.arange(
+            self.root_nodes, self.total_nodes, device=self.device
+        )
         parent, action = self._parent_action_for_nodes(child_indices)
         actor = self.env.to_act[parent]
         opp = 1 - actor
@@ -475,7 +478,11 @@ class CFREvaluator(ABC):
             empty_boards = torch.empty(0, 5, dtype=torch.long, device=self.device)
             self.allin_call_indices_by_street = (empty, empty, empty)
             self.allin_call_parent_indices_by_street = (empty, empty, empty)
-            self.allin_call_boards_by_street = (empty_boards, empty_boards, empty_boards)
+            self.allin_call_boards_by_street = (
+                empty_boards,
+                empty_boards,
+                empty_boards,
+            )
             self.allin_turn_tables_i16 = torch.empty(
                 0, NUM_HANDS, NUM_HANDS, dtype=torch.int16, device=self.device
             )
@@ -561,13 +568,17 @@ class CFREvaluator(ABC):
         perm_ids = actual_perm.index_select(0, unique_actual_idx)
         tables = resolver._flop_i8.index_select(0, canon_ids)
         perms = combo_perms.index_select(0, perm_ids)
-        self.allin_flop_tables_i8 = tables.gather(
-            1,
-            perms[:, :, None].expand(-1, -1, NUM_HANDS),
-        ).gather(
-            2,
-            perms[:, None, :].expand(-1, NUM_HANDS, -1),
-        ).contiguous()
+        self.allin_flop_tables_i8 = (
+            tables.gather(
+                1,
+                perms[:, :, None].expand(-1, -1, NUM_HANDS),
+            )
+            .gather(
+                2,
+                perms[:, None, :].expand(-1, NUM_HANDS, -1),
+            )
+            .contiguous()
+        )
         self.allin_flop_table_ids = inverse.contiguous()
         self.allin_flop_stats_buffer = torch.empty(
             flop_boards.shape[0],
@@ -669,7 +680,9 @@ class CFREvaluator(ABC):
         parent_start = offsets[parent_depth]
         child_start = offsets[parent_depth + 1]
         local = node_indices - child_start
-        parent = parent_start + torch.div(local, self.num_actions, rounding_mode="floor")
+        parent = parent_start + torch.div(
+            local, self.num_actions, rounding_mode="floor"
+        )
         action = local.remainder(self.num_actions)
         return parent, action
 
@@ -740,7 +753,9 @@ class CFREvaluator(ABC):
                 )
             self._write_scaled_allin_values(node_idx, values)
 
-    def _write_scaled_allin_values(self, node_idx: torch.Tensor, values: torch.Tensor) -> None:
+    def _write_scaled_allin_values(
+        self, node_idx: torch.Tensor, values: torch.Tensor
+    ) -> None:
         potential = (
             self.env.stacks[node_idx].to(values.dtype)
             + self.env.pot[node_idx, None].to(values.dtype)
@@ -833,9 +848,11 @@ class CFREvaluator(ABC):
         total_iterations = max(1, self.cfr_iterations - self.warm_start_iterations)
         progress = (t - float(self.warm_start_iterations)).clamp(min=0.0)
         t_normalized = (progress / float(total_iterations)).clamp(min=0.0, max=1.0)
-        return float(self.dcfr_gamma_initial) + (
-            float(self.dcfr_gamma_final) - float(self.dcfr_gamma_initial)
-        ) * t_normalized
+        return (
+            float(self.dcfr_gamma_initial)
+            + (float(self.dcfr_gamma_final) - float(self.dcfr_gamma_initial))
+            * t_normalized
+        )
 
     def _reset_average_policy_accumulators(self) -> None:
         """Clear true CFR average-strategy accumulators for a fresh subgame."""
@@ -1897,8 +1914,8 @@ class CFREvaluator(ABC):
 
     def update_average_policy(self, t: int) -> None:
         """Update the average policy using true CFR reach-weighted sums."""
-        if (
-            self.cfr_type == CFRType.discounted and self._average_accumulation_delayed(t)
+        if self.cfr_type == CFRType.discounted and self._average_accumulation_delayed(
+            t
         ):
             self.policy_probs_avg[:] = self.policy_probs
             self.average_policy_initialized = False
@@ -2081,14 +2098,19 @@ class CFREvaluator(ABC):
 
     @profile
     def training_data(
-        self, exclude_start: bool = True
-    ) -> tuple[RebelBatch, RebelBatch, RebelBatch]:
+        self,
+        exclude_start: bool = True,
+        *,
+        include_pre_chance_value_batch: bool = True,
+        include_policy_batch: bool = True,
+    ) -> tuple[RebelBatch, RebelBatch | None, RebelBatch | None]:
         """Return training data from CFR evaluation."""
         N = self.root_nodes
         top = self.depth_offsets[-2] if len(self.depth_offsets) > 1 else N
 
-        policy_targets = self._pull_back(self.policy_probs_avg)
-        policy_targets = policy_targets[:top].permute(0, 2, 1)
+        if include_policy_batch:
+            policy_targets = self._pull_back(self.policy_probs_avg)
+            policy_targets = policy_targets[:top].permute(0, 2, 1)
 
         source_values = (
             self.latest_values if self.use_final_policy_values else self.values_avg
@@ -2116,9 +2138,10 @@ class CFREvaluator(ABC):
 
         policy_encoder = getattr(self, "policy_feature_encoder", self.feature_encoder)
         value_encoder = getattr(self, "value_feature_encoder", self.feature_encoder)
-        policy_features = policy_encoder.encode(
-            self.beliefs_avg, pre_chance_node=False
-        )[:top]
+        if include_policy_batch:
+            policy_features = policy_encoder.encode(
+                self.beliefs_avg, pre_chance_node=False
+            )[:top]
         if torch.equal(value_node_indices, root_indices):
             value_features_all = value_encoder.encode(
                 self.beliefs_avg, pre_chance_node=False
@@ -2205,17 +2228,6 @@ class CFREvaluator(ABC):
                 stat[root_value_mask] = value[value_node_indices[root_value_mask]]
             value_statistics[key] = stat
 
-        # Policy batch gets all valid, non-leaf states.
-        # Use valid_mask directly (works for both: sparse has all-ones, dense has computed mask)
-        valid_top = self.valid_mask[:top] & ~self.leaf_mask[:top]
-
-        policy_statistics = {
-            key: statistics[key][:top][valid_top] for key in statistics
-        }
-        policy_statistics["policy_node_reach"] = self._compute_policy_node_reach(top)[
-            valid_top
-        ]
-
         value_batch = RebelBatch(
             features=value_features,
             value_targets=value_targets,
@@ -2244,24 +2256,35 @@ class CFREvaluator(ABC):
             )
             value_batch = value_batch[~value_start_nodes]
 
-        policy_batch = RebelBatch(
-            features=policy_features[valid_top],
-            policy_targets=policy_targets[valid_top],
-            legal_masks=legal_masks[:top][valid_top],
-            statistics=policy_statistics,
-        )
+        policy_batch = None
+        if include_policy_batch:
+            # Policy batch gets all valid, non-leaf states.
+            # Use valid_mask directly (works for both: sparse has all-ones,
+            # dense has computed mask).
+            valid_top = self.valid_mask[:top] & ~self.leaf_mask[:top]
+            policy_statistics = {
+                key: statistics[key][:top][valid_top] for key in statistics
+            }
+            policy_statistics["policy_node_reach"] = self._compute_policy_node_reach(
+                top
+            )[valid_top]
+            policy_batch = RebelBatch(
+                features=policy_features[valid_top],
+                policy_targets=policy_targets[valid_top],
+                legal_masks=legal_masks[:top][valid_top],
+                statistics=policy_statistics,
+            )
 
-        pre_features_all = value_encoder.encode(
-            self.beliefs, pre_chance_node=True
-        )
+        if not include_pre_chance_value_batch:
+            return value_batch, None, policy_batch
+
+        pre_features_all = value_encoder.encode(self.beliefs, pre_chance_node=True)
         pre_features_root = pre_features_all[:N].clone()
         pre_beliefs = self.root_pre_chance_beliefs[:N].reshape(N, -1)
         pre_features_root.beliefs = pre_beliefs
 
         value_targets_pre = root_value_targets.clone()
-        value_statistics_pre = {
-            key: statistics[key][:N].clone() for key in statistics
-        }
+        value_statistics_pre = {key: statistics[key][:N].clone() for key in statistics}
         value_statistics_pre["target_source"] = torch.full(
             (N,),
             TARGET_SOURCE_CHANCE_EXPECTATION,
@@ -2326,7 +2349,9 @@ class CFREvaluator(ABC):
 
         return value_batch, pre_value_batch, policy_batch
 
-    def _root_leaf_target_source_counts(self, num_roots: int) -> dict[str, torch.Tensor]:
+    def _root_leaf_target_source_counts(
+        self, num_roots: int
+    ) -> dict[str, torch.Tensor]:
         """Count terminal/model/closing leaf sources under each root."""
 
         total_nodes = int(self.total_nodes)
@@ -2347,7 +2372,9 @@ class CFREvaluator(ABC):
             return counts
 
         root_owner = torch.arange(total_nodes, dtype=torch.long, device=device)
-        root_owner[:num_roots] = torch.arange(num_roots, dtype=torch.long, device=device)
+        root_owner[:num_roots] = torch.arange(
+            num_roots, dtype=torch.long, device=device
+        )
         for level in range(1, len(self.depth_offsets) - 1):
             start = self.depth_offsets[level]
             end = self.depth_offsets[level + 1]
@@ -2628,7 +2655,9 @@ class CFREvaluator(ABC):
             if tree_indices.numel() == 0:
                 continue
 
-            env_state = type(self.env).from_proto(self.env, num_envs=tree_indices.numel())
+            env_state = type(self.env).from_proto(
+                self.env, num_envs=tree_indices.numel()
+            )
             env_state.copy_state_from(
                 self.env,
                 tree_indices.to(self.device),
@@ -2669,7 +2698,9 @@ class CFREvaluator(ABC):
             root_action_mix_by_node
         )
 
-    def _summarize_action_mix(self, action_mix_by_node: torch.Tensor) -> dict[str, float]:
+    def _summarize_action_mix(
+        self, action_mix_by_node: torch.Tensor
+    ) -> dict[str, float]:
         return {
             "fold": action_mix_by_node[:, 0].mean().item(),
             "call": action_mix_by_node[:, 1].mean().item(),

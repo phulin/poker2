@@ -163,15 +163,24 @@ class DummyEvaluator:
             beliefs=beliefs,
         )
 
-    def evaluate_cfr(self, training_mode: bool = True, sample_continuation: bool = True):
+    def evaluate_cfr(
+        self, training_mode: bool = True, sample_continuation: bool = True
+    ):
         del training_mode
         if not sample_continuation:
             self.self_play_calls += 1
             return None
         return self.self_play_iteration()
 
-    def training_data(self):
+    def training_data(
+        self,
+        exclude_start: bool = True,
+        *,
+        include_pre_chance_value_batch: bool = True,
+        include_policy_batch: bool = True,
+    ):
         """Return training data as tuple (value_batch, policy_batch)."""
+        del exclude_start
 
         count = self.search_batch_size
         indices = torch.arange(count, dtype=torch.long)
@@ -203,11 +212,17 @@ class DummyEvaluator:
             policy_targets=self.policy_probs_avg[:count],
             legal_masks=self.env.legal_bins_mask()[indices],
         )
-        return value_batch, value_batch, policy_batch
+        return (
+            value_batch,
+            value_batch if include_pre_chance_value_batch else None,
+            policy_batch if include_policy_batch else None,
+        )
 
 
 class WarmupEvaluator(DummyEvaluator):
-    def evaluate_cfr(self, training_mode: bool = True, sample_continuation: bool = True):
+    def evaluate_cfr(
+        self, training_mode: bool = True, sample_continuation: bool = True
+    ):
         del training_mode
         self.self_play_calls += 1
         if not sample_continuation:
@@ -291,9 +306,7 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
     assert evaluator.self_play_calls >= 1
 
 
-def test_rebel_data_generator_can_skip_pre_chance_value_batches(
-    monkeypatch, env_proto
-):
+def test_rebel_data_generator_can_skip_pre_chance_value_batches(monkeypatch, env_proto):
     monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
     evaluator = DummyEvaluator(
         env_proto=env_proto,
@@ -547,4 +560,6 @@ def test_rebel_data_generator_state_dict_roundtrip(monkeypatch):
 
     assert restored.last_extra == 7
     torch.testing.assert_close(restored.current_pbs.env.street, torch.tensor([1, 3]))
-    torch.testing.assert_close(restored.current_pbs.beliefs, generator.current_pbs.beliefs)
+    torch.testing.assert_close(
+        restored.current_pbs.beliefs, generator.current_pbs.beliefs
+    )

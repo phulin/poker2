@@ -298,18 +298,32 @@ class RebelDataGenerator:
             if self.record_batch_diag:
                 self._record_batch_diag(refilled)
 
+            need_policy_batch = self.store_replay or return_policy_batch
+            need_pre_chance_value_batch = self.include_pre_chance_value_batches and (
+                self.store_replay or return_value_batch
+            )
             value_batch, augmented_value_batch, policy_batch = (
-                self.evaluator.training_data()
+                self.evaluator.training_data(
+                    include_pre_chance_value_batch=need_pre_chance_value_batch,
+                    include_policy_batch=need_policy_batch,
+                )
             )
             if self.store_replay:
                 if self.policy_buffer is None or self.value_buffer is None:
                     raise RuntimeError("store_replay=True requires replay buffers")
+                if policy_batch is None:
+                    raise RuntimeError("store_replay=True requires policy batch")
                 self.policy_buffer.add_batch(policy_batch)
                 self.value_buffer.add_batch(value_batch)
                 if self.include_pre_chance_value_batches:
+                    if augmented_value_batch is None:
+                        raise RuntimeError(
+                            "include_pre_chance_value_batches=True requires "
+                            "augmented value batch"
+                        )
                     self.value_buffer.add_batch(augmented_value_batch)
 
-            if return_policy_batch:
+            if return_policy_batch and policy_batch is not None:
                 remaining = (
                     None
                     if max_return_policy_samples is None
@@ -328,6 +342,11 @@ class RebelDataGenerator:
             if return_value_batch:
                 value_batches.append(value_batch)
                 if self.include_pre_chance_value_batches:
+                    if augmented_value_batch is None:
+                        raise RuntimeError(
+                            "include_pre_chance_value_batches=True requires "
+                            "augmented value batch"
+                        )
                     value_batches.append(augmented_value_batch)
 
             collected += len(value_batch)

@@ -439,10 +439,16 @@ def _patch_profiler_tags(
         "aggression_metrics",
         event_timer,
     )
-    _wrap_method(trainer.value_buffer, "sample", "value_buffer_sample", event_timer)
-    _wrap_method(trainer.policy_buffer, "sample", "policy_buffer_sample", event_timer)
-    _wrap_method(trainer.value_buffer, "add_batch", "value_buffer_add", event_timer)
-    _wrap_method(trainer.policy_buffer, "add_batch", "policy_buffer_add", event_timer)
+    if trainer.value_buffer is not None:
+        _wrap_method(trainer.value_buffer, "sample", "value_buffer_sample", event_timer)
+        _wrap_method(trainer.value_buffer, "add_batch", "value_buffer_add", event_timer)
+    if trainer.policy_buffer is not None:
+        _wrap_method(
+            trainer.policy_buffer, "sample", "policy_buffer_sample", event_timer
+        )
+        _wrap_method(
+            trainer.policy_buffer, "add_batch", "policy_buffer_add", event_timer
+        )
 
     from p2.rl.rebel_batch import RebelBatch
 
@@ -563,7 +569,7 @@ def _sync(device: torch.device) -> None:
         torch.cuda.synchronize()
 
 
-def _make_trainer(cfg: Config) -> RebelCFRTrainer:
+def _make_trainer(cfg: Config, *, pregeneration_only: bool = False) -> RebelCFRTrainer:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
@@ -572,7 +578,9 @@ def _make_trainer(cfg: Config) -> RebelCFRTrainer:
     except Exception:
         pass
     torch.manual_seed(cfg.seed)
-    return RebelCFRTrainer(cfg=cfg, device=device)
+    return RebelCFRTrainer(
+        cfg=cfg, device=device, pregeneration_only=pregeneration_only
+    )
 
 
 def _event_device_us(evt) -> float:
@@ -742,7 +750,7 @@ def run_generate_benchmark(
         trainer.data_generator.generate_data(
             value_samples,
             return_value_batch=True,
-            return_policy_batch=True,
+            return_policy_batch=not args.generate_value_only,
             max_return_policy_samples=value_samples,
         )
 
@@ -1204,6 +1212,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--sync-attribution", action="store_true")
     parser.add_argument("--no-torch-profiler", action="store_true")
     parser.add_argument("--no-compile", action="store_true")
+    parser.add_argument(
+        "--generate-value-only",
+        action="store_true",
+        help="In --mode generate, skip returned policy batches.",
+    )
     parser.add_argument("--no-pause", action="store_true")
     parser.add_argument("--pause-pattern", default="train_rebel")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -1214,7 +1227,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> None:
     args = parse_args(argv)
     cfg = _load_config(args)
-    trainer = _make_trainer(cfg)
+    trainer = _make_trainer(cfg, pregeneration_only=args.mode == "generate")
 
     config_summary = {
         "num_envs": cfg.num_envs,
