@@ -6,6 +6,7 @@ import torch
 
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
+from p2.rl.target_provenance import TARGET_SOURCE_CHANCE_EXPECTATION
 from p2.search.chance_node_helper import ChanceNodeHelper
 from p2.search.postflop_spot_sampler import ChanceRootSample
 
@@ -99,6 +100,12 @@ def build_end_of_street_value_batch(
         "street": closed_street_tensor,
         "stage": 2 * closed_street_tensor + 1,
         "board": env.last_board_indices.clone(),
+        "target_source": torch.full(
+            (batch_size,),
+            TARGET_SOURCE_CHANCE_EXPECTATION,
+            dtype=torch.long,
+            device=device,
+        ),
     }
 
     return RebelBatch(

@@ -17,6 +17,10 @@ from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
+from p2.rl.target_provenance import (
+    TARGET_SOURCE_CFR_BACKUP,
+    TARGET_SOURCE_CHANCE_EXPECTATION,
+)
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 
@@ -721,9 +725,23 @@ def test_variable_stack_root_training_data_is_finite() -> None:
         exclude_start=False
     )
     assert torch.isfinite(value_batch.value_targets).all()
+    assert torch.equal(
+        value_batch.statistics["target_source"],
+        torch.full_like(
+            value_batch.statistics["target_source"],
+            TARGET_SOURCE_CFR_BACKUP,
+        ),
+    )
     assert torch.isfinite(policy_batch.policy_targets).all()
     if len(pre_value_batch) > 0:
         assert torch.isfinite(pre_value_batch.value_targets).all()
+        assert torch.equal(
+            pre_value_batch.statistics["target_source"],
+            torch.full_like(
+                pre_value_batch.statistics["target_source"],
+                TARGET_SOURCE_CHANCE_EXPECTATION,
+            ),
+        )
 
 
 def test_leaf_mask() -> None:

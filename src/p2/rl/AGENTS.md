@@ -21,6 +21,7 @@ Reinforcement learning and ReBeL training support: PPO losses, replay buffers, o
 - `kmedoids.py`: PyTorch k-medoids helper for pool diversity.
 - `elo_calculator.py`: Elo update helper.
 - `trueskill_tracker.py`: TrueSkill plus Gaussian reward tracking, snapshot trend metrics, and weight binding helpers.
+- `target_provenance.py`: Integer codes and names for value-target provenance recorded in ReBeL batch statistics.
 - `popart_normalizer.py`: PopArt normalization module.
 - `exponential_controller.py`: Generic exponential schedule/controller.
 

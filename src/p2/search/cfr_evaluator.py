@@ -35,6 +35,10 @@ from p2.search.allin_payoff import (
     compute_postflop_payoff_quantized_triton_batched,
 )
 from p2.rl.rebel_batch import RebelBatch
+from p2.rl.target_provenance import (
+    TARGET_SOURCE_CFR_BACKUP,
+    TARGET_SOURCE_CHANCE_EXPECTATION,
+)
 from p2.search.chance_node_helper import ChanceNodeHelper
 from p2.utils.model_utils import compute_masked_logits
 from p2.utils.profiling import profile
@@ -2110,6 +2114,12 @@ class CFREvaluator(ABC):
         )
 
         value_statistics = {key: statistics[key][:N] for key in statistics}
+        value_statistics["target_source"] = torch.full(
+            (N,),
+            TARGET_SOURCE_CFR_BACKUP,
+            dtype=torch.long,
+            device=self.device,
+        )
         value_statistics["local_exploitability"] = exploit_stats.local_exploitability
         value_statistics["local_exploitability_mbbg"] = exploit_mbbg
         value_statistics["local_best_response_values"] = (
@@ -2177,6 +2187,12 @@ class CFREvaluator(ABC):
         )
         value_statistics_pre["street"] = prev_street
         value_statistics_pre["stage"] = 2 * prev_street + 1
+        value_statistics_pre["target_source"] = torch.full(
+            (N,),
+            TARGET_SOURCE_CHANCE_EXPECTATION,
+            dtype=torch.long,
+            device=self.device,
+        )
 
         start_mask = actions_root == 0
 

@@ -8,6 +8,7 @@ from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.better_feature_encoder import BetterStreetValueFeatureEncoder
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
+from p2.rl.target_provenance import TARGET_SOURCE_CHANCE_EXPECTATION
 from p2.search.end_of_street_distillation import build_end_of_street_value_batch
 from p2.search.postflop_spot_sampler import sample_end_of_street_chance_roots
 
@@ -80,6 +81,10 @@ def test_build_end_of_street_value_batch_uses_pre_chance_features_and_targets():
         )
         assert torch.equal(batch.statistics["street"], torch.full((3,), closed_street))
         assert torch.equal(batch.statistics["stage"], torch.full((3,), 2 * closed_street + 1))
+        assert torch.equal(
+            batch.statistics["target_source"],
+            torch.full((3,), TARGET_SOURCE_CHANCE_EXPECTATION),
+        )
 
         previous_allowed = board_allowed_hands(sample.pbs.env.last_board_indices)
         expected_targets = torch.where(
