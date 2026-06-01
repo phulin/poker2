@@ -965,7 +965,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         capacity = max(
             self._subgame_capacity,
-            int(num_roots) * max(2, self.num_actions),
+            int(num_roots)
+            * max(2, self.num_actions)
+            * max(1, self.max_depth * self.max_depth),
         )
         while True:
             self._ensure_subgame_capacity(capacity, src_env)
