@@ -5416,19 +5416,17 @@ if triton is not None:
         idx_last_c2 = tl.maximum(off_last_c2, 0)
 
         for hero in tl.static_range(2):
-            villain = 1 - hero
-            b_at_k = tl.load(
-                beliefs_ptr + m * 2 * NUM_HANDS + villain * NUM_HANDS + hand_idx,
-                mask=mask_k,
-                other=0.0,
-            )
+            p_base = P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1)
+            P_k = tl.load(p_base + k_offs, mask=mask_k, other=0.0)
+            P_k_next = tl.load(p_base + k_offs + 1, mask=mask_k, other=0.0)
+            b_at_k = P_k_next - P_k
             P_L = tl.load(
-                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + L,
+                p_base + L,
                 mask=mask_k,
                 other=0.0,
             )
             P_R = tl.load(
-                P_padded_ptr + m * 2 * (H_ACTIVE + 1) + hero * (H_ACTIVE + 1) + R,
+                p_base + R,
                 mask=mask_k,
                 other=0.0,
             )
