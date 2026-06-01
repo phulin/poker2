@@ -140,6 +140,68 @@ def test_rebel_cfr_trainer_runs_pregenerated_mode_one_step(tmp_path):
     assert len(trainer.policy_buffer) >= cfg.train.batch_size
 
 
+def test_rebel_cfr_trainer_pregenerated_resume_matches_uninterrupted(tmp_path):
+    dataset_path = tmp_path / "dataset"
+    cfg = _tiny_rebel_cfg()
+    cfg.seed = 123
+    cfg.data.mode = "pregenerated"
+    cfg.num_steps = 2
+    cfg.train.batch_size = 2
+    cfg.train.episodes_per_step = 1
+    cfg.train.replay_buffer_batches = 2
+    cfg.train.value_reuse_goal = 1
+    cfg.data.pregenerated.value_batch_size = 2
+    cfg.data.pregenerated.policy_batch_size = 2
+    cfg.data.pregenerated.datasets = [
+        PregeneratedDatasetConfig(path=str(dataset_path))
+    ]
+    model_family = (
+        cfg.model.name.value if hasattr(cfg.model.name, "value") else str(cfg.model.name)
+    )
+    action_schedule = {
+        "bet_bins": list(cfg.env.bet_bins),
+        "bet_bins_by_depth": cfg.search.bet_bins_by_depth,
+        "allin_by_depth": cfg.search.allin_by_depth,
+    }
+    write_rebel_solved_dataset(
+        dataset_path,
+        value_batches=[_tiny_solved_batch(cfg, stream="value", start=0, count=8)],
+        policy_batches=[_tiny_solved_batch(cfg, stream="policy", start=10, count=8)],
+        metadata={
+            "model_family": model_family,
+            "action_schedule": action_schedule,
+        },
+    )
+
+    device = torch.device("cpu")
+    uninterrupted = RebelCFRTrainer(cfg, device)
+    uninterrupted.train_step(0)
+    uninterrupted_metrics = uninterrupted.train_step(1)
+
+    resumed_first = RebelCFRTrainer(cfg, device)
+    resumed_first.train_step(0)
+    checkpoint_path = tmp_path / "rebel_latest.pt"
+    resumed_first.save_checkpoint(str(checkpoint_path), step=0, save_optimizer=True)
+
+    resumed_second = RebelCFRTrainer(cfg, device)
+    loaded_step = resumed_second.load_checkpoint(str(checkpoint_path))
+    resumed_metrics = resumed_second.train_step(loaded_step + 1)
+
+    assert loaded_step == 0
+    assert resumed_second.data_source.state_dict()["value_cursors"] == (
+        uninterrupted.data_source.state_dict()["value_cursors"]
+    )
+    assert resumed_second.data_source.state_dict()["policy_cursors"] == (
+        uninterrupted.data_source.state_dict()["policy_cursors"]
+    )
+    for key in ("loss", "value_loss", "policy_loss", "policy_target_model_kl"):
+        assert resumed_metrics[key] == pytest.approx(uninterrupted_metrics[key])
+    for lhs, rhs in zip(
+        resumed_second.model.parameters(), uninterrupted.model.parameters()
+    ):
+        torch.testing.assert_close(lhs, rhs)
+
+
 def test_rebel_cfr_trainer_wires_random_postflop_root_sources():
     expected_streets = {
         "random_flop": 1,

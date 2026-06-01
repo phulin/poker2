@@ -2286,6 +2286,7 @@ class RebelCFRTrainer:
         if save_optimizer:
             state["optimizer"] = self.optimizer.state_dict()
             state["rng"] = self.rng.get_state()
+            state["buffer_rng"] = self.buffer_rng.get_state()
 
         # Save EMA shadow weights if enabled.
         if self.ema_helper is not None:
@@ -2347,8 +2348,10 @@ class RebelCFRTrainer:
 
         self.cfg.wandb_run_id = ckpt.get("wandb_run_id")
         self.checkpoint_metadata = dict(ckpt.get("metadata", {}))
-        # if "rng" in ckpt:
-        #     self.rng.set_state(ckpt["rng"].to(self.device))
+        if "rng" in ckpt:
+            self.rng.set_state(ckpt["rng"])
+        if "buffer_rng" in ckpt:
+            self.buffer_rng.set_state(ckpt["buffer_rng"])
         self._sync_inference_model()
         if "data_generator" in ckpt:
             self.data_source.load_state_dict(ckpt["data_generator"])
