@@ -2337,6 +2337,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             ):
                 self._last_model_values_buf = self.latest_values.new_empty(empty_shape)
             self.last_model_values = self._last_model_values_buf
+            runner = getattr(self, "_showdown_graph_runner", None)
+            if runner is not None:
+                runner.write_indexed(beliefs, self.showdown_indices, self.latest_values)
+                self._set_allin_call_values(beliefs)
+                return
             showdown_beliefs = beliefs[self.showdown_indices]
 
         showdown_values = self._showdown_value_both(showdown_beliefs)

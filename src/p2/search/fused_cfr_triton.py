@@ -4728,6 +4728,56 @@ if triton is not None:
         )
 
     @triton.jit
+    def _copy_indexed_belief_rows_kernel(
+        src_ptr,  # [N, 2, NUM_HANDS]
+        row_index_ptr,  # [M]
+        dst_ptr,  # [M, 2, NUM_HANDS]
+        NUM_HANDS,
+        BLOCK_H: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        hero = tl.program_id(1)
+        h_block = tl.program_id(2)
+        h = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = h < NUM_HANDS
+        src_row = tl.load(row_index_ptr + m)
+        values = tl.load(
+            src_ptr + src_row * 2 * NUM_HANDS + hero * NUM_HANDS + h,
+            mask=mask,
+            other=0.0,
+        )
+        tl.store(
+            dst_ptr + m * 2 * NUM_HANDS + hero * NUM_HANDS + h,
+            values,
+            mask=mask,
+        )
+
+    @triton.jit
+    def _copy_rows_to_indexed_values_kernel(
+        src_ptr,  # [M, 2, NUM_HANDS]
+        row_index_ptr,  # [M]
+        dst_ptr,  # [N, 2, NUM_HANDS]
+        NUM_HANDS,
+        BLOCK_H: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        hero = tl.program_id(1)
+        h_block = tl.program_id(2)
+        h = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = h < NUM_HANDS
+        dst_row = tl.load(row_index_ptr + m)
+        values = tl.load(
+            src_ptr + m * 2 * NUM_HANDS + hero * NUM_HANDS + h,
+            mask=mask,
+            other=0.0,
+        )
+        tl.store(
+            dst_ptr + dst_row * 2 * NUM_HANDS + hero * NUM_HANDS + h,
+            values,
+            mask=mask,
+        )
+
+    @triton.jit
     def _showdown_ev_v15_kernel(
         b_opp_sorted_ptr,  # [M, 2, H]
         P_padded_ptr,  # [M, 2, H+1]
@@ -7177,6 +7227,44 @@ class ShowdownActiveCardBlockGraphRunner:
             BLOCK_K=self.block_k,
             num_warps=self.finish_num_warps,
         )
+
+    def _copy_indexed_beliefs(
+        self, beliefs: torch.Tensor, indices: torch.Tensor
+    ) -> None:
+        grid = (self.M, 2, triton.cdiv(self.NUM_HANDS, 256))
+        _copy_indexed_belief_rows_kernel[grid](
+            beliefs,
+            indices,
+            self.beliefs_in,
+            self.NUM_HANDS,
+            BLOCK_H=256,
+        )
+
+    def _scatter_indexed_values(
+        self, latest_values: torch.Tensor, indices: torch.Tensor
+    ) -> None:
+        grid = (self.M, 2, triton.cdiv(self.NUM_HANDS, 256))
+        _copy_rows_to_indexed_values_kernel[grid](
+            self.ev_out,
+            indices,
+            latest_values,
+            self.NUM_HANDS,
+            BLOCK_H=256,
+        )
+
+    def write_indexed(
+        self,
+        beliefs: torch.Tensor,
+        indices: torch.Tensor,
+        latest_values: torch.Tensor,
+    ) -> torch.Tensor:
+        self._copy_indexed_beliefs(beliefs, indices)
+        if torch.cuda.is_current_stream_capturing():
+            self._launch_pipeline()
+        else:
+            self.graph.replay()
+        self._scatter_indexed_values(latest_values, indices)
+        return self.ev_out
 
     def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
         self.beliefs_in.copy_(beliefs)
