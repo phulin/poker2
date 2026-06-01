@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Benchmark the realistic ReBeL CFR data-generation + training loop.
 
-This script has two modes:
+This script has three modes:
 
 * ``source``: runs a few production ``RebelCFRTrainer.train_step`` calls with
   torch profiler record-function tags around major components.
+* ``generate``: runs live ``RebelDataGenerator.generate_data`` calls directly,
+  matching postflop pregeneration without supervised updates.
 * ``micro``: prepares the same trainer/evaluator and times selected components
   with CUDA events.
 
@@ -37,6 +39,7 @@ from p2.rl.cfr_trainer import RebelCFRTrainer
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = REPO_ROOT / "outputs" / "cfr_main_path_benchmark.json"
 STEP_TAG = "train_step"
+GENERATE_TAG = "generate_step"
 
 INIT_SUBTAGS = [
     "cfr_init_construct_subgame",
@@ -71,6 +74,7 @@ INIT_SUBTAGS = [
 
 COMPONENT_TAGS = [
     STEP_TAG,
+    GENERATE_TAG,
     "trainer_update_model",
     "data_generate",
     "cfr_evaluate",
@@ -106,6 +110,7 @@ COMPONENT_TAGS = [
 
 CUDA_EVENT_TAGS = {
     STEP_TAG,
+    GENERATE_TAG,
     "trainer_update_model",
     "data_generate",
     "cfr_evaluate",
@@ -174,9 +179,7 @@ class CudaEventTimer:
 
     @contextmanager
     def region(self, tag: str):
-        sync_region = (
-            self.enabled and self.sync_attribution and tag in INIT_SUBTAGS
-        )
+        sync_region = self.enabled and self.sync_attribution and tag in INIT_SUBTAGS
         if sync_region:
             pre_t0 = time.perf_counter()
             torch.cuda.synchronize()
@@ -204,9 +207,7 @@ class CudaEventTimer:
                     }
                 )
 
-    def summary(
-        self, active_steps: int, active_wall_s: list[float]
-    ) -> dict[str, Any]:
+    def summary(self, active_steps: int, active_wall_s: list[float]) -> dict[str, Any]:
         if self.enabled:
             torch.cuda.synchronize()
         wall_mean_ms = (
@@ -431,9 +432,7 @@ def _patch_profiler_tags(
     _wrap_method(trainer, "_update_model", "trainer_update_model", event_timer)
     _wrap_method(trainer, "_supervise", "training_supervise", event_timer)
     _wrap_method(trainer, "_compute_metrics", "training_metrics", event_timer)
-    _wrap_method(
-        trainer, "_compute_permutation_loss", "suit_permutation", event_timer
-    )
+    _wrap_method(trainer, "_compute_permutation_loss", "suit_permutation", event_timer)
     _wrap_method(
         trainer.aggression_analyzer,
         "analyze_batch",
@@ -598,9 +597,7 @@ def _profiler_summary(
         counts[evt.name] += 1
 
     wall_mean_us = (
-        1e6 * sum(active_wall_s) / max(1, len(active_wall_s))
-        if active_wall_s
-        else 0.0
+        1e6 * sum(active_wall_s) / max(1, len(active_wall_s)) if active_wall_s else 0.0
     )
     step_cuda = cuda_us[STEP_TAG] / max(1, active_steps)
     step_cpu = cpu_us[STEP_TAG] / max(1, active_steps)
@@ -712,9 +709,108 @@ def run_source_benchmark(
                 if row["component"] == STEP_TAG
             ]
             if step_rows:
-                summary["step_cuda_event_ms"] = step_rows[0][
-                    "cuda_event_ms_per_step"
-                ]
+                summary["step_cuda_event_ms"] = step_rows[0]["cuda_event_ms_per_step"]
+        summary["warmup_wall_s"] = warmup_wall
+        summary["active_wall_s"] = active_wall
+        summary["active_wall_mean_s"] = sum(active_wall) / max(1, len(active_wall))
+        return summary
+    finally:
+        if event_timer is not None:
+            fused_sparse_cfr_evaluator._INIT_PROFILE_HOOK = fused_init_hook_prev
+
+
+def run_generate_benchmark(
+    trainer: RebelCFRTrainer, args: argparse.Namespace
+) -> dict[str, Any]:
+    device = trainer.device
+    event_timer = (
+        CudaEventTimer(device, sync_attribution=args.sync_attribution)
+        if args.cuda_events
+        else None
+    )
+    fused_init_hook_prev = None
+    if event_timer is not None:
+        import p2.search.fused_sparse_cfr_evaluator as fused_sparse_cfr_evaluator
+
+        fused_init_hook_prev = fused_sparse_cfr_evaluator._INIT_PROFILE_HOOK
+        fused_sparse_cfr_evaluator._INIT_PROFILE_HOOK = event_timer.region
+    _patch_profiler_tags(trainer, event_timer)
+
+    value_samples = max(1, args.micro_value_samples)
+
+    def generate_data() -> None:
+        trainer.data_generator.generate_data(
+            value_samples,
+            return_value_batch=True,
+            return_policy_batch=True,
+            max_return_policy_samples=value_samples,
+        )
+
+    try:
+        warmup_wall: list[float] = []
+        for step in range(args.warmup_steps):
+            t0 = time.perf_counter()
+            generate_data()
+            _sync(device)
+            warmup_wall.append(time.perf_counter() - t0)
+            print(f"[generate warmup {step}] {warmup_wall[-1]:.3f}s", flush=True)
+
+        if event_timer is not None:
+            event_timer.clear()
+
+        activities = [ProfilerActivity.CPU]
+        if device.type == "cuda":
+            activities.append(ProfilerActivity.CUDA)
+
+        active_wall: list[float] = []
+
+        def active_step() -> None:
+            def run():
+                with record_function(GENERATE_TAG):
+                    generate_data()
+                    _sync(device)
+
+            if event_timer is not None:
+                event_timer.measure(GENERATE_TAG, run)
+            else:
+                run()
+
+        summary: dict[str, Any]
+        if args.no_torch_profiler:
+            for i in range(args.active_steps):
+                t0 = time.perf_counter()
+                active_step()
+                active_wall.append(time.perf_counter() - t0)
+                print(f"[generate active {i}] {active_wall[-1]:.3f}s", flush=True)
+            summary = {"components": []}
+        else:
+            with profile(activities=activities, record_shapes=False) as prof:
+                for i in range(args.active_steps):
+                    t0 = time.perf_counter()
+                    active_step()
+                    active_wall.append(time.perf_counter() - t0)
+                    print(
+                        f"[generate active {i}] {active_wall[-1]:.3f}s",
+                        flush=True,
+                    )
+            summary = {
+                "components": [],
+                "profiler_cuda_top": prof.key_averages().table(
+                    sort_by="cuda_time_total", row_limit=24
+                ),
+            }
+
+        if event_timer is not None:
+            event_summary = event_timer.summary(args.active_steps, active_wall)
+            summary["cuda_events"] = event_summary
+            step_rows = [
+                row
+                for row in event_summary["components"]
+                if row["component"] == GENERATE_TAG
+            ]
+            if step_rows:
+                summary["step_cuda_event_ms"] = step_rows[0]["cuda_event_ms_per_step"]
+        summary["value_samples_per_call"] = value_samples
         summary["warmup_wall_s"] = warmup_wall
         summary["active_wall_s"] = active_wall
         summary["active_wall_mean_s"] = sum(active_wall) / max(1, len(active_wall))
@@ -758,7 +854,9 @@ def _cuda_event_time(
 
 
 def _ensure_training_batches(trainer: RebelCFRTrainer) -> None:
-    while min(len(trainer.value_buffer), len(trainer.policy_buffer)) < trainer.batch_size:
+    while (
+        min(len(trainer.value_buffer), len(trainer.policy_buffer)) < trainer.batch_size
+    ):
         trainer.data_generator.generate_data(trainer.K_value)
         _sync(trainer.device)
 
@@ -1058,9 +1156,40 @@ def _print_micro_summary(micro: dict[str, Any]) -> None:
         )
 
 
+def _print_generate_summary(generate: dict[str, Any]) -> None:
+    print("\nGeneration-only profile:")
+    print(
+        f"  wall mean: {generate['active_wall_mean_s'] * 1e3:.2f} ms/call"
+        f" for {generate['value_samples_per_call']} value samples"
+    )
+    if "step_cuda_event_ms" in generate:
+        print(f"  CUDA events step: {generate['step_cuda_event_ms']:.2f} ms/call")
+    if "cuda_events" in generate:
+        print("  top CUDA event components:")
+        for row in generate["cuda_events"]["components"][:14]:
+            print(
+                f"    {row['component']:<26}"
+                f" {row['cuda_event_ms_per_step']:>9.2f} ms cuda-event"
+                f" {row['cuda_event_pct_of_wall']:>6.1f}% wall"
+                f" calls/call={row['calls_per_step']:.1f}"
+            )
+        sync_rows = generate["cuda_events"].get("sync_attribution", [])
+        if sync_rows:
+            print("  sync attribution init regions:")
+            for row in sync_rows[:16]:
+                print(
+                    f"    {row['component']:<34}"
+                    f" pre_sync={row['pre_sync_ms_per_step']:>9.2f} ms"
+                    f" own_wall={row['region_wall_ms_per_step']:>9.2f} ms"
+                    f" calls/call={row['calls_per_step']:.1f}"
+                )
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["source", "micro", "both"], default="both")
+    parser.add_argument(
+        "--mode", choices=["source", "generate", "micro", "both"], default="both"
+    )
     parser.add_argument("--warmup-steps", type=int, default=1)
     parser.add_argument("--active-steps", type=int, default=1)
     parser.add_argument("--micro-warmup", type=int, default=1)
@@ -1113,6 +1242,11 @@ def main(argv: list[str]) -> None:
         with pause_train_rebel(not args.no_pause, args.pause_pattern):
             output["source"] = run_source_benchmark(trainer, args)
         _print_source_summary(output["source"])
+
+    if args.mode == "generate":
+        with pause_train_rebel(not args.no_pause, args.pause_pattern):
+            output["generate"] = run_generate_benchmark(trainer, args)
+        _print_generate_summary(output["generate"])
 
     if args.mode in {"micro", "both"}:
         with pause_train_rebel(not args.no_pause, args.pause_pattern):
