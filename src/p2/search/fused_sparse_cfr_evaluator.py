@@ -1745,6 +1745,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             out=self.policy_probs[bottom:],
             out_offset=bottom,
             max_children=self.num_actions,
+            uniform_count_fallback=True,
         )
         self._mask_invalid(self.policy_probs)
 

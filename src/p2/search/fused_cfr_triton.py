@@ -1784,6 +1784,7 @@ if triton is not None:
         out_offset,  # absolute row index corresponding to out row 0
         H,
         EPS,
+        UNIFORM_COUNT_FALLBACK: tl.constexpr,
         MAX_CHILDREN: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
@@ -1809,8 +1810,11 @@ if triton is not None:
         divided = vals / denom_safe[None, :]
 
         child_rel = first + row_offs - out_offset
-        f_ptrs = fallback_ptr + child_rel[:, None] * H + col_offs[None, :]
-        fallback = tl.load(f_ptrs, mask=mask_2d, other=0.0)
+        if UNIFORM_COUNT_FALLBACK:
+            fallback = 1.0 / count.to(tl.float32)
+        else:
+            f_ptrs = fallback_ptr + child_rel[:, None] * H + col_offs[None, :]
+            fallback = tl.load(f_ptrs, mask=mask_2d, other=0.0)
         result = tl.where(use_div[None, :], divided, fallback)
 
         out_ptrs = out_ptr + child_rel[:, None] * H + col_offs[None, :]
@@ -1827,6 +1831,7 @@ def fused_parent_sum_divide_(
     max_children: int = 8,
     eps: float = 1e-8,
     block_h: int = 512,
+    uniform_count_fallback: bool = False,
 ) -> None:
     """For each parent, sum its child rows in ``values`` and immediately write
     normalized child rows to ``out``.
@@ -1859,6 +1864,7 @@ def fused_parent_sum_divide_(
         out_offset,
         h,
         eps,
+        UNIFORM_COUNT_FALLBACK=uniform_count_fallback,
         MAX_CHILDREN=mc_pow2,
         BLOCK_H=block_h,
         num_warps=4,
