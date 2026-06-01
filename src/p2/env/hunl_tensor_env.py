@@ -1008,45 +1008,6 @@ class HUNLTensorEnv:
         # Save previous board (if we later want to look back)
         self.last_board_indices[acting, :] = self.board_indices[acting, :]
 
-        live = ~self.has_folded
-        eligible = live & ~self.is_allin & (self.stacks > 0)
-        no_more_betting = (
-            acting_mask
-            & ~self.done
-            & (live.sum(dim=1) > 1)
-            & (eligible.sum(dim=1) == 0)
-        )
-        no_more_betting_idx = torch.where(no_more_betting)[0]
-        if no_more_betting_idx.numel() > 0:
-            runout_pos = self.deck_pos[no_more_betting_idx].clone()
-            self.board_indices[no_more_betting_idx] = self.deck[
-                no_more_betting_idx, 4:9
-            ]
-            self.board_onehot[no_more_betting_idx] = self.card_onehot_cache[
-                self.board_indices[no_more_betting_idx]
-            ]
-            self.deck_pos[no_more_betting_idx] = 9
-
-            ab_plane = self.hole_onehot[no_more_betting_idx].any(
-                dim=2
-            ) | self.board_onehot[no_more_betting_idx].any(dim=1).unsqueeze(1)
-            cmp = rules.compare_7_single_batch(ab_plane)
-            self.winner[no_more_betting_idx[cmp > 0]] = 0
-            self.winner[no_more_betting_idx[cmp < 0]] = 1
-            self.winner[no_more_betting_idx[cmp == 0]] = 2
-            rewards[no_more_betting_idx] = self.finish_and_assign_rewards(
-                no_more_betting_idx, self.winner[no_more_betting_idx]
-            )
-            self.street[no_more_betting_idx] = 4
-            new_streets[no_more_betting_idx] = 4
-            for offset in range(dealt_cards.shape[1]):
-                card_pos = runout_pos + offset
-                valid = card_pos < 9
-                valid_ids = no_more_betting_idx[valid]
-                dealt_cards[valid_ids, offset] = self.deck[
-                    valid_ids, card_pos[valid]
-                ]
-
         # Round closure: equal committed (or 1 player all-in) and both acted
         equal_committed = self.committed[:, 0] == self.committed[:, 1]
         all_in_committed = (

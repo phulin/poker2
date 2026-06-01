@@ -1291,7 +1291,7 @@ def test_allin_legal_mask_with_betting():
                 ), f"SB should not be able to bet/raise/all-in (bin {bin_idx}) vs BB all-in"
 
 
-def test_implicit_allin_call_marks_allin_and_finishes_runout():
+def test_implicit_allin_call_marks_allin_without_runout_cutoff():
     env = _make_env(N=1, mean_stack=1000, sb=25, bb=50, device=torch.device("cpu"))
     env.reset()
     env.street[:] = 2
@@ -1317,11 +1317,10 @@ def test_implicit_allin_call_marks_allin_and_finishes_runout():
     )
 
     assert env.is_allin.tolist() == [[True, True]]
-    assert env.done.tolist() == [True]
-    assert env.street.tolist() == [4]
+    assert env.done.tolist() == [False]
+    assert env.street.tolist() == [3]
     assert env.deck_pos.tolist() == [9]
-    assert new_streets.tolist() == [4]
-    assert (env.board_indices >= 0).all()
+    assert new_streets.tolist() == [3]
 
 
 def test_short_implicit_allin_river_call_terminates():
@@ -1352,7 +1351,7 @@ def test_short_implicit_allin_river_call_terminates():
     assert env.is_allin.tolist() == [[True, True]]
     assert env.done.tolist() == [True]
     assert env.street.tolist() == [4]
-    assert new_streets.tolist() == [4]
+    assert new_streets.tolist() == [-1]
 
 
 def test_allin_legal_mask_consistency():
