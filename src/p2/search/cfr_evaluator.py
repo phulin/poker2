@@ -255,6 +255,13 @@ class CFREvaluator(ABC):
         """Pull back data to all parent nodes."""
         raise NotImplementedError("Subclasses must implement _pull_back.")
 
+    def _policy_targets_for_nodes(
+        self, node_indices: torch.Tensor, top: int
+    ) -> torch.Tensor:
+        """Return per-hand action targets for selected policy nodes."""
+        policy_targets = self._pull_back(self.policy_probs_avg)
+        return policy_targets[:top].permute(0, 2, 1)[node_indices]
+
     def _pull_back_sum(
         self, tensor: torch.Tensor, out: torch.Tensor, level: int | None = None
     ) -> None:
@@ -2108,10 +2115,6 @@ class CFREvaluator(ABC):
         N = self.root_nodes
         top = self.depth_offsets[-2] if len(self.depth_offsets) > 1 else N
 
-        if include_policy_batch:
-            policy_targets = self._pull_back(self.policy_probs_avg)
-            policy_targets = policy_targets[:top].permute(0, 2, 1)
-
         source_values = (
             self.latest_values if self.use_final_policy_values else self.values_avg
         )
@@ -2139,9 +2142,14 @@ class CFREvaluator(ABC):
         policy_encoder = getattr(self, "policy_feature_encoder", self.feature_encoder)
         value_encoder = getattr(self, "value_feature_encoder", self.feature_encoder)
         if include_policy_batch:
+            valid_top = self.valid_mask[:top] & ~self.leaf_mask[:top]
+            valid_policy_indices = torch.where(valid_top)[0].contiguous()
+            policy_targets = self._policy_targets_for_nodes(valid_policy_indices, top)
             policy_features = policy_encoder.encode(
-                self.beliefs_avg, pre_chance_node=False
-            )[:top]
+                self.beliefs_avg,
+                pre_chance_node=False,
+                indices=valid_policy_indices,
+            )
         if torch.equal(value_node_indices, root_indices):
             value_features_all = value_encoder.encode(
                 self.beliefs_avg, pre_chance_node=False
@@ -2261,7 +2269,6 @@ class CFREvaluator(ABC):
             # Policy batch gets all valid, non-leaf states.
             # Use valid_mask directly (works for both: sparse has all-ones,
             # dense has computed mask).
-            valid_top = self.valid_mask[:top] & ~self.leaf_mask[:top]
             policy_statistics = {
                 key: statistics[key][:top][valid_top] for key in statistics
             }
@@ -2270,8 +2277,8 @@ class CFREvaluator(ABC):
                     self._compute_policy_node_reach(top)[valid_top]
                 )
             policy_batch = RebelBatch(
-                features=policy_features[valid_top],
-                policy_targets=policy_targets[valid_top],
+                features=policy_features,
+                policy_targets=policy_targets,
                 legal_masks=legal_masks[:top][valid_top],
                 statistics=policy_statistics,
             )
@@ -2372,17 +2379,21 @@ class CFREvaluator(ABC):
         if num_roots == 0 or total_nodes == 0 or self.leaf_mask.numel() == 0:
             return counts
 
-        root_owner = torch.arange(total_nodes, dtype=torch.long, device=device)
-        root_owner[:num_roots] = torch.arange(
-            num_roots, dtype=torch.long, device=device
-        )
-        for level in range(1, len(self.depth_offsets) - 1):
-            start = self.depth_offsets[level]
-            end = self.depth_offsets[level + 1]
-            if end <= start:
-                continue
-            parents = self.parent_index[start:end].clamp(min=0)
-            root_owner[start:end] = root_owner[parents]
+        get_root_index = getattr(self, "_get_root_index", None)
+        if callable(get_root_index):
+            root_owner = get_root_index()
+        else:
+            root_owner = torch.arange(total_nodes, dtype=torch.long, device=device)
+            root_owner[:num_roots] = torch.arange(
+                num_roots, dtype=torch.long, device=device
+            )
+            for level in range(1, len(self.depth_offsets) - 1):
+                start = self.depth_offsets[level]
+                end = self.depth_offsets[level + 1]
+                if end <= start:
+                    continue
+                parents = self.parent_index[start:end].clamp(min=0)
+                root_owner[start:end] = root_owner[parents]
 
         valid_leaf = self.leaf_mask
         if self.valid_mask.numel() == self.leaf_mask.numel():

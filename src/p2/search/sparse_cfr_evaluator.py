@@ -162,8 +162,12 @@ class SparseCFREvaluator(CFREvaluator):
         self.cumulative_regrets = torch.empty_like(self.policy_probs)
 
         self.feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder | None = None
-        self.policy_feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder | None = None
-        self.value_feature_encoder: RebelFeatureEncoder | BetterFeatureEncoder | None = None
+        self.policy_feature_encoder: (
+            RebelFeatureEncoder | BetterFeatureEncoder | None
+        ) = None
+        self.value_feature_encoder: (
+            RebelFeatureEncoder | BetterFeatureEncoder | None
+        ) = None
 
         self.sampled_leaf_indices = torch.empty(0, dtype=torch.long, device=self.device)
         self.continuation_value_target_indices = torch.empty(
@@ -204,9 +208,7 @@ class SparseCFREvaluator(CFREvaluator):
             torch.full((num_roots,), -1, dtype=torch.long, device=self.device)
         ]
         vector_rewards = isinstance(src_env, PBSEnv)
-        reward_shape = (
-            (num_roots, self.num_players) if vector_rewards else (num_roots,)
-        )
+        reward_shape = (num_roots, self.num_players) if vector_rewards else (num_roots,)
         reward_levels = [
             torch.zeros(reward_shape, dtype=self.float_dtype, device=self.device)
         ]
@@ -493,7 +495,9 @@ class SparseCFREvaluator(CFREvaluator):
                         generator=self.generator,
                         device=self.device,
                     )
-                    target_depths = torch.where(target_enabled, depth_draws, target_depths)
+                    target_depths = torch.where(
+                        target_enabled, depth_draws, target_depths
+                    )
                     hit_root = (
                         target_enabled
                         & (target_depths == 0)
@@ -647,6 +651,32 @@ class SparseCFREvaluator(CFREvaluator):
         out[parent_indices - parent_start, actions] = tensor[child_start:child_end]
         return out
 
+    def _policy_targets_for_nodes(
+        self, node_indices: torch.Tensor, top: int
+    ) -> torch.Tensor:
+        """Return policy targets for selected sparse parent nodes only."""
+        out = torch.zeros(
+            (node_indices.numel(), self.num_actions, NUM_HANDS),
+            dtype=self.policy_probs_avg.dtype,
+            device=self.device,
+        )
+        if node_indices.numel() == 0 or self.total_nodes <= self.depth_offsets[1]:
+            return out.permute(0, 2, 1)
+
+        cols = torch.arange(self.num_actions, dtype=torch.long, device=self.device)
+        counts = self.child_count[node_indices]
+        valid = cols[None, :] < counts[:, None]
+        child_indices = self.child_offsets[node_indices, None] + cols[None, :]
+        safe_child_indices = torch.where(valid, child_indices, 0)
+        actions = self.action_from_parent[safe_child_indices]
+        rows = torch.arange(node_indices.numel(), dtype=torch.long, device=self.device)[
+            :, None
+        ].expand_as(actions)
+        out[rows[valid], actions[valid]] = self.policy_probs_avg[
+            safe_child_indices[valid]
+        ]
+        return out.permute(0, 2, 1)
+
     def _pull_back_sum(
         self, tensor: torch.Tensor, out: torch.Tensor, level: int | None = None
     ) -> None:
@@ -690,10 +720,9 @@ class SparseCFREvaluator(CFREvaluator):
         action_from_parent = self.action_from_parent[child_start:child_end]
 
         denom = self.allowed_hands[:top].sum(dim=1).clamp(min=1)
-        child_mass = (
-            self.policy_probs_avg[child_start:child_end].sum(dim=1)
-            / denom.index_select(0, parent_index)
-        )
+        child_mass = self.policy_probs_avg[child_start:child_end].sum(
+            dim=1
+        ) / denom.index_select(0, parent_index)
 
         action_mix_by_node = torch.zeros(
             top,
