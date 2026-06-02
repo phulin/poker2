@@ -957,16 +957,19 @@ class RebelSupervisedLoss(nn.Module):
             2,
             combo_permutations[:, None, :].expand(-1, self.num_players, -1),
         )
-        return F.mse_loss(output.hand_values, hand_values_permuted_reversed)
+        return F.mse_loss(
+            output.hand_values.float(), hand_values_permuted_reversed.float()
+        )
 
     def forward_policy(
         self,
         output: ModelOutput,
         batch: RebelBatch,
     ) -> dict[str, torch.Tensor]:
-        logits = output.policy_logits
+        logits = output.policy_logits.float()
         device = logits.device
         _, _, _, actor_belief, opp_matchup = self._policy_weights(batch)
+        policy_targets = batch.policy_targets.to(dtype=logits.dtype)
 
         legal_masks = batch.legal_masks[:, None, :]
         masked_logits = compute_masked_logits(logits, legal_masks)
@@ -978,11 +981,11 @@ class RebelSupervisedLoss(nn.Module):
             min=1e-8
         )
         policy_weights = policy_weights_unnormalized / policy_weight_sum
-        target_log_probs = batch.policy_targets.clamp_min(1e-8).log()
-        target_entropy_per_hand = -(batch.policy_targets * target_log_probs).sum(dim=-1)
-        policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
+        target_log_probs = policy_targets.clamp_min(1e-8).log()
+        target_entropy_per_hand = -(policy_targets * target_log_probs).sum(dim=-1)
+        policy_ce_per_hand = -(policy_targets * log_probs).sum(dim=-1)
         policy_objective_per_hand = self._policy_objective_per_hand(
-            probs, batch.policy_targets, policy_ce_per_hand
+            probs, policy_targets, policy_ce_per_hand
         )
         policy_loss_per_hand = policy_objective_per_hand * policy_weights
         policy_loss_all = policy_loss_per_hand.sum(dim=-1)
@@ -1058,15 +1061,16 @@ class RebelSupervisedLoss(nn.Module):
         output: ModelOutput,
         batch: RebelBatch,
     ) -> dict[str, torch.Tensor]:
-        hand_values = output.hand_values
+        hand_values = output.hand_values.float()
         device = hand_values.device
+        value_targets = batch.value_targets.to(dtype=hand_values.dtype)
         _, allowed_hands_float, unblocked_mass = self._base_weights(batch)
 
         value_weights = self._value_weights(unblocked_mass, allowed_hands_float)
-        value_loss = F.mse_loss(hand_values, batch.value_targets, weight=value_weights)
+        value_loss = F.mse_loss(hand_values, value_targets, weight=value_weights)
         value_loss_all = F.mse_loss(
             hand_values.detach(),
-            batch.value_targets,
+            value_targets,
             reduction="none",
             weight=value_weights,
         )
@@ -1101,9 +1105,11 @@ class RebelSupervisedLoss(nn.Module):
         output: ModelOutput,
         batch: RebelBatch,
     ) -> dict[str, torch.Tensor]:
-        logits = output.policy_logits
-        hand_values = output.hand_values
+        logits = output.policy_logits.float()
+        hand_values = output.hand_values.float()
         device = logits.device
+        policy_targets = batch.policy_targets.to(dtype=logits.dtype)
+        value_targets = batch.value_targets.to(dtype=hand_values.dtype)
         _, allowed_hands_float, unblocked_mass, actor_belief, opp_matchup = (
             self._policy_weights(batch)
         )
@@ -1118,11 +1124,11 @@ class RebelSupervisedLoss(nn.Module):
             min=1e-8
         )
         policy_weights = policy_weights_unnormalized / policy_weight_sum
-        target_log_probs = batch.policy_targets.clamp_min(1e-8).log()
-        target_entropy_per_hand = -(batch.policy_targets * target_log_probs).sum(dim=-1)
-        policy_ce_per_hand = -(batch.policy_targets * log_probs).sum(dim=-1)
+        target_log_probs = policy_targets.clamp_min(1e-8).log()
+        target_entropy_per_hand = -(policy_targets * target_log_probs).sum(dim=-1)
+        policy_ce_per_hand = -(policy_targets * log_probs).sum(dim=-1)
         policy_objective_per_hand = self._policy_objective_per_hand(
-            probs, batch.policy_targets, policy_ce_per_hand
+            probs, policy_targets, policy_ce_per_hand
         )
         policy_loss_per_hand = policy_objective_per_hand * policy_weights
         policy_loss_all = policy_loss_per_hand.sum(dim=-1)
@@ -1160,10 +1166,10 @@ class RebelSupervisedLoss(nn.Module):
         entropy = -(probs * log_probs).sum(dim=-1).mean()
 
         value_weights = self._value_weights(unblocked_mass, allowed_hands_float)
-        value_loss = F.mse_loss(hand_values, batch.value_targets, weight=value_weights)
+        value_loss = F.mse_loss(hand_values, value_targets, weight=value_weights)
         value_loss_all = F.mse_loss(
             hand_values.detach(),
-            batch.value_targets,
+            value_targets,
             reduction="none",
             weight=value_weights,
         )

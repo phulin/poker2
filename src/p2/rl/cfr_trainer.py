@@ -803,7 +803,9 @@ class RebelCFRTrainer:
             2,
             combo_permutations[:, None, :].expand(-1, self.num_players, -1),
         )
-        return F.mse_loss(value_output.hand_values, hand_values_permuted_reversed)
+        return F.mse_loss(
+            value_output.hand_values.float(), hand_values_permuted_reversed.float()
+        )
 
     def _compute_entropy(self, probs: torch.Tensor) -> float:
         eps = 1e-8
