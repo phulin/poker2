@@ -47,51 +47,68 @@ class RebelDataSource(ABC):
 
 
 class LiveRebelDataSource(RebelDataSource):
-    """Live CFR data source that wraps the existing ReBeL data generator."""
+    """Live CFR data source that streams the current generated batches."""
 
     def __init__(
         self,
         generator: RebelDataGenerator,
-        value_buffer: RebelReplayBuffer,
-        policy_buffer: RebelReplayBuffer,
         *,
         value_sample_count: int,
         max_return_policy_samples: int,
     ) -> None:
         self.generator = generator
-        self.value_buffer = value_buffer
-        self.policy_buffer = policy_buffer
         self.value_sample_count = int(value_sample_count)
         self.max_return_policy_samples = int(max_return_policy_samples)
+        self._value_batch: RebelBatch | None = None
+        self._policy_batch: RebelBatch | None = None
 
     def prepare_step(self, step: int) -> tuple[RebelBatch | None, RebelBatch | None]:
         del step
-        return self.generator.generate_data(
+        self._value_batch, self._policy_batch = self.generator.generate_data(
             self.value_sample_count,
             return_policy_batch=True,
             max_return_policy_samples=self.max_return_policy_samples,
         )
+        return self._value_batch, self._policy_batch
 
     def ensure_min_samples(self, value_samples: int, policy_samples: int) -> None:
-        while (
-            len(self.value_buffer) < value_samples
-            or len(self.policy_buffer) < policy_samples
-        ):
-            self.generator.generate_data(
-                self.value_sample_count,
+        if self._value_batch is None or len(self._value_batch) < value_samples:
+            self._value_batch, self._policy_batch = self.generator.generate_data(
+                max(self.value_sample_count, value_samples),
+                return_policy_batch=True,
+                max_return_policy_samples=max(
+                    self.max_return_policy_samples, policy_samples
+                ),
+            )
+        if self._policy_batch is None or len(self._policy_batch) < policy_samples:
+            _, self._policy_batch = self.generator.generate_data(
+                max(self.value_sample_count, value_samples),
                 return_value_batch=False,
-                return_policy_batch=False,
+                return_policy_batch=True,
+                max_return_policy_samples=max(
+                    self.max_return_policy_samples, policy_samples
+                ),
             )
 
     def sample_value(
         self, batch_size: int, stratify_streets: list[float] | None
     ) -> RebelBatch:
-        return self.value_buffer.sample(batch_size, stratify_streets=stratify_streets)
+        del stratify_streets
+        if self._value_batch is None or len(self._value_batch) < batch_size:
+            self.ensure_min_samples(batch_size, 0)
+        if self._value_batch is None:
+            raise RuntimeError("Live data source has no generated value batch")
+        return self._value_batch[:batch_size]
 
     def sample_policy(
         self, batch_size: int, stratify_streets: list[float] | None
     ) -> RebelBatch:
-        return self.policy_buffer.sample(batch_size, stratify_streets=stratify_streets)
+        del stratify_streets
+        if self._policy_batch is None or len(self._policy_batch) < batch_size:
+            self.ensure_min_samples(0, batch_size)
+        if self._policy_batch is None:
+            raise RuntimeError("Live data source has no generated policy batch")
+        return self._policy_batch[:batch_size]
 
     def state_dict(self) -> dict:
         return self.generator.state_dict()

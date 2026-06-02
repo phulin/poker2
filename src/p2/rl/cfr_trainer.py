@@ -265,13 +265,15 @@ class RebelCFRTrainer:
             self.num_actions / 2
         ) ** self.cfg.search.depth / self.cfg.train.policy_capacity_factor
 
+        self.stream_live_batches = cfg.data.mode == "live" and not pregeneration_only
+
         C_over_K = self.cfg.train.replay_buffer_batches
         value_capacity = int(math.ceil(C_over_K * self.K_value))
         policy_capacity = int(
             math.ceil(value_capacity * self.cfg.train.policy_capacity_factor)
         )
 
-        if pregeneration_only:
+        if pregeneration_only or self.stream_live_batches:
             self.value_buffer = None
             self.policy_buffer = None
         else:
@@ -451,8 +453,9 @@ class RebelCFRTrainer:
                 policy_buffer=self.policy_buffer,
                 root_sampler=root_sampler,
                 include_pre_chance_value_batches=cfg.data.include_pre_chance_value_batches,
-                store_replay=not pregeneration_only,
-                sample_continuations=not pregeneration_only,
+                store_replay=not pregeneration_only and not self.stream_live_batches,
+                sample_continuations=not pregeneration_only
+                and not self.stream_live_batches,
                 record_batch_diag=not pregeneration_only,
             )
             if pregeneration_only:
@@ -462,9 +465,7 @@ class RebelCFRTrainer:
                 return
             self.data_source = LiveRebelDataSource(
                 self.data_generator,
-                self.value_buffer,
-                self.policy_buffer,
-                value_sample_count=self.K_value,
+                value_sample_count=max(self.K_value, self.batch_size),
                 max_return_policy_samples=self.batch_size,
             )
             if cfg.data.mode == "hybrid":
@@ -1448,9 +1449,31 @@ class RebelCFRTrainer:
             weights = policy_node_weights(batch, tensor.dtype)
             return reduce_by_masks(tensor, masks, names, weights=weights)
 
-        value_buffer_streets_stats = street_count(
-            self.value_buffer.features.street[: len(self.value_buffer)]
+        has_replay_buffers = (
+            self.value_buffer is not None and self.policy_buffer is not None
         )
+        value_buffer_streets_stats = (
+            street_count(self.value_buffer.features.street[: len(self.value_buffer)])
+            if has_replay_buffers
+            else {}
+        )
+        if has_replay_buffers and len(self.value_buffer) > 0:
+            value_buffer_target_mean_abs_tensor = (
+                self.value_buffer.value_targets[: len(self.value_buffer)]
+                * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
+                    -1, 2, NUM_HANDS
+                )
+            ).abs().sum(dim=2)
+            value_buffer_target_mean_abs = (
+                value_buffer_target_mean_abs_tensor.mean().item()
+            )
+            value_buffer_target_mean_abs_street = by_street(
+                value_buffer_target_mean_abs_tensor.mean(dim=1),
+                street=self.value_buffer.features.street[: len(self.value_buffer)],
+            )
+        else:
+            value_buffer_target_mean_abs = 0.0
+            value_buffer_target_mean_abs_street = {}
         if streamed_train_metrics is None:
             aggression_stats = {
                 f"chunk_{i}": v
@@ -1511,44 +1534,24 @@ class RebelCFRTrainer:
             "permutation_loss": step_stats["permutation_loss"] / episodes,
             "param_update_norm": step_stats["update_norm"] / episodes,
             "value_buffer": value_buffer_streets_stats,
-            "value_buffer_size": len(self.value_buffer),
-            "policy_buffer_size": len(self.policy_buffer),
+            "value_buffer_size": len(self.value_buffer) if has_replay_buffers else 0,
+            "policy_buffer_size": len(self.policy_buffer) if has_replay_buffers else 0,
             "value_buffer_mean_sample_count": (
                 self.value_buffer.sample_count[: len(self.value_buffer)]
                 .float()
                 .mean()
                 .item()
-                if len(self.value_buffer) > 0
+                if has_replay_buffers and len(self.value_buffer) > 0
                 else 0.0
             ),
-            "value_buffer_target_mean_abs": (
-                self.value_buffer.value_targets[: len(self.value_buffer)]
-                * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
-                    -1, 2, NUM_HANDS
-                )
-            )
-            .abs()
-            .sum(dim=2)
-            .mean()
-            .item(),
-            "value_buffer_target_mean_abs_street": by_street(
-                (
-                    self.value_buffer.value_targets[: len(self.value_buffer)]
-                    * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
-                        -1, 2, NUM_HANDS
-                    )
-                )
-                .abs()
-                .sum(dim=2)
-                .mean(dim=1),
-                street=self.value_buffer.features.street[: len(self.value_buffer)],
-            ),
+            "value_buffer_target_mean_abs": value_buffer_target_mean_abs,
+            "value_buffer_target_mean_abs_street": value_buffer_target_mean_abs_street,
             "policy_buffer_mean_sample_count": (
                 self.policy_buffer.sample_count[: len(self.policy_buffer)]
                 .float()
                 .mean()
                 .item()
-                if len(self.policy_buffer) > 0
+                if has_replay_buffers and len(self.policy_buffer) > 0
                 else 0.0
             ),
             "grad_norm_clipped": grad_norm_clipped,
@@ -2076,11 +2079,16 @@ class RebelCFRTrainer:
         )
         self.data_source.ensure_min_samples(self.batch_size, min_policy_samples)
 
-        value_fullness = len(self.value_buffer) / self.value_buffer.capacity
-        episodes = math.ceil(self.cfg.train.episodes_per_step * value_fullness)
         supervisions = (
             self.cfg.model.num_supervisions if isinstance(self.model, BetterTRM) else 1
         )
+        if self.stream_live_batches:
+            episodes = 1
+        else:
+            if self.value_buffer is None:
+                raise RuntimeError("Buffered data source requires value_buffer")
+            value_fullness = len(self.value_buffer) / self.value_buffer.capacity
+            episodes = math.ceil(self.cfg.train.episodes_per_step * value_fullness)
         updates = episodes * supervisions
         metric_value_batch = None
         metric_policy_batch = None
@@ -2330,6 +2338,8 @@ class RebelCFRTrainer:
         return os.path.join(directory, REPLAY_BUFFER_CHECKPOINT)
 
     def save_replay_buffers(self, checkpoint_path: str, step: int) -> str:
+        if self.value_buffer is None or self.policy_buffer is None:
+            return ""
         path = self.replay_buffer_checkpoint_path(checkpoint_path)
         directory = os.path.dirname(path)
         if directory:
@@ -2345,6 +2355,8 @@ class RebelCFRTrainer:
         return path
 
     def load_replay_buffers(self, checkpoint_path: str) -> bool:
+        if self.value_buffer is None or self.policy_buffer is None:
+            return False
         path = self.replay_buffer_checkpoint_path(checkpoint_path)
         if not os.path.exists(path):
             return False
@@ -2380,7 +2392,11 @@ class RebelCFRTrainer:
             "step": step,
             "save_dtype": str(save_dtype) if save_dtype is not None else None,
             "config": asdict(self.cfg),
-            "replay_buffer_checkpoint": REPLAY_BUFFER_CHECKPOINT,
+            "replay_buffer_checkpoint": (
+                REPLAY_BUFFER_CHECKPOINT
+                if self.value_buffer is not None and self.policy_buffer is not None
+                else None
+            ),
             # Store wandb run ID for resumption
             "wandb_run_id": wandb_run_id,
         }

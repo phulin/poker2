@@ -163,6 +163,31 @@ def test_rebel_cfr_trainer_runs_pregenerated_mode_one_step(tmp_path):
     assert len(trainer.policy_buffer) >= cfg.train.batch_size
 
 
+def test_rebel_cfr_trainer_live_mode_streams_without_replay_buffers():
+    cfg = _tiny_rebel_cfg()
+    cfg.data.mode = "live"
+    cfg.data.live_root_source = "random_river"
+    cfg.num_steps = 1
+    cfg.train.batch_size = 1
+    cfg.train.episodes_per_step = 4
+    cfg.train.replay_buffer_batches = 8
+    cfg.train.value_reuse_goal = 1
+    cfg.search.depth = 1
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    metrics = trainer.train_step(0)
+
+    assert trainer.stream_live_batches is True
+    assert trainer.value_buffer is None
+    assert trainer.policy_buffer is None
+    assert trainer.data_generator is not None
+    assert trainer.data_generator.store_replay is False
+    assert trainer.data_generator.sample_continuations is False
+    assert metrics["updates"] == 1
+    assert metrics["value_buffer_size"] == 0
+    assert metrics["policy_buffer_size"] == 0
+
+
 def test_rebel_cfr_trainer_hybrid_mode_uses_holdout_metrics(tmp_path):
     cfg = _tiny_rebel_cfg()
     cfg.data.mode = "hybrid"
@@ -897,32 +922,8 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
 
     ckpt_path = tmp_path / "rebel.pt"
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
-    value_batch = RebelBatch(
-        features=MLPFeatures(
-            context=torch.arange(8, dtype=torch.float32).view(2, 4),
-            street=torch.zeros(2, dtype=torch.long),
-            to_act=torch.zeros(2, dtype=torch.long),
-            board=torch.full((2, 5), -1, dtype=torch.long),
-            beliefs=torch.full((2, 2 * NUM_HANDS), 1.0 / NUM_HANDS),
-        ),
-        policy_targets=None,
-        value_targets=torch.arange(2 * 2 * NUM_HANDS, dtype=torch.float32).view(
-            2, 2, NUM_HANDS
-        ),
-        legal_masks=torch.ones(2, cfg.model.num_actions, dtype=torch.bool),
-    )
-    policy_batch = RebelBatch(
-        features=value_batch.features.clone(),
-        policy_targets=torch.full(
-            (2, NUM_HANDS, cfg.model.num_actions),
-            1.0 / cfg.model.num_actions,
-        ),
-        value_targets=None,
-        legal_masks=torch.ones(2, cfg.model.num_actions, dtype=torch.bool),
-        statistics={"node_depth": torch.arange(2, dtype=torch.long)},
-    )
-    trainer.value_buffer.add_batch(value_batch)
-    trainer.policy_buffer.add_batch(policy_batch)
+    assert trainer.value_buffer is None
+    assert trainer.policy_buffer is None
     trainer.data_generator.current_pbs.env.street.fill_(2)
     trainer.data_generator.current_pbs.beliefs.fill_(0.25)
     trainer.data_generator.last_extra = 5
@@ -949,9 +950,11 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
         "stage_step": 7,
     }
     replay_path = RebelCFRTrainer.replay_buffer_checkpoint_path(str(ckpt_path))
-    assert (tmp_path / "rebel_replay_buffers.pt").samefile(replay_path)
-    assert len(new_trainer.value_buffer) == len(trainer.value_buffer)
-    assert len(new_trainer.policy_buffer) == len(trainer.policy_buffer)
+    assert replay_path == str(tmp_path / "rebel_replay_buffers.pt")
+    assert checkpoint["replay_buffer_checkpoint"] is None
+    assert not (tmp_path / "rebel_replay_buffers.pt").exists()
+    assert new_trainer.value_buffer is None
+    assert new_trainer.policy_buffer is None
     assert new_trainer.data_generator.last_extra == 5
     torch.testing.assert_close(
         new_trainer.data_generator.current_pbs.env.street,
@@ -960,18 +963,6 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
     torch.testing.assert_close(
         new_trainer.data_generator.current_pbs.beliefs,
         trainer.data_generator.current_pbs.beliefs,
-    )
-    torch.testing.assert_close(
-        new_trainer.value_buffer.features.context,
-        trainer.value_buffer.features.context,
-    )
-    torch.testing.assert_close(
-        new_trainer.value_buffer.value_targets,
-        trainer.value_buffer.value_targets,
-    )
-    torch.testing.assert_close(
-        new_trainer.policy_buffer.policy_targets,
-        trainer.policy_buffer.policy_targets,
     )
 
 
