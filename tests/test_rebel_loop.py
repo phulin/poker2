@@ -115,3 +115,42 @@ def test_run_training_loop_preserves_checkpoint_and_snapshot_flow(
         (1, {"rebel": True}),
         (3, {"title": "Final Preflop Range Grid", "rebel": True}),
     ]
+
+
+def test_run_training_loop_can_skip_preflop_analyzer(monkeypatch, tmp_path) -> None:
+    grid_calls = []
+    monkeypatch.setattr(
+        rebel_loop,
+        "print_preflop_range_grid",
+        lambda trainer, step, **kwargs: grid_calls.append((step, kwargs)),
+    )
+
+    trainer = _FakeTrainer()
+    cfg = SimpleNamespace(
+        use_wandb=False,
+        wandb_project="unused",
+        wandb_name=None,
+        checkpoint_dir=str(tmp_path),
+        checkpoint_interval=1,
+        economize_checkpoints=False,
+    )
+
+    last_step = rebel_loop.run_training_loop(
+        trainer,
+        cfg,
+        None,
+        start_step=0,
+        stop_step=2,
+        print_preflop_analyzer=False,
+    )
+
+    assert last_step == 1
+    assert trainer.steps == [0, 1]
+    assert [saved[0] for saved in trainer.saved] == [
+        str(tmp_path / "rebel_step_1.pt"),
+        str(tmp_path / "rebel_latest.pt"),
+        str(tmp_path / "rebel_step_2.pt"),
+        str(tmp_path / "rebel_latest.pt"),
+        str(tmp_path / "rebel_final.pt"),
+    ]
+    assert grid_calls == []

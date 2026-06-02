@@ -673,6 +673,9 @@ class RebelCFRTrainer:
             key: value.to(self.float_dtype) if value.dtype.is_floating_point else value
             for key, value in model_state.items()
         }
+        model_component = checkpoint.get("model_component")
+        if model_component == "value_model":
+            model = getattr(model, "value_model", model)
         model.load_state_dict(model_state, strict=self.cfg.strict_model_loading)
         model.eval()
         for param in model.parameters():
@@ -1039,9 +1042,7 @@ class RebelCFRTrainer:
             "value_batch_street": torch.zeros(len(STREETS), device=device, dtype=dtype),
             "ratios": {},
             "argmax_ratios": {},
-            "aggression_bet_sums": torch.zeros(
-                5, device=device, dtype=dtype
-            ),
+            "aggression_bet_sums": torch.zeros(5, device=device, dtype=dtype),
             "aggression_counts": torch.zeros(5, device=device, dtype=dtype),
             "value_sum": None,
             "value_sumsq": None,
@@ -1292,7 +1293,9 @@ class RebelCFRTrainer:
             group_den = torch.zeros(2, device=kl_all.device, dtype=metric_dtype)
             group_num = torch.zeros_like(group_den)
             group_den.scatter_add_(0, group_ids, reach_weights)
-            group_num.scatter_add_(0, group_ids, reach_weights * kl_all.to(metric_dtype))
+            group_num.scatter_add_(
+                0, group_ids, reach_weights * kl_all.to(metric_dtype)
+            )
             total = reach_weights.sum()
             for idx, name in enumerate(names):
                 self._accumulate_ratio(
@@ -1324,7 +1327,7 @@ class RebelCFRTrainer:
             return {k: v for k, v in zip(names, vals_cpu) if not math.isnan(v)}
 
         def ratio_scalars(
-            ratios: dict[str, tuple[torch.Tensor, torch.Tensor]]
+            ratios: dict[str, tuple[torch.Tensor, torch.Tensor]],
         ) -> dict[str, float]:
             out: dict[str, float] = {}
             for key, (numer, denom) in ratios.items():
@@ -1347,7 +1350,10 @@ class RebelCFRTrainer:
             "policy_loss_street": ratio_vector("policy_loss_street", list(STREETS)),
             "policy_target_model_kl_depth": ratio_vector(
                 "policy_target_model_kl_depth",
-                [f"depth_{i}" for i in range(int(getattr(self.cfg.search, "depth", 0)) + 1)],
+                [
+                    f"depth_{i}"
+                    for i in range(int(getattr(self.cfg.search, "depth", 0)) + 1)
+                ],
             ),
             "policy_target_model_kl_reach_bucket": ratio_vector(
                 "policy_target_model_kl_reach_bucket",
@@ -1414,13 +1420,13 @@ class RebelCFRTrainer:
             names = list(STREETS)
             if denominator_weights is not None:
                 numers = torch.stack(
-                    [
-                        tensor[street == i].sum()
-                        for i, _ in enumerate(names)
-                    ]
+                    [tensor[street == i].sum() for i, _ in enumerate(names)]
                 )
                 denoms = torch.stack(
-                    [denominator_weights[street == i].sum() for i, _ in enumerate(names)]
+                    [
+                        denominator_weights[street == i].sum()
+                        for i, _ in enumerate(names)
+                    ]
                 )
                 vals = torch.where(
                     denoms > 0,
@@ -1517,11 +1523,15 @@ class RebelCFRTrainer:
         )
         if has_replay_buffers and len(self.value_buffer) > 0:
             value_buffer_target_mean_abs_tensor = (
-                self.value_buffer.value_targets[: len(self.value_buffer)]
-                * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
-                    -1, self.num_players, NUM_HANDS
+                (
+                    self.value_buffer.value_targets[: len(self.value_buffer)]
+                    * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
+                        -1, self.num_players, NUM_HANDS
+                    )
                 )
-            ).abs().sum(dim=2)
+                .abs()
+                .sum(dim=2)
+            )
             value_buffer_target_mean_abs = (
                 value_buffer_target_mean_abs_tensor.mean().item()
             )
@@ -2033,9 +2043,7 @@ class RebelCFRTrainer:
             "update_norm": update_norm.detach(),
         }
 
-    def train_value_batch(
-        self, value_batch: RebelBatch, step: int
-    ) -> dict[str, Any]:
+    def train_value_batch(self, value_batch: RebelBatch, step: int) -> dict[str, Any]:
         """Run one value-only supervised update for distillation workloads."""
 
         self._apply_schedules(step)
@@ -2322,9 +2330,9 @@ class RebelCFRTrainer:
         if any(v is not None for v in extra_tensor_stats.values()):
             keys = [k for k, v in extra_tensor_stats.items() if v is not None]
             stacked = (
-                torch.stack(
-                    [extra_tensor_stats[k].reshape(()) for k in keys]
-                ).cpu().tolist()
+                torch.stack([extra_tensor_stats[k].reshape(()) for k in keys])
+                .cpu()
+                .tolist()
             )
             for k, val in zip(keys, stacked):
                 step_stats[f"extra_{k}"] = val
@@ -2503,6 +2511,49 @@ class RebelCFRTrainer:
         torch.save(state, path)
         self.save_replay_buffers(path, step)
 
+    def save_value_checkpoint(
+        self,
+        path: str,
+        step: int,
+        wandb_run_id: str | None = None,
+        save_optimizer: bool = True,
+        save_dtype: torch.dtype | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        value_model = getattr(self.model, "value_model", self.model)
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+        model_state = value_model.state_dict()
+        if save_dtype is not None:
+            model_state = {
+                k: v.to(save_dtype) if v.dtype.is_floating_point else v
+                for k, v in model_state.items()
+            }
+
+        state = {
+            "model": model_state,
+            "model_component": "value_model",
+            "step": step,
+            "save_dtype": str(save_dtype) if save_dtype is not None else None,
+            "config": asdict(self.cfg),
+            "replay_buffer_checkpoint": None,
+            "wandb_run_id": wandb_run_id,
+        }
+        if metadata is not None:
+            state["metadata"] = dict(metadata)
+        if save_optimizer:
+            state["optimizer"] = self.optimizer.state_dict()
+            state["rng"] = self.rng.get_state()
+            state["buffer_rng"] = self.buffer_rng.get_state()
+
+        data_source_state = self.data_source.state_dict()
+        state["data_source"] = data_source_state
+        state["data_generator"] = data_source_state
+
+        torch.save(state, path)
+
     def load_checkpoint(self, path: str, load_optimizer: bool = True) -> int:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
 
@@ -2516,7 +2567,15 @@ class RebelCFRTrainer:
                 for k, v in model_state.items()
             }
 
-        self.model.load_state_dict(model_state, strict=self.cfg.strict_model_loading)
+        if ckpt.get("model_component") == "value_model":
+            value_model = getattr(self.model, "value_model", self.model)
+            value_model.load_state_dict(
+                model_state, strict=self.cfg.strict_model_loading
+            )
+        else:
+            self.model.load_state_dict(
+                model_state, strict=self.cfg.strict_model_loading
+            )
 
         # Load EMA state if it exists in checkpoint and EMA is enabled.
         if "model_avg" in ckpt and self.ema_helper is not None:

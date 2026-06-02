@@ -3,6 +3,7 @@ import torch
 
 from p2.core.structured_config import (
     Config,
+    ModelType,
     PregeneratedDatasetConfig,
     PolicyLossType,
     PolicyNodeWeighting,
@@ -76,6 +77,34 @@ def test_rebel_cfr_trainer_loads_street_model_registry(tmp_path):
     assert isinstance(trainer.cfr_evaluator.model, StreetModelRegistry)
 
 
+def test_rebel_cfr_trainer_saves_value_only_checkpoint(tmp_path):
+    cfg = _tiny_rebel_cfg()
+    cfg.model.name = ModelType.better_ffn
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    with torch.no_grad():
+        for param in trainer.model.value_model.parameters():
+            param.fill_(2.0)
+
+    path = tmp_path / "E_turn.pt"
+    trainer.save_value_checkpoint(path, step=7, save_optimizer=False)
+
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    assert checkpoint["model_component"] == "value_model"
+    assert not any(key.startswith("policy_model.") for key in checkpoint["model"])
+
+    resumed = RebelCFRTrainer(cfg, torch.device("cpu"))
+    resumed.load_checkpoint(str(path), load_optimizer=False)
+    for actual, expected in zip(
+        resumed.model.value_model.parameters(),
+        trainer.model.value_model.parameters(),
+        strict=True,
+    ):
+        assert torch.equal(actual, expected)
+
+    frozen = resumed._load_closing_leaf_model(str(path))
+    assert not hasattr(frozen, "policy_model")
+
+
 def _tiny_rebel_cfg() -> Config:
     cfg = Config()
     cfg.num_envs = 1
@@ -95,7 +124,9 @@ def _tiny_rebel_cfg() -> Config:
     return cfg
 
 
-def _tiny_solved_batch(cfg: Config, *, stream: str, start: int, count: int) -> RebelBatch:
+def _tiny_solved_batch(
+    cfg: Config, *, stream: str, start: int, count: int
+) -> RebelBatch:
     rows = torch.arange(start, start + count)
     features = MLPFeatures(
         context=torch.stack(
@@ -243,11 +274,11 @@ def test_rebel_cfr_trainer_pregenerated_resume_matches_uninterrupted(tmp_path):
     cfg.train.value_reuse_goal = 1
     cfg.data.pregenerated.value_batch_size = 2
     cfg.data.pregenerated.policy_batch_size = 2
-    cfg.data.pregenerated.datasets = [
-        PregeneratedDatasetConfig(path=str(dataset_path))
-    ]
+    cfg.data.pregenerated.datasets = [PregeneratedDatasetConfig(path=str(dataset_path))]
     model_family = (
-        cfg.model.name.value if hasattr(cfg.model.name, "value") else str(cfg.model.name)
+        cfg.model.name.value
+        if hasattr(cfg.model.name, "value")
+        else str(cfg.model.name)
     )
     action_schedule = {
         "bet_bins": list(cfg.env.bet_bins),
@@ -279,11 +310,13 @@ def test_rebel_cfr_trainer_pregenerated_resume_matches_uninterrupted(tmp_path):
     resumed_metrics = resumed_second.train_step(loaded_step + 1)
 
     assert loaded_step == 0
-    assert resumed_second.data_source.state_dict()["value_cursors"] == (
-        uninterrupted.data_source.state_dict()["value_cursors"]
+    assert (
+        resumed_second.data_source.state_dict()["value_cursors"]
+        == (uninterrupted.data_source.state_dict()["value_cursors"])
     )
-    assert resumed_second.data_source.state_dict()["policy_cursors"] == (
-        uninterrupted.data_source.state_dict()["policy_cursors"]
+    assert (
+        resumed_second.data_source.state_dict()["policy_cursors"]
+        == (uninterrupted.data_source.state_dict()["policy_cursors"])
     )
     for key in ("loss", "value_loss", "policy_loss", "policy_target_model_kl"):
         assert resumed_metrics[key] == pytest.approx(uninterrupted_metrics[key])
@@ -312,20 +345,18 @@ def test_rebel_cfr_trainer_wires_random_postflop_root_sources():
         assert trainer.data_generator.root_sampler is not None
         pbs = trainer.data_generator.root_sampler(2)
         assert pbs.env.N == 2
-        assert torch.equal(
-            pbs.env.street, torch.full((2,), street, dtype=torch.long)
-        )
+        assert torch.equal(pbs.env.street, torch.full((2,), street, dtype=torch.long))
         if root_source.endswith("_prefix"):
-            assert torch.equal(pbs.env.actions_this_round, torch.ones(2, dtype=torch.long))
+            assert torch.equal(
+                pbs.env.actions_this_round, torch.ones(2, dtype=torch.long)
+            )
 
 
 def test_rebel_cfr_trainer_loads_closing_leaf_checkpoint(tmp_path):
     checkpoint_path = tmp_path / "closing.pt"
     source_cfg = _tiny_rebel_cfg()
     source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
-    source_trainer.save_checkpoint(
-        str(checkpoint_path), step=0, save_optimizer=False
-    )
+    source_trainer.save_checkpoint(str(checkpoint_path), step=0, save_optimizer=False)
 
     cfg = _tiny_rebel_cfg()
     cfg.search.closing_leaf_checkpoint = str(checkpoint_path)
@@ -903,9 +934,7 @@ def test_rebel_cfr_trainer_single_step_cpu():
     before_value_head_value_only = [
         param.detach().clone() for param in trainer.model.hand_value_head.parameters()
     ]
-    before_value_only = [
-        param.detach().clone() for param in trainer.model.parameters()
-    ]
+    before_value_only = [param.detach().clone() for param in trainer.model.parameters()]
     value_only_stats = trainer.train_value_batch(value_only_batch, step=0)
 
     assert value_only_stats["policy_loss"] is None

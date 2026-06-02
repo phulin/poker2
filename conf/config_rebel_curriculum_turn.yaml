@@ -30,6 +30,7 @@ curriculum:
   turn:
     kind: train
     net: S_turn
+    from: S_river
     closing_net: E_turn
     closing_checkpoint: null
     num_steps: ${num_steps}

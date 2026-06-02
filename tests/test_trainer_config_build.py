@@ -120,6 +120,7 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert turn_cfg.curriculum.substeps["distill_E_turn"].net == "E_turn"
     assert turn_cfg.curriculum.substeps["distill_E_turn"].from_net == "S_river"
     assert turn_cfg.curriculum.substeps["distill_E_turn"].chance == "single_card"
+    assert turn_cfg.curriculum.substeps["turn"].from_net == "S_river"
     assert turn_cfg.curriculum.substeps["turn"].closing_net == "E_turn"
     assert turn_cfg.curriculum.substeps["turn"].closing_checkpoint is None
     assert flop_cfg.data.live_root_source == "random_flop"
@@ -133,6 +134,7 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert flop_cfg.curriculum.substeps["distill_E_flop"].net == "E_flop"
     assert flop_cfg.curriculum.substeps["distill_E_flop"].from_net == "S_turn"
     assert flop_cfg.curriculum.substeps["distill_E_flop"].chance == "single_card"
+    assert flop_cfg.curriculum.substeps["flop"].from_net == "S_turn"
     assert flop_cfg.curriculum.substeps["flop"].closing_net == "E_flop"
     assert flop_cfg.curriculum.substeps["flop"].closing_checkpoint is None
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].net == "E_preflop"
@@ -171,7 +173,9 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
         "live_root_source": "random_flop"
     }
     assert cfg.curriculum.substeps["turn"].closing_net == "E_turn"
+    assert cfg.curriculum.substeps["turn"].from_net == "S_river"
     assert cfg.curriculum.substeps["flop"].closing_net == "E_flop"
+    assert cfg.curriculum.substeps["flop"].from_net == "S_turn"
     assert cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"
 
 
@@ -187,10 +191,7 @@ def test_rebel_postflop_hybrid_holdout_config_loads_from_yaml():
     assert cfg.data.pregenerated.shuffle is False
     assert cfg.data.pregenerated.direct_sample is False
     assert len(cfg.data.pregenerated.datasets) == 1
-    assert (
-        cfg.data.pregenerated.datasets[0].path
-        == "outputs/rebel_postflop/river_val"
-    )
+    assert cfg.data.pregenerated.datasets[0].path == "outputs/rebel_postflop/river_val"
 
 
 def test_rebel_pregenerate_postflop_config_loads_from_yaml():

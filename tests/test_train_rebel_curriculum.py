@@ -31,6 +31,68 @@ def test_stage_wandb_name_only_uses_explicit_base_name() -> None:
     assert curriculum_cli._stage_wandb_name(cfg, "river") == "postflop-river"
 
 
+def test_curriculum_train_substeps_do_not_run_preflop_analyzer() -> None:
+    assert curriculum_cli._should_print_preflop_analyzer("E_preflop") is False
+    assert curriculum_cli._should_print_preflop_analyzer("S_0") is False
+    assert curriculum_cli._should_print_preflop_analyzer("S_preflop") is False
+    assert curriculum_cli._should_print_preflop_analyzer("S_river") is False
+    assert curriculum_cli._should_print_preflop_analyzer("S_turn") is False
+    assert curriculum_cli._should_print_preflop_analyzer("S_flop") is False
+    assert curriculum_cli._should_print_preflop_analyzer("E_turn") is False
+
+
+class _FakeSplitModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.policy_model = torch.nn.Linear(1, 1)
+        self.value_model = torch.nn.Linear(1, 1)
+
+
+class _FakeSplitTrainer:
+    def __init__(self) -> None:
+        self.model = _FakeSplitModel()
+        self.cfg = Config(device="cpu")
+        self.cfg.strict_model_loading = True
+        self.synced = False
+
+    def _load_closing_leaf_model(self, checkpoint_path: str) -> torch.nn.Module:
+        del checkpoint_path
+        source = _FakeSplitModel()
+        with torch.no_grad():
+            source.policy_model.weight.fill_(3.0)
+            source.policy_model.bias.fill_(4.0)
+        return source
+
+    def _sync_inference_model(self) -> None:
+        self.synced = True
+
+
+def test_initialize_policy_from_checkpoint_copies_only_policy() -> None:
+    trainer = _FakeSplitTrainer()
+    original_value = {
+        key: value.clone()
+        for key, value in trainer.model.value_model.state_dict().items()
+    }
+
+    curriculum_cli._initialize_policy_from_checkpoint(
+        trainer,
+        "unused.pt",
+        substep_name="turn",
+    )
+
+    assert torch.equal(
+        trainer.model.policy_model.weight,
+        torch.full_like(trainer.model.policy_model.weight, 3.0),
+    )
+    assert torch.equal(
+        trainer.model.policy_model.bias,
+        torch.full_like(trainer.model.policy_model.bias, 4.0),
+    )
+    for key, value in trainer.model.value_model.state_dict().items():
+        assert torch.equal(value, original_value[key])
+    assert trainer.synced is True
+
+
 def test_curriculum_train_substep_uses_stage_dir_and_metadata(
     monkeypatch, tmp_path
 ) -> None:
@@ -76,9 +138,11 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
     assert stage_cfg.search.closing_leaf_checkpoint == "outputs/E_turn.pt"
     assert stage_cfg.data.live_root_source == "random_river"
     assert stage_cfg.search.iterations == 17
+    assert stage_cfg.trueskill.enabled is False
     assert kwargs["start_step"] == 0
     assert kwargs["stop_step"] == 3
     assert kwargs["stage_tag"] == "river"
+    assert kwargs["print_preflop_analyzer"] is False
     assert kwargs["checkpoint_metadata"] == {
         "curriculum_substep": "river",
         "curriculum_kind": "train",
@@ -89,6 +153,57 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
     assert promoted_path.exists()
     state = json.loads((tmp_path / "promoted" / "curriculum_state.json").read_text())
     assert state == {"promoted": {"S_river": str(promoted_path)}}
+
+
+def test_curriculum_train_substep_initializes_policy_from_promoted_source(
+    monkeypatch, tmp_path
+) -> None:
+    init_calls = []
+
+    def fake_run_loop(trainer, cfg, run, **kwargs):
+        del run, kwargs
+        final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
+        os.makedirs(cfg.checkpoint_dir, exist_ok=True)
+        torch.save(
+            {"model": trainer.model.state_dict(), "step": cfg.num_steps}, final_path
+        )
+        return cfg.num_steps - 1
+
+    def fake_init_policy(trainer, checkpoint_path, *, substep_name):
+        init_calls.append((trainer, checkpoint_path, substep_name))
+
+    source_path = tmp_path / "promoted" / "S_river.pt"
+    source_path.parent.mkdir()
+    source_path.write_bytes(b"checkpoint")
+
+    monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
+    monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
+    monkeypatch.setattr(curriculum_cli, "_init_wandb", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(
+        curriculum_cli, "_initialize_policy_from_checkpoint", fake_init_policy
+    )
+    monkeypatch.setattr(
+        curriculum_cli, "_log_model_parameter_summary", lambda model, run: None
+    )
+
+    cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
+    substep = CurriculumSubstepConfig(
+        kind="train", net="S_turn", from_net="S_river", num_steps=2
+    )
+
+    curriculum_cli._run_train_substep(
+        cfg,
+        "turn",
+        substep,
+        device=torch.device("cpu"),
+        resume_from=None,
+        promoted={"S_river": str(source_path)},
+    )
+
+    assert len(init_calls) == 1
+    _, checkpoint_path, substep_name = init_calls[0]
+    assert checkpoint_path == str(source_path)
+    assert substep_name == "turn"
 
 
 def test_curriculum_train_substep_allows_hybrid_holdout_mode(

@@ -107,6 +107,7 @@ def run_training_loop(
     stop_step: int,
     stage_tag: str | None = None,
     checkpoint_metadata: dict[str, object] | None = None,
+    print_preflop_analyzer: bool = True,
 ) -> int:
     del stage_tag
 
@@ -161,7 +162,8 @@ def run_training_loop(
                 cleanup_old_checkpoints(cfg.checkpoint_dir, ckpt_path)
 
             print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
-            print_preflop_range_grid(trainer, step, rebel=True)
+            if print_preflop_analyzer:
+                print_preflop_range_grid(trainer, step, rebel=True)
 
         if (
             trainer.trueskill_tracker is not None
@@ -189,9 +191,10 @@ def run_training_loop(
         f"Training complete in {total_elapsed / 3600:.2f} hours. "
         f"Final checkpoint: {final_path}"
     )
-    print_preflop_range_grid(
-        trainer, stop_step, title="Final Preflop Range Grid", rebel=True
-    )
+    if print_preflop_analyzer:
+        print_preflop_range_grid(
+            trainer, stop_step, title="Final Preflop Range Grid", rebel=True
+        )
     return last_completed_step
 
 

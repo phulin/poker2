@@ -31,6 +31,7 @@ curriculum:
   flop:
     kind: train
     net: S_flop
+    from: S_turn
     closing_net: E_flop
     closing_checkpoint: null
     num_steps: ${num_steps}

@@ -88,6 +88,11 @@ def _stage_wandb_name(cfg: Config, substep_name: str) -> str | None:
     return None
 
 
+def _should_print_preflop_analyzer(net: str) -> bool:
+    del net
+    return False
+
+
 def _apply_overrides(target: object, overrides: dict[str, Any], *, label: str) -> None:
     for key, value in overrides.items():
         if not hasattr(target, key):
@@ -176,6 +181,7 @@ def _stage_config(
     )
     stage_cfg.resume_from = resume_from
     stage_cfg.wandb_name = _stage_wandb_name(cfg, substep_name)
+    stage_cfg.trueskill.enabled = False
     _apply_overrides(
         stage_cfg.data, substep.data_overrides, label=f"{substep_name}.data"
     )
@@ -212,14 +218,44 @@ def _closed_street_for_end_net(net: str) -> int:
     mapping = {"E_preflop": 0, "E_flop": 1, "E_turn": 2}
     if net not in mapping:
         raise ValueError(
-            "Distill net must be one of E_preflop, E_flop, or E_turn; "
-            f"got {net!r}"
+            f"Distill net must be one of E_preflop, E_flop, or E_turn; got {net!r}"
         )
     return mapping[net]
 
 
 def _value_model(model: torch.nn.Module) -> torch.nn.Module:
     return getattr(model, "value_model", model)
+
+
+def _policy_model(model: torch.nn.Module) -> torch.nn.Module | None:
+    policy_model = getattr(model, "policy_model", None)
+    return policy_model if isinstance(policy_model, torch.nn.Module) else None
+
+
+def _initialize_policy_from_checkpoint(
+    trainer: RebelCFRTrainer,
+    checkpoint_path: str,
+    *,
+    substep_name: str,
+) -> None:
+    target_policy = _policy_model(trainer.model)
+    if target_policy is None:
+        raise ValueError(
+            f"Curriculum train substep {substep_name} cannot initialize policy: "
+            "target model has no policy_model"
+        )
+    source_model = trainer._load_closing_leaf_model(checkpoint_path)
+    source_policy = _policy_model(source_model)
+    if source_policy is None:
+        raise ValueError(
+            f"Curriculum train substep {substep_name} cannot initialize policy "
+            f"from value-only checkpoint: {checkpoint_path}"
+        )
+    target_policy.load_state_dict(
+        source_policy.state_dict(), strict=trainer.cfg.strict_model_loading
+    )
+    trainer._sync_inference_model()
+    print(f"Initialized policy for train substep {substep_name} from {checkpoint_path}")
 
 
 def _run_train_substep(
@@ -274,6 +310,11 @@ def _run_train_substep(
             print(f"Resuming curriculum substep {substep_name}: {resume_from}")
             start_step = trainer.load_checkpoint(resume_from) + 1
             print(f"Resumed {substep_name} at step {start_step}")
+        elif substep.from_net is not None or substep.checkpoint is not None:
+            policy_source = _source_checkpoint(substep, promoted or {})
+            _initialize_policy_from_checkpoint(
+                trainer, policy_source, substep_name=substep_name
+            )
 
         run_training_loop(
             trainer,
@@ -283,6 +324,7 @@ def _run_train_substep(
             stop_step=stage_cfg.num_steps,
             stage_tag=substep_name,
             checkpoint_metadata=metadata,
+            print_preflop_analyzer=_should_print_preflop_analyzer(substep.net),
         )
 
     final_path = os.path.join(stage_cfg.checkpoint_dir, "rebel_final.pt")
@@ -384,7 +426,7 @@ def _run_distill_substep(
                     stage_cfg.checkpoint_dir, f"rebel_step_{step + 1}.pt"
                 )
                 wandb_run_id = run.id if run else None
-                trainer.save_checkpoint(
+                trainer.save_value_checkpoint(
                     ckpt_path,
                     step,
                     wandb_run_id=wandb_run_id,
@@ -392,7 +434,7 @@ def _run_distill_substep(
                     save_dtype=torch.bfloat16,
                     metadata=metadata,
                 )
-                trainer.save_checkpoint(
+                trainer.save_value_checkpoint(
                     os.path.join(stage_cfg.checkpoint_dir, "rebel_latest.pt"),
                     step,
                     wandb_run_id=wandb_run_id,
@@ -405,7 +447,7 @@ def _run_distill_substep(
                 print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
 
         final_path = os.path.join(stage_cfg.checkpoint_dir, "rebel_final.pt")
-        trainer.save_checkpoint(
+        trainer.save_value_checkpoint(
             final_path,
             stage_cfg.num_steps,
             save_optimizer=False,
