@@ -308,3 +308,19 @@ trials:
       train.adamw_learning_rate: 0.04
       train.policy_head_muon_learning_rate: 0.02
       train.lr_schedule: cosine
+
+  - name: compact_deep_value_no_trunk_lr004_final002_phm002_adamw004
+    params:
+      model.hidden_dim: 384
+      model.range_hidden_dim: 192
+      model.ffn_dim: 768
+      model.num_hidden_layers: 0
+      model.num_value_layers: 7
+      model.num_policy_layers: 6
+      model.policy_rank: 96
+      model.policy_hand_bias_rank: 24
+      train.learning_rate: 0.04
+      train.learning_rate_final: 0.002
+      train.adamw_learning_rate: 0.04
+      train.policy_head_muon_learning_rate: 0.02
+      train.lr_schedule: cosine
