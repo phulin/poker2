@@ -5,7 +5,7 @@ defaults:
 
 num_steps: 5000
 use_tensor_env: true
-num_envs: 1024
+num_envs: 512
 device: cuda
 checkpoint_dir: checkpoints-rebel
 checkpoint_interval: 50
@@ -15,27 +15,27 @@ wandb_project: poker-rebel-cfr
 wandb_tags: ["rebel", "cfr"]
 
 train:
-  learning_rate: 1e-3
-  learning_rate_final: 1e-4
+  learning_rate: 1e-2
+  learning_rate_final: 1e-3
   lr_schedule: cosine
   warmup_steps: 0
 
   weight_decay: 0.01
-  optimizer: adamw # override to muon or normuon for 2D linear weights
-  adamw_learning_rate: null # if set, one LR for all AdamW params
+  optimizer: muon
+  adamw_learning_rate: 0.002 # if set, one LR for all AdamW params
   policy_head_muon_learning_rate: 0.02
-  batch_size: 4096
+  batch_size: 2048
   episodes_per_step: 10
   replay_buffer_batches: 16
   replay_buffer_device: cuda
-  value_reuse_goal: 4
+  value_reuse_goal: 2
   policy_capacity_factor: 10
   policy_depth_stratify_decimate: true
   policy_depth_stratify_sample: true
   policy_depth_stratify_probs: null
   policy_node_weighting: uniform
-  policy_loss_type: cross_entropy
-  policy_logit_l2_coef: 1e-6
+  policy_loss_type: mse
+  policy_logit_l2_coef: 0
   policy_extra_updates_per_step: 0
   policy_extra_batch_size: null # if null, uses train.batch_size
   value_coef: 1.0
@@ -74,7 +74,7 @@ data:
 model:
   name: BetterFFN
   nonlinearity: leaky_relu
-  hidden_dim: 1024
+  hidden_dim: 512
   range_hidden_dim: 256
   ffn_dim: 1024
   board_interaction_dim: 64
@@ -82,9 +82,9 @@ model:
   policy_hand_bias_rank: 32
 
   shared_trunk: true # DO NOT detach policy head from trunk
-  num_hidden_layers: 4
-  num_value_layers: 1
-  num_policy_layers: 2
+  num_hidden_layers: 3
+  num_value_layers: 3
+  num_policy_layers: 5
 
   detach_value_head: false
   compile: default
@@ -118,7 +118,7 @@ search:
   preflop_allin_table_path: outputs/preflop_allin_table.pt.zst
   sparse: true
   sparse_fused: true
-  value_targets_from_final_policy: true
+  value_targets_from_final_policy: false
 
   cfr_type: discounted
   cfr_avg: false
@@ -144,7 +144,7 @@ search:
 
 trueskill:
   enabled: true
-  snapshot_frac: 0.01
+  snapshot_frac: 0.02
   game_budget_frac: 0.03
   actions_per_game: 16
   eval_solves_per_action: 2.0
