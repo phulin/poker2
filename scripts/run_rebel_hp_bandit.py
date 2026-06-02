@@ -109,6 +109,8 @@ def _make_trial_config(
     cfg.num_steps = int(steps)
     cfg.seed = int(seed)
     cfg.device = device_name
+    if device_name != "cuda":
+        cfg.search.sparse_fused = False
     cfg.use_wandb = False
     cfg.wandb_name = None
     cfg.trueskill.enabled = False
