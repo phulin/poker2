@@ -12,6 +12,7 @@ Shared training and model utilities used across CLI, RL, models, and tests.
 - `kl_divergence.py`: KL divergence utilities for policies.
 - `quantile_calculator.py`: Streaming quantile calculator.
 - `profiling.py`: Profiling helper utilities.
+- `rng.py`: Torch generator checkpoint-state normalization helpers.
 
 ### Subdirectories
 There are no child source directories.

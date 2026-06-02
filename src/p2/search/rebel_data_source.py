@@ -12,6 +12,7 @@ from p2.rl.rebel_batch import RebelBatch
 from p2.rl.rebel_replay import RebelReplayBuffer
 from p2.search.rebel_data_generator import RebelDataGenerator
 from p2.search.rebel_solved_dataset import RebelSolvedDataset
+from p2.utils.rng import generator_state_for_set_state
 
 
 class RebelDataSource(ABC):
@@ -350,4 +351,6 @@ class PregeneratedRebelDataSource(RebelDataSource):
         ):
             dataset_state.policy_cursor = int(cursor)
         if "generator_state" in state:
-            self.generator.set_state(state["generator_state"])
+            self.generator.set_state(
+                generator_state_for_set_state(state["generator_state"])
+            )

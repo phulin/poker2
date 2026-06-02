@@ -51,6 +51,7 @@ from p2.search.rebel_data_source import (
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 from p2.utils.ema_helper import EMAHelper
 from p2.utils.profiling import profile
+from p2.utils.rng import generator_state_for_set_state
 
 STREETS = ["preflop", "flop", "turn", "river", "showdown"]
 REPLAY_BUFFER_CHECKPOINT = "rebel_replay_buffers.pt"
@@ -2609,9 +2610,9 @@ class RebelCFRTrainer:
         self.cfg.wandb_run_id = ckpt.get("wandb_run_id")
         self.checkpoint_metadata = dict(ckpt.get("metadata", {}))
         if "rng" in ckpt:
-            self.rng.set_state(ckpt["rng"])
+            self.rng.set_state(generator_state_for_set_state(ckpt["rng"]))
         if "buffer_rng" in ckpt:
-            self.buffer_rng.set_state(ckpt["buffer_rng"])
+            self.buffer_rng.set_state(generator_state_for_set_state(ckpt["buffer_rng"]))
         self._sync_inference_model()
         data_source_state = ckpt.get("data_source", ckpt.get("data_generator"))
         if data_source_state is not None:

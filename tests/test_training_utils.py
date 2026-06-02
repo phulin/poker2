@@ -2,6 +2,7 @@ import torch
 
 from p2.core.structured_config import Config
 from p2.utils import training_utils
+from p2.utils.rng import generator_state_for_set_state
 from p2.utils.training_utils import _resolve_search_iterations
 
 
@@ -54,6 +55,39 @@ def test_resolve_iterations_uses_interpolation_when_available():
     )
     assert interpolated >= cfg.search.warm_start_iterations + 1
     assert interpolated == 30
+
+
+def test_generator_state_for_set_state_returns_cpu_bytetensor():
+    state = torch.Generator(device="cpu").manual_seed(123).get_state()
+
+    restored = generator_state_for_set_state(state)
+
+    assert restored.device.type == "cpu"
+    assert restored.dtype == torch.uint8
+    assert restored.is_contiguous()
+    torch.Generator(device="cpu").set_state(restored)
+
+
+def test_generator_state_for_set_state_rejects_wrong_dtype():
+    state = torch.zeros(16, dtype=torch.int64)
+
+    try:
+        generator_state_for_set_state(state)
+    except TypeError as exc:
+        assert "uint8" in str(exc)
+    else:
+        raise AssertionError("expected TypeError")
+
+
+def test_generator_state_for_set_state_accepts_cuda_state_when_available():
+    if not torch.cuda.is_available():
+        return
+
+    state = torch.Generator(device="cuda").manual_seed(123).get_state().to("cuda")
+    restored = generator_state_for_set_state(state)
+
+    assert restored.device.type == "cpu"
+    torch.Generator(device="cuda").set_state(restored)
 
 
 def test_print_preflop_grid_uses_model_without_ema(monkeypatch, capsys):
