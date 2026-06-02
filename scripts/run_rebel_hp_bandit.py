@@ -278,6 +278,19 @@ def _candidate_arms(
                 "model.policy_hand_bias_rank": 24,
             },
         ),
+        (
+            "compact_deep_value_no_trunk",
+            {
+                "model.hidden_dim": 384,
+                "model.range_hidden_dim": 192,
+                "model.ffn_dim": 768,
+                "model.num_hidden_layers": 0,
+                "model.num_value_layers": 7,
+                "model.num_policy_layers": 6,
+                "model.policy_rank": 96,
+                "model.policy_hand_bias_rank": 24,
+            },
+        ),
     ]
     if arch_set == "all":
         architectures = standard_architectures
