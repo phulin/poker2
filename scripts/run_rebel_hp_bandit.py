@@ -154,6 +154,7 @@ def _candidate_arms(
     max_arms: int,
     *,
     arch_set: str = "all",
+    arch_names: list[str] | None = None,
     lr_starts: list[float] | None = None,
     schedules: list[str] | None = None,
 ) -> list[Arm]:
@@ -286,6 +287,15 @@ def _candidate_arms(
         architectures = small_architectures + standard_architectures
     else:
         raise ValueError(f"unsupported arch_set: {arch_set}")
+    if arch_names is not None:
+        requested = set(arch_names)
+        architectures = [(name, arch) for name, arch in architectures if name in requested]
+        found = {name for name, _ in architectures}
+        missing = sorted(requested - found)
+        if missing:
+            raise ValueError(
+                f"unknown architecture(s) for arch_set={arch_set}: {', '.join(missing)}"
+            )
     if lr_starts is None:
         lr_starts = [0.006, 0.01, 0.016]
     if schedules is None:
@@ -326,6 +336,13 @@ def _parse_schedule_list(value: str) -> list[str]:
     unknown = sorted(set(items) - allowed)
     if unknown:
         raise argparse.ArgumentTypeError(f"unknown schedule(s): {', '.join(unknown)}")
+    return items
+
+
+def _parse_string_list(value: str) -> list[str]:
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    if not items:
+        raise argparse.ArgumentTypeError("expected at least one comma-separated item")
     return items
 
 
@@ -430,6 +447,12 @@ def main() -> None:
         help="Architecture candidate family to sample.",
     )
     parser.add_argument(
+        "--arch-names",
+        type=_parse_string_list,
+        default=None,
+        help="Optional comma-separated architecture names to keep from the selected family.",
+    )
+    parser.add_argument(
         "--lr-starts",
         type=_parse_float_list,
         default=_parse_float_list("0.006,0.01,0.016"),
@@ -469,6 +492,7 @@ def main() -> None:
         rng,
         args.max_arms,
         arch_set=args.arch_set,
+        arch_names=args.arch_names,
         lr_starts=args.lr_starts,
         schedules=args.schedules,
     )
