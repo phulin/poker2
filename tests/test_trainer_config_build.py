@@ -82,7 +82,7 @@ def test_rebel_curriculum_and_data_config_parse_from_hydra_shape():
 
     assert cfg.data.mode == "pregenerated"
     assert cfg.data.live_root_source == "self_play"
-    assert cfg.data.include_pre_chance_value_batches is True
+    assert cfg.data.include_pre_chance_value_batches is False
     assert cfg.data.pregenerated.value_batch_size == 32
     assert cfg.data.pregenerated.direct_sample is True
     assert cfg.data.pregenerated.datasets[0].path == "outputs/rebel_postflop/river_v1"

@@ -23,6 +23,14 @@ class _FakeTrainer:
         return 4
 
 
+def test_stage_wandb_name_only_uses_explicit_base_name() -> None:
+    cfg = Config(wandb_name=None)
+    assert curriculum_cli._stage_wandb_name(cfg, "river") is None
+
+    cfg.wandb_name = "postflop"
+    assert curriculum_cli._stage_wandb_name(cfg, "river") == "postflop-river"
+
+
 def test_curriculum_train_substep_uses_stage_dir_and_metadata(
     monkeypatch, tmp_path
 ) -> None:

@@ -85,7 +85,7 @@ def _promote_checkpoint(
 def _stage_wandb_name(cfg: Config, substep_name: str) -> str | None:
     if cfg.wandb_name:
         return f"{cfg.wandb_name}-{substep_name}"
-    return substep_name
+    return None
 
 
 def _apply_overrides(target: object, overrides: dict[str, Any], *, label: str) -> None:

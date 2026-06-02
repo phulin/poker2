@@ -275,7 +275,7 @@ class RebelCFRTrainer:
             self.num_actions / 2
         ) ** self.cfg.search.depth / self.cfg.train.policy_capacity_factor
 
-        self.stream_live_batches = cfg.data.mode == "live" and not pregeneration_only
+        self.stream_live_batches = False
 
         C_over_K = self.cfg.train.replay_buffer_batches
         value_capacity = int(math.ceil(C_over_K * self.K_value))
@@ -283,7 +283,7 @@ class RebelCFRTrainer:
             math.ceil(value_capacity * self.cfg.train.policy_capacity_factor)
         )
 
-        if pregeneration_only or self.stream_live_batches:
+        if pregeneration_only:
             self.value_buffer = None
             self.policy_buffer = None
         else:
@@ -463,9 +463,8 @@ class RebelCFRTrainer:
                 policy_buffer=self.policy_buffer,
                 root_sampler=root_sampler,
                 include_pre_chance_value_batches=cfg.data.include_pre_chance_value_batches,
-                store_replay=not pregeneration_only and not self.stream_live_batches,
-                sample_continuations=not pregeneration_only
-                and not self.stream_live_batches,
+                store_replay=not pregeneration_only,
+                sample_continuations=not pregeneration_only,
                 record_batch_diag=not pregeneration_only,
             )
             if pregeneration_only:
@@ -473,9 +472,13 @@ class RebelCFRTrainer:
                 self.aggression_analyzer = AggressionAnalyzer(device=self.device)
                 self.trueskill_tracker = None
                 return
+            if self.value_buffer is None or self.policy_buffer is None:
+                raise RuntimeError("Live training requires replay buffers")
             self.data_source = LiveRebelDataSource(
                 self.data_generator,
-                value_sample_count=max(self.K_value, self.batch_size),
+                self.value_buffer,
+                self.policy_buffer,
+                value_sample_count=self.K_value,
                 max_return_policy_samples=self.batch_size,
             )
             if cfg.data.mode == "hybrid":
@@ -1516,7 +1519,7 @@ class RebelCFRTrainer:
             value_buffer_target_mean_abs_tensor = (
                 self.value_buffer.value_targets[: len(self.value_buffer)]
                 * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
-                    -1, 2, NUM_HANDS
+                    -1, self.num_players, NUM_HANDS
                 )
             ).abs().sum(dim=2)
             value_buffer_target_mean_abs = (
