@@ -23,7 +23,7 @@ train:
 
   weight_decay: 0.01
   optimizer: muon
-  adamw_learning_rate: 0.008 # if set, one LR for all AdamW params
+  adamw_learning_rate: 0.04 # if set, one LR for all AdamW params
   policy_head_muon_learning_rate: 0.02
   batch_size: 2048
   episodes_per_step: 10
