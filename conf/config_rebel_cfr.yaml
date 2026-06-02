@@ -19,6 +19,7 @@ train:
   learning_rate_final: 1e-3
   lr_schedule: cosine
   warmup_steps: 0
+  lr_wsd_decay_fraction: 0.2
 
   weight_decay: 0.01
   optimizer: muon

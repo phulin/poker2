@@ -440,6 +440,69 @@ def test_rebel_zero_warmup_matches_existing_schedule():
     )
 
 
+def test_rebel_wsd_holds_then_cosine_decays():
+    lr_start = 1e-3
+    lr_final = 1e-4
+    total_steps = 100
+
+    assert math.isclose(
+        _scheduled_learning_rate(
+            step=0,
+            total_steps=total_steps,
+            lr_start=lr_start,
+            lr_final=lr_final,
+            lr_schedule=LrSchedule.wsd,
+            warmup_steps=0,
+            wsd_decay_fraction=0.2,
+        ),
+        lr_start,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    )
+    assert math.isclose(
+        _scheduled_learning_rate(
+            step=80,
+            total_steps=total_steps,
+            lr_start=lr_start,
+            lr_final=lr_final,
+            lr_schedule=LrSchedule.wsd,
+            warmup_steps=0,
+            wsd_decay_fraction=0.2,
+        ),
+        lr_start,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    )
+    assert math.isclose(
+        _scheduled_learning_rate(
+            step=90,
+            total_steps=total_steps,
+            lr_start=lr_start,
+            lr_final=lr_final,
+            lr_schedule=LrSchedule.wsd,
+            warmup_steps=0,
+            wsd_decay_fraction=0.2,
+        ),
+        lr_final + 0.5 * (lr_start - lr_final),
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    )
+    assert math.isclose(
+        _scheduled_learning_rate(
+            step=100,
+            total_steps=total_steps,
+            lr_start=lr_start,
+            lr_final=lr_final,
+            lr_schedule=LrSchedule.wsd,
+            warmup_steps=0,
+            wsd_decay_fraction=0.2,
+        ),
+        lr_final,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    )
+
+
 def test_entropy_linear_decay_with_floor():
     num_steps = 100
     ent_start = 0.01

@@ -71,6 +71,7 @@ def _scheduled_learning_rate(
     lr_final: float,
     lr_schedule: LrSchedule,
     warmup_steps: int = 0,
+    wsd_decay_fraction: float = 0.2,
 ) -> float:
     warmup_steps = max(0, int(warmup_steps))
     if warmup_steps > 0 and step < warmup_steps:
@@ -86,6 +87,15 @@ def _scheduled_learning_rate(
         return lr_final + 0.5 * (lr_start - lr_final) * (1.0 + math.cos(math.pi * t))
     if lr_schedule == LrSchedule.linear and lr_final != lr_start:
         return lr_start + (lr_final - lr_start) * t
+    if lr_schedule == LrSchedule.wsd and lr_final != lr_start:
+        decay_fraction = min(1.0, max(1e-6, float(wsd_decay_fraction)))
+        stable_until = 1.0 - decay_fraction
+        if t <= stable_until:
+            return lr_start
+        decay_t = min(1.0, (t - stable_until) / decay_fraction)
+        return lr_final + 0.5 * (lr_start - lr_final) * (
+            1.0 + math.cos(math.pi * decay_t)
+        )
     return lr_start
 
 
@@ -730,6 +740,7 @@ class RebelCFRTrainer:
             lr_final=lr_final,
             lr_schedule=self.cfg.train.lr_schedule,
             warmup_steps=self.cfg.train.warmup_steps,
+            wsd_decay_fraction=self.cfg.train.lr_wsd_decay_fraction,
         )
         lr_scale = lr_now / lr_start if lr_start > 0.0 else 1.0
         policy_head_muon_lr = (

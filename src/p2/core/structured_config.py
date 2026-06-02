@@ -18,6 +18,7 @@ class ValueLossType(str, Enum):
 class LrSchedule(str, Enum):
     cosine = "cosine"
     linear = "linear"
+    wsd = "wsd"
 
 
 class ValueHeadType(str, Enum):
@@ -102,6 +103,7 @@ class TrainingConfig:
     learning_rate_final: float = 1e-5
     lr_schedule: LrSchedule = LrSchedule.cosine
     warmup_steps: int = 0
+    lr_wsd_decay_fraction: float = 0.2
     batch_size: int = 1024
     episodes_per_step: int = 4
 
