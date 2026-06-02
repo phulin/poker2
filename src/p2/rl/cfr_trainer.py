@@ -983,6 +983,26 @@ class RebelCFRTrainer:
         return numer, denom
 
     @staticmethod
+    def _bucket_weighted_loss_parts(
+        weighted_losses: torch.Tensor,
+        buckets: torch.Tensor,
+        num_buckets: int,
+        loss_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        values = weighted_losses.reshape(weighted_losses.shape[0], -1).sum(dim=1)
+        weights = loss_weights.reshape(loss_weights.shape[0], -1).sum(dim=1)
+        buckets = buckets.reshape(-1).to(device=values.device, dtype=torch.long)
+        valid = (buckets >= 0) & (buckets < num_buckets)
+        buckets = buckets[valid]
+        values = values[valid]
+        weights = weights.to(device=values.device, dtype=values.dtype)[valid]
+        numer = torch.zeros(num_buckets, device=values.device, dtype=values.dtype)
+        denom = torch.zeros_like(numer)
+        numer.scatter_add_(0, buckets, values)
+        denom.scatter_add_(0, buckets, weights)
+        return numer, denom
+
+    @staticmethod
     def _bucket_counts(
         buckets: torch.Tensor,
         num_buckets: int,
@@ -1021,6 +1041,7 @@ class RebelCFRTrainer:
         value_output: ModelOutput,
         policy_output: ModelOutput,
         value_loss_all: torch.Tensor,
+        value_weights: torch.Tensor,
         policy_loss_all: torch.Tensor,
         policy_target_model_kl_all: torch.Tensor,
     ) -> None:
@@ -1032,10 +1053,11 @@ class RebelCFRTrainer:
         )
         state["value_batch_street"] += street_count
 
-        numer, denom = self._bucket_sum_parts(
+        numer, denom = self._bucket_weighted_loss_parts(
             value_loss_all,
             value_batch.features.street,
             len(STREETS),
+            value_weights,
         )
         self._accumulate_ratio(ratios, "value_loss_street", numer, denom)
 
@@ -1349,6 +1371,7 @@ class RebelCFRTrainer:
         value_output: ModelOutput,
         policy_output: ModelOutput | None,
         value_loss_all: torch.Tensor,
+        value_weights: torch.Tensor,
         policy_loss_all: torch.Tensor,
         policy_target_model_kl_all: torch.Tensor,
         fresh_value_loss: float | None = None,
@@ -1361,7 +1384,11 @@ class RebelCFRTrainer:
         ).item()
 
         def by_street(
-            tensor: torch.Tensor, batch=value_batch, street=None, weights=None
+            tensor: torch.Tensor,
+            batch=value_batch,
+            street=None,
+            weights=None,
+            denominator_weights=None,
         ) -> dict[str, float]:
             # Stack the per-street reductions and pull them across in a
             # single DtoH instead of one .item() per street. Empty streets
@@ -1369,7 +1396,22 @@ class RebelCFRTrainer:
             if street is None:
                 street = batch.features.street
             names = list(STREETS)
-            if weights is not None:
+            if denominator_weights is not None:
+                numers = torch.stack(
+                    [
+                        tensor[street == i].sum()
+                        for i, _ in enumerate(names)
+                    ]
+                )
+                denoms = torch.stack(
+                    [denominator_weights[street == i].sum() for i, _ in enumerate(names)]
+                )
+                vals = torch.where(
+                    denoms > 0,
+                    numers / denoms.clamp(min=1e-12),
+                    torch.full_like(denoms, float("nan")),
+                )
+            elif weights is not None:
                 vals = torch.stack(
                     [
                         (tensor[street == i] * weights[street == i]).sum()
@@ -1484,7 +1526,9 @@ class RebelCFRTrainer:
                 )
             }
             value_batch_street = street_count(value_batch.features.street)
-            value_loss_street = by_street(value_loss_all)
+            value_loss_street = by_street(
+                value_loss_all, denominator_weights=value_weights
+            )
             policy_loss_street = by_street(policy_loss_all, batch=policy_batch)
             policy_target_model_kl_depth = policy_metric_by_depth(
                 policy_target_model_kl_all, policy_batch
@@ -1786,6 +1830,7 @@ class RebelCFRTrainer:
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,
     ]:
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -1819,6 +1864,7 @@ class RebelCFRTrainer:
         )
         value_loss = loss_dict["value_loss"]
         value_loss_update = loss_dict["value_loss_all"]
+        value_weights_update = loss_dict["value_weights"]
         total_loss = loss_dict["total_loss"]
 
         permutation_loss_tensor = self._compute_permutation_loss(
@@ -1905,6 +1951,7 @@ class RebelCFRTrainer:
             value_output_orig,
             policy_output,
             value_loss_update,
+            value_weights_update,
             policy_loss_update,
             policy_kl_update,
         )
@@ -2095,6 +2142,7 @@ class RebelCFRTrainer:
         metric_value_output = None
         metric_policy_output = None
         metric_value_loss_all = None
+        metric_value_weights = None
         metric_policy_loss_all = None
         metric_policy_kl_all = None
         streamed_metric_state = self._new_train_metric_stream()
@@ -2170,6 +2218,7 @@ class RebelCFRTrainer:
                     value_output_orig,
                     policy_output,
                     value_loss_update,
+                    value_weights_update,
                     policy_loss_update,
                     policy_kl_update,
                 ) = self._supervise(
@@ -2210,6 +2259,7 @@ class RebelCFRTrainer:
             metric_value_output = permuted_value_output
             metric_policy_output = policy_output
             metric_value_loss_all = value_loss_update
+            metric_value_weights = value_weights_update
             metric_policy_loss_all = policy_loss_update
             metric_policy_kl_all = policy_kl_update
             self._accumulate_train_metrics(
@@ -2219,6 +2269,7 @@ class RebelCFRTrainer:
                 permuted_value_output,
                 policy_output,
                 value_loss_update,
+                value_weights_update,
                 policy_loss_update,
                 policy_kl_update,
             )
@@ -2269,6 +2320,7 @@ class RebelCFRTrainer:
             or metric_value_output is None
             or metric_policy_output is None
             or metric_value_loss_all is None
+            or metric_value_weights is None
             or metric_policy_loss_all is None
             or metric_policy_kl_all is None
         ):
@@ -2282,6 +2334,7 @@ class RebelCFRTrainer:
             metric_value_output,
             metric_policy_output,
             metric_value_loss_all,
+            metric_value_weights,
             metric_policy_loss_all,
             metric_policy_kl_all,
             fresh_value_batch=fresh_value_batch,

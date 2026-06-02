@@ -524,6 +524,36 @@ def test_rebel_supervised_loss_zeros_board_blocked_weights():
     assert torch.all(loss_dict["value_weights"][0, :, allowed] > 0)
 
 
+def test_rebel_value_loss_street_reducer_uses_weight_denominator():
+    weighted_losses = torch.tensor(
+        [
+            [[1.0, 2.0], [3.0, 4.0]],
+            [[5.0, 6.0], [7.0, 8.0]],
+            [[9.0, 10.0], [11.0, 12.0]],
+        ]
+    )
+    weights = torch.tensor(
+        [
+            [[1.0, 2.0], [1.0, 2.0]],
+            [[3.0, 1.0], [3.0, 1.0]],
+            [[4.0, 4.0], [4.0, 4.0]],
+        ]
+    )
+    streets = torch.tensor([3, 3, 2])
+
+    numer, denom = RebelCFRTrainer._bucket_weighted_loss_parts(
+        weighted_losses,
+        streets,
+        5,
+        weights,
+    )
+
+    expected_river = weighted_losses[:2].sum() / weights[:2].sum()
+    expected_turn = weighted_losses[2].sum() / weights[2].sum()
+    torch.testing.assert_close(numer[3] / denom[3], expected_river)
+    torch.testing.assert_close(numer[2] / denom[2], expected_turn)
+
+
 def test_rebel_policy_loss_has_saturated_wrong_action_gradient():
     loss_fn = RebelSupervisedLoss()
     batch_size, num_actions = 1, 2
