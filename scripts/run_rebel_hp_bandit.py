@@ -119,8 +119,10 @@ def _make_trial_config(
     cfg.data.pregenerated.datasets = [
         PregeneratedDatasetConfig(path=str(dataset), value_weight=1.0, policy_weight=1.0)
     ]
-    cfg.data.pregenerated.direct_sample = True
-    cfg.data.pregenerated.shuffle = True
+    # Random direct sampling touches most shards for each large batch. Keep a
+    # one-batch staging buffer and stream sequentially instead.
+    cfg.data.pregenerated.direct_sample = False
+    cfg.data.pregenerated.shuffle = False
     cfg.data.pregenerated.value_batch_size = batch_size
     cfg.data.pregenerated.policy_batch_size = batch_size
     cfg.train.batch_size = batch_size
