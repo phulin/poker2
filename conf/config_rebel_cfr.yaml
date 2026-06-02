@@ -127,13 +127,16 @@ search:
 
   iterations: 400
   iterations_final: 1000
-  # warm_start_iterations and dcfr_plus_delay are derived from the
-  # current cfr_iterations each step (iterations/20 and iterations*0.4
-  # respectively); these static values are starting points that the
-  # trainer overwrites — see _apply_schedules in cfr_trainer.py.
-  warm_start_iterations: 10
+  # warm_start_iterations is held constant at this value by the trainer;
+  # dcfr_plus_delay is derived each step as iterations*0.2 (the static value
+  # below is just a starting point) — see _apply_schedules in cfr_trainer.py.
+  warm_start_iterations: 15
   warm_start_type: model_br
-  warm_start_multiplier: 10
+  # seed weight = warm_start_iterations * warm_start_multiplier. River sweeps
+  # (10 spots, geomean) show the model_br seed helps as a light nudge (~30) and
+  # hurts when heavy; the optimum is iteration-count-independent, so warm is
+  # held constant (not scaled with the iteration budget). 15 * 2 = seed≈30.
+  warm_start_multiplier: 2
   dcfr_plus_delay: 80
 
   dcfr_alpha: 3.0

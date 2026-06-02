@@ -778,12 +778,15 @@ class RebelCFRTrainer:
         else:
             iterations_now = self.cfg.search.iterations
 
-        # Derived schedules: warm_start_iterations and dcfr_plus_delay
-        # scale with the current iteration budget. Tuned values:
-        #   warm_start_iterations ≈ iterations / 20
-        #   dcfr_plus_delay       ≈ iterations * 0.4
-        warm_now = max(1, iterations_now // 20)
-        delay_now = int(round(iterations_now * 0.4))
+        # dcfr_plus_delay scales with the current iteration budget
+        # (dcfr_plus_delay ≈ iterations * 0.2). warm_start_iterations is held
+        # constant at the configured value instead: river sweeps showed the
+        # model_br warm-start seed weight (warm_start_iterations *
+        # warm_start_multiplier) has an iteration-count-independent optimum
+        # (~30), so scaling it with the iteration budget pushes it into the
+        # harmful regime as iterations grow.
+        warm_now = max(1, int(self.cfg.search.warm_start_iterations))
+        delay_now = int(round(iterations_now * 0.2))
         iterations_now = max(warm_now + 1, iterations_now)
         self.cfr_evaluator.cfr_iterations = iterations_now
         self.cfr_evaluator.warm_start_iterations = warm_now
