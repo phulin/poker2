@@ -149,8 +149,13 @@ def _make_trial_config(
     return cfg
 
 
-def _candidate_arms(rng: random.Random, max_arms: int) -> list[Arm]:
-    architectures = [
+def _candidate_arms(
+    rng: random.Random,
+    max_arms: int,
+    *,
+    arch_set: str = "all",
+) -> list[Arm]:
+    standard_architectures = [
         (
             "compact",
             {
@@ -217,6 +222,68 @@ def _candidate_arms(rng: random.Random, max_arms: int) -> list[Arm]:
             },
         ),
     ]
+    small_architectures = [
+        (
+            "tiny",
+            {
+                "model.hidden_dim": 256,
+                "model.range_hidden_dim": 128,
+                "model.ffn_dim": 512,
+                "model.num_hidden_layers": 2,
+                "model.num_value_layers": 2,
+                "model.num_policy_layers": 3,
+                "model.policy_rank": 64,
+                "model.policy_hand_bias_rank": 16,
+            },
+        ),
+        (
+            "small",
+            {
+                "model.hidden_dim": 320,
+                "model.range_hidden_dim": 160,
+                "model.ffn_dim": 640,
+                "model.num_hidden_layers": 2,
+                "model.num_value_layers": 3,
+                "model.num_policy_layers": 4,
+                "model.policy_rank": 80,
+                "model.policy_hand_bias_rank": 20,
+            },
+        ),
+        (
+            "compact",
+            {
+                "model.hidden_dim": 384,
+                "model.range_hidden_dim": 192,
+                "model.ffn_dim": 768,
+                "model.num_hidden_layers": 2,
+                "model.num_value_layers": 2,
+                "model.num_policy_layers": 4,
+                "model.policy_rank": 96,
+                "model.policy_hand_bias_rank": 24,
+            },
+        ),
+        (
+            "compact_deep_value",
+            {
+                "model.hidden_dim": 384,
+                "model.range_hidden_dim": 192,
+                "model.ffn_dim": 768,
+                "model.num_hidden_layers": 2,
+                "model.num_value_layers": 5,
+                "model.num_policy_layers": 4,
+                "model.policy_rank": 96,
+                "model.policy_hand_bias_rank": 24,
+            },
+        ),
+    ]
+    if arch_set == "all":
+        architectures = standard_architectures
+    elif arch_set == "small":
+        architectures = small_architectures
+    elif arch_set == "all_plus_small":
+        architectures = small_architectures + standard_architectures
+    else:
+        raise ValueError(f"unsupported arch_set: {arch_set}")
     lr_starts = [0.006, 0.01, 0.016]
     schedules = ["cosine", "linear", "wsd"]
 
@@ -331,6 +398,12 @@ def main() -> None:
     )
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "outputs" / "rebel_hp_bandit")
     parser.add_argument("--max-arms", type=int, default=12)
+    parser.add_argument(
+        "--arch-set",
+        default="all",
+        choices=["all", "small", "all_plus_small"],
+        help="Architecture candidate family to sample.",
+    )
     parser.add_argument("--trials", type=int, default=18)
     parser.add_argument("--epochs", type=float, default=5.0)
     parser.add_argument("--steps-per-trial", type=int, default=None)
@@ -355,7 +428,7 @@ def main() -> None:
         explicit_steps=args.steps_per_trial,
     )
     rng = random.Random(args.seed)
-    arms = _candidate_arms(rng, args.max_arms)
+    arms = _candidate_arms(rng, args.max_arms, arch_set=args.arch_set)
     states = {arm.name: ArmState() for arm in arms}
     args.output_dir.mkdir(parents=True, exist_ok=True)
     print(
