@@ -153,6 +153,7 @@ profile_output*.txt
 
 # Project-specific
 # Ignore the included virtual environment directory
+/.worktrees/
 /venv/
 /notes.md
 /task_plan.md
@@ -160,6 +161,7 @@ profile_output*.txt
 /checkpoints-*/
 /allin_lr_sweep/checkpoints*/
 /secret*
+/logs/
 /outputs/
 /profiler_logs/
 /website/.wrangler/
