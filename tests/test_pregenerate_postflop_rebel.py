@@ -186,6 +186,35 @@ def test_code_version_metadata_records_commit_and_dirty_state(monkeypatch):
     }
 
 
+def test_policy_generation_cap_tracks_value_policy_ratio():
+    cap = pregenerate_cli._max_policy_samples_for_generation(
+        value_examples=0,
+        policy_examples=0,
+        value_target_min=200_000,
+        policy_target_min=500_000,
+        generation_batch_size=512,
+    )
+    assert cap == 1280
+
+    final_cap = pregenerate_cli._max_policy_samples_for_generation(
+        value_examples=199_900,
+        policy_examples=499_700,
+        value_target_min=200_000,
+        policy_target_min=500_000,
+        generation_batch_size=512,
+    )
+    assert final_cap == 250
+
+    value_only_cap = pregenerate_cli._max_policy_samples_for_generation(
+        value_examples=0,
+        policy_examples=0,
+        value_target_min=3_000_000,
+        policy_target_min=0,
+        generation_batch_size=512,
+    )
+    assert value_only_cap == 0
+
+
 def test_target_model_metadata_records_distilled_source_checkpoint(tmp_path):
     source_checkpoint = tmp_path / "S_river.pt"
     source_checkpoint.write_bytes(b"frozen start net")

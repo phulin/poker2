@@ -199,6 +199,26 @@ def _tag_root_source(batch: RebelBatch, root_source_code: int) -> RebelBatch:
     )
 
 
+def _max_policy_samples_for_generation(
+    *,
+    value_examples: int,
+    policy_examples: int,
+    value_target_min: int,
+    policy_target_min: int,
+    generation_batch_size: int,
+) -> int:
+    policy_remaining = max(0, policy_target_min - policy_examples)
+    if policy_remaining == 0:
+        return 0
+    value_remaining = max(0, value_target_min - value_examples)
+    if value_target_min <= 0 or value_remaining == 0:
+        return policy_remaining
+    value_this_batch = min(generation_batch_size, value_remaining)
+    target_ratio = policy_target_min / value_target_min
+    batch_cap = max(1, int(round(value_this_batch * target_ratio)))
+    return min(policy_remaining, batch_cap)
+
+
 def pregenerate_postflop_rebel(cfg: Config) -> dict:
     """Generate a bounded solved dataset from live CFR roots."""
 
@@ -239,13 +259,18 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
             and generation_batches >= pregenerate_cfg.max_generation_batches
         ):
             break
+        max_policy_samples = _max_policy_samples_for_generation(
+            value_examples=value_examples,
+            policy_examples=policy_examples,
+            value_target_min=pregenerate_cfg.value_target_min,
+            policy_target_min=pregenerate_cfg.policy_target_min,
+            generation_batch_size=pregenerate_cfg.generation_batch_size,
+        )
         value_batch, policy_batch = trainer.data_generator.generate_data(
             pregenerate_cfg.generation_batch_size,
             return_value_batch=value_examples < pregenerate_cfg.value_target_min,
             return_policy_batch=policy_examples < pregenerate_cfg.policy_target_min,
-            max_return_policy_samples=max(
-                1, pregenerate_cfg.policy_target_min - policy_examples
-            ),
+            max_return_policy_samples=max_policy_samples,
         )
         generation_batches += 1
         if value_batch is not None and value_examples < pregenerate_cfg.value_target_min:
