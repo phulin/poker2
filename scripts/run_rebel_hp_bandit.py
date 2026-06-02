@@ -154,6 +154,8 @@ def _candidate_arms(
     max_arms: int,
     *,
     arch_set: str = "all",
+    lr_starts: list[float] | None = None,
+    schedules: list[str] | None = None,
 ) -> list[Arm]:
     standard_architectures = [
         (
@@ -284,8 +286,10 @@ def _candidate_arms(
         architectures = small_architectures + standard_architectures
     else:
         raise ValueError(f"unsupported arch_set: {arch_set}")
-    lr_starts = [0.006, 0.01, 0.016]
-    schedules = ["cosine", "linear", "wsd"]
+    if lr_starts is None:
+        lr_starts = [0.006, 0.01, 0.016]
+    if schedules is None:
+        schedules = ["cosine", "linear", "wsd"]
 
     arms: list[Arm] = []
     for (arch_name, arch), lr, schedule in itertools.product(
@@ -302,6 +306,27 @@ def _candidate_arms(
         arms.append(Arm(f"{arch_name}_lr{lr:g}_{schedule}", overrides))
     rng.shuffle(arms)
     return arms[:max_arms]
+
+
+def _parse_float_list(value: str) -> list[float]:
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    if not items:
+        raise argparse.ArgumentTypeError("expected at least one comma-separated float")
+    try:
+        return [float(item) for item in items]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _parse_schedule_list(value: str) -> list[str]:
+    allowed = {"cosine", "linear", "wsd"}
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    if not items:
+        raise argparse.ArgumentTypeError("expected at least one comma-separated schedule")
+    unknown = sorted(set(items) - allowed)
+    if unknown:
+        raise argparse.ArgumentTypeError(f"unknown schedule(s): {', '.join(unknown)}")
+    return items
 
 
 def _select_arm(
@@ -404,6 +429,18 @@ def main() -> None:
         choices=["all", "small", "all_plus_small"],
         help="Architecture candidate family to sample.",
     )
+    parser.add_argument(
+        "--lr-starts",
+        type=_parse_float_list,
+        default=_parse_float_list("0.006,0.01,0.016"),
+        help="Comma-separated learning-rate starts to include in candidates.",
+    )
+    parser.add_argument(
+        "--schedules",
+        type=_parse_schedule_list,
+        default=_parse_schedule_list("cosine,linear,wsd"),
+        help="Comma-separated LR schedules to include in candidates.",
+    )
     parser.add_argument("--trials", type=int, default=18)
     parser.add_argument("--epochs", type=float, default=5.0)
     parser.add_argument("--steps-per-trial", type=int, default=None)
@@ -428,7 +465,13 @@ def main() -> None:
         explicit_steps=args.steps_per_trial,
     )
     rng = random.Random(args.seed)
-    arms = _candidate_arms(rng, args.max_arms, arch_set=args.arch_set)
+    arms = _candidate_arms(
+        rng,
+        args.max_arms,
+        arch_set=args.arch_set,
+        lr_starts=args.lr_starts,
+        schedules=args.schedules,
+    )
     states = {arm.name: ArmState() for arm in arms}
     args.output_dir.mkdir(parents=True, exist_ok=True)
     print(
