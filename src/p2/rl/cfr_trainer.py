@@ -1742,6 +1742,9 @@ class RebelCFRTrainer:
                 fresh_policy_loss_dict = self.loss_fn.forward_policy(
                     fresh_policy_output, fresh_policy_batch
                 )
+                metrics["fresh_policy_loss"] = fresh_policy_loss_dict[
+                    "policy_loss"
+                ].item()
                 metrics["fresh_policy_target_model_kl"] = fresh_policy_loss_dict[
                     "target_model_kl"
                 ].item()

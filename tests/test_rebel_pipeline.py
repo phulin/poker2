@@ -186,6 +186,7 @@ def test_rebel_cfr_trainer_live_mode_uses_replay_buffers():
     assert metrics["updates"] >= 1
     assert metrics["value_buffer_size"] >= cfg.train.batch_size
     assert metrics["policy_buffer_size"] >= cfg.train.batch_size
+    assert torch.isfinite(torch.tensor(metrics["fresh_policy_loss"]))
 
 
 def test_rebel_cfr_trainer_hybrid_mode_uses_holdout_metrics(tmp_path):
