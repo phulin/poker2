@@ -13,11 +13,13 @@ import os
 import random
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
+import wandb
 from omegaconf import OmegaConf
 
 from p2.core.structured_config import Config, PregeneratedDatasetConfig
@@ -106,6 +108,8 @@ def _make_trial_config(
     compile_mode: str,
     seed: int,
     keep_checkpoints: bool,
+    use_wandb: bool,
+    wandb_group: str | None,
 ) -> Config:
     cfg = _load_base_config(base_config_path)
     cfg.num_steps = int(steps)
@@ -113,8 +117,9 @@ def _make_trial_config(
     cfg.device = device_name
     if device_name != "cuda":
         cfg.search.sparse_fused = False
-    cfg.use_wandb = False
-    cfg.wandb_name = None
+    cfg.use_wandb = bool(use_wandb and cfg.use_wandb)
+    if cfg.use_wandb:
+        cfg.wandb_name = _wandb_trial_name(wandb_group, trial_index, arm.name)
     cfg.trueskill.enabled = False
     cfg.model.compile = compile_mode
     cfg.data.mode = "pregenerated"
@@ -391,6 +396,30 @@ def _short_param_name(key: str) -> str:
     return replacements.get(key, key.split(".")[-1])
 
 
+def _wandb_trial_name(group: str | None, trial_index: int, arm_name: str) -> str:
+    prefix = group or "rebel_hp_bandit"
+    return f"{prefix}/trial_{trial_index:04d}/{arm_name}"[:255]
+
+
+def _init_wandb_run(cfg: Config, *, group: str | None) -> Any:
+    if not cfg.use_wandb:
+        return nullcontext()
+    init_kwargs: dict[str, Any] = {
+        "project": cfg.wandb_project,
+        "name": cfg.wandb_name,
+        "tags": cfg.wandb_tags or [],
+        "config": asdict(cfg),
+    }
+    if group is not None:
+        init_kwargs["group"] = group
+    try:
+        return wandb.init(**init_kwargs)
+    except Exception as exc:
+        print(f"Wandb init failed ({exc}); continuing without logging.", flush=True)
+        cfg.use_wandb = False
+        return nullcontext()
+
+
 def _load_trial_spec(path: Path) -> list[Arm]:
     raw = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
     if isinstance(raw, list):
@@ -475,39 +504,48 @@ def _run_trial(
     steps: int,
     log_every: int,
     keep_checkpoint: bool,
+    wandb_group: str | None,
 ) -> tuple[dict[str, float], float]:
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
     torch.manual_seed(int(cfg.seed))
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
-    trainer = RebelCFRTrainer(cfg=cfg, device=device)
-    history: list[dict[str, float]] = []
-    start = time.time()
-    for step in range(steps):
-        metrics = trainer.train_step(step)
-        keep = {
-            key: float(value)
-            for key, value in metrics.items()
-            if isinstance(value, (int, float)) and value is not None
-        }
-        history.append(keep)
-        if log_every > 0 and ((step + 1) % log_every == 0 or step == 0):
-            print(
-                f"  step {step + 1:04d}/{steps} "
-                f"loss={keep.get('loss', float('nan')):.6g} "
-                f"value={keep.get('value_loss', float('nan')):.6g} "
-                f"policy={keep.get('policy_loss', float('nan')):.6g}",
-                flush=True,
+    run_cm = _init_wandb_run(cfg, group=wandb_group)
+    with run_cm as run:
+        trainer = RebelCFRTrainer(cfg=cfg, device=device)
+        history: list[dict[str, float]] = []
+        start = time.time()
+        for step in range(steps):
+            step_start = time.time()
+            metrics = trainer.train_step(step)
+            step_elapsed = time.time() - step_start
+            keep = {
+                key: float(value)
+                for key, value in metrics.items()
+                if isinstance(value, (int, float)) and value is not None
+            }
+            keep["step_time_s"] = step_elapsed
+            history.append(keep)
+            if cfg.use_wandb and run is not None:
+                run.log(keep, step=int(keep.get("step", step + 1)))
+            if log_every > 0 and ((step + 1) % log_every == 0 or step == 0):
+                print(
+                    f"  step {step + 1:04d}/{steps} "
+                    f"loss={keep.get('loss', float('nan')):.6g} "
+                    f"value={keep.get('value_loss', float('nan')):.6g} "
+                    f"policy={keep.get('policy_loss', float('nan')):.6g}",
+                    flush=True,
+                )
+        if keep_checkpoint:
+            trainer.save_checkpoint(
+                os.path.join(cfg.checkpoint_dir, "rebel_final.pt"),
+                steps - 1,
+                wandb_run_id=run.id if cfg.use_wandb and run is not None else None,
+                save_optimizer=False,
+                save_dtype=torch.bfloat16 if device.type == "cuda" else None,
             )
-    if keep_checkpoint:
-        trainer.save_checkpoint(
-            os.path.join(cfg.checkpoint_dir, "rebel_final.pt"),
-            steps - 1,
-            save_optimizer=False,
-            save_dtype=torch.bfloat16 if device.type == "cuda" else None,
-        )
-    elapsed = time.time() - start
-    del trainer
+        elapsed = time.time() - start
+        del trainer
     gc.collect()
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -598,6 +636,12 @@ def main() -> None:
     parser.add_argument("--objective", default="value_loss", choices=["value_loss", "policy_loss", "loss"])
     parser.add_argument("--log-every", type=int, default=25)
     parser.add_argument("--keep-checkpoints", action="store_true")
+    parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument(
+        "--wandb-group",
+        default=None,
+        help="Optional W&B group for per-arm runs; defaults to output dir name.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -647,6 +691,7 @@ def main() -> None:
         return
 
     device = _device_from_name(args.device)
+    wandb_group = args.wandb_group or args.output_dir.name
     results_jsonl = args.output_dir / "results.jsonl"
     results_csv = args.output_dir / "results.csv"
 
@@ -671,6 +716,8 @@ def main() -> None:
             compile_mode=args.compile,
             seed=trial_seed,
             keep_checkpoints=args.keep_checkpoints,
+            use_wandb=not args.no_wandb,
+            wandb_group=wandb_group,
         )
         metrics, elapsed = _run_trial(
             cfg,
@@ -678,6 +725,7 @@ def main() -> None:
             steps=steps,
             log_every=args.log_every,
             keep_checkpoint=args.keep_checkpoints,
+            wandb_group=wandb_group,
         )
         objective = float(metrics[args.objective])
         reward = -objective
