@@ -23,6 +23,7 @@ class RebelReplayBuffer:
         value_targets: bool = True,
         dtype: torch.dtype = torch.float32,
         decimate: float | None = None,
+        underfull_evict_fraction: float = 0.0,
         generator: Optional[torch.Generator] = None,
         depth_stratify_decimate: bool = False,
         depth_stratify_sample: bool = False,
@@ -35,6 +36,12 @@ class RebelReplayBuffer:
         self.device = device
         self.dtype = dtype
         self.decimate = decimate
+        if not 0.0 <= underfull_evict_fraction < 1.0:
+            raise ValueError(
+                "underfull_evict_fraction must be in [0.0, 1.0); got "
+                f"{underfull_evict_fraction}"
+            )
+        self.underfull_evict_fraction = underfull_evict_fraction
         self.generator = generator
         self.depth_stratify_decimate = depth_stratify_decimate
         self.depth_stratify_sample = depth_stratify_sample
@@ -83,10 +90,28 @@ class RebelReplayBuffer:
         self.sample_count = torch.zeros(self.capacity, dtype=torch.long, device=device)
 
         self.position = 0
+        self.start = 0
         self.size = 0
 
     def __len__(self) -> int:
         return self.size
+
+    def _physical_indices(self, logical_indices: torch.Tensor) -> torch.Tensor:
+        return (logical_indices + self.start) % self.capacity
+
+    def _valid_physical_indices(self) -> torch.Tensor:
+        return self._physical_indices(torch.arange(self.size, device=self.device))
+
+    def _evict_oldest_underfull(self, count: int) -> None:
+        """Drop the oldest logical entries while the buffer is still under capacity."""
+        if count <= 0:
+            return
+        count = min(count, self.size)
+        if count == 0:
+            return
+
+        self.start = (self.start + count) % self.capacity
+        self.size -= count
 
     def state_dict(self) -> dict[str, Any]:
         """Return replay-buffer contents for checkpoint sidecar storage."""
@@ -122,6 +147,7 @@ class RebelReplayBuffer:
             },
             "sample_count": self.sample_count.detach().to(cpu).clone(),
             "position": self.position,
+            "start": self.start,
             "size": self.size,
         }
 
@@ -145,7 +171,9 @@ class RebelReplayBuffer:
 
         features = state["features"]
         self.features.context.copy_(
-            features["context"].to(device=self.device, dtype=self.features.context.dtype)
+            features["context"].to(
+                device=self.device, dtype=self.features.context.dtype
+            )
         )
         self.features.street.copy_(
             features["street"].to(device=self.device, dtype=self.features.street.dtype)
@@ -157,7 +185,9 @@ class RebelReplayBuffer:
             features["board"].to(device=self.device, dtype=self.features.board.dtype)
         )
         self.features.beliefs.copy_(
-            features["beliefs"].to(device=self.device, dtype=self.features.beliefs.dtype)
+            features["beliefs"].to(
+                device=self.device, dtype=self.features.beliefs.dtype
+            )
         )
 
         if self.policy_targets is not None:
@@ -183,6 +213,7 @@ class RebelReplayBuffer:
             for key, value in state["statistics"].items()
         }
         self.position = int(state["position"])
+        self.start = int(state.get("start", 0))
         self.size = int(state["size"])
 
     def _depth_stratified_probs(self, depths: torch.Tensor) -> torch.Tensor:
@@ -309,6 +340,14 @@ class RebelReplayBuffer:
         decimating = (
             self.decimate is not None and self.size == self.capacity and batch_size > 0
         )
+        if (
+            self.underfull_evict_fraction > 0.0
+            and self.size < self.capacity
+            and batch_size > 0
+        ):
+            evict_count = int(self.underfull_evict_fraction * batch_size)
+            self._evict_oldest_underfull(evict_count)
+
         if batch_size >= self.capacity and not decimating:
             if (
                 self.depth_stratify_decimate
@@ -384,7 +423,10 @@ class RebelReplayBuffer:
             self.statistics[key][dest_indices] = batch.statistics[key]
         assert set(self.statistics.keys()) == set(batch.statistics.keys())
 
-        self.position = (insert_start + batch_size) % self.capacity
+        next_position = (insert_start + batch_size) % self.capacity
+        if self.size + batch_size >= self.capacity:
+            self.start = next_position
+        self.position = next_position
         self.size = min(self.size + batch_size, self.capacity)
 
     def sample(
@@ -403,21 +445,25 @@ class RebelReplayBuffer:
                 and "node_depth" in self.statistics
                 and self.depth_stratify_buckets > 0
             ):
-                idxs = self._depth_stratified_indices(
-                    self.statistics["node_depth"][: self.size],
+                valid_idxs = self._valid_physical_indices()
+                logical_idxs = self._depth_stratified_indices(
+                    self.statistics["node_depth"][valid_idxs],
                     batch_size,
                     replacement=True,
                 )
+                idxs = valid_idxs[logical_idxs]
             else:
-                idxs = torch.randint(
+                logical_idxs = torch.randint(
                     0,
                     self.size,
                     (batch_size,),
                     generator=self.generator,
                     device=self.device,
                 )
+                idxs = self._physical_indices(logical_idxs)
         else:
-            streets = self.features.street[: self.size]
+            valid_idxs = self._valid_physical_indices()
+            streets = self.features.street[valid_idxs]
             stratify_tensor = torch.tensor(stratify_streets, device=self.device)
             bins = torch.bincount(streets, minlength=4)
             stratify_tensor[bins == 0] = 0.0
@@ -426,7 +472,10 @@ class RebelReplayBuffer:
             probs = stratify_tensor / bins
             all_probs = probs[streets]
             # sample without replacement
-            idxs = torch.multinomial(all_probs, batch_size, generator=self.generator)
+            logical_idxs = torch.multinomial(
+                all_probs, batch_size, generator=self.generator
+            )
+            idxs = valid_idxs[logical_idxs]
 
         # Increment sample counters for sampled indices
         self.sample_count.scatter_add_(0, idxs, torch.ones_like(idxs))
@@ -458,6 +507,7 @@ class RebelReplayBuffer:
 
     def clear(self) -> None:
         self.position = 0
+        self.start = 0
         self.size = 0
 
 
@@ -474,6 +524,7 @@ class RebelPolicyBuffer(RebelReplayBuffer):
         device: torch.device,
         dtype: torch.dtype = torch.float32,
         decimate: float | None = None,
+        underfull_evict_fraction: float = 0.0,
         generator: Optional[torch.Generator] = None,
         depth_stratify_decimate: bool = False,
         depth_stratify_sample: bool = False,
@@ -490,6 +541,7 @@ class RebelPolicyBuffer(RebelReplayBuffer):
             value_targets=False,
             dtype=dtype,
             decimate=decimate,
+            underfull_evict_fraction=underfull_evict_fraction,
             generator=generator,
             depth_stratify_decimate=depth_stratify_decimate,
             depth_stratify_sample=depth_stratify_sample,
@@ -511,6 +563,7 @@ class RebelValueBuffer(RebelReplayBuffer):
         device: torch.device,
         dtype: torch.dtype = torch.float32,
         decimate: float | None = None,
+        underfull_evict_fraction: float = 0.0,
         generator: Optional[torch.Generator] = None,
     ) -> None:
         super().__init__(
@@ -523,5 +576,6 @@ class RebelValueBuffer(RebelReplayBuffer):
             value_targets=True,
             dtype=dtype,
             decimate=decimate,
+            underfull_evict_fraction=underfull_evict_fraction,
             generator=generator,
         )

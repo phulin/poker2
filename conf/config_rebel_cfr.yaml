@@ -29,6 +29,7 @@ train:
   episodes_per_step: 5
   replay_buffer_batches: 128
   replay_buffer_device: cuda
+  replay_buffer_underfull_evict_fraction: 0.25
   value_reuse_goal: 2
   policy_capacity_factor: 4
   policy_depth_stratify_decimate: true

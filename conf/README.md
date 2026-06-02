@@ -135,6 +135,7 @@ python src/p2/cli/train_kbest.py --config-name=config_custom
 - `optimizer`: ReBeL trainer optimizer backend (`adamw`, `muon`, or `normuon` to use matrix-only Muon/NorMuon with AdamW for the remaining parameters)
 - `adamw_learning_rate`: Optional initial learning rate for all AdamW parameter groups; `null` uses `learning_rate`
 - `policy_head_muon_learning_rate`: Initial ReBeL `muon` mode learning rate for policy-head 2D linear weights; scaled by the main learning-rate schedule during training
+- `replay_buffer_underfull_evict_fraction`: Fraction of each incoming batch size to evict from the oldest replay entries while the ReBeL buffer is not full
 - `policy_depth_stratify_decimate`: Preserve policy replay depth mix during decimation using policy node depth
 - `policy_depth_stratify_sample`: Sample policy minibatches stratified by policy node depth
 - `policy_depth_stratify_probs`: Optional target probabilities for policy node-depth buckets; `null` uses uniform available depths

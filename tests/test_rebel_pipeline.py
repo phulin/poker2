@@ -211,6 +211,14 @@ def test_rebel_cfr_trainer_live_mode_uses_replay_buffers():
     assert trainer.stream_live_batches is False
     assert trainer.value_buffer is not None
     assert trainer.policy_buffer is not None
+    assert (
+        trainer.value_buffer.underfull_evict_fraction
+        == cfg.train.replay_buffer_underfull_evict_fraction
+    )
+    assert (
+        trainer.policy_buffer.underfull_evict_fraction
+        == cfg.train.replay_buffer_underfull_evict_fraction
+    )
     assert trainer.data_generator is not None
     assert trainer.data_generator.store_replay is True
     assert trainer.data_generator.sample_continuations is True

@@ -278,6 +278,29 @@ def test_no_decimation_when_not_full():
     )
 
 
+def test_underfull_eviction_removes_oldest_entries():
+    device = torch.device("cpu")
+    buffer = RebelPolicyBuffer(
+        capacity=20,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=device,
+        underfull_evict_fraction=0.25,
+    )
+
+    buffer.add_batch(_make_policy_batch(10, 5, torch.arange(10)))
+    buffer.add_batch(_make_policy_batch(8, 5, torch.arange(100, 108)))
+
+    assert len(buffer) == 16
+    assert buffer.start == 2
+    assert buffer.position == 18
+    torch.testing.assert_close(
+        buffer.statistics["node_depth"][buffer._valid_physical_indices()],
+        torch.cat([torch.arange(2, 10), torch.arange(100, 108)]),
+    )
+
+
 def test_policy_buffer_depth_stratified_decimation_keeps_roots():
     device = torch.device("cpu")
     generator = torch.Generator(device=device)

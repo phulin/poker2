@@ -294,6 +294,7 @@ class RebelCFRTrainer:
                 num_players=self.num_players,
                 num_context_features=num_context_features,
                 device=self.buffer_device,
+                underfull_evict_fraction=cfg.train.replay_buffer_underfull_evict_fraction,
                 generator=self.buffer_rng,
             )
             # Larger policy buffer since we store more samples there
@@ -304,6 +305,7 @@ class RebelCFRTrainer:
                 num_context_features=num_context_features,
                 device=self.buffer_device,
                 decimate=1.0 / policy_decimate,
+                underfull_evict_fraction=cfg.train.replay_buffer_underfull_evict_fraction,
                 generator=self.buffer_rng,
                 depth_stratify_decimate=cfg.train.policy_depth_stratify_decimate,
                 depth_stratify_sample=cfg.train.policy_depth_stratify_sample,
