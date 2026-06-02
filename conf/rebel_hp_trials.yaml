@@ -1,0 +1,278 @@
+# ReBeL HP runner trial specifications. Values under a trial's params may be
+# scalars or arrays; arrays expand as a grid within that trial only.
+
+defaults:
+  train.lr_wsd_decay_fraction: 0.2
+
+trials:
+  - name: standard_deep_value_lr0016
+    params:
+      model.hidden_dim: 512
+      model.range_hidden_dim: 256
+      model.ffn_dim: 1024
+      model.num_hidden_layers: 3
+      model.num_value_layers: 5
+      model.num_policy_layers: 4
+      model.policy_rank: 128
+      model.policy_hand_bias_rank: 32
+      train.learning_rate: 0.016
+      train.learning_rate_final: 0.0016
+      train.adamw_learning_rate: 0.0032
+      train.policy_head_muon_learning_rate: 0.032
+      train.lr_schedule: [cosine, linear]
+
+  - name: standard_deep_value_lr0006
+    params:
+      model.hidden_dim: 512
+      model.range_hidden_dim: 256
+      model.ffn_dim: 1024
+      model.num_hidden_layers: 3
+      model.num_value_layers: 5
+      model.num_policy_layers: 4
+      model.policy_rank: 128
+      model.policy_hand_bias_rank: 32
+      train.learning_rate: 0.006
+      train.learning_rate_final: 0.0006
+      train.adamw_learning_rate: 0.0012
+      train.policy_head_muon_learning_rate: 0.012
+      train.lr_schedule: [cosine, wsd]
+
+  - name: standard_base_lr0016
+    params:
+      model.hidden_dim: 512
+      model.range_hidden_dim: 256
+      model.ffn_dim: 1024
+      model.num_hidden_layers: 3
+      model.num_value_layers: 3
+      model.num_policy_layers: 5
+      model.policy_rank: 128
+      model.policy_hand_bias_rank: 32
+      train.learning_rate: 0.016
+      train.learning_rate_final: 0.0016
+      train.adamw_learning_rate: 0.0032
+      train.policy_head_muon_learning_rate: 0.032
+      train.lr_schedule: [linear, wsd]
+
+  - name: standard_compact_lr0016
+    params:
+      model.hidden_dim: 384
+      model.range_hidden_dim: 192
+      model.ffn_dim: 768
+      model.num_hidden_layers: 2
+      model.num_value_layers: 2
+      model.num_policy_layers: 4
+      model.policy_rank: 96
+      model.policy_hand_bias_rank: 24
+      train.learning_rate: 0.016
+      train.learning_rate_final: 0.0016
+      train.adamw_learning_rate: 0.0032
+      train.policy_head_muon_learning_rate: 0.032
+      train.lr_schedule: [cosine, wsd]
+
+  - name: standard_compact_lr001
+    params:
+      model.hidden_dim: 384
+      model.range_hidden_dim: 192
+      model.ffn_dim: 768
+      model.num_hidden_layers: 2
+      model.num_value_layers: 2
+      model.num_policy_layers: 4
+      model.policy_rank: 96
+      model.policy_hand_bias_rank: 24
+      train.learning_rate: 0.01
+      train.learning_rate_final: 0.001
+      train.adamw_learning_rate: 0.002
+      train.policy_head_muon_learning_rate: 0.02
+      train.lr_schedule: cosine
+
+  - name: standard_range512_lr0006_wsd
+    params:
+      model.hidden_dim: 512
+      model.range_hidden_dim: 384
+      model.ffn_dim: 1024
+      model.num_hidden_layers: 3
+      model.num_value_layers: 3
+      model.num_policy_layers: 5
+      model.policy_rank: 128
+      model.policy_hand_bias_rank: 32
+      train.learning_rate: 0.006
+      train.learning_rate_final: 0.0006
+      train.adamw_learning_rate: 0.0012
+      train.policy_head_muon_learning_rate: 0.012
+      train.lr_schedule: wsd
+
+  - name: standard_range512_lr001_cosine
+    params:
+      model.hidden_dim: 512
+      model.range_hidden_dim: 384
+      model.ffn_dim: 1024
+      model.num_hidden_layers: 3
+      model.num_value_layers: 3
+      model.num_policy_layers: 5
+      model.policy_rank: 128
+      model.policy_hand_bias_rank: 32
+      train.learning_rate: 0.01
+      train.learning_rate_final: 0.001
+      train.adamw_learning_rate: 0.002
+      train.policy_head_muon_learning_rate: 0.02
+      train.lr_schedule: cosine
+
+  - name: standard_wide_lr0006_cosine
+    params:
+      model.hidden_dim: 512
+      model.range_hidden_dim: 256
+      model.ffn_dim: 1536
+      model.num_hidden_layers: 3
+      model.num_value_layers: 3
+      model.num_policy_layers: 5
+      model.policy_rank: 128
+      model.policy_hand_bias_rank: 32
+      train.learning_rate: 0.006
+      train.learning_rate_final: 0.0006
+      train.adamw_learning_rate: 0.0012
+      train.policy_head_muon_learning_rate: 0.012
+      train.lr_schedule: cosine
+
+  - name: small_tiny_lr0016_cosine
+    params:
+      model.hidden_dim: 256
+      model.range_hidden_dim: 128
+      model.ffn_dim: 512
+      model.num_hidden_layers: 2
+      model.num_value_layers: 2
+      model.num_policy_layers: 3
+      model.policy_rank: 64
+      model.policy_hand_bias_rank: 16
+      train.learning_rate: 0.016
+      train.learning_rate_final: 0.0016
+      train.adamw_learning_rate: 0.0032
+      train.policy_head_muon_learning_rate: 0.032
+      train.lr_schedule: cosine
+
+  - name: small_lr0006_wsd
+    params:
+      model.hidden_dim: 320
+      model.range_hidden_dim: 160
+      model.ffn_dim: 640
+      model.num_hidden_layers: 2
+      model.num_value_layers: 3
+      model.num_policy_layers: 4
+      model.policy_rank: 80
+      model.policy_hand_bias_rank: 20
+      train.learning_rate: 0.006
+      train.learning_rate_final: 0.0006
+      train.adamw_learning_rate: 0.0012
+      train.policy_head_muon_learning_rate: 0.012
+      train.lr_schedule: wsd
+
+  - name: small_lr0016_cosine
+    params:
+      model.hidden_dim: 320
+      model.range_hidden_dim: 160
+      model.ffn_dim: 640
+      model.num_hidden_layers: 2
+      model.num_value_layers: 3
+      model.num_policy_layers: 4
+      model.policy_rank: 80
+      model.policy_hand_bias_rank: 20
+      train.learning_rate: 0.016
+      train.learning_rate_final: 0.0016
+      train.adamw_learning_rate: 0.0032
+      train.policy_head_muon_learning_rate: 0.032
+      train.lr_schedule: cosine
+
+  - name: compact_deep_value_lr0016_cosine
+    params:
+      model.hidden_dim: 384
+      model.range_hidden_dim: 192
+      model.ffn_dim: 768
+      model.num_hidden_layers: 2
+      model.num_value_layers: 5
+      model.num_policy_layers: 4
+      model.policy_rank: 96
+      model.policy_hand_bias_rank: 24
+      train.learning_rate: 0.016
+      train.learning_rate_final: 0.0016
+      train.adamw_learning_rate: 0.0032
+      train.policy_head_muon_learning_rate: 0.032
+      train.lr_schedule: cosine
+
+  - name: compact_deep_value_lr002_cosine
+    params:
+      model.hidden_dim: 384
+      model.range_hidden_dim: 192
+      model.ffn_dim: 768
+      model.num_hidden_layers: 2
+      model.num_value_layers: 5
+      model.num_policy_layers: 4
+      model.policy_rank: 96
+      model.policy_hand_bias_rank: 24
+      train.learning_rate: 0.02
+      train.learning_rate_final: 0.002
+      train.adamw_learning_rate: 0.004
+      train.policy_head_muon_learning_rate: 0.04
+      train.lr_schedule: cosine
+
+  - name: compact_deep_value_lr003_cosine
+    params:
+      model.hidden_dim: 384
+      model.range_hidden_dim: 192
+      model.ffn_dim: 768
+      model.num_hidden_layers: 2
+      model.num_value_layers: 5
+      model.num_policy_layers: 4
+      model.policy_rank: 96
+      model.policy_hand_bias_rank: 24
+      train.learning_rate: 0.03
+      train.learning_rate_final: 0.003
+      train.adamw_learning_rate: 0.006
+      train.policy_head_muon_learning_rate: 0.06
+      train.lr_schedule: cosine
+
+  - name: compact_deep_value_no_trunk_lr003_cosine
+    params:
+      model.hidden_dim: 384
+      model.range_hidden_dim: 192
+      model.ffn_dim: 768
+      model.num_hidden_layers: 0
+      model.num_value_layers: 7
+      model.num_policy_layers: 6
+      model.policy_rank: 96
+      model.policy_hand_bias_rank: 24
+      train.learning_rate: 0.03
+      train.learning_rate_final: 0.003
+      train.adamw_learning_rate: 0.006
+      train.policy_head_muon_learning_rate: 0.06
+      train.lr_schedule: cosine
+
+  - name: compact_deep_value_no_trunk_lr004_cosine
+    params:
+      model.hidden_dim: 384
+      model.range_hidden_dim: 192
+      model.ffn_dim: 768
+      model.num_hidden_layers: 0
+      model.num_value_layers: 7
+      model.num_policy_layers: 6
+      model.policy_rank: 96
+      model.policy_hand_bias_rank: 24
+      train.learning_rate: 0.04
+      train.learning_rate_final: 0.004
+      train.adamw_learning_rate: 0.008
+      train.policy_head_muon_learning_rate: 0.08
+      train.lr_schedule: cosine
+
+  - name: compact_deep_value_no_trunk_lr004_phm002_adamw_sweep
+    params:
+      model.hidden_dim: 384
+      model.range_hidden_dim: 192
+      model.ffn_dim: 768
+      model.num_hidden_layers: 0
+      model.num_value_layers: 7
+      model.num_policy_layers: 6
+      model.policy_rank: 96
+      model.policy_hand_bias_rank: 24
+      train.learning_rate: 0.04
+      train.learning_rate_final: 0.004
+      train.adamw_learning_rate: [0.004, 0.016]
+      train.policy_head_muon_learning_rate: 0.02
+      train.lr_schedule: cosine

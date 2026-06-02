@@ -11,6 +11,7 @@ import json
 import math
 import os
 import random
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ from p2.search.rebel_solved_dataset import MANIFEST_NAME
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_TRIAL_SPEC = REPO_ROOT / "conf" / "rebel_hp_trials.yaml"
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,8 @@ def _candidate_arms(
     arch_set: str = "all",
     arch_names: list[str] | None = None,
     lr_starts: list[float] | None = None,
+    adamw_lr_factors: list[float] | None = None,
+    policy_head_muon_learning_rate: float | None = None,
     schedules: list[str] | None = None,
 ) -> list[Arm]:
     standard_architectures = [
@@ -311,22 +315,29 @@ def _candidate_arms(
             )
     if lr_starts is None:
         lr_starts = [0.006, 0.01, 0.016]
+    if adamw_lr_factors is None:
+        adamw_lr_factors = [0.2]
     if schedules is None:
         schedules = ["cosine", "linear", "wsd"]
 
     arms: list[Arm] = []
-    for (arch_name, arch), lr, schedule in itertools.product(
-        architectures, lr_starts, schedules
+    for (arch_name, arch), lr, adamw_factor, schedule in itertools.product(
+        architectures, lr_starts, adamw_lr_factors, schedules
     ):
         overrides = dict(arch)
         overrides.update(
             {
                 "train.learning_rate": lr,
+                "train.adamw_learning_rate": lr * adamw_factor,
                 "train.lr_schedule": schedule,
                 "train.lr_wsd_decay_fraction": 0.2,
             }
         )
-        arms.append(Arm(f"{arch_name}_lr{lr:g}_{schedule}", overrides))
+        name = f"{arch_name}_lr{lr:g}_adamw{lr * adamw_factor:g}_{schedule}"
+        if policy_head_muon_learning_rate is not None:
+            overrides["train.policy_head_muon_learning_rate"] = policy_head_muon_learning_rate
+            name = f"{name}_phm{policy_head_muon_learning_rate:g}"
+        arms.append(Arm(name, overrides))
     rng.shuffle(arms)
     return arms[:max_arms]
 
@@ -357,6 +368,76 @@ def _parse_string_list(value: str) -> list[str]:
     if not items:
         raise argparse.ArgumentTypeError("expected at least one comma-separated item")
     return items
+
+
+def _grid_values(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else [value]
+
+
+def _slug(value: Any) -> str:
+    text = str(value)
+    text = re.sub(r"[^A-Za-z0-9.+-]+", "_", text).strip("_")
+    return text or "value"
+
+
+def _short_param_name(key: str) -> str:
+    replacements = {
+        "train.learning_rate": "lr",
+        "train.learning_rate_final": "lrfinal",
+        "train.adamw_learning_rate": "adamw",
+        "train.policy_head_muon_learning_rate": "phm",
+        "train.lr_schedule": "sched",
+    }
+    return replacements.get(key, key.split(".")[-1])
+
+
+def _load_trial_spec(path: Path) -> list[Arm]:
+    raw = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
+    if isinstance(raw, list):
+        default_params: dict[str, Any] = {}
+        trial_specs = raw
+    elif isinstance(raw, dict):
+        default_params = raw.get("defaults", {}) or {}
+        trial_specs = raw.get("trials", [])
+    else:
+        raise TypeError(f"expected mapping or list trial spec at {path}")
+    if not isinstance(default_params, dict):
+        raise TypeError(f"trial spec defaults must be a mapping: {path}")
+    if not isinstance(trial_specs, list):
+        raise TypeError(f"trial spec trials must be a list: {path}")
+
+    arms: list[Arm] = []
+    seen_names: set[str] = set()
+    for index, trial in enumerate(trial_specs):
+        if not isinstance(trial, dict):
+            raise TypeError(f"trial {index} must be a mapping: {path}")
+        base_name = str(trial.get("name") or f"trial_{index:03d}")
+        params = trial.get("params", {})
+        if not isinstance(params, dict):
+            raise TypeError(f"trial {base_name} params must be a mapping")
+        merged_params = {**default_params, **params}
+        keys = list(merged_params.keys())
+        value_lists = [_grid_values(merged_params[key]) for key in keys]
+        varied_keys = [
+            key for key, values in zip(keys, value_lists, strict=True) if len(values) > 1
+        ]
+        for values in itertools.product(*value_lists):
+            overrides = dict(zip(keys, values, strict=True))
+            name_parts = [_slug(base_name)]
+            if varied_keys:
+                variant_parts = [
+                    f"{_short_param_name(key)}{_slug(overrides[key])}"
+                    for key in varied_keys
+                ]
+                name_parts.append("_".join(variant_parts))
+            name = "__".join(name_parts)
+            if name in seen_names:
+                raise ValueError(f"duplicate expanded trial name: {name}")
+            seen_names.add(name)
+            arms.append(Arm(name=name, overrides=overrides))
+    if not arms:
+        raise ValueError(f"trial spec produced no arms: {path}")
+    return arms
 
 
 def _select_arm(
@@ -452,7 +533,23 @@ def main() -> None:
         default=REPO_ROOT / "conf" / "config_rebel_cfr.yaml",
     )
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "outputs" / "rebel_hp_bandit")
-    parser.add_argument("--max-arms", type=int, default=12)
+    parser.add_argument(
+        "--trial-spec",
+        type=Path,
+        default=DEFAULT_TRIAL_SPEC,
+        help="YAML trial spec. Each trial params map may contain scalar values or arrays.",
+    )
+    parser.add_argument(
+        "--legacy-candidate-grid",
+        action="store_true",
+        help="Use the historical CLI-generated candidate grid instead of --trial-spec.",
+    )
+    parser.add_argument(
+        "--arm-name-regex",
+        default=None,
+        help="Optional regex used to filter expanded arm names before running.",
+    )
+    parser.add_argument("--max-arms", type=int, default=None)
     parser.add_argument(
         "--arch-set",
         default="all",
@@ -472,12 +569,24 @@ def main() -> None:
         help="Comma-separated learning-rate starts to include in candidates.",
     )
     parser.add_argument(
+        "--adamw-lr-factors",
+        type=_parse_float_list,
+        default=_parse_float_list("0.2"),
+        help="Comma-separated AdamW LR factors relative to each learning-rate start.",
+    )
+    parser.add_argument(
+        "--policy-head-muon-learning-rate",
+        type=float,
+        default=None,
+        help="Optional fixed policy-head Muon LR for all candidates.",
+    )
+    parser.add_argument(
         "--schedules",
         type=_parse_schedule_list,
         default=_parse_schedule_list("cosine,linear,wsd"),
         help="Comma-separated LR schedules to include in candidates.",
     )
-    parser.add_argument("--trials", type=int, default=18)
+    parser.add_argument("--trials", type=int, default=None)
     parser.add_argument("--epochs", type=float, default=5.0)
     parser.add_argument("--steps-per-trial", type=int, default=None)
     parser.add_argument("--min-steps", type=int, default=100)
@@ -501,21 +610,37 @@ def main() -> None:
         explicit_steps=args.steps_per_trial,
     )
     rng = random.Random(args.seed)
-    arms = _candidate_arms(
-        rng,
-        args.max_arms,
-        arch_set=args.arch_set,
-        arch_names=args.arch_names,
-        lr_starts=args.lr_starts,
-        schedules=args.schedules,
-    )
+    if args.legacy_candidate_grid:
+        arms = _candidate_arms(
+            rng,
+            args.max_arms or 12,
+            arch_set=args.arch_set,
+            arch_names=args.arch_names,
+            lr_starts=args.lr_starts,
+            adamw_lr_factors=args.adamw_lr_factors,
+            policy_head_muon_learning_rate=args.policy_head_muon_learning_rate,
+            schedules=args.schedules,
+        )
+        trial_count = args.trials if args.trials is not None else 18
+    else:
+        arms = _load_trial_spec(args.trial_spec)
+        if args.arm_name_regex is not None:
+            pattern = re.compile(args.arm_name_regex)
+            arms = [arm for arm in arms if pattern.search(arm.name)]
+        if args.max_arms is not None:
+            arms = arms[: args.max_arms]
+        if not arms:
+            raise ValueError("no arms selected from trial spec")
+        trial_count = args.trials if args.trials is not None else len(arms)
     states = {arm.name: ArmState() for arm in arms}
     args.output_dir.mkdir(parents=True, exist_ok=True)
     print(
         f"dataset value={manifest.get('value_examples')} policy={manifest.get('policy_examples')} "
-        f"steps_per_trial={steps} arms={len(arms)} trials={args.trials}",
+        f"steps_per_trial={steps} arms={len(arms)} trials={trial_count}",
         flush=True,
     )
+    if not args.legacy_candidate_grid:
+        print(f"trial_spec={args.trial_spec}", flush=True)
     for arm in arms:
         print(f"arm {arm.name}: {arm.overrides}", flush=True)
     if args.dry_run:
@@ -525,13 +650,13 @@ def main() -> None:
     results_jsonl = args.output_dir / "results.jsonl"
     results_csv = args.output_dir / "results.csv"
 
-    for trial_index in range(args.trials):
+    for trial_index in range(trial_count):
         arm = _select_arm(
             arms, states, total_trials=trial_index, ucb_c=float(args.ucb_c)
         )
         trial_seed = int(args.seed + trial_index * 1009)
         print(
-            f"\ntrial {trial_index + 1}/{args.trials}: {arm.name} seed={trial_seed}",
+            f"\ntrial {trial_index + 1}/{trial_count}: {arm.name} seed={trial_seed}",
             flush=True,
         )
         cfg = _make_trial_config(
