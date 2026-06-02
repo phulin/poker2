@@ -271,7 +271,23 @@ def _run_split_warm_start(trainer: RebelCFRTrainer, pbs) -> dict[str, float]:
                 ev.cumulative_regrets += scale * regrets
 
             timed("seed_regrets", seed_regrets)
-            timed("update_policy", lambda: ev.update_policy(ev.warm_start_iterations))
+
+            def seed_average_policy() -> None:
+                scale = float(ev.warm_start_iterations) * float(
+                    ev.warm_start_multiplier
+                )
+                per_iter_weight = ev._get_average_policy_weight(
+                    ev.warm_start_iterations
+                )
+                ev.update_average_policy(
+                    ev.warm_start_iterations,
+                    weight_override=scale * per_iter_weight,
+                )
+                ev._calculate_reach_weights(ev.self_reach_avg, ev.policy_probs_avg)
+                ev._propagate_all_beliefs(ev.beliefs_avg, ev.self_reach_avg)
+
+            timed("seed_average_policy", seed_average_policy)
+            timed("regret_match_current_policy", ev._regret_match_current_policy)
 
     out["split_sum_cuda_ms"] = sum(v for k, v in out.items() if k.endswith("_cuda_ms"))
     out["split_sum_wall_ms"] = sum(v for k, v in out.items() if k.endswith("_wall_ms"))

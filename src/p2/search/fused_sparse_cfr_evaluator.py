@@ -2087,8 +2087,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     # Update average policy: fused mixing + parent-aligned renorm.
     # ------------------------------------------------------------------
 
-    def update_average_policy(self, t: int, update_reach: bool = False) -> None:
-        self._update_average_policy_true(t, update_reach=update_reach)
+    def update_average_policy(
+        self,
+        t: int,
+        update_reach: bool = False,
+        weight_override: float | None = None,
+    ) -> None:
+        self._update_average_policy_true(
+            t, update_reach=update_reach, weight_override=weight_override
+        )
 
     def _ensure_average_policy_buffers(self) -> tuple[torch.Tensor, torch.Tensor]:
         return self._ensure_average_policy_accumulators()
@@ -2131,7 +2138,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             eps=1e-5,
         )
 
-    def _update_average_policy_true(self, t: int, update_reach: bool = False) -> None:
+    def _update_average_policy_true(
+        self,
+        t: int,
+        update_reach: bool = False,
+        weight_override: float | None = None,
+    ) -> None:
         defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
         if self.cfr_type == CFRType.discounted and self._average_accumulation_delayed(
             t
@@ -2152,6 +2164,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         num, den = self._ensure_average_policy_buffers()
         parent_index_all = self._parent_index_all
         assert parent_index_all is not None
+        new = self._t_scalars.mix_new
+        if weight_override is not None:
+            new = torch.tensor(
+                float(weight_override), dtype=self.float_dtype, device=self.device
+            )
         fused_average_policy_mix_with_tensors_(
             policy_probs_avg=self.policy_probs_avg,
             average_policy_numerator=num,
@@ -2160,7 +2177,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self_reach=self.self_reach,
             to_act=self.env.to_act.contiguous(),
             parent_index=parent_index_all,
-            new=self._t_scalars.mix_new,
+            new=new,
             bottom=N,
             block_h=1024 if defer_avg_policy else 512,
             write_policy=not defer_avg_policy,

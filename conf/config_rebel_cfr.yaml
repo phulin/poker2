@@ -132,14 +132,16 @@ search:
   # respectively); these static values are starting points that the
   # trainer overwrites — see _apply_schedules in cfr_trainer.py.
   warm_start_iterations: 10
-  warm_start_type: model
+  warm_start_type: model_br
   warm_start_multiplier: 10
   dcfr_plus_delay: 80
 
   dcfr_alpha: 3.0
   dcfr_alpha_final: 4.0
   dcfr_beta: -1.0
-  dcfr_beta_final: -2.0
+  # beta-ramp removed: holding beta constant (== dcfr_beta) tested marginally
+  # best on river spots; see river-cfr-exploitability-trajectory wandb runs.
+  dcfr_beta_final: null
   dcfr_gamma: 5.0
   dcfr_gamma_final: 0.0
 

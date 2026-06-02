@@ -7761,7 +7761,23 @@ class ShowdownActiveCardBlockDirectGraphRunner(ShowdownActiveCardBlockGraphRunne
             else:
                 self.graph.replay()
             return self.ev_out
-        return super().write_indexed(beliefs, indices, latest_values)
+
+        # The captured graph for this subclass reads from source_beliefs and
+        # writes directly into self.latest_values. The base-class fallback graph
+        # would therefore still use the direct pointers and ignore beliefs_in.
+        # For non-captured pointers, run the base indexed pipeline eagerly.
+        self._copy_indexed_beliefs(beliefs, indices)
+        ShowdownActiveCardBlockGraphRunner._launch_pipeline(self)
+        self._scatter_indexed_values(latest_values, indices)
+        return self.ev_out
+
+    def __call__(self, beliefs: torch.Tensor) -> torch.Tensor:
+        # __call__ accepts compact [M, 2, H] beliefs. The direct graph is only
+        # valid for its captured full source_beliefs/row_indices pair, so use the
+        # base compact pipeline here.
+        self.beliefs_in.copy_(beliefs)
+        ShowdownActiveCardBlockGraphRunner._launch_pipeline(self)
+        return self.ev_out
 
 
 class ShowdownFullyCompactDirectGraphRunner:

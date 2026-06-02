@@ -17,6 +17,9 @@ Reusable profiling and benchmark scripts that are broader than a single repro bu
 - `run_rebel_hp_bandit.py`: Runs bounded pregenerated ReBeL hyperparameter trials with a simple UCB multi-armed-bandit allocation over architecture, LR, and schedule candidates.
 - `precompute_preflop_allin_table.py`: Streams preflop five-card boards to build a zstd-compressed int16 `[1326, 1326]` all-in matchup payoff table for preflop all-in-call terminal abstraction.
 - `probe_cfr_fp_precision.py`: Probes fp32 precision loss in fused sparse CFR average-policy/value updates from saved spots and checkpoints.
+- `river_cfr_exploitability_trajectory.py`: Samples random river roots, runs sparse/fused CFR, and logs per-spot exploitability trajectories for convergence diagnostics.
+- `diagnose_river_convergence.py`: Compares train-path and eager river CFR evaluation details, including leaf composition and value-source diagnostics.
+- `independent_river_exploitability.py`: River CFR exploitability diagnostic harness; prints evaluator-consistent exact-final exploitability and a legacy from-scratch checker that is not authoritative for PBS terminal values.
 - `test_survey_runner.py`: Runs pytest files or node ids with per-invocation timeouts and records structured audit results.
 
 ### Subdirectories

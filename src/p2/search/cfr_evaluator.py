@@ -1606,7 +1606,23 @@ class CFREvaluator(ABC):
         )
         scale = float(self.warm_start_iterations) * float(self.warm_start_multiplier)
         self.cumulative_regrets += scale * regrets
-        self.update_policy(self.warm_start_iterations)
+
+        # Seed the average strategy with the model policy as if it had been
+        # played for `scale` iterations (paper App. "CFR Warm Start Algorithm":
+        # "the average policy effectively assumes that the warm start policy was
+        # played for the first [warm_start] iterations of CFR"). policy_probs and
+        # self_reach still hold the model policy here, so accumulate it into the
+        # average before regret matching overwrites the current strategy.
+        per_iter_weight = self._get_average_policy_weight(self.warm_start_iterations)
+        self.update_average_policy(
+            self.warm_start_iterations, weight_override=scale * per_iter_weight
+        )
+        self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
+        self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
+
+        # Set the post-warm-start current strategy from the seeded regrets,
+        # without refolding it into the model-seeded average.
+        self._regret_match_current_policy()
 
     def _maybe_enforce_zero_sum(
         self,
@@ -1902,6 +1918,20 @@ class CFREvaluator(ABC):
     @profile
     def update_policy(self, t: int) -> None:
         """Update policy using regret matching."""
+        self._regret_match_current_policy()
+
+        self.update_average_policy(t)
+        self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
+        self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
+
+    def _regret_match_current_policy(self) -> None:
+        """Set the current strategy from cumulative regrets via regret matching
+        and refresh the current-strategy reach weights and beliefs.
+
+        This is the per-iteration strategy update only; it does not touch the
+        average-strategy accumulators, so callers can update the average
+        separately (e.g. to seed it with a warm-start policy).
+        """
         bottom = self.depth_offsets[1]
         positive_regrets = self.cumulative_regrets.clamp(min=0.0)
         regret_sum = torch.zeros_like(self.policy_probs)
@@ -1923,12 +1953,15 @@ class CFREvaluator(ABC):
         self._calculate_reach_weights(self.self_reach, self.policy_probs)
         self._propagate_all_beliefs(self.beliefs, self.self_reach)
 
-        self.update_average_policy(t)
-        self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
-        self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
+    def update_average_policy(
+        self, t: int, weight_override: float | None = None
+    ) -> None:
+        """Update the average policy using true CFR reach-weighted sums.
 
-    def update_average_policy(self, t: int) -> None:
-        """Update the average policy using true CFR reach-weighted sums."""
+        ``weight_override`` replaces the per-iteration accumulation weight. It is
+        used to seed the average with the warm-start policy as if it had been
+        played for several CFR iterations.
+        """
         if self.cfr_type == CFRType.discounted and self._average_accumulation_delayed(
             t
         ):
@@ -1937,7 +1970,11 @@ class CFREvaluator(ABC):
             return
 
         N = self.root_nodes
-        weight = self._get_average_policy_weight(t)
+        weight = (
+            self._get_average_policy_weight(t)
+            if weight_override is None
+            else weight_override
+        )
         numerator, denominator = self._ensure_average_policy_accumulators()
 
         # Get actor indices at source nodes (nodes that have children)
