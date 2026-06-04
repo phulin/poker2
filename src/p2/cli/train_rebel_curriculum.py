@@ -248,6 +248,17 @@ def _policy_model(model: torch.nn.Module) -> torch.nn.Module | None:
     return policy_model if isinstance(policy_model, torch.nn.Module) else None
 
 
+def _value_initialization_checkpoint(
+    stage_cfg: Config,
+    substep: CurriculumSubstepConfig,
+) -> str | None:
+    if substep.value_checkpoint is not None:
+        return substep.value_checkpoint
+    if substep.closing_net is not None:
+        return stage_cfg.search.closing_leaf_checkpoint
+    return None
+
+
 def _initialize_policy_from_checkpoint(
     trainer: RebelCFRTrainer,
     checkpoint_path: str,
@@ -272,6 +283,64 @@ def _initialize_policy_from_checkpoint(
     )
     trainer._sync_inference_model()
     print(f"Initialized policy for train substep {substep_name} from {checkpoint_path}")
+
+
+def _copy_value_state_from_source(
+    target_value: torch.nn.Module,
+    source_value: torch.nn.Module,
+) -> dict[str, int]:
+    target_state = target_value.state_dict()
+    source_state = source_value.state_dict()
+    load_state: dict[str, torch.Tensor] = {}
+    exact = 0
+    pre_to_post = 0
+
+    def add_tensor(target_key: str, source_tensor: torch.Tensor) -> bool:
+        target_tensor = target_state.get(target_key)
+        if target_tensor is None or target_tensor.shape != source_tensor.shape:
+            return False
+        if source_tensor.dtype.is_floating_point:
+            load_state[target_key] = source_tensor.to(
+                device=target_tensor.device,
+                dtype=target_tensor.dtype,
+            )
+        else:
+            load_state[target_key] = source_tensor.to(device=target_tensor.device)
+        return True
+
+    for key, value in source_state.items():
+        if add_tensor(key, value):
+            exact += 1
+        if key.startswith("pre_value_head."):
+            post_key = f"post_value_head.{key.removeprefix('pre_value_head.')}"
+            if add_tensor(post_key, value):
+                pre_to_post += 1
+
+    if not load_state:
+        raise ValueError(
+            "Value initialization checkpoint had no compatible value-model tensors"
+        )
+    target_value.load_state_dict(load_state, strict=False)
+    return {"exact": exact, "pre_to_post": pre_to_post, "total": len(load_state)}
+
+
+def _initialize_value_from_checkpoint(
+    trainer: RebelCFRTrainer,
+    checkpoint_path: str,
+    *,
+    substep_name: str,
+) -> dict[str, int]:
+    target_value = _value_model(trainer.model)
+    source_model = trainer._load_closing_leaf_model(checkpoint_path)
+    source_value = _value_model(source_model)
+    loaded = _copy_value_state_from_source(target_value, source_value)
+    trainer._sync_inference_model()
+    print(
+        f"Initialized value model for train substep {substep_name} from "
+        f"{checkpoint_path} "
+        f"(exact={loaded['exact']}, pre_to_post={loaded['pre_to_post']})"
+    )
+    return loaded
 
 
 def _run_train_substep(
@@ -310,6 +379,9 @@ def _run_train_substep(
         metadata["curriculum_closing_checkpoint"] = (
             stage_cfg.search.closing_leaf_checkpoint
         )
+    value_checkpoint = _value_initialization_checkpoint(stage_cfg, substep)
+    if value_checkpoint is not None:
+        metadata["curriculum_value_checkpoint"] = value_checkpoint
 
     run_cm = _init_wandb(
         stage_cfg,
@@ -328,11 +400,16 @@ def _run_train_substep(
             print(f"Resuming curriculum substep {substep_name}: {resume_from}")
             start_step = trainer.load_checkpoint(resume_from) + 1
             print(f"Resumed {substep_name} at step {start_step}")
-        elif substep.from_net is not None or substep.checkpoint is not None:
-            policy_source = _source_checkpoint(substep, promoted or {})
-            _initialize_policy_from_checkpoint(
-                trainer, policy_source, substep_name=substep_name
-            )
+        else:
+            if substep.from_net is not None or substep.checkpoint is not None:
+                policy_source = _source_checkpoint(substep, promoted or {})
+                _initialize_policy_from_checkpoint(
+                    trainer, policy_source, substep_name=substep_name
+                )
+            if value_checkpoint is not None:
+                _initialize_value_from_checkpoint(
+                    trainer, value_checkpoint, substep_name=substep_name
+                )
 
         run_training_loop(
             trainer,

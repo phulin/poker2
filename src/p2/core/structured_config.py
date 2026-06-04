@@ -439,6 +439,7 @@ class CurriculumSubstepConfig:
     from_net: str | None = None
     closing_net: str | None = None
     closing_checkpoint: str | None = None
+    value_checkpoint: str | None = None
     chance: str | None = None
     checkpoint: str | None = None
     output_dir: str | None = None
