@@ -825,6 +825,108 @@ if triton is not None:
         tl.store(latest_values + (node * 2 + 1) * H + h, ev1, mask=hmask)
 
     @triton.jit
+    def _allin_grouped_table_values_card_denom_dot_kernel(
+        table,
+        beliefs,
+        node_indices,
+        group_positions,
+        latest_values,
+        stacks,
+        pot,
+        starting_stacks,
+        env_scale,
+        stats,
+        combo_card_a,
+        combo_card_b,
+        G,
+        GROUP_WIDTH: tl.constexpr,
+        H: tl.constexpr,
+        NUM_CARDS: tl.constexpr,
+        TABLE_SCALE,
+        BH: tl.constexpr,
+        BK: tl.constexpr,
+        BN: tl.constexpr,
+        BP: tl.constexpr,
+    ):
+        g = tl.program_id(0)
+        bh = tl.program_id(1)
+        bg = tl.program_id(2)
+        h = bh * BH + tl.arange(0, BH)
+        hmask = h < H
+        cols = tl.arange(0, BP)
+        slot = bg * BN + (cols // 2)
+        src_player = cols - (cols // 2) * 2
+        out_player = 1 - src_player
+        slot_valid = slot < GROUP_WIDTH
+        mpos = tl.load(
+            group_positions + g * GROUP_WIDTH + slot,
+            mask=slot_valid,
+            other=-1,
+        )
+        col_valid = mpos >= 0
+        node = tl.load(node_indices + mpos, mask=col_valid, other=0)
+
+        ca = tl.load(combo_card_a + h, mask=hmask, other=0)
+        cb = tl.load(combo_card_b + h, mask=hmask, other=0)
+        stats_base = (mpos * 2 + src_player) * (NUM_CARDS + 1)
+        total = tl.load(stats + stats_base, mask=col_valid, other=0.0).to(tl.float32)
+        card_a_sum = tl.load(
+            stats + stats_base[None, :] + 1 + ca[:, None],
+            mask=hmask[:, None] & col_valid[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        card_b_sum = tl.load(
+            stats + stats_base[None, :] + 1 + cb[:, None],
+            mask=hmask[:, None] & col_valid[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        belief_src_h = tl.load(
+            beliefs + (node[None, :] * 2 + src_player[None, :]) * H + h[:, None],
+            mask=hmask[:, None] & col_valid[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        denom = tl.maximum(total[None, :] - card_a_sum - card_b_sum + belief_src_h, 0.0)
+
+        table_base = g * H * H
+        acc = tl.zeros((BH, BP), tl.float32)
+        for k0 in range(0, H, BK):
+            k = k0 + tl.arange(0, BK)
+            kmask = k < H
+            q = tl.load(
+                table + table_base + h[:, None] * H + k[None, :],
+                mask=hmask[:, None] & kmask[None, :],
+                other=0,
+            ).to(tl.float32)
+            b = tl.load(
+                beliefs + (node[None, :] * 2 + src_player[None, :]) * H + k[:, None],
+                mask=kmask[:, None] & col_valid[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            acc += tl.dot(q, b, input_precision="tf32")
+
+        ev = tl.where(denom > 1.0e-8, (acc / TABLE_SCALE) / denom, 0.0)
+        p = tl.load(pot + node, mask=col_valid, other=0.0).to(tl.float32)
+        sc = tl.load(env_scale + node, mask=col_valid, other=1.0).to(tl.float32)
+        stack = tl.load(
+            stacks + node * 2 + out_player,
+            mask=col_valid,
+            other=0.0,
+        ).to(tl.float32)
+        start = tl.load(
+            starting_stacks + node * 2 + out_player,
+            mask=col_valid,
+            other=0.0,
+        ).to(tl.float32)
+        ev *= (stack[None, :] + p[None, :] - start[None, :]) / tl.maximum(
+            sc[None, :], 1.0e-8
+        )
+        tl.store(
+            latest_values + (node[None, :] * 2 + out_player[None, :]) * H + h[:, None],
+            ev,
+            mask=hmask[:, None] & col_valid[None, :],
+        )
+
+    @triton.jit
     def _allin_table_values_both_players_kernel(
         table,
         beliefs,
@@ -1548,6 +1650,82 @@ def write_allin_table_values_card_denom_dot_values_triton_(
         BP=block_p,
         HAS_CANON_TABLE=True,
         num_warps=4,
+    )
+
+
+def write_allin_grouped_table_values_card_denom_dot_values_triton_(
+    *,
+    table: torch.Tensor,
+    beliefs: torch.Tensor,
+    node_indices: torch.Tensor,
+    group_positions: torch.Tensor,
+    latest_values: torch.Tensor,
+    stacks: torch.Tensor,
+    pot: torch.Tensor,
+    starting_stacks: torch.Tensor,
+    env_scale: torch.Tensor,
+    table_scale: float,
+    stats_buffer: torch.Tensor,
+    block_h: int = 64,
+    block_k: int = 64,
+    block_nodes: int = 32,
+    num_warps: int = 8,
+) -> None:
+    if triton is None or beliefs.device.type != "cuda":
+        raise RuntimeError("grouped all-in table value writeback requires CUDA + Triton")
+    if node_indices.numel() == 0:
+        return
+    if group_positions.ndim != 2:
+        raise ValueError("group_positions must have shape [groups, group_width]")
+    if block_nodes <= 0:
+        raise ValueError("block_nodes must be positive")
+    device = beliefs.device
+    if (
+        stats_buffer.shape != (node_indices.numel(), 2, 53)
+        or stats_buffer.dtype != torch.float32
+        or stats_buffer.device != device
+    ):
+        raise ValueError(
+            "stats_buffer must have shape "
+            f"{(node_indices.numel(), 2, 53)} on {device} with dtype float32"
+        )
+    if table.shape[0] != group_positions.shape[0]:
+        raise ValueError(
+            "table first dimension must match group_positions groups; "
+            f"got {table.shape[0]} and {group_positions.shape[0]}"
+        )
+    combo_card_a, combo_card_b = combo_cards_i32_tensor(device=device)
+    groups = group_positions.shape[0]
+    group_width = group_positions.shape[1]
+    bp = int(block_nodes) * 2
+    grid = (
+        groups,
+        triton.cdiv(NUM_HANDS, block_h),
+        triton.cdiv(group_width, block_nodes),
+    )
+    _allin_grouped_table_values_card_denom_dot_kernel[grid](
+        table.contiguous(),
+        beliefs.contiguous(),
+        node_indices.contiguous(),
+        group_positions.contiguous(),
+        latest_values,
+        stacks,
+        pot,
+        starting_stacks,
+        env_scale,
+        stats_buffer.contiguous(),
+        combo_card_a,
+        combo_card_b,
+        groups,
+        group_width,
+        NUM_HANDS,
+        52,
+        float(table_scale),
+        BH=block_h,
+        BK=block_k,
+        BN=int(block_nodes),
+        BP=bp,
+        num_warps=int(num_warps),
     )
 
 

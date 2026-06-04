@@ -17,7 +17,10 @@ def test_write_allin_table_values_triton_matches_eager_for_both_players() -> Non
         FLOP_I8_SCALE,
         I16_SCALE,
         allin_values_from_payoff_batch,
+        write_allin_belief_card_stats_split_triton_,
+        write_allin_grouped_table_values_card_denom_dot_values_triton_,
         write_allin_table_values_card_denom_dot_triton_,
+        write_allin_table_values_card_denom_dot_values_triton_,
         write_allin_table_values_card_denom_triton_,
         write_allin_table_values_triton_,
     )
@@ -188,6 +191,60 @@ def test_write_allin_table_values_triton_matches_eager_for_both_players() -> Non
     torch.testing.assert_close(
         latest_values_turn_dot[node_indices],
         expected_values(turn_tables.index_select(0, canon_ids), scale=I16_SCALE),
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+    stats_buffer = torch.empty(num_allin, 2, 53, dtype=torch.float32, device=device)
+    empty_nodes = torch.empty(0, dtype=torch.long, device=device)
+    empty_stats = torch.empty(0, 2, 53, dtype=torch.float32, device=device)
+    write_allin_belief_card_stats_split_triton_(
+        beliefs=beliefs,
+        node_indices0=empty_nodes,
+        stats_buffer0=empty_stats,
+        node_indices1=node_indices,
+        stats_buffer1=stats_buffer,
+    )
+    latest_values_turn_values = torch.empty(num_nodes, 2, NUM_HANDS, device=device)
+    write_allin_table_values_card_denom_dot_values_triton_(
+        table=turn_tables,
+        beliefs=beliefs,
+        node_indices=node_indices,
+        latest_values=latest_values_turn_values,
+        stacks=stacks,
+        pot=pot,
+        starting_stacks=starting_stacks,
+        env_scale=env_scale,
+        table_scale=I16_SCALE,
+        canon_ids=canon_ids,
+        stats_buffer=stats_buffer,
+        block_h=64,
+        block_k=64,
+        block_p=8,
+    )
+
+    group_positions = torch.tensor(
+        [[0, 3], [1, -1], [2, -1]],
+        dtype=torch.long,
+        device=device,
+    )
+    latest_values_turn_grouped = torch.empty(num_nodes, 2, NUM_HANDS, device=device)
+    write_allin_grouped_table_values_card_denom_dot_values_triton_(
+        table=turn_tables,
+        beliefs=beliefs,
+        node_indices=node_indices,
+        group_positions=group_positions,
+        latest_values=latest_values_turn_grouped,
+        stacks=stacks,
+        pot=pot,
+        starting_stacks=starting_stacks,
+        env_scale=env_scale,
+        table_scale=I16_SCALE,
+        stats_buffer=stats_buffer,
+    )
+    torch.testing.assert_close(
+        latest_values_turn_grouped[node_indices],
+        latest_values_turn_values[node_indices],
         rtol=1e-3,
         atol=1e-3,
     )

@@ -52,6 +52,7 @@ from p2.search.allin_payoff import (
     I16_SCALE,
     combo_cards_i32_tensor,
     write_allin_belief_card_stats_split_triton_,
+    write_allin_grouped_table_values_card_denom_dot_values_triton_,
     write_allin_table_values_card_denom_dot_triton_,
     write_allin_table_values_card_denom_dot_values_triton_,
 )
@@ -964,6 +965,36 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self.new_street_mask[self.allin_call_indices] = False
         parent_street = self.env.street[self.allin_call_parent_indices].contiguous()
         self._cache_allin_call_street_partitions(parent_street)
+
+    def _cache_allin_turn_tables(self) -> None:
+        super()._cache_allin_turn_tables()
+        turn_ids = getattr(self, "allin_turn_table_ids", None)
+        if turn_ids is None or turn_ids.numel() == 0:
+            empty = torch.empty(0, 0, dtype=torch.long, device=self.device)
+            self.allin_turn_group_positions = empty
+            return
+        counts = torch.bincount(
+            turn_ids, minlength=int(self.allin_turn_tables_i16.shape[0])
+        )
+        max_count = int(counts.max().item()) if counts.numel() > 0 else 0
+        if max_count <= 0:
+            self.allin_turn_group_positions = torch.empty(
+                counts.numel(), 0, dtype=torch.long, device=self.device
+            )
+            return
+        order = torch.argsort(turn_ids)
+        sorted_ids = turn_ids[order]
+        offsets = counts.cumsum(0)
+        starts = offsets - counts
+        local = torch.arange(order.numel(), device=self.device) - starts[sorted_ids]
+        group_positions = torch.full(
+            (counts.numel(), max_count),
+            -1,
+            dtype=torch.long,
+            device=self.device,
+        )
+        group_positions[sorted_ids, local] = order
+        self.allin_turn_group_positions = group_positions.contiguous()
 
     def _construct_subgame(
         self, src_env: HUNLTensorEnv, src_indices: torch.Tensor
@@ -2577,31 +2608,52 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             turn_tables = getattr(self, "allin_turn_tables_i16", None)
             turn_ids = getattr(self, "allin_turn_table_ids", None)
             turn_stats = getattr(self, "allin_turn_stats_buffer", None)
+            turn_group_positions = getattr(self, "allin_turn_group_positions", None)
             if (
                 turn_tables is None
                 or turn_ids is None
                 or turn_stats is None
+                or turn_group_positions is None
                 or turn_tables.numel() == 0
             ):
                 raise RuntimeError(
                     "Fused all-in turn evaluation requires cached turn tables."
                 )
-            write_allin_table_values_card_denom_dot_values_triton_(
-                table=turn_tables,
-                beliefs=beliefs,
-                node_indices=node_idx,
-                latest_values=self.latest_values,
-                stacks=self.env.stacks,
-                pot=self.env.pot,
-                starting_stacks=self.env.starting_stacks,
-                env_scale=self.env.scale,
-                table_scale=I16_SCALE,
-                canon_ids=turn_ids,
-                stats_buffer=turn_stats,
-                block_h=64,
-                block_k=128,
-                block_p=8,
-            )
+            if turn_group_positions.numel() > 0:
+                write_allin_grouped_table_values_card_denom_dot_values_triton_(
+                    table=turn_tables,
+                    beliefs=beliefs,
+                    node_indices=node_idx,
+                    group_positions=turn_group_positions,
+                    latest_values=self.latest_values,
+                    stacks=self.env.stacks,
+                    pot=self.env.pot,
+                    starting_stacks=self.env.starting_stacks,
+                    env_scale=self.env.scale,
+                    table_scale=I16_SCALE,
+                    stats_buffer=turn_stats,
+                    block_h=64,
+                    block_k=64,
+                    block_nodes=32,
+                    num_warps=8,
+                )
+            else:
+                write_allin_table_values_card_denom_dot_values_triton_(
+                    table=turn_tables,
+                    beliefs=beliefs,
+                    node_indices=node_idx,
+                    latest_values=self.latest_values,
+                    stacks=self.env.stacks,
+                    pot=self.env.pot,
+                    starting_stacks=self.env.starting_stacks,
+                    env_scale=self.env.scale,
+                    table_scale=I16_SCALE,
+                    canon_ids=turn_ids,
+                    stats_buffer=turn_stats,
+                    block_h=64,
+                    block_k=64,
+                    block_p=8,
+                )
 
     # ------------------------------------------------------------------
     # CFR iteration: fused DCFR update.
