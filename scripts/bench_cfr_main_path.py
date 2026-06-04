@@ -89,6 +89,7 @@ COMPONENT_TAGS = [
     "cfr_set_leaf",
     "cfr_leaf_showdown",
     "cfr_leaf_set_model_values",
+    "cfr_leaf_set_allin_values",
     "cfr_model_fwd",
     "cfr_graph_capture",
     "cfr_graph_replay",
@@ -125,7 +126,11 @@ CUDA_EVENT_TAGS = {
     "cfr_set_leaf",
     "cfr_leaf_showdown",
     "cfr_leaf_set_model_values",
+    "cfr_leaf_set_allin_values",
     "cfr_model_fwd",
+    "cfr_graph_capture",
+    "cfr_graph_replay",
+    "cfr_prepare_replay",
     "cfr_sample_leaves",
     "cfr_training_data",
     "training_supervise",
@@ -488,6 +493,7 @@ def _patch_profiler_tags(
         ("set_leaf_values", "cfr_set_leaf"),
         ("_showdown_value_both", "cfr_leaf_showdown"),
         ("_set_model_values", "cfr_leaf_set_model_values"),
+        ("_set_allin_call_values", "cfr_leaf_set_allin_values"),
         ("compute_expected_values", "cfr_iter_expected_values"),
         ("update_policy", "cfr_iter_update_policy"),
         ("update_average_values", "cfr_iter_avg_values"),
@@ -1223,6 +1229,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-torch-profiler", action="store_true")
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument(
+        "--disable-cfr-graph",
+        action="store_true",
+        help="Force fused CFR to run eager iterations instead of CUDA graph replay.",
+    )
+    parser.add_argument(
         "--generate-value-only",
         action="store_true",
         help="In --mode generate, skip returned policy batches.",
@@ -1238,6 +1249,8 @@ def main(argv: list[str]) -> None:
     args = parse_args(argv)
     cfg = _load_config(args)
     trainer = _make_trainer(cfg, pregeneration_only=args.mode == "generate")
+    if args.disable_cfr_graph and hasattr(trainer.cfr_evaluator, "_graph_capture_regime"):
+        trainer.cfr_evaluator._graph_capture_regime = lambda _t: None  # type: ignore[method-assign]
 
     config_summary = {
         "num_envs": cfg.num_envs,

@@ -14,6 +14,7 @@ Reusable profiling and benchmark scripts that are broader than a single repro bu
 - `bench_cfr_init_spots.py`: Microbenchmarks fused sparse CFR subgame initialization and init-time tensor expansions from evenly balanced saved spots.
 - `bench_cfr_iterator_spots.py`: Profiles eager sparse/fused-sparse CFR iterator segments and isolated CFR components from evenly balanced saved spots across preflop/flop/turn/river roots.
 - `bench_warm_start_spots.py`: Microbenchmarks fused sparse CFR warm-start total time and substeps from evenly balanced saved spots.
+- `bench_turn_allin_values.py`: Microbenchmarks random-turn fused sparse CFR all-in-call leaf value writeback, comparing legacy per-node turn payoff dot kernels with grouped turn-board fused kernels across block-size candidates.
 - `run_rebel_hp_bandit.py`: Runs bounded pregenerated ReBeL hyperparameter trials with a simple UCB multi-armed-bandit allocation over architecture, LR, and schedule candidates.
 - `precompute_preflop_allin_table.py`: Streams preflop five-card boards to build a zstd-compressed int16 `[1326, 1326]` all-in matchup payoff table for preflop all-in-call terminal abstraction.
 - `probe_cfr_fp_precision.py`: Probes fp32 precision loss in fused sparse CFR average-policy/value updates from saved spots and checkpoints.

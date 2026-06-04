@@ -22,31 +22,27 @@ from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 
 
-NUM_WARMUP = 3
-NUM_ACTIVE = 3
-MODEL_TAG = "model_fwd"
+NUM_WARMUP = int(os.environ.get("P2_BENCH_WARMUP", "3"))
+NUM_ACTIVE = int(os.environ.get("P2_BENCH_ACTIVE", "3"))
+MODEL_TAGS = (
+    "train_model_fwd",
+    "eval_model_fwd",
+    "closing_model_fwd",
+)
 STEP_TAG = "train_step"
 
 
-def _wrap_models(*models: torch.nn.Module) -> None:
-    """Patch every supplied model's class __call__ with a record_function tag.
-    Pass both the trainer's model and the CFR evaluator's torch.compile-wrapped
-    model so both forward paths get attributed."""
-    seen_classes = set()
-    for model in models:
-        cls = model.__class__
-        if cls in seen_classes:
-            continue
-        seen_classes.add(cls)
-        orig_call = cls.__call__
+def _wrap_model_forward(model: torch.nn.Module | None, tag: str) -> None:
+    """Patch one module instance so separate model roles remain attributable."""
+    if model is None or not isinstance(model, torch.nn.Module):
+        return
+    orig_forward = model.forward
 
-        def make_wrapped(orig):
-            def wrapped(self, *args, **kwargs):
-                with record_function(MODEL_TAG):
-                    return orig(self, *args, **kwargs)
-            return wrapped
+    def wrapped(*args, **kwargs):
+        with record_function(tag):
+            return orig_forward(*args, **kwargs)
 
-        cls.__call__ = make_wrapped(orig_call)
+    model.forward = wrapped  # type: ignore[method-assign]
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config_rebel_cfr")
@@ -62,7 +58,12 @@ def main(dict_config: DictConfig) -> None:
     torch.manual_seed(cfg.seed)
 
     trainer = RebelCFRTrainer(cfg=cfg, device=device)
-    _wrap_models(trainer.model, trainer.cfr_evaluator.model)
+    _wrap_model_forward(trainer.model, "train_model_fwd")
+    _wrap_model_forward(trainer.cfr_evaluator.model, "eval_model_fwd")
+    _wrap_model_forward(
+        getattr(trainer.cfr_evaluator, "closing_leaf_value_model", None),
+        "closing_model_fwd",
+    )
 
     print(f"Using device: {device}; warmup={NUM_WARMUP} active={NUM_ACTIVE}")
 
@@ -90,32 +91,37 @@ def main(dict_config: DictConfig) -> None:
     # for each, sum cuda_time_total over child kernels.
     step_cpu_us = 0.0
     step_cuda_us = 0.0
-    model_cpu_us = 0.0
-    model_cuda_us = 0.0
+    model_cpu_us = {tag: 0.0 for tag in MODEL_TAGS}
+    model_cuda_us = {tag: 0.0 for tag in MODEL_TAGS}
     for evt in prof.events():
         if evt.name == STEP_TAG:
             step_cpu_us += evt.cpu_time_total or 0.0
             step_cuda_us += evt.cuda_time_total or 0.0
-        elif evt.name == MODEL_TAG:
-            model_cpu_us += evt.cpu_time_total or 0.0
-            model_cuda_us += evt.cuda_time_total or 0.0
+        elif evt.name in model_cpu_us:
+            model_cpu_us[evt.name] += evt.cpu_time_total or 0.0
+            model_cuda_us[evt.name] += evt.cuda_time_total or 0.0
 
     n = NUM_ACTIVE
     print()
     print(f"Per-step (avg over {n} iters):")
     print(f"  total CPU wall:    {step_cpu_us/n/1e3:8.2f} ms")
     print(f"  total CUDA time:   {step_cuda_us/n/1e3:8.2f} ms")
-    print(f"  model fwd CPU:     {model_cpu_us/n/1e3:8.2f} ms")
-    print(f"  model fwd CUDA:    {model_cuda_us/n/1e3:8.2f} ms")
+    total_model_cpu_us = sum(model_cpu_us.values())
+    total_model_cuda_us = sum(model_cuda_us.values())
+    for tag in MODEL_TAGS:
+        print(f"  {tag} CPU: {model_cpu_us[tag]/n/1e3:8.2f} ms")
+        print(f"  {tag} CUDA:{model_cuda_us[tag]/n/1e3:8.2f} ms")
+    print(f"  total model CPU:   {total_model_cpu_us/n/1e3:8.2f} ms")
+    print(f"  total model CUDA:  {total_model_cuda_us/n/1e3:8.2f} ms")
     if step_cuda_us > 0:
         print(
             f"  model share of CUDA time: "
-            f"{100 * model_cuda_us / step_cuda_us:.1f}%"
+            f"{100 * total_model_cuda_us / step_cuda_us:.1f}%"
         )
     if step_cpu_us > 0:
         print(
             f"  model share of CPU time:  "
-            f"{100 * model_cpu_us / step_cpu_us:.1f}%"
+            f"{100 * total_model_cpu_us / step_cpu_us:.1f}%"
         )
 
 
