@@ -27,6 +27,12 @@ curriculum:
     from: S_river
     chance: single_card
     num_steps: ${num_steps}
+    train_overrides:
+      learning_rate: 0.08
+      learning_rate_final: 0.008
+      lr_schedule: linear
+      adamw_learning_rate: 0.08
+      batch_size: 1024
   turn:
     kind: train
     net: S_turn

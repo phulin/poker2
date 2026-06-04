@@ -6,7 +6,7 @@ from p2.core.action_schedule import (
     legal_action_masks_by_depth,
     make_action_schedule,
 )
-from p2.core.structured_config import Config
+from p2.core.structured_config import CFRType, Config
 from p2.env.card_utils import NUM_HANDS, combo_to_onehot_tensor
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
@@ -70,7 +70,36 @@ class SparseCFREvaluator(CFREvaluator):
         )
         self.warm_start_type = cfg.search.warm_start_type
         self.warm_start_multiplier = cfg.search.warm_start_multiplier
+        self.warm_start_regret_multiplier = (
+            cfg.search.warm_start_regret_multiplier
+            if cfg.search.warm_start_regret_multiplier is not None
+            else cfg.search.warm_start_multiplier
+        )
+        exact_sparse = type(self) is SparseCFREvaluator
+        self._warm_start_policy_prior = None
+        self._warm_start_prior_tau = None
+        self._warm_start_prior_start_t = 0
+        self._warm_start_prior_horizon = 0
+        self._warm_start_regrets = None
+        self._warm_start_regret_decay = (
+            cfg.search.warm_start_regret_decay if exact_sparse else "none"
+        )
+        self._warm_start_regret_decay_horizon = cfg.search.warm_start_regret_decay_horizon
+        self._warm_start_regret_decay_floor = cfg.search.warm_start_regret_decay_floor
+        self._warm_start_regret_start_t = 0
+        self._warm_start_ftrl_enabled = exact_sparse
+        self._warm_start_ftrl_mode = cfg.search.warm_start_ftrl_mode
+        self._warm_start_ftrl_tau_scale = cfg.search.warm_start_ftrl_tau_scale
+        self._warm_start_ftrl_horizon = cfg.search.warm_start_ftrl_horizon
+        self._warm_start_ftrl_floor = cfg.search.warm_start_ftrl_floor
         self.cfr_type = cfg.search.cfr_type
+        self.sapcfr_alpha = cfg.search.sapcfr_alpha
+        self.predictive_cfr_delay = cfg.search.predictive_cfr_delay
+        self._predictive_cfr_dcfr_hybrid = cfg.search.predictive_cfr_dcfr_hybrid
+        self._predictive_cfr_enabled = exact_sparse and self.cfr_type in (
+            CFRType.pcfr,
+            CFRType.sapcfr,
+        )
         self.cfr_avg = cfg.search.cfr_avg
         self.cfr_plus = cfg.search.cfr_plus
         self.dcfr_alpha = cfg.search.dcfr_alpha
@@ -335,6 +364,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.average_policy_initialized = False
         self.policy_probs_sample = torch.zeros_like(self.policy_probs)
         self.cumulative_regrets = torch.zeros_like(self.policy_probs)
+        self._last_instantaneous_regrets = torch.zeros_like(self.policy_probs)
 
         # `parent_index[root_nodes:]` is already the child-to-parent expansion
         # needed here; using it avoids another repeat_interleave during subgame

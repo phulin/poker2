@@ -13,7 +13,7 @@ Current implementation policy: progression is fixed-schedule. Each configured su
 ### Model factoring: start-of-street and end-of-street nets per street
 Use **distinct networks per postflop street**, not one cumulative model conditioned on a street embedding. This is the DeepStack factoring and is what makes the backward curriculum clean. Per street `X` there are two nets with different roles:
 
-- **Start-of-street net `S_X`** — post-chance (the street-`X` card(s) are dealt, betting about to begin). Predicts counterfactual values **and** policy. Used to resolve street `X` at play time and to value within-street depth-limited leaves during street-`X` CFR (normal ReBeL self-bootstrap on the net being trained).
+- **Start-of-street net `S_X`** — post-chance (the street-`X` card(s) are dealt, betting about to begin). Predicts counterfactual values **and** policy. Used to resolve street `X` at play time and to train from CFR backups at street roots/interior betting states. In the current postflop curriculum, `S_turn` and `S_flop` solve betting to an end-of-street cutoff, so their neural leaves are street-closing leaves rather than same-street `S_X` bootstraps.
 - **End-of-street net `E_X`** — pre-chance (street-`X` betting closed, the next card not yet dealt). Predicts the **chance-averaged** counterfactual value only (no policy). Used as the **terminal leaf value at street-`X`-closing nodes inside street-`X`'s CFR iterations**.
 
 Distillation chain (backward):
@@ -31,7 +31,7 @@ Properties:
 
 Costs / caveats:
 
-- Non-fused sparse CFR supports the `(S_X, E_X)` pair with leaf routing by phase (within-street → `S_X`, street-closing → `E_X`). Fused sparse CFR still rejects closing-leaf checkpoints until fused parity is implemented.
+- Sparse and fused CFR both support postflop closing-leaf training by configuring `search.model_scope=end_of_street`: construction validates that all neural leaves are street-closing leaves, and the evaluator reads the frozen `E_X` at those leaves. `search.model_scope=single_street` is reserved for a model such as `S_preflop` that intentionally evaluates both mid-betting and end-of-betting leaves itself; `mixed_street` is the neutral mode that simply evaluates the configured current model on all neural leaves.
 - Boundary approximation compounds: `S_{X+1}` error → distilled into `E_X` → consumed by `S_X` training. Keep exact terminals mixed in and validate `E_X` against fresh chance-enumerated `S_{X+1}` values on a holdout.
 - Cross-street weight sharing is given up; transfer flows through `E_X` targets instead.
 
@@ -399,7 +399,7 @@ Build the turn-closing terminal-value net so turn CFR never enumerates the river
 Output: `E_turn`, frozen, consumed as turn-closing leaf values in Stage 2.
 
 ### Stage 2: Turn (`S_turn`)
-Train `S_turn` live. Turn-closing leaves are valued by the frozen `E_turn` (one eval per leaf); within-turn depth-limited leaves are valued by `S_turn` itself (normal ReBeL bootstrap). No chance enumeration happens inside the CFR loop.
+Train `S_turn` live. The turn search is configured to solve betting to an end-of-street cutoff, so every non-terminal neural leaf is turn-closing and is valued by the frozen `E_turn` (one eval per leaf). No chance enumeration happens inside the CFR loop.
 
 Data generation (live by default):
 
@@ -442,7 +442,7 @@ Same pattern as Stage 1.5, one street earlier:
 Output: `E_flop`, frozen, consumed as flop-closing leaf values in Stage 3.
 
 ### Stage 3: Flop (`S_flop`)
-Train `S_flop` live. Flop-closing leaves are valued by the frozen `E_flop` (one eval per leaf); within-flop depth-limited leaves are valued by `S_flop` itself. The turn card at the flop boundary is a single-card chance node already amortized into `E_flop`, so flop CFR does no chance enumeration in its inner loop.
+Train `S_flop` live. The flop search is configured to solve betting to an end-of-street cutoff, so every non-terminal neural leaf is flop-closing and is valued by the frozen `E_flop` (one eval per leaf). The turn card at the flop boundary is a single-card chance node already amortized into `E_flop`, so flop CFR does no chance enumeration in its inner loop.
 
 Data generation (live by default):
 
@@ -642,7 +642,7 @@ Start pregeneration with non-fused sparse CFR for correctness. Add fused sparse 
 ### Phase 6: Turn (distill `E_turn`, then train `S_turn`)
 1. Add the `E_X` distiller: sample end-of-street pre-chance PBS, build targets via `ChanceNodeHelper` over a frozen `S_{X+1}`, regress a value-only net.
 2. Distill `E_turn` from frozen `S_river` (single-card river enumeration).
-3. Train `S_turn` live: turn-closing leaves read frozen `E_turn`, within-turn depth leaves use `S_turn`; exact terminals where applicable.
+3. Train `S_turn` live: solve turn betting to end-of-street neural leaves, read frozen `E_turn` at those leaves, and use exact terminals where applicable.
 4. Record target provenance per row; promote `S_turn`.
 
 ### Phase 7: Flop (distill `E_flop`, then train `S_flop`) + `E_preflop`
@@ -683,7 +683,7 @@ Start pregeneration with non-fused sparse CFR for correctness. Add fused sparse 
 ### End-of-Street Distillation (`E_X`)
 - `E_X` targets match the chance expectation of frozen `S_{X+1}`: single-card enumeration covers all legal next cards; flop sampling draws `FLOP_SAMPLE_SIZE` distinct legal flops.
 - A trained `E_X` agrees with freshly enumerated `S_{X+1}` expectations on a holdout within tolerance.
-- During street-`X` CFR, closing-leaf values come from `E_X` only (no chance enumeration in the inner loop); within-street depth leaves come from `S_X`.
+- During postflop street-`X` CFR, configured solve-to-end neural leaves come from `E_X` only (no chance enumeration in the inner loop). Same-street neural leaf evaluation is reserved for scopes such as preflop `single_street`, where one model intentionally covers both middle- and end-of-betting leaves.
 - For bounded holdout/HP datasets, the manifest records the frozen `E_X` (and its `S_{X+1}` source); same-seed + same-net regeneration reproduces close numerical targets.
 
 ### Trainer / Loop Refactor

@@ -11,6 +11,7 @@ from p2.env.hunl_env import HUNLEnv
 from p2.env.types import GameState, PlayerState
 from p2.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
 from p2.models.cnn.cnn_embedding_data import CNNEmbeddingData
+from p2.core.structured_config import StreetValueHeads
 import p2.models.mlp.better_ffn as better_ffn_module
 from p2.models.mlp.better_features import (
     ChancePhase,
@@ -521,6 +522,59 @@ def test_better_street_value_auto_matches_phase_heads():
     assert auto is not None
     torch.testing.assert_close(auto[:1], pre)
     torch.testing.assert_close(auto[1:], post)
+
+
+def test_better_street_value_can_omit_unused_phase_head():
+    pre_only = BetterStreetValueFFN(
+        num_actions=1,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=2,
+        value_heads=StreetValueHeads.pre,
+    )
+    post_only = BetterStreetValueFFN(
+        num_actions=1,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=2,
+        value_heads=StreetValueHeads.post,
+    )
+
+    pre_keys = set(pre_only.state_dict())
+    post_keys = set(post_only.state_dict())
+
+    assert any(key.startswith("pre_value_head.") for key in pre_keys)
+    assert not any(key.startswith("post_value_head.") for key in pre_keys)
+    assert any(key.startswith("post_value_head.") for key in post_keys)
+    assert not any(key.startswith("pre_value_head.") for key in post_keys)
+
+    beliefs = torch.full((1, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32)
+    features = MLPFeatures(
+        context=torch.zeros(1, value_context_length(2)),
+        street=torch.zeros(1, dtype=torch.long),
+        to_act=torch.zeros(1, dtype=torch.long),
+        board=torch.full((1, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(1, -1),
+    )
+
+    assert pre_only(features, include_policy=False).hand_values.shape == (
+        1,
+        2,
+        NUM_HANDS,
+    )
+    assert post_only(features, include_policy=False).hand_values.shape == (
+        1,
+        2,
+        NUM_HANDS,
+    )
 
 
 def test_better_street_value_auto_uses_graph_safe_dispatch(monkeypatch):

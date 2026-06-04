@@ -354,11 +354,6 @@ class RebelCFRTrainer:
             eval_model = self._load_street_model_registry(
                 cfg.search.street_model_checkpoints
             )
-        if cfg.search.sparse_fused and cfg.search.closing_leaf_checkpoint is not None:
-            raise NotImplementedError(
-                "search.sparse_fused does not yet support closing_leaf_checkpoint; "
-                "use non-fused sparse CFR for S_turn/S_flop curriculum stages."
-            )
         closing_leaf_model = None
         if cfg.search.closing_leaf_checkpoint is not None:
             closing_leaf_model = self._load_closing_leaf_model(
@@ -615,7 +610,11 @@ class RebelCFRTrainer:
         )
         return BetterSplitFFN(
             policy_model=BetterPolicyFFN(num_actions=self.num_actions, **common),
-            value_model=BetterStreetValueFFN(num_actions=1, **common),
+            value_model=BetterStreetValueFFN(
+                num_actions=1,
+                value_heads=cfg.model.street_value_heads,
+                **common,
+            ),
         )
 
     def _make_eval_twin(self, compile_model: bool = True) -> nn.Module:
@@ -667,16 +666,30 @@ class RebelCFRTrainer:
         return self._load_frozen_eval_model(checkpoint_path)
 
     def _load_frozen_eval_model(self, checkpoint_path: str) -> nn.Module:
-        model = self._make_eval_twin(compile_model=False)
         checkpoint = torch.load(
             checkpoint_path, map_location=self.device, weights_only=False
         )
+        model_component = checkpoint.get("model_component")
+        checkpoint_config = checkpoint.get("config", {})
+        checkpoint_model_config = (
+            checkpoint_config.get("model", {})
+            if isinstance(checkpoint_config, dict)
+            else {}
+        )
+        checkpoint_value_heads = checkpoint_model_config.get("street_value_heads")
+        original_value_heads = getattr(self.cfg.model, "street_value_heads", None)
+        if checkpoint_value_heads is not None:
+            self.cfg.model.street_value_heads = checkpoint_value_heads
+        try:
+            model = self._make_eval_twin(compile_model=False)
+        finally:
+            if original_value_heads is not None:
+                self.cfg.model.street_value_heads = original_value_heads
         model_state = checkpoint["model"]
         model_state = {
             key: value.to(self.float_dtype) if value.dtype.is_floating_point else value
             for key, value in model_state.items()
         }
-        model_component = checkpoint.get("model_component")
         if model_component == "value_model":
             model = getattr(model, "value_model", model)
         model.load_state_dict(model_state, strict=self.cfg.strict_model_loading)
@@ -2049,7 +2062,13 @@ class RebelCFRTrainer:
             "update_norm": update_norm.detach(),
         }
 
-    def train_value_batch(self, value_batch: RebelBatch, step: int) -> dict[str, Any]:
+    def train_value_batch(
+        self,
+        value_batch: RebelBatch,
+        step: int,
+        *,
+        sync_inference_model: bool = True,
+    ) -> dict[str, Any]:
         """Run one value-only supervised update for distillation workloads."""
 
         self._apply_schedules(step)
@@ -2118,7 +2137,8 @@ class RebelCFRTrainer:
 
         if self.ema_helper is not None:
             self.ema_helper.update(self.model)
-        self._sync_inference_model()
+        if sync_inference_model:
+            self._sync_inference_model()
 
         current_lr = self.optimizer.param_groups[0]["lr"]
         update_norm = current_lr * grad_norm

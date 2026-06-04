@@ -949,6 +949,7 @@ def _make_metrics_callable(trainer: RebelCFRTrainer) -> Callable[[], Any]:
         _value_output_orig,
         _policy_output,
         value_loss_update,
+        value_weights_update,
         policy_loss_update,
         policy_kl_update,
         *_extra_supervise_outputs,
@@ -977,6 +978,7 @@ def _make_metrics_callable(trainer: RebelCFRTrainer) -> Callable[[], Any]:
             value_output=permuted_value_output,
             policy_output=None,
             value_loss_all=value_loss_update,
+            value_weights=value_weights_update,
             policy_loss_all=policy_loss_update,
             policy_target_model_kl_all=policy_kl_update,
             fresh_value_batch=None,
@@ -1021,6 +1023,8 @@ def run_microbenchmarks(
     )
 
     start_t = _prepare_evaluator_for_iter(trainer)
+    if args.micro_start_iter is not None:
+        start_t = max(start_t, int(args.micro_start_iter))
     t_box = {"t": start_t}
 
     def run_cfr_iter():
@@ -1202,6 +1206,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--active-steps", type=int, default=1)
     parser.add_argument("--micro-warmup", type=int, default=1)
     parser.add_argument("--micro-iters", type=int, default=3)
+    parser.add_argument(
+        "--micro-start-iter",
+        type=int,
+        default=None,
+        help="Start cfr_iteration microbenchmarks at this CFR iteration.",
+    )
     parser.add_argument("--micro-value-samples", type=int, default=1)
     parser.add_argument("--num-envs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)

@@ -28,6 +28,12 @@ curriculum:
     from: S_turn
     chance: single_card
     num_steps: ${num_steps}
+    train_overrides:
+      learning_rate: 0.08
+      learning_rate_final: 0.008
+      lr_schedule: linear
+      adamw_learning_rate: 0.08
+      batch_size: 1024
   flop:
     kind: train
     net: S_flop
@@ -41,3 +47,9 @@ curriculum:
     from: S_flop
     chance: sample_flops
     num_steps: ${num_steps}
+    train_overrides:
+      learning_rate: 0.08
+      learning_rate_final: 0.008
+      lr_schedule: linear
+      adamw_learning_rate: 0.08
+      batch_size: 1024

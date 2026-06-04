@@ -103,6 +103,8 @@ def test_rebel_curriculum_river_config_loads_from_yaml():
     assert cfg.curriculum.stages == ["river"]
     assert cfg.curriculum.substeps["river"].kind == "train"
     assert cfg.curriculum.substeps["river"].net == "S_river"
+    assert cfg.validation_set.enabled is False
+    assert cfg.validation_set.interval == 50
 
 
 def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
@@ -112,6 +114,13 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     flop_cfg = Config.from_dict_config(
         OmegaConf.load("conf/config_rebel_curriculum_flop.yaml")
     )
+    distill_train_overrides = {
+        "learning_rate": 0.08,
+        "learning_rate_final": 0.008,
+        "lr_schedule": "linear",
+        "adamw_learning_rate": 0.08,
+        "batch_size": 1024,
+    }
 
     assert turn_cfg.data.live_root_source == "random_turn"
     assert turn_cfg.data.include_pre_chance_value_batches is False
@@ -120,9 +129,14 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert turn_cfg.curriculum.substeps["distill_E_turn"].net == "E_turn"
     assert turn_cfg.curriculum.substeps["distill_E_turn"].from_net == "S_river"
     assert turn_cfg.curriculum.substeps["distill_E_turn"].chance == "single_card"
+    assert (
+        turn_cfg.curriculum.substeps["distill_E_turn"].train_overrides
+        == distill_train_overrides
+    )
     assert turn_cfg.curriculum.substeps["turn"].from_net == "S_river"
     assert turn_cfg.curriculum.substeps["turn"].closing_net == "E_turn"
     assert turn_cfg.curriculum.substeps["turn"].closing_checkpoint is None
+    assert turn_cfg.curriculum.substeps["turn"].train_overrides == {}
     assert flop_cfg.data.live_root_source == "random_flop"
     assert flop_cfg.data.include_pre_chance_value_batches is False
     assert flop_cfg.curriculum.stages == [
@@ -134,18 +148,34 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert flop_cfg.curriculum.substeps["distill_E_flop"].net == "E_flop"
     assert flop_cfg.curriculum.substeps["distill_E_flop"].from_net == "S_turn"
     assert flop_cfg.curriculum.substeps["distill_E_flop"].chance == "single_card"
+    assert (
+        flop_cfg.curriculum.substeps["distill_E_flop"].train_overrides
+        == distill_train_overrides
+    )
     assert flop_cfg.curriculum.substeps["flop"].from_net == "S_turn"
     assert flop_cfg.curriculum.substeps["flop"].closing_net == "E_flop"
     assert flop_cfg.curriculum.substeps["flop"].closing_checkpoint is None
+    assert flop_cfg.curriculum.substeps["flop"].train_overrides == {}
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].net == "E_preflop"
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].from_net == "S_flop"
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"
+    assert (
+        flop_cfg.curriculum.substeps["distill_E_preflop"].train_overrides
+        == distill_train_overrides
+    )
 
 
 def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
     cfg = Config.from_dict_config(
         OmegaConf.load("conf/config_rebel_curriculum_postflop.yaml")
     )
+    distill_train_overrides = {
+        "learning_rate": 0.08,
+        "learning_rate_final": 0.008,
+        "lr_schedule": "linear",
+        "adamw_learning_rate": 0.08,
+        "batch_size": 1024,
+    }
 
     assert cfg.data.mode == "live"
     assert cfg.data.include_pre_chance_value_batches is False
@@ -177,6 +207,21 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
     assert cfg.curriculum.substeps["flop"].closing_net == "E_flop"
     assert cfg.curriculum.substeps["flop"].from_net == "S_turn"
     assert cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"
+    assert cfg.curriculum.substeps["river"].train_overrides == {}
+    assert (
+        cfg.curriculum.substeps["distill_E_turn"].train_overrides
+        == distill_train_overrides
+    )
+    assert cfg.curriculum.substeps["turn"].train_overrides == {}
+    assert (
+        cfg.curriculum.substeps["distill_E_flop"].train_overrides
+        == distill_train_overrides
+    )
+    assert cfg.curriculum.substeps["flop"].train_overrides == {}
+    assert (
+        cfg.curriculum.substeps["distill_E_preflop"].train_overrides
+        == distill_train_overrides
+    )
 
 
 def test_rebel_postflop_hybrid_holdout_config_loads_from_yaml():

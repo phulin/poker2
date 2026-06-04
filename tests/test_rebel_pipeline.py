@@ -3,10 +3,12 @@ import torch
 
 from p2.core.structured_config import (
     Config,
+    ModelScope,
     ModelType,
     PregeneratedDatasetConfig,
     PolicyLossType,
     PolicyNodeWeighting,
+    StreetValueHeads,
     ValueHeadType,
 )
 from p2.env.card_utils import (
@@ -48,13 +50,33 @@ def test_value_samples_per_step_allows_fractional_reuse_goal():
         _value_samples_per_step(batch_size=512, value_reuse_goal=0.0)
 
 
-def test_rebel_cfr_trainer_rejects_fused_closing_leaf_checkpoint():
+def test_rebel_cfr_trainer_passes_closing_leaf_checkpoint_to_fused_evaluator(
+    tmp_path, monkeypatch
+):
+    from p2.search import fused_sparse_cfr_evaluator as fused_module
+    from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
+
+    class FakeFusedSparseCFREvaluator(SparseCFREvaluator):
+        pass
+
+    monkeypatch.setattr(
+        fused_module, "FusedSparseCFREvaluator", FakeFusedSparseCFREvaluator
+    )
+
+    checkpoint_path = tmp_path / "closing.pt"
+    source_cfg = _tiny_rebel_cfg()
+    source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
+    source_trainer.save_checkpoint(str(checkpoint_path), step=0, save_optimizer=False)
+
     cfg = _tiny_rebel_cfg()
     cfg.search.sparse_fused = True
-    cfg.search.closing_leaf_checkpoint = "outputs/E_turn.pt"
+    cfg.search.closing_leaf_checkpoint = str(checkpoint_path)
+    cfg.search.model_scope = ModelScope.end_of_street
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
 
-    with pytest.raises(NotImplementedError, match="closing_leaf_checkpoint"):
-        RebelCFRTrainer(cfg, torch.device("cpu"))
+    assert isinstance(trainer.cfr_evaluator, FakeFusedSparseCFREvaluator)
+    assert trainer.cfr_evaluator.closing_leaf_value_model is not None
+    assert trainer.cfr_evaluator.cfg.search.model_scope == ModelScope.end_of_street
 
 
 def test_rebel_cfr_trainer_loads_street_model_registry(tmp_path):
@@ -103,6 +125,29 @@ def test_rebel_cfr_trainer_saves_value_only_checkpoint(tmp_path):
 
     frozen = resumed._load_closing_leaf_model(str(path))
     assert not hasattr(frozen, "policy_model")
+
+
+def test_rebel_cfr_trainer_loads_pre_only_value_checkpoint(tmp_path):
+    source_cfg = _tiny_rebel_cfg()
+    source_cfg.model.name = ModelType.better_ffn
+    source_cfg.model.street_value_heads = StreetValueHeads.pre
+    source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
+    checkpoint_path = tmp_path / "E_turn.pt"
+    source_trainer.save_value_checkpoint(
+        checkpoint_path, step=7, save_optimizer=False
+    )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert any(key.startswith("pre_value_head.") for key in checkpoint["model"])
+    assert not any(key.startswith("post_value_head.") for key in checkpoint["model"])
+
+    cfg = _tiny_rebel_cfg()
+    cfg.model.name = ModelType.better_ffn
+    cfg.model.street_value_heads = StreetValueHeads.both
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    frozen = trainer._load_closing_leaf_model(str(checkpoint_path))
+
+    assert hasattr(frozen, "pre_value_head")
+    assert not hasattr(frozen, "post_value_head")
 
 
 def _tiny_rebel_cfg() -> Config:

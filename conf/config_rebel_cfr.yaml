@@ -82,6 +82,7 @@ model:
   board_interaction_dim: 64
   policy_rank: 96
   policy_hand_bias_rank: 24
+  street_value_heads: both
 
   shared_trunk: true # Keep policy gradients through shared input encoders.
   num_hidden_layers: 0
@@ -123,6 +124,9 @@ search:
   value_targets_from_final_policy: false
 
   cfr_type: discounted
+  sapcfr_alpha: 2.0
+  predictive_cfr_dcfr_hybrid: true
+  predictive_cfr_delay: -1
   cfr_avg: false
   cfr_plus: false
 
@@ -134,9 +138,8 @@ search:
   warm_start_iterations: 15
   warm_start_type: model_br
   # seed weight = warm_start_iterations * warm_start_multiplier. River sweeps
-  # (10 spots, geomean) show the model_br seed helps as a light nudge (~30) and
-  # hurts when heavy; the optimum is iteration-count-independent, so warm is
-  # held constant (not scaled with the iteration budget). 15 * 2 = seed≈30.
+  # (10 spots, final geomean at 1000 CFR iterations) show the intended
+  # 15 * 2 = 30 model_br seed beats lighter 10-iteration/15-iteration variants.
   warm_start_multiplier: 2
   dcfr_plus_delay: 80
 

@@ -144,6 +144,12 @@ def test_fused_sparse_graph_capture_regime_splits_dcfr_delay() -> None:
     assert ev._graph_capture_regime(2) == "post_dcfr_delay"
     assert ev._graph_capture_regime(5) == "post_dcfr_delay"
 
+    ev.cfr_type = CFRType.sapcfr
+    ev._predictive_cfr_dcfr_hybrid = True
+    assert ev._graph_capture_regime(2) == "pre_dcfr_delay"
+    assert ev._graph_capture_regime(5) == "pre_dcfr_delay"
+    assert ev._graph_capture_regime(6) == "post_dcfr_delay"
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("kernel_name", ["optimized", "legacy"])
@@ -834,6 +840,112 @@ def test_fused_parent_sum_divide_matches_pytorch() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_unblocked_regret_dcfr_update_predictive_matches_pytorch() -> None:
+    pytest.importorskip("triton")
+    from p2.env.card_utils import hand_combos_tensor
+    from p2.search.fused_cfr_triton import (
+        _preprocess_unblocked_stats_out,
+        fused_unblocked_regret_dcfr_update_with_tensors_,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(71)
+    top = 5
+    child_counts = torch.tensor([3, 0, 2, 4, 1], device=device, dtype=torch.long)
+    bottom = top
+    total = int(bottom + child_counts.sum().item())
+    h = 1326
+    child_offsets = bottom + torch.cumsum(child_counts, dim=0) - child_counts
+
+    target = torch.rand(top, h, device=device)
+    stats = torch.empty(top, 53, device=device)
+    _preprocess_unblocked_stats_out(target.contiguous(), stats)
+    allowed = torch.rand(top, h, device=device) > 0.1
+    values_achieved = torch.randn(total, 2, h, device=device)
+    values_expected = torch.randn(top, 2, h, device=device)
+    to_act = torch.randint(0, 2, (top,), dtype=torch.long, device=device)
+    prev_actor = torch.randint(0, 2, (total,), dtype=torch.long, device=device)
+    cumulative = torch.randn(total, h, device=device)
+    last = torch.randn_like(cumulative) * 0.1
+    t_alpha_num = torch.tensor(7.0**1.5, device=device)
+    t_beta_num = torch.tensor(7.0**0.5, device=device)
+    t_alpha_den = t_alpha_num + 1.0
+    t_beta_den = t_beta_num + 1.0
+    prediction_scale = torch.tensor(1.0 / 3.0, device=device)
+    current_player = torch.tensor(1, dtype=torch.long, device=device)
+
+    cumulative_ref = cumulative.clone()
+    last_ref = last.clone()
+    pos_ref = torch.empty_like(cumulative)
+    combos = hand_combos_tensor(device=device)
+    ca = combos[:, 0]
+    cb = combos[:, 1]
+    for p in range(top):
+        count = int(child_counts[p].item())
+        if count == 0:
+            continue
+        first = int(child_offsets[p].item())
+        total_mass = target[p].sum()
+        card_mass = torch.zeros(52, device=device)
+        card_mass.scatter_add_(0, ca, target[p])
+        card_mass.scatter_add_(0, cb, target[p])
+        src_w = (total_mass - card_mass[ca] - card_mass[cb] + target[p]).clamp_min(0.0)
+        src_w = torch.where(allowed[p], src_w, torch.zeros_like(src_w))
+        expected = values_expected[p, to_act[p]]
+        for child in range(first, first + count):
+            achieved = values_achieved[child, prev_actor[child]]
+            regret = src_w * (achieved - expected)
+            c = cumulative_ref[child]
+            scale = torch.where(c > 0, t_alpha_num, t_beta_num)
+            denom = torch.where(c > 0, t_alpha_den, t_beta_den)
+            c = c * scale
+            c = c / denom
+            c = c + regret
+            cumulative_ref[child] = c
+            if prev_actor[child] != current_player:
+                last_ref[child] = regret
+            pos_ref[child] = (c + prediction_scale * last_ref[child]).clamp_min(0.0)
+
+    cumulative_out = cumulative.clone()
+    last_out = last.clone()
+    pos_out = torch.empty_like(cumulative)
+    fused_unblocked_regret_dcfr_update_with_tensors_(
+        target=target.contiguous(),
+        stats=stats.contiguous(),
+        allowed_mask=allowed.contiguous(),
+        values_achieved=values_achieved.contiguous(),
+        values_expected=values_expected.contiguous(),
+        to_act=to_act.contiguous(),
+        child_offsets=child_offsets.contiguous(),
+        child_count=child_counts.contiguous(),
+        prev_actor=prev_actor.contiguous(),
+        cumulative_regrets=cumulative_out,
+        t_alpha_num=t_alpha_num,
+        t_beta_num=t_beta_num,
+        t_alpha_den=t_alpha_den,
+        t_beta_den=t_beta_den,
+        apply_dcfr=True,
+        cfr_plus=False,
+        max_children=4,
+        positive_regrets_out=pos_out,
+        last_instantaneous_regrets=last_out,
+        prediction_scale=prediction_scale,
+        current_player=current_player,
+    )
+
+    child_slice = slice(bottom, total)
+    torch.testing.assert_close(
+        cumulative_out[child_slice], cumulative_ref[child_slice], rtol=1e-4, atol=1e-5
+    )
+    torch.testing.assert_close(
+        last_out[child_slice], last_ref[child_slice], rtol=1e-4, atol=1e-5
+    )
+    torch.testing.assert_close(
+        pos_out[child_slice], pos_ref[child_slice], rtol=1e-4, atol=1e-5
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fused_policy_sample_update_matches_where() -> None:
     pytest.importorskip("triton")
     from p2.search.fused_cfr_triton import fused_policy_sample_update_
@@ -978,6 +1090,51 @@ def test_fused_sparse_evaluator_matches_baseline_across_iterations() -> None:
         torch.testing.assert_close(
             a, b, rtol=1e-3, atol=1e-4, msg=f"mismatch on {name}"
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_sparse_sapdcfr_runs_past_predictive_delay() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    ev = _build_evaluator()
+    ev.__class__ = FusedSparseCFREvaluator
+    ev._ensure_fused_attrs()
+    ev.cfr_type = CFRType.sapcfr
+    ev.sapcfr_alpha = 2.0
+    ev.predictive_cfr_delay = 2
+    ev._predictive_cfr_dcfr_hybrid = True
+    ev._predictive_cfr_enabled = True
+    ev.dcfr_delay = 3
+    ev.set_leaf_values = lambda t: None
+
+    for t in range(1, 6):
+        ev.cfr_iteration(t)
+    torch.cuda.synchronize()
+
+    assert ev._last_instantaneous_regrets is not None
+    assert torch.isfinite(ev.cumulative_regrets).all()
+    assert torch.isfinite(ev.policy_probs).all()
+    assert ev._last_instantaneous_regrets.abs().sum().item() > 0
+    assert ev._t_scalars.predictive_scale.item() == pytest.approx(1.0 / 3.0)
+
+    bottom = ev.depth_offsets[1]
+    top = ev.depth_offsets[-2]
+    for parent in range(top):
+        count = int(ev.child_count[parent].item())
+        if count == 0:
+            continue
+        first = int(ev.child_offsets[parent].item())
+        sibling_sum = ev.policy_probs[first : first + count].sum(dim=0)
+        active = sibling_sum > 0
+        if active.any():
+            torch.testing.assert_close(
+                sibling_sum[active],
+                torch.ones_like(sibling_sum[active]),
+                rtol=1e-4,
+                atol=1e-5,
+            )
+    assert bottom < ev.total_nodes
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

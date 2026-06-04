@@ -796,6 +796,9 @@ if triton is not None:
         prev_actor_ptr,  # [total]
         cumul_ptr,  # [total, H]
         pos_out_ptr,  # [total, H]
+        last_regrets_ptr,  # optional [total, H]
+        prediction_scale_ptr,
+        current_player_ptr,
         t_alpha_num_ptr,
         t_beta_num_ptr,
         t_alpha_den_ptr,
@@ -805,6 +808,7 @@ if triton is not None:
         APPLY_DCFR: tl.constexpr,
         CFR_PLUS: tl.constexpr,
         WRITE_POS: tl.constexpr,
+        HAS_PREDICTIVE: tl.constexpr,
         HAS_ALLOWED: tl.constexpr,
         MAX_CHILDREN: tl.constexpr,
         BLOCK_H: tl.constexpr,
@@ -853,6 +857,9 @@ if triton is not None:
             t_beta_num = tl.load(t_beta_num_ptr)
             t_alpha_den = tl.load(t_alpha_den_ptr)
             t_beta_den = tl.load(t_beta_den_ptr)
+        if HAS_PREDICTIVE:
+            prediction_scale = tl.load(prediction_scale_ptr)
+            current_player = tl.load(current_player_ptr)
 
         for i in tl.static_range(0, MAX_CHILDREN):
             if i < count:
@@ -880,7 +887,18 @@ if triton is not None:
 
                 tl.store(cumul_ptr + cumul_offs, c, mask=mask)
                 if WRITE_POS:
-                    tl.store(pos_out_ptr + cumul_offs, tl.maximum(c, 0.0), mask=mask)
+                    policy_c = c
+                    if HAS_PREDICTIVE:
+                        last = tl.load(
+                            last_regrets_ptr + cumul_offs,
+                            mask=mask,
+                            other=0.0,
+                        )
+                        observed = prev_actor != current_player
+                        last = tl.where(observed, r, last)
+                        tl.store(last_regrets_ptr + cumul_offs, last, mask=mask)
+                        policy_c = c + prediction_scale * last
+                    tl.store(pos_out_ptr + cumul_offs, tl.maximum(policy_c, 0.0), mask=mask)
 
 
 def fused_unblocked_regret_dcfr_update_with_tensors_(
@@ -902,6 +920,9 @@ def fused_unblocked_regret_dcfr_update_with_tensors_(
     cfr_plus: bool,
     max_children: int,
     positive_regrets_out: torch.Tensor | None = None,
+    last_instantaneous_regrets: torch.Tensor | None = None,
+    prediction_scale: torch.Tensor | None = None,
+    current_player: torch.Tensor | None = None,
     block_h: int = 512,
 ) -> None:
     """Finalize parent opponent reach and update child cumulative regrets.
@@ -940,6 +961,20 @@ def fused_unblocked_regret_dcfr_update_with_tensors_(
         mc_pow2 *= 2
     write_pos = positive_regrets_out is not None
     pos_ptr = positive_regrets_out if write_pos else cumulative_regrets
+    has_predictive = last_instantaneous_regrets is not None
+    if has_predictive:
+        assert last_instantaneous_regrets is not None
+        assert last_instantaneous_regrets.is_contiguous()
+        assert last_instantaneous_regrets.shape == cumulative_regrets.shape
+        assert prediction_scale is not None and prediction_scale.dim() == 0
+        assert current_player is not None and current_player.dim() == 0
+        last_ptr = last_instantaneous_regrets
+        pred_scale_ptr = prediction_scale
+        current_player_ptr = current_player
+    else:
+        last_ptr = cumulative_regrets
+        pred_scale_ptr = t_alpha_num
+        current_player_ptr = t_alpha_num
     card_a, card_b = _get_combo_cards(target.device)
     grid = (top, triton.cdiv(h, block_h))
     _fused_unblocked_regret_dcfr_update_kernel[grid](
@@ -956,6 +991,9 @@ def fused_unblocked_regret_dcfr_update_with_tensors_(
         prev_actor,
         cumulative_regrets,
         pos_ptr,
+        last_ptr,
+        pred_scale_ptr,
+        current_player_ptr,
         t_alpha_num,
         t_beta_num,
         t_alpha_den,
@@ -965,6 +1003,7 @@ def fused_unblocked_regret_dcfr_update_with_tensors_(
         APPLY_DCFR=apply_dcfr,
         CFR_PLUS=cfr_plus,
         WRITE_POS=write_pos,
+        HAS_PREDICTIVE=has_predictive,
         HAS_ALLOWED=allowed_mask is not None,
         MAX_CHILDREN=mc_pow2,
         BLOCK_H=block_h,
@@ -4162,6 +4201,9 @@ class TScalars:
         self.mix_new = _z()
         self.mix_total = _z()
         self.mix_inv_total = _z()
+        # Predictive CFR policy extraction.
+        self.predictive_scale = _z()
+        self.current_player = torch.zeros((), dtype=torch.long, device=device)
         # Model-values mix (for _set_model_values_impl): (old+new)/new and old/new
         self.mix_onon = _z()  # (old + new) / new
         self.mix_oon = _z()  # old / new
@@ -4175,6 +4217,8 @@ class TScalars:
         dcfr_beta: float,
         mix_old: float,
         mix_new: float,
+        predictive_scale: float = 0.0,
+        current_player: int = 0,
     ) -> None:
         """Write t-derived scalars into the device tensors.
 
@@ -4195,6 +4239,8 @@ class TScalars:
         if float(mix_new) != 0.0:
             self.mix_onon.fill_(total / float(mix_new))
             self.mix_oon.fill_(float(mix_old) / float(mix_new))
+        self.predictive_scale.fill_(float(predictive_scale))
+        self.current_player.fill_(int(current_player))
         self.t_tensor.fill_(int(t))
 
 

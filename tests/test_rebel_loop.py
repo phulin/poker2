@@ -53,6 +53,16 @@ class _FakeTrainer:
         return {"weight": 1.0}
 
 
+class _FakeRun:
+    id = "fake-run"
+
+    def __init__(self) -> None:
+        self.logged = []
+
+    def log(self, metrics: dict, step: int) -> None:
+        self.logged.append((dict(metrics), step))
+
+
 def test_run_training_loop_preserves_checkpoint_and_snapshot_flow(
     monkeypatch, tmp_path
 ) -> None:
@@ -154,3 +164,86 @@ def test_run_training_loop_can_skip_preflop_analyzer(monkeypatch, tmp_path) -> N
         str(tmp_path / "rebel_final.pt"),
     ]
     assert grid_calls == []
+
+
+def test_run_training_loop_logs_validation_set_metrics(monkeypatch, tmp_path) -> None:
+    validation_calls = []
+
+    class FakeValidationSetEvaluator:
+        def __init__(
+            self,
+            *,
+            trainer,
+            cfg,
+            dataset_path,
+            batch_size,
+            max_examples,
+        ) -> None:
+            validation_calls.append(
+                ("init", trainer, cfg, dataset_path, batch_size, max_examples)
+            )
+
+        def evaluate(self) -> dict:
+            validation_calls.append(("evaluate",))
+            return {
+                "validation_value_loss": 0.125,
+                "validation_examples": 16,
+                "validation_num_batches": 2,
+                "validation_batch_loss_mean": 0.125,
+                "validation_element_mean_weighted_square_error": 0.1,
+                "validation_dataset": "validation-data",
+            }
+
+    monkeypatch.setattr(
+        rebel_loop,
+        "RebelValueValidationSetEvaluator",
+        FakeValidationSetEvaluator,
+    )
+    monkeypatch.setattr(
+        rebel_loop,
+        "print_preflop_range_grid",
+        lambda *args, **kwargs: None,
+    )
+
+    trainer = _FakeTrainer()
+    run = _FakeRun()
+    validation_cfg = SimpleNamespace(
+        enabled=True,
+        dataset="validation-data",
+        interval=2,
+        batch_size=8,
+        max_examples=16,
+    )
+    cfg = SimpleNamespace(
+        use_wandb=True,
+        wandb_project="unused",
+        wandb_name=None,
+        checkpoint_dir=str(tmp_path),
+        checkpoint_interval=10,
+        economize_checkpoints=False,
+        validation_set=validation_cfg,
+    )
+
+    rebel_loop.run_training_loop(
+        trainer,
+        cfg,
+        run,
+        start_step=0,
+        stop_step=3,
+        print_preflop_analyzer=False,
+    )
+
+    assert validation_calls[0] == (
+        "init",
+        trainer,
+        cfg,
+        "validation-data",
+        8,
+        16,
+    )
+    assert validation_calls[1:] == [("evaluate",)]
+    assert [step for _, step in run.logged] == [0, 1, 2]
+    assert "validation_value_loss" not in run.logged[0][0]
+    assert run.logged[1][0]["validation_value_loss"] == 0.125
+    assert "validation_time_s" in run.logged[1][0]
+    assert "validation_value_loss" not in run.logged[2][0]

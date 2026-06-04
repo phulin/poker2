@@ -6,7 +6,7 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 
-from p2.core.structured_config import NonlinearityType
+from p2.core.structured_config import NonlinearityType, StreetValueHeads
 from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
 from p2.models.activation_utils import get_activation, SwiGLU
 from p2.models.base_mlp_model import BaseMLPModel
@@ -1015,10 +1015,19 @@ class BetterPolicyFFN(BetterFFN):
 class BetterStreetValueFFN(BetterFFN):
     """BetterFFN value path with deployed pre-chance and auxiliary post-chance heads."""
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        value_heads: str | StreetValueHeads = StreetValueHeads.both,
+        **kwargs,
+    ) -> None:
         if not args:
             kwargs.setdefault("num_actions", 1)
         super().__init__(*args, **kwargs)
+        value_heads = getattr(value_heads, "value", value_heads)
+        if value_heads not in ("both", "pre", "post"):
+            raise ValueError("value_heads must be one of: both, pre, post")
+        self.value_heads = str(value_heads)
 
         del self.policy_tower
         del self.policy_hand_proj
@@ -1030,9 +1039,22 @@ class BetterStreetValueFFN(BetterFFN):
         del self.policy_hand_bias_action
         del self.policy_hand_norm
 
-        self.pre_value_head = self.hand_value_head
+        base_value_head = self.hand_value_head
         del self.hand_value_head
 
+        if self.value_heads in ("both", "pre"):
+            self.pre_value_head = base_value_head
+        if self.value_heads == "post":
+            self.post_value_head = base_value_head
+        elif self.value_heads == "both":
+            self.post_value_head = self._make_value_head()
+
+        # Directly conditions per-player belief summaries before belief_proj.
+        self.belief_phase_shift = nn.Embedding(
+            5 * 2, self.num_players * self.hidden_dim
+        )
+
+    def _make_value_head(self) -> nn.Sequential:
         alpha = 1 / math.sqrt(self.num_hidden_layers + self.num_value_layers)
         layers = [
             ResidualBlock(
@@ -1046,12 +1068,7 @@ class BetterStreetValueFFN(BetterFFN):
             for _ in range(self.num_value_layers)
         ]
         layers.append(output_projection(self.hidden_dim, self.num_players * NUM_HANDS))
-        self.post_value_head = nn.Sequential(*layers)
-
-        # Directly conditions per-player belief summaries before belief_proj.
-        self.belief_phase_shift = nn.Embedding(
-            5 * 2, self.num_players * self.hidden_dim
-        )
+        return nn.Sequential(*layers)
 
     def _phase_key(self, features: MLPFeatures) -> torch.Tensor:
         phase = features.context[:, ValueScalarContext.CHANCE_PHASE.value]
@@ -1139,6 +1156,8 @@ class BetterStreetValueFFN(BetterFFN):
         static_base_features: torch.Tensor | None = None,
         apply_zero_sum: bool = True,
     ) -> torch.Tensor:
+        if not hasattr(self, "pre_value_head"):
+            raise RuntimeError("BetterStreetValueFFN was constructed without a pre head")
         return self._forward_value_head(
             features,
             self.pre_value_head,
@@ -1152,6 +1171,8 @@ class BetterStreetValueFFN(BetterFFN):
         static_base_features: torch.Tensor | None = None,
         apply_zero_sum: bool = True,
     ) -> torch.Tensor:
+        if not hasattr(self, "post_value_head"):
+            raise RuntimeError("BetterStreetValueFFN was constructed without a post head")
         return self._forward_value_head(
             features,
             self.post_value_head,
@@ -1186,6 +1207,20 @@ class BetterStreetValueFFN(BetterFFN):
             return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
         if value_head != "auto":
             raise ValueError("value_head must be one of: auto, pre, post")
+        if self.value_heads == "pre":
+            hand_values = self.forward_pre(
+                features,
+                static_base_features=static_base_features,
+                apply_zero_sum=apply_zero_sum,
+            )
+            return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
+        if self.value_heads == "post":
+            hand_values = self.forward_post(
+                features,
+                static_base_features=static_base_features,
+                apply_zero_sum=apply_zero_sum,
+            )
+            return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
 
         phase = features.context[:, ValueScalarContext.CHANCE_PHASE.value]
         pre_mask = (phase >= 0.5).view(-1, 1, 1)

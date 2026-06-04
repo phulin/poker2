@@ -37,6 +37,7 @@ def build_end_of_street_value_batch(
     *,
     value_encoder: ValueFeatureEncoder,
     target_model: torch.nn.Module,
+    chance_helper: ChanceNodeHelper | None = None,
     chance: ChanceMode = "auto",
     float_dtype: torch.dtype | None = None,
     generator: torch.Generator | None = None,
@@ -67,13 +68,15 @@ def build_end_of_street_value_batch(
     dtype = float_dtype or pre_chance_beliefs.dtype
 
     target_model.eval()
-    helper = ChanceNodeHelper(
-        device=device,
-        float_dtype=dtype,
-        num_players=num_players,
-        model=target_model,
-        generator=generator,
-    )
+    helper = chance_helper
+    if helper is None:
+        helper = ChanceNodeHelper(
+            device=device,
+            float_dtype=dtype,
+            num_players=num_players,
+            model=target_model,
+            generator=generator,
+        )
 
     root_indices = torch.arange(batch_size, device=device, dtype=torch.long)
     post_features = value_encoder.encode(pbs.beliefs, pre_chance_node=False)

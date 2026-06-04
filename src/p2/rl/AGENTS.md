@@ -24,6 +24,7 @@ Reinforcement learning and ReBeL training support: PPO losses, replay buffers, o
 - `target_provenance.py`: Integer codes and names for value-target provenance recorded in ReBeL batch statistics.
 - `popart_normalizer.py`: PopArt normalization module.
 - `exponential_controller.py`: Generic exponential schedule/controller.
+- `validation_set.py`: Pregenerated solved-dataset value-loss evaluator used for periodic ReBeL validation during training and standalone checkpoint benchmarking.
 
 ### Subdirectories
 There are no child source directories.

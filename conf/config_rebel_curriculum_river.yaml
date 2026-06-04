@@ -14,6 +14,13 @@ data:
   live_root_source: random_river
   include_pre_chance_value_batches: false
 
+validation_set:
+  enabled: false
+  dataset: null
+  interval: 50
+  batch_size: 1024
+  max_examples: null
+
 curriculum:
   stages: [river]
   wandb_group: rebel_postflop_curriculum

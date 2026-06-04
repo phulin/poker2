@@ -22,6 +22,7 @@ rebel_pregenerate:
   max_generation_batches: null
   root_source: random_river
   storage_dtype: null
+  print_final_average_policy_exploitability: false
 
 search:
   sparse: true

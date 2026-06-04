@@ -9,6 +9,7 @@ import torch
 
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.rl.validation_set import RebelValueValidationSetEvaluator
 from p2.utils.training_utils import print_preflop_range_grid
 
 
@@ -123,12 +124,47 @@ def run_training_loop(
 
     training_start = time.time()
     last_completed_step = start_step - 1
+    validation_evaluator = None
+    validation_cfg = getattr(cfg, "validation_set", None)
+    if validation_cfg is not None and validation_cfg.enabled:
+        if validation_cfg.dataset is None:
+            raise ValueError("validation_set.dataset is required when validation is enabled")
+        if validation_cfg.interval <= 0:
+            raise ValueError("validation_set.interval must be positive")
+        validation_evaluator = RebelValueValidationSetEvaluator(
+            trainer=trainer,
+            cfg=cfg,
+            dataset_path=validation_cfg.dataset,
+            batch_size=validation_cfg.batch_size,
+            max_examples=validation_cfg.max_examples,
+        )
+        print(
+            "Validation set enabled: "
+            f"dataset={validation_cfg.dataset} "
+            f"interval={validation_cfg.interval} "
+            f"batch_size={validation_cfg.batch_size}"
+        )
 
     for step in range(start_step, stop_step):
         step_start = time.time()
         metrics = trainer.train_step(step)
         step_elapsed = time.time() - step_start
         total_elapsed = time.time() - training_start
+
+        if validation_evaluator is not None and (
+            (step + 1) % validation_cfg.interval == 0
+        ):
+            validation_start = time.time()
+            validation_metrics = validation_evaluator.evaluate()
+            validation_elapsed = time.time() - validation_start
+            validation_metrics["validation_time_s"] = validation_elapsed
+            metrics.update(validation_metrics)
+            print(
+                f"[Validation {step + 1:05d}/{stop_step}] "
+                f"value_loss={validation_metrics['validation_value_loss']:.8f} "
+                f"examples={validation_metrics['validation_examples']} "
+                f"time={validation_elapsed:.2f}s"
+            )
 
         print_rebel_training_stats(
             metrics, step, stop_step, step_elapsed, total_elapsed

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
 import torch
 
 from p2.cli import pregenerate_postflop_rebel as pregenerate_cli
@@ -42,6 +43,7 @@ def _batch(stream: str, start: int, count: int) -> RebelBatch:
 class _FakeGenerator:
     def __init__(self) -> None:
         self.calls = 0
+        self.evaluator = object()
 
     def generate_data(self, value_sample_count: int, **kwargs):
         self.calls += 1
@@ -213,6 +215,47 @@ def test_policy_generation_cap_tracks_value_policy_ratio():
         generation_batch_size=512,
     )
     assert value_only_cap == 0
+
+
+def test_pregenerate_postflop_rebel_prints_final_avg_exploitability(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(pregenerate_cli, "RebelCFRTrainer", _FakeTrainer)
+    monkeypatch.setattr(
+        pregenerate_cli,
+        "_code_version_metadata",
+        lambda: {"code_version": "abc123", "code_dirty": False},
+    )
+    monkeypatch.setattr(
+        pregenerate_cli,
+        "_final_average_policy_exploitability_mbbg",
+        lambda evaluator: torch.tensor([10.0, 40.0]),
+    )
+
+    cfg = Config(device="cpu", use_wandb=False)
+    cfg.data.mode = "live"
+    cfg.rebel_pregenerate.output_dir = str(tmp_path)
+    cfg.rebel_pregenerate.root_source = "random_river"
+    cfg.rebel_pregenerate.value_target_min = 2
+    cfg.rebel_pregenerate.policy_target_min = 2
+    cfg.rebel_pregenerate.generation_batch_size = 2
+    cfg.rebel_pregenerate.print_final_average_policy_exploitability = True
+
+    manifest = pregenerate_cli.pregenerate_postflop_rebel(cfg)
+
+    out = capsys.readouterr().out
+    assert "Final average-policy exploitability" in out
+    summary = manifest["quality"]["final_average_policy_exploitability_mbbg"]
+    assert summary["count"] == 2
+    assert summary["mean"] == 25.0
+    assert summary["geomean"] == pytest.approx(20.0)
+    assert summary["min"] == 10.0
+    assert summary["max"] == 40.0
+    disk_manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert (
+        disk_manifest["quality"]["final_average_policy_exploitability_mbbg"]
+        == summary
+    )
 
 
 def test_target_model_metadata_records_distilled_source_checkpoint(tmp_path):

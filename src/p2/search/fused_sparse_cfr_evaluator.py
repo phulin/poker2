@@ -184,6 +184,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         # Reused across update_policy calls to avoid reallocating the fan-out denom.
         self._fused_positive_regrets_buf: torch.Tensor | None = None
+        self._last_instantaneous_regrets: torch.Tensor | None = None
+        self._predictive_cfr_enabled = self.cfr_type in (
+            CFRType.pcfr,
+            CFRType.sapcfr,
+        )
         # Lazy cache of root_index[i] = root ancestor row for node i.
         self._root_index: torch.Tensor | None = None
         self._root_index_total: int = -1
@@ -442,6 +447,13 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._compile_kwargs = _compile_kwargs_from_env()
         if not hasattr(self, "_fused_positive_regrets_valid"):
             self._fused_positive_regrets_valid = False
+        if not hasattr(self, "_last_instantaneous_regrets"):
+            self._last_instantaneous_regrets = None
+        if not hasattr(self, "_predictive_cfr_enabled"):
+            self._predictive_cfr_enabled = self.cfr_type in (
+                CFRType.pcfr,
+                CFRType.sapcfr,
+            )
         if not hasattr(self, "_reach_scratch_a"):
             self._reach_scratch_a = None
         if not hasattr(self, "_reach_scratch_b"):
@@ -1157,6 +1169,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self.average_policy_initialized = False
             self.policy_probs_sample = torch.empty_like(self.policy_probs)
             self.cumulative_regrets = torch.empty_like(self.policy_probs)
+            self._last_instantaneous_regrets = torch.zeros_like(self.policy_probs)
             self.uniform_policy = torch.empty_like(self.policy_probs)
         with _init_profile_region("cfr_init_attempt_policy_init"):
             init_policy_tensors_triton_(
@@ -1402,6 +1415,25 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._fused_positive_regrets_buf = torch.empty_like(self.cumulative_regrets)
             self._fused_positive_regrets_valid = False
         return self._fused_positive_regrets_buf
+
+    def _ensure_last_instantaneous_regrets_buf(self) -> torch.Tensor:
+        last = getattr(self, "_last_instantaneous_regrets", None)
+        if last is None or last.shape != self.cumulative_regrets.shape:
+            self._last_instantaneous_regrets = torch.zeros_like(
+                self.cumulative_regrets
+            )
+        assert self._last_instantaneous_regrets is not None
+        return self._last_instantaneous_regrets
+
+    def _predictive_policy_scale_for_t(self, t: int) -> float:
+        if not getattr(self, "_predictive_cfr_enabled", False):
+            return 0.0
+        if not self._predictive_cfr_active(t):
+            return 0.0
+        return self._predictive_cfr_prediction_scale()
+
+    def _uses_dcfr_backbone(self) -> bool:
+        return self.cfr_type == CFRType.discounted or self._predictive_cfr_uses_dcfr()
 
     def _ensure_reach_scratch_buffers(self) -> tuple[torch.Tensor, torch.Tensor]:
         max_width = 1
@@ -1730,7 +1762,18 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         assert parent_index_bottom is not None
         positive_regrets = self._ensure_positive_regrets_buf()
         if not self._fused_positive_regrets_valid:
-            torch.clamp(self.cumulative_regrets, min=0.0, out=positive_regrets)
+            scale = self._predictive_policy_scale_for_t(t)
+            last_regrets = getattr(self, "_last_instantaneous_regrets", None)
+            if scale > 0.0 and last_regrets is not None:
+                torch.add(
+                    self.cumulative_regrets,
+                    last_regrets,
+                    alpha=scale,
+                    out=positive_regrets,
+                )
+                torch.clamp(positive_regrets, min=0.0, out=positive_regrets)
+            else:
+                torch.clamp(self.cumulative_regrets, min=0.0, out=positive_regrets)
         self._fused_positive_regrets_valid = False
 
         # Parent-aligned sum (no child broadcast), then a divide kernel that
@@ -1753,7 +1796,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
         if defer_avg_reach and defer_avg_policy:
             skip_avg_update = (
-                self.cfr_type == CFRType.discounted
+                self._uses_dcfr_backbone()
                 and self._average_accumulation_delayed(t)
             )
             write_average_policy = not skip_avg_update
@@ -2145,7 +2188,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         weight_override: float | None = None,
     ) -> None:
         defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
-        if self.cfr_type == CFRType.discounted and self._average_accumulation_delayed(
+        if self._uses_dcfr_backbone() and self._average_accumulation_delayed(
             t
         ):
             if defer_avg_policy:
@@ -2230,12 +2273,18 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     # Model value mixing: fused (old+new)*h - old*l / new.
     # ------------------------------------------------------------------
 
-    def _set_model_values_impl(self, t, beliefs, features):
+    def _eval_model_for_fused_writeback(
+        self,
+        value_model,
+        features: MLPFeatures,
+        *,
+        use_pre_head: bool,
+    ) -> tuple[torch.Tensor, bool]:
         from p2.models.mlp.better_trm import BetterTRM
 
         model_applied_zero_sum = False
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            model = getattr(self, "value_model", self.model)
+            model = value_model
             base_model = getattr(model, "_orig_mod", model)
             if isinstance(base_model, BetterTRM):
                 model_output = model(features, include_policy=False, latent=self.latent)
@@ -2281,13 +2330,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     include_policy=False,
                     apply_zero_sum=True,
                     static_base_features=self._static_model_base_features,
-                    value_head="pre" if self._uses_street_cutoff_schedule() else "auto",
+                    value_head="pre" if use_pre_head else "auto",
                 )
                 model_applied_zero_sum = bool(base_model.enforce_zero_sum)
             else:
-                if self._uses_street_cutoff_schedule() and hasattr(
-                    model, "forward_pre"
-                ):
+                if use_pre_head and hasattr(model, "forward_pre"):
                     hand_values = model.forward_pre(features).contiguous()
                     model_applied_zero_sum = bool(
                         getattr(base_model, "enforce_zero_sum", False)
@@ -2297,6 +2344,34 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     model_output = model(features, include_policy=False)
         if model_output is not None:
             hand_values = model_output.hand_values.contiguous()
+        return hand_values, model_applied_zero_sum
+
+    def _model_leaf_values_for_fused_writeback(
+        self, features: MLPFeatures
+    ) -> tuple[torch.Tensor, bool]:
+        value_model = getattr(self, "value_model", self.model)
+        closing_value_model = getattr(self, "closing_leaf_value_model", None)
+        scope = self._model_scope()
+        if scope in ("mixed_street", "single_street"):
+            return self._eval_model_for_fused_writeback(
+                value_model,
+                features,
+                use_pre_head=False,
+            )
+
+        if scope != "end_of_street":
+            raise ValueError(f"Unknown search.model_scope: {scope!r}")
+        return self._eval_model_for_fused_writeback(
+            closing_value_model or value_model,
+            features,
+            use_pre_head=False,
+        )
+
+    def _set_model_values_impl(self, t, beliefs, features):
+        self._ensure_fused_attrs()
+        hand_values, model_applied_zero_sum = (
+            self._model_leaf_values_for_fused_writeback(features)
+        )
 
         do_mix = (
             self.cfr_avg
@@ -2546,18 +2621,28 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 dcfr_beta=self.dcfr_beta,
                 mix_old=float(mix_old),
                 mix_new=float(mix_new),
+                predictive_scale=self._predictive_policy_scale_for_t(t),
+                current_player=t % self.num_players,
             )
 
         self._sample_compact_leaves_for_current_t()
 
-        if self.cfr_type == CFRType.linear:
+        if self.cfr_type == CFRType.linear or (
+            self.cfr_type in (CFRType.pcfr, CFRType.sapcfr)
+            and not self._predictive_cfr_uses_dcfr()
+        ):
             # Linear CFR not supported by the fused kernel; use parent path.
             regrets = self.compute_instantaneous_regrets(self.latest_values)
             regrets.masked_fill_(self.prev_actor[:, None] == t % self.num_players, 0.0)
             self.cumulative_regrets += regrets
         else:
-            apply_dcfr = self.cfr_type == CFRType.discounted
+            apply_dcfr = self._uses_dcfr_backbone()
             positive_regrets_out = self._ensure_positive_regrets_buf()
+            last_regrets = (
+                self._ensure_last_instantaneous_regrets_buf()
+                if getattr(self, "_predictive_cfr_enabled", False)
+                else None
+            )
             self._prepare_tree_slices()
             top = self._top
             to_act_top = self._to_act_top
@@ -2594,6 +2679,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 cfr_plus=self.cfr_plus,
                 max_children=self.num_actions,
                 positive_regrets_out=positive_regrets_out,
+                last_instantaneous_regrets=last_regrets,
+                prediction_scale=self._t_scalars.predictive_scale,
+                current_player=self._t_scalars.current_player,
             )
             self._fused_positive_regrets_valid = True
 
@@ -2724,13 +2812,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             dcfr_beta=self.dcfr_beta,
             mix_old=float(mix_old),
             mix_new=float(mix_new),
+            predictive_scale=self._predictive_policy_scale_for_t(t),
+            current_player=t % self.num_players,
         )
 
     def _graph_capture_regime(self, t: int) -> str | None:
         """Return the Python-branch regime that is safe to CUDA-graph replay."""
         if t < 2:
             return None
-        if self.cfr_type == CFRType.discounted and t <= self.dcfr_delay:
+        if self._uses_dcfr_backbone() and t <= self.dcfr_delay:
             return "pre_dcfr_delay"
         return "post_dcfr_delay"
 

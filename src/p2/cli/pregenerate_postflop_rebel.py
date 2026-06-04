@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import subprocess
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,75 @@ _ROOT_SOURCE_CODES = {
     "multiway_preflop_handoff_forced_fold": 11,
 }
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@dataclass
+class _ExploitabilityAccumulator:
+    count: int = 0
+    total: float = 0.0
+    log_total: float = 0.0
+    minimum: float = math.inf
+    maximum: float = -math.inf
+
+    def update(self, mbbg: torch.Tensor) -> None:
+        values = mbbg.detach().float()
+        if values.numel() == 0:
+            return
+        self.count += int(values.numel())
+        self.total += float(values.sum().item())
+        self.log_total += float(values.clamp_min(1e-6).log().sum().item())
+        self.minimum = min(self.minimum, float(values.min().item()))
+        self.maximum = max(self.maximum, float(values.max().item()))
+
+    def summary(self) -> dict[str, float | int | None]:
+        if self.count == 0:
+            return {
+                "count": 0,
+                "mean": None,
+                "geomean": None,
+                "min": None,
+                "max": None,
+            }
+        return {
+            "count": self.count,
+            "mean": self.total / self.count,
+            "geomean": math.exp(self.log_total / self.count),
+            "min": self.minimum,
+            "max": self.maximum,
+        }
+
+
+@torch.no_grad()
+def _final_average_policy_exploitability_mbbg(evaluator: object) -> torch.Tensor:
+    """Measure final average-policy local exploitability without changing targets."""
+
+    latest_values = evaluator.latest_values.clone()
+    values_avg = evaluator.values_avg.clone()
+    last_model_values = (
+        evaluator.last_model_values.clone()
+        if getattr(evaluator, "last_model_values", None) is not None
+        else None
+    )
+    if hasattr(evaluator, "_exploitability_cache_key"):
+        evaluator._exploitability_cache_key = None
+    if hasattr(evaluator, "_exploitability_cache"):
+        evaluator._exploitability_cache = None
+
+    try:
+        evaluator.update_average_values_final()
+        if hasattr(evaluator, "_exploitability_cache_key"):
+            evaluator._exploitability_cache_key = None
+        stats = evaluator._compute_exploitability()
+        mbbg = evaluator._local_exploitability_mbbg(stats.local_exploitability)
+        return mbbg.detach().float().cpu()
+    finally:
+        evaluator.latest_values = latest_values
+        evaluator.values_avg = values_avg
+        evaluator.last_model_values = last_model_values
+        if hasattr(evaluator, "_exploitability_cache_key"):
+            evaluator._exploitability_cache_key = None
+        if hasattr(evaluator, "_exploitability_cache"):
+            evaluator._exploitability_cache = None
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -176,6 +246,34 @@ def _feature_encoder_metadata(trainer: object) -> dict[str, dict[str, str | None
     }
 
 
+def _load_model_weights_for_pregeneration(
+    trainer: RebelCFRTrainer, checkpoint_path: str
+) -> None:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    model_state = checkpoint["model"]
+    save_dtype_str = checkpoint.get("save_dtype")
+    if save_dtype_str is not None and save_dtype_str != str(trainer.float_dtype):
+        model_state = {
+            key: (
+                value.to(trainer.float_dtype)
+                if value.dtype.is_floating_point
+                else value
+            )
+            for key, value in model_state.items()
+        }
+
+    if checkpoint.get("model_component") == "value_model":
+        value_model = getattr(trainer.model, "value_model", trainer.model)
+        value_model.load_state_dict(model_state, strict=trainer.cfg.strict_model_loading)
+    else:
+        trainer.model.load_state_dict(
+            model_state, strict=trainer.cfg.strict_model_loading
+        )
+    trainer.model.to(trainer.device)
+    trainer._sync_inference_model()
+    trainer.model.eval()
+
+
 def _trim_batch(batch: RebelBatch, target_remaining: int) -> RebelBatch:
     if len(batch) <= target_remaining:
         return batch
@@ -241,6 +339,9 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
     trainer = RebelCFRTrainer(cfg=cfg, device=device, pregeneration_only=True)
     if trainer.data_generator is None:
         raise RuntimeError("postflop pregeneration requires a live data generator")
+    if cfg.resume_from:
+        print(f"Loading model weights for pregeneration: {cfg.resume_from}")
+        _load_model_weights_for_pregeneration(trainer, cfg.resume_from)
 
     writer = RebelSolvedDatasetWriter(
         pregenerate_cfg.output_dir,
@@ -249,6 +350,11 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
     value_examples = 0
     policy_examples = 0
     generation_batches = 0
+    exploitability_accumulator = (
+        _ExploitabilityAccumulator()
+        if pregenerate_cfg.print_final_average_policy_exploitability
+        else None
+    )
 
     while (
         value_examples < pregenerate_cfg.value_target_min
@@ -273,6 +379,12 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
             max_return_policy_samples=max_policy_samples,
         )
         generation_batches += 1
+        if exploitability_accumulator is not None:
+            exploitability_accumulator.update(
+                _final_average_policy_exploitability_mbbg(
+                    trainer.data_generator.evaluator
+                )
+            )
         if value_batch is not None and value_examples < pregenerate_cfg.value_target_min:
             batch = _trim_batch(
                 value_batch,
@@ -307,6 +419,19 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
             "policy target minimum was not reached before max_generation_batches"
         )
 
+    quality = _quality_metadata(cfg)
+    if exploitability_accumulator is not None:
+        exploitability_summary = exploitability_accumulator.summary()
+        quality["final_average_policy_exploitability_mbbg"] = exploitability_summary
+        print(
+            "Final average-policy exploitability "
+            f"(mbb/g over {exploitability_summary['count']} generated roots): "
+            f"mean={exploitability_summary['mean']:.6g} "
+            f"geomean={exploitability_summary['geomean']:.6g} "
+            f"min={exploitability_summary['min']:.6g} "
+            f"max={exploitability_summary['max']:.6g}"
+        )
+
     manifest = writer.finalize(
         metadata={
             "stage": pregenerate_cfg.stage,
@@ -333,7 +458,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 **_code_version_metadata(),
             },
             "target_model": _target_model_metadata(cfg),
-            "quality": _quality_metadata(cfg),
+            "quality": quality,
             "model_config": asdict(cfg.model),
             "env_config": asdict(cfg.env),
             "search_config": asdict(cfg.search),

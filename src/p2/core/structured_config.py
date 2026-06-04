@@ -62,11 +62,25 @@ class CFRType(str, Enum):
     standard = "standard"
     linear = "linear"
     discounted = "discounted"
+    pcfr = "pcfr"
+    sapcfr = "sapcfr"
 
 
 class WarmStartType(str, Enum):
     model = "model"
     model_br = "model_br"
+
+
+class ModelScope(str, Enum):
+    mixed_street = "mixed_street"
+    single_street = "single_street"
+    end_of_street = "end_of_street"
+
+
+class StreetValueHeads(str, Enum):
+    both = "both"
+    pre = "pre"
+    post = "post"
 
 
 class NonlinearityType(str, Enum):
@@ -87,6 +101,8 @@ torch.serialization.add_safe_globals(PolicyLossType)
 torch.serialization.add_safe_globals(KLType)
 torch.serialization.add_safe_globals(CFRType)
 torch.serialization.add_safe_globals(WarmStartType)
+torch.serialization.add_safe_globals(ModelScope)
+torch.serialization.add_safe_globals(StreetValueHeads)
 torch.serialization.add_safe_globals(NonlinearityType)
 torch.serialization.add_safe_globals(PPOClipping)
 
@@ -252,6 +268,7 @@ class ModelConfig:
     policy_rank: int = 64
     policy_hand_bias_rank: int = 32
     value_rank: int = 128
+    street_value_heads: StreetValueHeads = StreetValueHeads.both
 
     # Better TRM parameters
     num_recursions: int = 6
@@ -302,6 +319,14 @@ class SearchConfig:
     warm_start_iterations: int = 15
     warm_start_type: WarmStartType = WarmStartType.model_br
     warm_start_multiplier: float = 1.0
+    warm_start_regret_multiplier: float | None = None
+    warm_start_regret_decay: str = "none"
+    warm_start_regret_decay_horizon: int = 0
+    warm_start_regret_decay_floor: float = 0.0
+    warm_start_ftrl_mode: str = "none"
+    warm_start_ftrl_tau_scale: float = 4.0
+    warm_start_ftrl_horizon: int = 0
+    warm_start_ftrl_floor: float = 0.05
     branching: int = 4
     belief_samples: int = 16
     sample_epsilon: float = 0.25
@@ -315,6 +340,9 @@ class SearchConfig:
     include_average_policy: bool = True
     cfr_type: CFRType = CFRType.linear
     cfr_plus: bool = True
+    sapcfr_alpha: float = 2.0
+    predictive_cfr_dcfr_hybrid: bool = True
+    predictive_cfr_delay: int = -1
     cfr_avg: bool = True
     sparse: bool = True
     sparse_fused: bool = False
@@ -322,6 +350,7 @@ class SearchConfig:
     allin_call_terminal_abstraction: bool = True
     preflop_allin_table_path: str | None = None
     closing_leaf_checkpoint: str | None = None
+    model_scope: ModelScope = ModelScope.mixed_street
     street_model_checkpoints: dict[str, str] = field(default_factory=dict)
     bet_bins_by_depth: list[list[float]] | None = None
     allin_by_depth: list[bool] | None = None
@@ -414,6 +443,7 @@ class CurriculumSubstepConfig:
     checkpoint: str | None = None
     output_dir: str | None = None
     data_overrides: dict[str, Any] = field(default_factory=dict)
+    train_overrides: dict[str, Any] = field(default_factory=dict)
     search_overrides: dict[str, Any] = field(default_factory=dict)
 
 
@@ -435,6 +465,16 @@ class RebelPregenerateConfig:
     max_generation_batches: int | None = None
     root_source: str | None = None
     storage_dtype: str | None = None
+    print_final_average_policy_exploitability: bool = False
+
+
+@dataclass
+class ValidationSetConfig:
+    enabled: bool = False
+    dataset: str | None = None
+    interval: int = 50
+    batch_size: int = 1024
+    max_examples: int | None = None
 
 
 @dataclass
@@ -479,6 +519,7 @@ class Config:
     rebel_pregenerate: RebelPregenerateConfig = field(
         default_factory=RebelPregenerateConfig
     )
+    validation_set: ValidationSetConfig = field(default_factory=ValidationSetConfig)
 
     def __post_init__(self):
         if self.wandb_tags is None:
@@ -561,6 +602,9 @@ class Config:
         container["curriculum"] = CurriculumConfig(**curriculum_clean)
         container["rebel_pregenerate"] = RebelPregenerateConfig(
             **container.get("rebel_pregenerate", {})
+        )
+        container["validation_set"] = ValidationSetConfig(
+            **container.get("validation_set", {})
         )
         return cls(**container)
 

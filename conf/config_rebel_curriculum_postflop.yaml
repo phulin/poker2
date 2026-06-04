@@ -39,6 +39,12 @@ curriculum:
     from: S_river
     chance: single_card
     num_steps: ${curriculum.distill_E_turn_steps}
+    train_overrides:
+      learning_rate: 0.08
+      learning_rate_final: 0.008
+      lr_schedule: linear
+      adamw_learning_rate: 0.08
+      batch_size: 1024
   turn:
     kind: train
     net: S_turn
@@ -54,6 +60,12 @@ curriculum:
     from: S_turn
     chance: single_card
     num_steps: ${curriculum.distill_E_flop_steps}
+    train_overrides:
+      learning_rate: 0.08
+      learning_rate_final: 0.008
+      lr_schedule: linear
+      adamw_learning_rate: 0.08
+      batch_size: 1024
   flop:
     kind: train
     net: S_flop
@@ -69,3 +81,9 @@ curriculum:
     from: S_flop
     chance: sample_flops
     num_steps: ${curriculum.distill_E_preflop_steps}
+    train_overrides:
+      learning_rate: 0.08
+      learning_rate_final: 0.008
+      lr_schedule: linear
+      adamw_learning_rate: 0.08
+      batch_size: 1024

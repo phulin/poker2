@@ -8,7 +8,12 @@ import pytest
 import torch
 
 from p2.cli import train_rebel_curriculum as curriculum_cli
-from p2.core.structured_config import Config, CurriculumSubstepConfig
+from p2.core.structured_config import (
+    Config,
+    CurriculumSubstepConfig,
+    ModelScope,
+    StreetValueHeads,
+)
 
 
 class _FakeTrainer:
@@ -29,6 +34,26 @@ def test_stage_wandb_name_only_uses_explicit_base_name() -> None:
 
     cfg.wandb_name = "postflop"
     assert curriculum_cli._stage_wandb_name(cfg, "river") == "postflop-river"
+
+
+def test_curriculum_distill_substep_uses_pre_only_value_head() -> None:
+    cfg = Config()
+    substep = CurriculumSubstepConfig(
+        kind="distill",
+        net="E_turn",
+        from_net="S_river",
+        num_steps=1,
+    )
+
+    stage_cfg = curriculum_cli._stage_config(
+        cfg,
+        "distill_E_turn",
+        substep,
+        resume_from=None,
+        promoted={},
+    )
+
+    assert stage_cfg.model.street_value_heads == StreetValueHeads.pre
 
 
 def test_curriculum_train_substeps_do_not_run_preflop_analyzer() -> None:
@@ -124,6 +149,7 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
             num_steps=3,
             closing_checkpoint="outputs/E_turn.pt",
             data_overrides={"live_root_source": "random_river"},
+            train_overrides={"batch_size": 77, "learning_rate": 0.08},
             search_overrides={"iterations": 17},
         )
     }
@@ -136,7 +162,10 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
     assert stage_cfg.num_steps == 3
     assert stage_cfg.checkpoint_dir == str(tmp_path / "river")
     assert stage_cfg.search.closing_leaf_checkpoint == "outputs/E_turn.pt"
+    assert stage_cfg.search.model_scope == ModelScope.end_of_street
     assert stage_cfg.data.live_root_source == "random_river"
+    assert stage_cfg.train.batch_size == 77
+    assert stage_cfg.train.learning_rate == 0.08
     assert stage_cfg.search.iterations == 17
     assert stage_cfg.trueskill.enabled is False
     assert kwargs["start_step"] == 0
@@ -410,6 +439,7 @@ def test_curriculum_train_resume_recovers_closing_checkpoint_from_metadata(
     assert len(calls) == 1
     stage_cfg, kwargs = calls[0]
     assert stage_cfg.search.closing_leaf_checkpoint == "outputs/E_turn.pt"
+    assert stage_cfg.search.model_scope == ModelScope.end_of_street
     assert kwargs["checkpoint_metadata"]["curriculum_closing_checkpoint"] == (
         "outputs/E_turn.pt"
     )
@@ -463,6 +493,23 @@ def test_curriculum_substep_rejects_unknown_overrides(tmp_path) -> None:
     }
 
     with pytest.raises(ValueError, match="Unknown river.data override"):
+        curriculum_cli._stage_config(
+            cfg,
+            "river",
+            cfg.curriculum.substeps["river"],
+            resume_from=None,
+        )
+
+    cfg.curriculum.substeps = {
+        "river": CurriculumSubstepConfig(
+            kind="train",
+            net="S_river",
+            num_steps=1,
+            train_overrides={"not_a_train_field": "x"},
+        )
+    }
+
+    with pytest.raises(ValueError, match="Unknown river.train override"):
         curriculum_cli._stage_config(
             cfg,
             "river",

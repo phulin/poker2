@@ -20,13 +20,19 @@ from p2.cli.train_rebel import (
     _init_wandb,
     _log_model_parameter_summary,
 )
-from p2.core.structured_config import Config, CurriculumSubstepConfig
+from p2.core.structured_config import (
+    Config,
+    CurriculumSubstepConfig,
+    ModelScope,
+    StreetValueHeads,
+)
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_loop import (
     cleanup_old_checkpoints,
     print_rebel_training_stats,
     run_training_loop,
 )
+from p2.search.chance_node_helper import ChanceNodeHelper
 from p2.search.end_of_street_distillation import build_end_of_street_value_batch
 from p2.search.postflop_spot_sampler import sample_end_of_street_chance_roots
 from p2.utils.profiling import install_triton_compile_logger_from_env
@@ -182,8 +188,13 @@ def _stage_config(
     stage_cfg.resume_from = resume_from
     stage_cfg.wandb_name = _stage_wandb_name(cfg, substep_name)
     stage_cfg.trueskill.enabled = False
+    if substep.kind == "distill":
+        stage_cfg.model.street_value_heads = StreetValueHeads.pre
     _apply_overrides(
         stage_cfg.data, substep.data_overrides, label=f"{substep_name}.data"
+    )
+    _apply_overrides(
+        stage_cfg.train, substep.train_overrides, label=f"{substep_name}.train"
     )
     _apply_overrides(
         stage_cfg.search, substep.search_overrides, label=f"{substep_name}.search"
@@ -192,6 +203,11 @@ def _stage_config(
     if closing_checkpoint is None and promoted is not None and substep.closing_net:
         closing_checkpoint = promoted.get(substep.closing_net)
     stage_cfg.search.closing_leaf_checkpoint = closing_checkpoint
+    if (
+        closing_checkpoint is not None
+        and "model_scope" not in substep.search_overrides
+    ):
+        stage_cfg.search.model_scope = ModelScope.end_of_street
     return stage_cfg
 
 
@@ -286,6 +302,8 @@ def _run_train_substep(
         closing_checkpoint = resume_metadata.get("curriculum_closing_checkpoint")
         if isinstance(closing_checkpoint, str) and closing_checkpoint:
             stage_cfg.search.closing_leaf_checkpoint = closing_checkpoint
+            if "model_scope" not in substep.search_overrides:
+                stage_cfg.search.model_scope = ModelScope.end_of_street
     os.makedirs(stage_cfg.checkpoint_dir, exist_ok=True)
     metadata = _checkpoint_metadata(substep_name, substep)
     if stage_cfg.search.closing_leaf_checkpoint is not None:
@@ -384,6 +402,13 @@ def _run_distill_substep(
 
         source_model = trainer._load_closing_leaf_model(source_checkpoint)
         value_model = _value_model(trainer.model)
+        chance_helper = ChanceNodeHelper(
+            device=device,
+            float_dtype=trainer.float_dtype,
+            num_players=trainer.num_players,
+            model=source_model,
+            generator=trainer.rng,
+        )
 
         loop_start = time.time()
         for step in range(start_step, stage_cfg.num_steps):
@@ -403,11 +428,14 @@ def _run_distill_substep(
                 sample,
                 value_encoder=value_encoder,
                 target_model=source_model,
+                chance_helper=chance_helper,
                 chance=chance,
                 float_dtype=trainer.float_dtype,
                 generator=trainer.rng,
             )
-            metrics = trainer.train_value_batch(batch, step)
+            metrics = trainer.train_value_batch(
+                batch, step, sync_inference_model=False
+            )
             step_elapsed = time.time() - step_start
             total_elapsed = time.time() - loop_start
             print_rebel_training_stats(

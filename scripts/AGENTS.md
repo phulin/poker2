@@ -9,7 +9,7 @@ Reusable profiling and benchmark scripts that are broader than a single repro bu
 - `bench_parent_expand.py`: Benchmarks parent expansion behavior.
 - `bench_breakdown.py`: Produces benchmark breakdowns for selected paths.
 - `bench_model_share.py`: Benchmarks model sharing or reuse behavior.
-- `bench_cfr_main_path.py`: Runs realistic ReBeL CFR train-step source profiling and component microbenchmarks with optional train_rebel pause/resume handling.
+- `bench_cfr_main_path.py`: Runs realistic ReBeL CFR train-step source profiling and component microbenchmarks with optional train_rebel pause/resume handling and configurable starting CFR iteration for post-delay kernel timing.
 - `bench_write_children_kernel.py`: Replays real fused-subgame child-writer inputs to compare legacy and optimized `write_children_same_street` Triton kernels with CUDA events.
 - `bench_cfr_init_spots.py`: Microbenchmarks fused sparse CFR subgame initialization and init-time tensor expansions from evenly balanced saved spots.
 - `bench_cfr_iterator_spots.py`: Profiles eager sparse/fused-sparse CFR iterator segments and isolated CFR components from evenly balanced saved spots across preflop/flop/turn/river roots.
@@ -17,9 +17,11 @@ Reusable profiling and benchmark scripts that are broader than a single repro bu
 - `run_rebel_hp_bandit.py`: Runs bounded pregenerated ReBeL hyperparameter trials with a simple UCB multi-armed-bandit allocation over architecture, LR, and schedule candidates.
 - `precompute_preflop_allin_table.py`: Streams preflop five-card boards to build a zstd-compressed int16 `[1326, 1326]` all-in matchup payoff table for preflop all-in-call terminal abstraction.
 - `probe_cfr_fp_precision.py`: Probes fp32 precision loss in fused sparse CFR average-policy/value updates from saved spots and checkpoints.
-- `river_cfr_exploitability_trajectory.py`: Samples random river roots, runs sparse/fused CFR, and logs per-spot exploitability trajectories for convergence diagnostics.
+- `river_cfr_exploitability_trajectory.py`: Samples random river roots, runs sparse/fused CFR, and logs per-spot exploitability trajectories for convergence diagnostics with warm-start, CFR-type, and delayed DCFR-hybrid PCFR/SAPCFR override flags.
 - `diagnose_river_convergence.py`: Compares train-path and eager river CFR evaluation details, including leaf composition and value-source diagnostics.
 - `independent_river_exploitability.py`: River CFR exploitability diagnostic harness; prints evaluator-consistent exact-final exploitability and a legacy from-scratch checker that is not authoritative for PBS terminal values.
+- `evaluate_rebel_value_loss.py`: Evaluates a promoted ReBeL checkpoint's value head on a solved dataset value stream and reports weighted supervised value loss.
+- `eturn_distill_mab_search.py`: Runs sequential W&B-enabled MAB-style E_turn distillation hyperparameter trials, including initial and follow-up presets, while recording planned/running experiments to YAML and results to JSONL.
 - `test_survey_runner.py`: Runs pytest files or node ids with per-invocation timeouts and records structured audit results.
 
 ### Subdirectories

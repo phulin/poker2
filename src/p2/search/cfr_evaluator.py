@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import warnings
 from abc import ABC
@@ -203,6 +204,20 @@ class CFREvaluator(ABC):
     profiler_enabled: bool
     profiler: any
     profiler_output_dir: str | None
+    _warm_start_policy_prior: torch.Tensor | None
+    _warm_start_prior_tau: torch.Tensor | None
+    _warm_start_prior_start_t: int
+    _warm_start_prior_horizon: int
+    _warm_start_regrets: torch.Tensor | None
+    _warm_start_regret_decay: str
+    _warm_start_regret_decay_horizon: int
+    _warm_start_regret_decay_floor: float
+    _warm_start_regret_start_t: int
+    _warm_start_ftrl_enabled: bool
+    _warm_start_ftrl_mode: str
+    _warm_start_ftrl_tau_scale: float
+    _warm_start_ftrl_horizon: int
+    _warm_start_ftrl_floor: float
 
     # ============================================================================
     # Abstract Methods (must be implemented by subclasses)
@@ -338,19 +353,28 @@ class CFREvaluator(ABC):
             and getattr(schedule, "bet_bins_by_depth", None) is not None
         )
 
+    def _model_scope(self) -> str:
+        search_cfg = getattr(getattr(self, "cfg", None), "search", None)
+        scope = getattr(search_cfg, "model_scope", "mixed_street")
+        return getattr(scope, "value", scope)
+
     def _validate_model_leaf_phases(self) -> None:
-        if not self._uses_street_cutoff_schedule() or self.model_indices.numel() == 0:
+        if self.model_indices.numel() == 0:
             return
+        scope = self._model_scope()
+        if scope in ("mixed_street", "single_street"):
+            return
+        if scope != "end_of_street":
+            raise ValueError(f"Unknown search.model_scope: {scope!r}")
         model_leaf_mask = self.leaf_mask & ~self.env.done
         allin_mask = getattr(self, "allin_call_mask", None)
         if allin_mask is not None and allin_mask.shape == model_leaf_mask.shape:
             model_leaf_mask &= ~allin_mask
-        same_street = model_leaf_mask & ~self.new_street_mask
-        if same_street.any():
+        invalid = model_leaf_mask & ~self.new_street_mask
+        if invalid.any():
             raise RuntimeError(
-                "Street-cutoff search produced same-street non-terminal model "
-                "leaves. Increase search.bet_bins_by_depth coverage or restrict "
-                "the final depth to actions that close the street."
+                f"search.model_scope={scope!r} requires all neural model leaves "
+                "to be end-of-street, but the search produced same-street leaves."
             )
 
     def _allin_abstraction_enabled(self) -> bool:
@@ -781,9 +805,12 @@ class CFREvaluator(ABC):
         """
         if self.cfr_type == CFRType.standard:
             return t, 1
-        elif self.cfr_type == CFRType.linear:
+        elif self.cfr_type == CFRType.linear or (
+            self.cfr_type in (CFRType.pcfr, CFRType.sapcfr)
+            and not self._predictive_cfr_uses_dcfr()
+        ):
             return t, 2
-        elif self.cfr_type == CFRType.discounted:
+        elif self.cfr_type == CFRType.discounted or self._predictive_cfr_uses_dcfr():
             new = self._get_average_policy_weight(t)
             if new == 0:
                 return 0.0, 0.0
@@ -796,7 +823,7 @@ class CFREvaluator(ABC):
 
     def _get_average_policy_weight(self, t: int) -> float:
         """Return the current-iteration weight for CFR average strategy."""
-        if self.cfr_type == CFRType.discounted:
+        if self.cfr_type == CFRType.discounted or self._predictive_cfr_uses_dcfr():
             if self._average_accumulation_delayed(t):
                 return 0.0
             progress = max(0.0, float(t - self.dcfr_delay)) / float(
@@ -807,7 +834,9 @@ class CFREvaluator(ABC):
         return float(new)
 
     def _average_accumulation_delayed(self, t: int) -> bool:
-        return self.cfr_type == CFRType.discounted and t <= self.dcfr_delay
+        return (
+            self.cfr_type == CFRType.discounted or self._predictive_cfr_uses_dcfr()
+        ) and t <= self.dcfr_delay
 
     def _average_accumulation_window(self) -> int:
         return max(1, self.cfr_iterations - self.dcfr_delay)
@@ -831,9 +860,12 @@ class CFREvaluator(ABC):
         t = iterations.to(device=self.device, dtype=torch.float32)
         if self.cfr_type == CFRType.standard:
             return torch.ones_like(t)
-        if self.cfr_type == CFRType.linear:
+        if self.cfr_type == CFRType.linear or (
+            self.cfr_type in (CFRType.pcfr, CFRType.sapcfr)
+            and not self._predictive_cfr_uses_dcfr()
+        ):
             return torch.full_like(t, 2.0)
-        if self.cfr_type == CFRType.discounted:
+        if self.cfr_type == CFRType.discounted or self._predictive_cfr_uses_dcfr():
             gamma = self._get_dcfr_gamma_tensor(iterations)
             progress = (t - float(self.dcfr_delay)).clamp(min=0.0) / float(
                 self._average_accumulation_window()
@@ -968,7 +1000,7 @@ class CFREvaluator(ABC):
 
     def _get_sampling_schedule(self) -> torch.Tensor:
         N = self.root_nodes
-        if self.cfr_type == CFRType.discounted:
+        if self.cfr_type == CFRType.discounted or self._predictive_cfr_uses_dcfr():
             sample_low = max(self.warm_start_iterations, self.dcfr_delay) + 1
         else:
             sample_low = self.warm_start_iterations + 1
@@ -1576,6 +1608,7 @@ class CFREvaluator(ABC):
             self.cumulative_regrets[bottom:] = (
                 self.policy_probs[bottom:] * weights[:, None]
             )
+            self._store_warm_start_policy_prior()
             self.update_policy(self.warm_start_iterations)
             return
 
@@ -1604,25 +1637,222 @@ class CFREvaluator(ABC):
         regrets = self.compute_instantaneous_regrets(
             values_achieved=values_br, values_expected=self.latest_values
         )
-        scale = float(self.warm_start_iterations) * float(self.warm_start_multiplier)
-        self.cumulative_regrets += scale * regrets
+        avg_scale = float(self.warm_start_iterations) * float(
+            self.warm_start_multiplier
+        )
+        regret_multiplier = getattr(
+            self, "warm_start_regret_multiplier", self.warm_start_multiplier
+        )
+        regret_scale = float(self.warm_start_iterations) * float(regret_multiplier)
+        if self._warm_start_regret_decay == "none":
+            self.cumulative_regrets += regret_scale * regrets
+            self._warm_start_regrets = None
+        else:
+            self._warm_start_regrets = (regret_scale * regrets).detach().clone()
+            self._warm_start_regret_start_t = int(self.warm_start_iterations)
 
         # Seed the average strategy with the model policy as if it had been
-        # played for `scale` iterations (paper App. "CFR Warm Start Algorithm":
+        # played for `avg_scale` iterations (paper App. "CFR Warm Start Algorithm":
         # "the average policy effectively assumes that the warm start policy was
         # played for the first [warm_start] iterations of CFR"). policy_probs and
         # self_reach still hold the model policy here, so accumulate it into the
         # average before regret matching overwrites the current strategy.
         per_iter_weight = self._get_average_policy_weight(self.warm_start_iterations)
         self.update_average_policy(
-            self.warm_start_iterations, weight_override=scale * per_iter_weight
+            self.warm_start_iterations, weight_override=avg_scale * per_iter_weight
         )
         self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
         self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
 
-        # Set the post-warm-start current strategy from the seeded regrets,
-        # without refolding it into the model-seeded average.
-        self._regret_match_current_policy()
+        # Keep the model policy as a prior for the current-policy extractor.
+        # The model_br regrets remain in cumulative_regrets, but the policy
+        # update is KL-regularized toward the model policy while regrets are
+        # still only a warm-start prior.
+        self._store_warm_start_policy_prior()
+        self._regret_match_current_policy(self.warm_start_iterations)
+
+    def _store_warm_start_policy_prior(self) -> None:
+        """Keep the warm-start policy as a KL/FTRL prior, when enabled."""
+        self._warm_start_policy_prior = None
+        self._warm_start_prior_tau = None
+        self._warm_start_prior_start_t = int(self.warm_start_iterations)
+        self._warm_start_prior_horizon = self._resolve_warm_start_horizon(
+            self._warm_start_ftrl_horizon
+        )
+        if (
+            not self._warm_start_ftrl_enabled
+            or self._warm_start_ftrl_mode == "none"
+            or self.warm_start_type != WarmStartType.model_br
+            or self.warm_start_iterations <= 0
+            or self.total_nodes <= self.depth_offsets[1]
+        ):
+            return
+        bottom = self.depth_offsets[1]
+        top = self.depth_offsets[-2]
+        self._warm_start_policy_prior = self.policy_probs[bottom:].detach().clone()
+
+        parent_regrets = self._pull_back(
+            self._effective_cumulative_regrets(self.warm_start_iterations)
+        )
+        action_ids = torch.arange(self.num_actions, device=self.device)
+        valid_actions = action_ids[None, :] < self.child_count[:top, None]
+        valid_actions = valid_actions[:, :, None]
+        high = parent_regrets.masked_fill(~valid_actions, -torch.inf).amax(dim=1)
+        low = parent_regrets.masked_fill(~valid_actions, torch.inf).amin(dim=1)
+        spread = high - low
+        spread = torch.where(torch.isfinite(spread), spread, torch.ones_like(spread))
+        self._warm_start_prior_tau = (
+            spread.clamp_min(1.0) * float(self._warm_start_ftrl_tau_scale)
+        ).detach()[:, None, :]
+
+    def _resolve_warm_start_horizon(self, configured: int) -> int:
+        if configured > 0:
+            return int(configured)
+        return max(
+            int(self.warm_start_iterations),
+            int(self.dcfr_delay) - int(self.warm_start_iterations),
+        )
+
+    def _warm_start_decay_factor(
+        self, t: int | None, *, mode: str, start_t: int, horizon: int, floor: float
+    ) -> float:
+        if t is None or mode == "none":
+            return 0.0
+        elapsed = int(t) - int(start_t)
+        if elapsed < 0:
+            return 1.0
+        horizon = max(1, int(horizon))
+        if mode == "constant":
+            return 1.0
+        if mode == "linear":
+            if elapsed >= horizon:
+                return float(floor)
+            progress = float(elapsed) / float(horizon)
+            return float(floor) + (1.0 - float(floor)) * (1.0 - progress)
+        if mode == "exp":
+            progress = float(elapsed) / float(horizon)
+            return float(floor) + (1.0 - float(floor)) * math.exp(-progress)
+        raise ValueError(f"Unsupported warm-start decay mode: {mode}")
+
+    def _warm_start_regret_factor(self, t: int | None) -> float:
+        return self._warm_start_decay_factor(
+            t,
+            mode=self._warm_start_regret_decay,
+            start_t=self._warm_start_regret_start_t,
+            horizon=self._resolve_warm_start_horizon(
+                self._warm_start_regret_decay_horizon
+            ),
+            floor=self._warm_start_regret_decay_floor,
+        )
+
+    def _effective_cumulative_regrets(self, t: int | None) -> torch.Tensor:
+        warm_regrets = self._warm_start_regrets
+        if warm_regrets is None:
+            return self.cumulative_regrets
+        factor = self._warm_start_regret_factor(t)
+        if factor <= 0.0:
+            return self.cumulative_regrets
+        return self.cumulative_regrets + factor * warm_regrets
+
+    def _predictive_cfr_prediction_scale(self) -> float:
+        if self.cfr_type == CFRType.pcfr:
+            return 1.0
+        if self.cfr_type == CFRType.sapcfr:
+            alpha = float(getattr(self, "sapcfr_alpha", 2.0))
+            return 1.0 / (1.0 + max(0.0, alpha))
+        return 0.0
+
+    def _predictive_cfr_uses_dcfr(self) -> bool:
+        return bool(
+            getattr(self, "_predictive_cfr_dcfr_hybrid", False)
+            and self.cfr_type in (CFRType.pcfr, CFRType.sapcfr)
+        )
+
+    def _predictive_cfr_delay_threshold(self) -> int:
+        delay = int(getattr(self, "predictive_cfr_delay", -1))
+        if delay < 0:
+            return int(self.dcfr_delay)
+        return delay
+
+    def _predictive_cfr_active(self, t: int | None) -> bool:
+        return (
+            t is not None
+            and getattr(self, "_predictive_cfr_enabled", False)
+            and int(t) > self._predictive_cfr_delay_threshold()
+        )
+
+    def _current_policy_regrets(self, t: int | None) -> torch.Tensor:
+        regrets = self._effective_cumulative_regrets(t)
+        if not self._predictive_cfr_active(t):
+            return regrets
+
+        last_regrets = getattr(self, "_last_instantaneous_regrets", None)
+        if last_regrets is None or last_regrets.shape != regrets.shape:
+            return regrets
+
+        scale = self._predictive_cfr_prediction_scale()
+        if scale <= 0.0:
+            return regrets
+        return regrets + scale * last_regrets
+
+    def _update_predictive_cfr_observation(
+        self, regrets: torch.Tensor, t: int
+    ) -> None:
+        if not getattr(self, "_predictive_cfr_enabled", False):
+            return
+
+        last_regrets = getattr(self, "_last_instantaneous_regrets", None)
+        if last_regrets is None or last_regrets.shape != regrets.shape:
+            self._last_instantaneous_regrets = torch.zeros_like(regrets)
+            last_regrets = self._last_instantaneous_regrets
+
+        # Match the existing alternating-update convention used by linear CFR:
+        # only the player whose regrets are updated this iteration gets a fresh
+        # prediction for the next policy extraction.
+        observed = self.prev_actor[:, None] != (t % self.num_players)
+        torch.where(observed, regrets, last_regrets, out=last_regrets)
+
+    def _try_apply_warm_start_ftrl_policy(self, t: int | None) -> bool:
+        """Extract policy with a KL prior: pi ∝ pi_prior * exp(R / tau)."""
+        prior = self._warm_start_policy_prior
+        tau = self._warm_start_prior_tau
+        if prior is None or tau is None or t is None:
+            return False
+
+        tau_factor = self._warm_start_decay_factor(
+            t,
+            mode=self._warm_start_ftrl_mode,
+            start_t=self._warm_start_prior_start_t,
+            horizon=self._warm_start_prior_horizon,
+            floor=self._warm_start_ftrl_floor,
+        )
+        if tau_factor <= 0.0:
+            self._warm_start_policy_prior = None
+            self._warm_start_prior_tau = None
+            return False
+
+        bottom = self.depth_offsets[1]
+        top = self.depth_offsets[-2]
+        if prior.shape != self.policy_probs[bottom:].shape:
+            self._warm_start_policy_prior = None
+            self._warm_start_prior_tau = None
+            return False
+
+        prior_full = torch.zeros_like(self.policy_probs)
+        prior_full[bottom:] = prior
+        parent_prior = self._pull_back(prior_full)
+        parent_regrets = self._pull_back(self._effective_cumulative_regrets(t))
+
+        action_ids = torch.arange(self.num_actions, device=self.device)
+        valid_actions = action_ids[None, :] < self.child_count[:top, None]
+        logits = parent_prior.clamp_min(1e-8).log() + parent_regrets / (
+            tau * tau_factor
+        ).clamp_min(1e-6)
+        logits = logits.masked_fill(~valid_actions[:, :, None], -1e9)
+        parent_policy = torch.softmax(logits, dim=1)
+        self.policy_probs[bottom:] = self._push_down(parent_policy)
+        self._mask_invalid(self.policy_probs)
+        return True
 
     def _maybe_enforce_zero_sum(
         self,
@@ -1672,43 +1902,20 @@ class CFREvaluator(ABC):
     def _model_leaf_values(self, features: MLPFeatures) -> torch.Tensor:
         value_model = getattr(self, "value_model", self.model)
         closing_value_model = getattr(self, "closing_leaf_value_model", None)
-        if closing_value_model is None:
+        scope = self._model_scope()
+        if scope in ("mixed_street", "single_street"):
             return self._eval_value_model(
                 value_model,
                 features,
-                use_pre_head=(
-                    self._uses_street_cutoff_schedule()
-                    and hasattr(value_model, "forward_pre")
-                ),
+                use_pre_head=False,
             )
-
-        model_indices = self.model_indices
-        closing_mask = self.new_street_mask[model_indices]
-        hand_values = torch.empty(
-            len(features),
-            self.num_players,
-            NUM_HANDS,
-            device=features.context.device,
-            dtype=self.float_dtype,
+        if scope != "end_of_street":
+            raise ValueError(f"Unknown search.model_scope: {scope!r}")
+        return self._eval_value_model(
+            closing_value_model or value_model,
+            features,
+            use_pre_head=False,
         )
-        if (~closing_mask).any():
-            same_street_values = self._eval_value_model(
-                value_model,
-                features[~closing_mask],
-                use_pre_head=(
-                    self._uses_street_cutoff_schedule()
-                    and hasattr(value_model, "forward_pre")
-                ),
-            )
-            hand_values[~closing_mask] = same_street_values
-        if closing_mask.any():
-            closing_values = self._eval_value_model(
-                closing_value_model,
-                features[closing_mask],
-                use_pre_head=True,
-            )
-            hand_values[closing_mask] = closing_values
-        return hand_values
 
     def _set_model_values_impl(
         self, t: int, beliefs: torch.Tensor, features: MLPFeatures
@@ -1918,13 +2125,13 @@ class CFREvaluator(ABC):
     @profile
     def update_policy(self, t: int) -> None:
         """Update policy using regret matching."""
-        self._regret_match_current_policy()
+        self._regret_match_current_policy(t)
 
         self.update_average_policy(t)
         self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
         self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
 
-    def _regret_match_current_policy(self) -> None:
+    def _regret_match_current_policy(self, t: int | None = None) -> None:
         """Set the current strategy from cumulative regrets via regret matching
         and refresh the current-strategy reach weights and beliefs.
 
@@ -1932,8 +2139,13 @@ class CFREvaluator(ABC):
         average-strategy accumulators, so callers can update the average
         separately (e.g. to seed it with a warm-start policy).
         """
+        if self._try_apply_warm_start_ftrl_policy(t):
+            self._calculate_reach_weights(self.self_reach, self.policy_probs)
+            self._propagate_all_beliefs(self.beliefs, self.self_reach)
+            return
+
         bottom = self.depth_offsets[1]
-        positive_regrets = self.cumulative_regrets.clamp(min=0.0)
+        positive_regrets = self._current_policy_regrets(t).clamp(min=0.0)
         regret_sum = torch.zeros_like(self.policy_probs)
 
         self._pull_back_sum(positive_regrets, regret_sum)
@@ -1962,9 +2174,9 @@ class CFREvaluator(ABC):
         used to seed the average with the warm-start policy as if it had been
         played for several CFR iterations.
         """
-        if self.cfr_type == CFRType.discounted and self._average_accumulation_delayed(
-            t
-        ):
+        if (
+            self.cfr_type == CFRType.discounted or self._predictive_cfr_uses_dcfr()
+        ) and self._average_accumulation_delayed(t):
             self.policy_probs_avg[:] = self.policy_probs
             self.average_policy_initialized = False
             return
@@ -2111,9 +2323,12 @@ class CFREvaluator(ABC):
         # Compute regrets
         regrets = self.compute_instantaneous_regrets(self.latest_values)
 
-        if self.cfr_type == CFRType.linear:  # Alternate updates.
+        if self.cfr_type == CFRType.linear or (
+            self.cfr_type in (CFRType.pcfr, CFRType.sapcfr)
+            and not self._predictive_cfr_uses_dcfr()
+        ):  # Alternate updates.
             regrets.masked_fill_(self.prev_actor[:, None] == t % self.num_players, 0.0)
-        elif self.cfr_type == CFRType.discounted:
+        elif self.cfr_type == CFRType.discounted or self._predictive_cfr_uses_dcfr():
             numerator = torch.where(
                 self.cumulative_regrets > 0, t**self.dcfr_alpha, t**self.dcfr_beta
             )
@@ -2130,6 +2345,8 @@ class CFREvaluator(ABC):
         # CFR+ trick: clamp regrets to non-negative
         if self.cfr_plus:
             self.cumulative_regrets.clamp_(min=0)
+
+        self._update_predictive_cfr_observation(regrets, t)
 
         # Update policy. Only clone old_policy_probs on the iterations where
         # _record_stats actually inspects it (5 percentile iters per CFR run).

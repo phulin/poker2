@@ -301,13 +301,58 @@ def test_sparse_evaluator_initialization() -> None:
     assert evaluator.depth_offsets[0] == 0
 
 
-def test_model_leaf_values_route_new_street_leaves_to_closing_model() -> None:
+def test_model_leaf_values_use_closing_model_when_model_leaves_close_street() -> None:
     evaluator = object.__new__(SparseCFREvaluator)
     current_model = ConstantValueModel(1.0)
     closing_model = ConstantValueModel(2.0)
     evaluator.model = current_model
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
+    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="end_of_street"))
+    evaluator.float_dtype = torch.float32
+    evaluator.num_players = 2
+    evaluator.cfr_avg = False
+    evaluator.latest_values = torch.zeros(3, 2, NUM_HANDS)
+    evaluator.model_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+    evaluator.new_street_mask = torch.tensor([True, True, True])
+    evaluator.action_schedule = None
+    evaluator.last_model_values = None
+
+    features = MLPFeatures(
+        context=torch.arange(3, dtype=torch.float32).view(3, 1),
+        street=torch.zeros(3, dtype=torch.long),
+        to_act=torch.zeros(3, dtype=torch.long),
+        board=torch.full((3, 5), -1, dtype=torch.long),
+        beliefs=torch.zeros(3, 2 * NUM_HANDS),
+    )
+    beliefs = torch.zeros(3, 2, NUM_HANDS)
+
+    new_values, last_model_values = evaluator._set_model_values_impl(
+        0, beliefs, features
+    )
+
+    torch.testing.assert_close(new_values[0], torch.full((2, NUM_HANDS), 2.0))
+    torch.testing.assert_close(new_values[1], torch.full((2, NUM_HANDS), 2.0))
+    torch.testing.assert_close(new_values[2], torch.full((2, NUM_HANDS), 2.0))
+    torch.testing.assert_close(
+        last_model_values[:, 0, 0], torch.tensor([2.0, 2.0, 2.0])
+    )
+    assert len(current_model.call_contexts) == 0
+    assert len(current_model.forward_pre_contexts) == 0
+    torch.testing.assert_close(
+        closing_model.call_contexts[0].flatten(), torch.tensor([0.0, 1.0, 2.0])
+    )
+    assert len(closing_model.forward_pre_contexts) == 0
+
+
+def test_model_leaf_values_mixed_scope_uses_current_model_for_all_leaves() -> None:
+    evaluator = object.__new__(SparseCFREvaluator)
+    current_model = ConstantValueModel(1.0)
+    closing_model = ConstantValueModel(2.0)
+    evaluator.model = current_model
+    evaluator.value_model = current_model
+    evaluator.closing_leaf_value_model = closing_model
+    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="mixed_street"))
     evaluator.float_dtype = torch.float32
     evaluator.num_players = 2
     evaluator.cfr_avg = False
@@ -331,16 +376,58 @@ def test_model_leaf_values_route_new_street_leaves_to_closing_model() -> None:
     )
 
     torch.testing.assert_close(new_values[0], torch.ones(2, NUM_HANDS))
-    torch.testing.assert_close(new_values[1], torch.full((2, NUM_HANDS), 2.0))
+    torch.testing.assert_close(new_values[1], torch.ones(2, NUM_HANDS))
     torch.testing.assert_close(new_values[2], torch.ones(2, NUM_HANDS))
     torch.testing.assert_close(
-        last_model_values[:, 0, 0], torch.tensor([1.0, 2.0, 1.0])
+        last_model_values[:, 0, 0], torch.tensor([1.0, 1.0, 1.0])
     )
     torch.testing.assert_close(
-        current_model.call_contexts[0].flatten(), torch.tensor([0.0, 2.0])
+        current_model.call_contexts[0].flatten(), torch.tensor([0.0, 1.0, 2.0])
     )
+    assert len(closing_model.call_contexts) == 0
+    assert len(closing_model.forward_pre_contexts) == 0
+
+
+def test_fused_model_leaf_values_use_closing_model_when_model_leaves_close_street() -> None:
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    evaluator = object.__new__(FusedSparseCFREvaluator)
+    current_model = ConstantValueModel(1.0)
+    closing_model = ConstantValueModel(2.0)
+    evaluator.model = current_model
+    evaluator.value_model = current_model
+    evaluator.closing_leaf_value_model = closing_model
+    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="end_of_street"))
+    evaluator.float_dtype = torch.float32
+    evaluator.num_players = 2
+    evaluator.latest_values = torch.zeros(3, 2, NUM_HANDS)
+    evaluator.model_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+    evaluator.new_street_mask = torch.tensor([True, True, True])
+    evaluator.action_schedule = None
+
+    features = MLPFeatures(
+        context=torch.arange(3, dtype=torch.float32).view(3, 1),
+        street=torch.zeros(3, dtype=torch.long),
+        to_act=torch.zeros(3, dtype=torch.long),
+        board=torch.full((3, 5), -1, dtype=torch.long),
+        beliefs=torch.zeros(3, 2 * NUM_HANDS),
+    )
+
+    hand_values, model_applied_zero_sum = (
+        evaluator._model_leaf_values_for_fused_writeback(features)
+    )
+
+    torch.testing.assert_close(hand_values[0], torch.full((2, NUM_HANDS), 2.0))
+    torch.testing.assert_close(hand_values[1], torch.full((2, NUM_HANDS), 2.0))
+    torch.testing.assert_close(hand_values[2], torch.full((2, NUM_HANDS), 2.0))
+    assert not model_applied_zero_sum
+    assert len(current_model.call_contexts) == 0
+    assert len(current_model.forward_pre_contexts) == 0
+    assert len(closing_model.call_contexts) == 1
+    assert len(closing_model.forward_pre_contexts) == 0
     torch.testing.assert_close(
-        closing_model.forward_pre_contexts[0].flatten(), torch.tensor([1.0])
+        closing_model.call_contexts[0],
+        torch.tensor([[0.0], [1.0], [2.0]]),
     )
 
 
@@ -1206,9 +1293,10 @@ def test_street_cutoff_depth_five_expands_fold_call_only() -> None:
     assert evaluator.new_street_mask[model_leaf_mask].all()
 
 
-def test_street_cutoff_model_leaves_use_forward_pre() -> None:
+def test_street_cutoff_model_leaves_use_configured_end_model() -> None:
     device = get_device()
     cfg = make_street_cutoff_config()
+    cfg.search.model_scope = "end_of_street"
     env = make_env(1, device=device)
     env.default_bet_bins = cfg.env.bet_bins
     env.num_bet_bins = cfg.model.num_actions
@@ -1219,4 +1307,4 @@ def test_street_cutoff_model_leaves_use_forward_pre() -> None:
     evaluator.set_leaf_values(0)
 
     assert evaluator.model_indices.numel() > 0
-    assert model.forward_pre_calls == 1
+    assert model.forward_pre_calls == 0
