@@ -11,7 +11,7 @@ from p2.search.chance_node_helper import ChanceNodeHelper
 from p2.search.postflop_spot_sampler import ChanceRootSample
 
 
-ChanceMode = Literal["auto", "single_card", "sample_flops"]
+ChanceMode = Literal["auto", "single_card", "sample_flops", "canonical_flops"]
 
 
 class ValueFeatureEncoder(Protocol):
@@ -28,6 +28,14 @@ def _chance_mode_for_closed_street(closed_street: int) -> ChanceMode:
         return "sample_flops"
     if closed_street in (1, 2):
         return "single_card"
+    raise ValueError("closed_street must be one of [0, 1, 2]")
+
+
+def _allowed_chance_modes_for_closed_street(closed_street: int) -> set[str]:
+    if closed_street == 0:
+        return {"sample_flops", "canonical_flops"}
+    if closed_street in (1, 2):
+        return {"single_card"}
     raise ValueError("closed_street must be one of [0, 1, 2]")
 
 
@@ -53,9 +61,11 @@ def build_end_of_street_value_batch(
     inferred_chance = _chance_mode_for_closed_street(closed_street)
     if chance == "auto":
         chance = inferred_chance
-    if chance != inferred_chance:
+    allowed_chance_modes = _allowed_chance_modes_for_closed_street(closed_street)
+    if chance not in allowed_chance_modes:
         raise ValueError(
-            f"closed_street={closed_street} requires chance={inferred_chance!r}, "
+            f"closed_street={closed_street} requires chance in "
+            f"{sorted(allowed_chance_modes)!r}, "
             f"got {chance!r}"
         )
 
@@ -80,12 +90,14 @@ def build_end_of_street_value_batch(
 
     root_indices = torch.arange(batch_size, device=device, dtype=torch.long)
     post_features = value_encoder.encode(pbs.beliefs, pre_chance_node=False)
-    pre_features = value_encoder.encode(
-        pre_chance_beliefs, pre_chance_node=True
-    )
+    pre_features = value_encoder.encode(pre_chance_beliefs, pre_chance_node=True)
 
     if chance == "sample_flops":
         value_targets = helper.flop_chance_values(
+            root_indices, post_features, pre_chance_beliefs
+        )
+    elif chance == "canonical_flops":
+        value_targets = helper.canonical_flop_chance_values(
             root_indices, post_features, pre_chance_beliefs
         )
     else:

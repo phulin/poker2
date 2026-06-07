@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from itertools import permutations
+from itertools import combinations, permutations
 
 import torch
 
@@ -190,6 +190,44 @@ def suit_permutations_tensor(device: torch.device | None = None) -> torch.Tensor
     if device is not None:
         perms = perms.to(device)
     return perms
+
+
+def _canonical_suit_key(cards: tuple[int, ...]) -> tuple[int, ...]:
+    best: tuple[int, ...] | None = None
+    for perm in permutations(range(4)):
+        mapped = tuple(sorted(perm[card // 13] * 13 + card % 13 for card in cards))
+        if best is None or mapped < best:
+            best = mapped
+    if best is None:
+        raise ValueError("cards must be non-empty")
+    return best
+
+
+@lru_cache(maxsize=1)
+def _canonical_flops_with_weights_cpu() -> tuple[torch.Tensor, torch.Tensor]:
+    counts: dict[tuple[int, ...], int] = {}
+    for flop in combinations(range(52), 3):
+        key = _canonical_suit_key(flop)
+        counts[key] = counts.get(key, 0) + 1
+
+    flops = torch.tensor(tuple(sorted(counts)), dtype=torch.long)
+    weights = torch.tensor(
+        [counts[tuple(flop.tolist())] for flop in flops], dtype=torch.float32
+    )
+    if flops.shape != (1755, 3):
+        raise RuntimeError(f"Expected 1755 canonical flops, got {flops.shape[0]}")
+    return flops, weights
+
+
+def canonical_flops_with_weights(
+    device: torch.device | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return canonical flop representatives and raw-flop orbit weights."""
+    flops, weights = _canonical_flops_with_weights_cpu()
+    if device is not None:
+        flops = flops.to(device)
+        weights = weights.to(device)
+    return flops, weights
 
 
 @lru_cache(maxsize=2)

@@ -120,6 +120,8 @@ def _checkpoint_metadata(
         metadata["curriculum_closing_net"] = substep.closing_net
     if substep.chance is not None:
         metadata["curriculum_chance"] = substep.chance
+    if substep.flop_sample_size is not None:
+        metadata["curriculum_flop_sample_size"] = int(substep.flop_sample_size)
     return metadata
 
 
@@ -203,10 +205,7 @@ def _stage_config(
     if closing_checkpoint is None and promoted is not None and substep.closing_net:
         closing_checkpoint = promoted.get(substep.closing_net)
     stage_cfg.search.closing_leaf_checkpoint = closing_checkpoint
-    if (
-        closing_checkpoint is not None
-        and "model_scope" not in substep.search_overrides
-    ):
+    if closing_checkpoint is not None and "model_scope" not in substep.search_overrides:
         stage_cfg.search.model_scope = ModelScope.end_of_street
     return stage_cfg
 
@@ -485,6 +484,7 @@ def _run_distill_substep(
             num_players=trainer.num_players,
             model=source_model,
             generator=trainer.rng,
+            flop_sample_size=substep.flop_sample_size,
         )
 
         loop_start = time.time()
@@ -510,9 +510,7 @@ def _run_distill_substep(
                 float_dtype=trainer.float_dtype,
                 generator=trainer.rng,
             )
-            metrics = trainer.train_value_batch(
-                batch, step, sync_inference_model=False
-            )
+            metrics = trainer.train_value_batch(batch, step, sync_inference_model=False)
             step_elapsed = time.time() - step_start
             total_elapsed = time.time() - loop_start
             print_rebel_training_stats(

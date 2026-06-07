@@ -7,6 +7,7 @@ import torch
 from p2.env.card_utils import (
     NUM_HANDS,
     calculate_unblocked_mass,
+    canonical_flops_with_weights,
     combo_to_onehot_tensor,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
@@ -26,6 +27,8 @@ class ChanceNodeHelper:
     model: Any
     combo_onehot_float: torch.Tensor
     all_flops: torch.Tensor
+    canonical_flops: torch.Tensor
+    canonical_flop_weights: torch.Tensor
 
     def __init__(
         self,
@@ -34,15 +37,28 @@ class ChanceNodeHelper:
         num_players: int,
         model: Any,
         generator: torch.Generator | None = None,
+        flop_sample_size: int | None = None,
     ) -> None:
         self.device = device
         self.float_dtype = float_dtype
         self.num_players = num_players
         self.model = model
         self.generator = generator
+        self._flop_sample_size_override = (
+            None if flop_sample_size is None else int(flop_sample_size)
+        )
         self.combo_onehot_float = combo_to_onehot_tensor(device=device).float()
         cards = torch.arange(52, device=device, dtype=torch.long)
         self.all_flops = torch.combinations(cards, r=3, with_replacement=False)
+        self.canonical_flops, self.canonical_flop_weights = (
+            canonical_flops_with_weights(device=device)
+        )
+
+    @property
+    def flop_sample_size(self) -> int:
+        if self._flop_sample_size_override is not None:
+            return self._flop_sample_size_override
+        return int(self.FLOP_SAMPLE_SIZE)
 
     @torch.no_grad()
     def flop_chance_values(
@@ -52,7 +68,42 @@ class ChanceNodeHelper:
         pre_chance_beliefs: torch.Tensor,
     ) -> torch.Tensor:
         """Expected CFVs over three-card flop chance using raw flop samples."""
+        return self._flop_chance_values(
+            root_indices,
+            root_features,
+            pre_chance_beliefs,
+            flops=self.all_flops,
+            sample_size=self.flop_sample_size,
+        )
 
+    @torch.no_grad()
+    def canonical_flop_chance_values(
+        self,
+        root_indices: torch.Tensor,
+        root_features: MLPFeatures,
+        pre_chance_beliefs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Expected CFVs over weighted canonical flop representatives."""
+        return self._flop_chance_values(
+            root_indices,
+            root_features,
+            pre_chance_beliefs,
+            flops=self.canonical_flops,
+            flop_weights=self.canonical_flop_weights,
+            sample_size=0,
+        )
+
+    @torch.no_grad()
+    def _flop_chance_values(
+        self,
+        root_indices: torch.Tensor,
+        root_features: MLPFeatures,
+        pre_chance_beliefs: torch.Tensor,
+        *,
+        flops: torch.Tensor,
+        flop_weights: torch.Tensor | None = None,
+        sample_size: int = 0,
+    ) -> torch.Tensor:
         if root_indices.numel() == 0:
             return torch.zeros(
                 0,
@@ -64,6 +115,9 @@ class ChanceNodeHelper:
 
         dtype = self.float_dtype
         device = self.device
+        flops = flops.to(device=device)
+        if flop_weights is not None:
+            flop_weights = flop_weights.to(device=device, dtype=dtype)
         B = root_indices.numel()
 
         pre_beliefs = pre_chance_beliefs[root_indices].to(dtype=dtype)
@@ -77,8 +131,7 @@ class ChanceNodeHelper:
         weight_sum = torch.zeros_like(values_sum)
 
         model = self.model
-        all_flops = self.all_flops
-        num_flops = all_flops.shape[0]
+        num_flops = flops.shape[0]
         static_feature_prefix = getattr(model, "static_feature_prefix", None)
         static_feature_base_from_prefix = getattr(
             model, "static_feature_base_from_prefix", None
@@ -96,7 +149,10 @@ class ChanceNodeHelper:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 static_prefix_root = static_feature_prefix(context_root, street_root)
 
-        def eval_chunk(flop_chunk: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        def eval_chunk(
+            flop_chunk: torch.Tensor,
+            weight_chunk: torch.Tensor | None = None,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             chunk_len = flop_chunk.shape[0]
             board_chunk = torch.cat(
                 [
@@ -187,14 +243,19 @@ class ChanceNodeHelper:
             weights = weights * allowed_chunk.unsqueeze(0).unsqueeze(2).to(
                 dtype=weights.dtype
             )
+            if weight_chunk is not None:
+                weights = weights * weight_chunk.view(1, chunk_len, 1, 1)
             return hand_values * weights.to(dtype=dtype), weights.to(dtype=dtype)
 
-        S = self.FLOP_SAMPLE_SIZE
+        S = sample_size
         if S > 0 and S < num_flops:
             sample_idx = torch.randperm(
                 num_flops, device=device, generator=self.generator
             )[:S]
-            weighted_values, weights = eval_chunk(all_flops[sample_idx])
+            sampled_weights = None
+            if flop_weights is not None:
+                sampled_weights = flop_weights[sample_idx]
+            weighted_values, weights = eval_chunk(flops[sample_idx], sampled_weights)
             values_sum = weighted_values.sum(dim=1)
             weight_sum = weights.sum(dim=1)
             return torch.where(
@@ -206,7 +267,10 @@ class ChanceNodeHelper:
         chunk_size = self.FLOP_CHUNK_SIZE
         for start in range(0, num_flops, chunk_size):
             end = min(start + chunk_size, num_flops)
-            weighted_values, weights = eval_chunk(all_flops[start:end])
+            weight_chunk = None
+            if flop_weights is not None:
+                weight_chunk = flop_weights[start:end]
+            weighted_values, weights = eval_chunk(flops[start:end], weight_chunk)
             values_sum += weighted_values.sum(dim=1)
             weight_sum += weights.sum(dim=1)
 

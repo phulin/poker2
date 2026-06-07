@@ -12,7 +12,7 @@ Heads-up no-limit Texas Hold 'Em environment logic, tensorized simulation, hand 
 - `env_gather_triton.py`: Triton row-gather kernels for CUDA environment expansion.
 - `rules.py`: PyTorch hand-ranking and comparison utilities.
 - `rules_triton.py`: Triton-accelerated hand-ranking wrappers, including fused board+combo score generation, and fallbacks.
-- `card_utils.py`: 1326-combo lookup, board masks, suit permutations, blockers, and unblocked-mass helpers.
+- `card_utils.py`: 1326-combo lookup, board masks, suit permutations, canonical flop representatives with orbit weights, blockers, and unblocked-mass helpers.
 - `aggression_analyzer.py`: Preflop hand-group mapping and aggression analysis.
 - `analyze_tensor_env.py`: Preflop and ReBeL analyzers for tensor environments and model-backed policies.
 

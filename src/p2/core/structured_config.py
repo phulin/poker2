@@ -441,6 +441,7 @@ class CurriculumSubstepConfig:
     closing_checkpoint: str | None = None
     value_checkpoint: str | None = None
     chance: str | None = None
+    flop_sample_size: int | None = None
     checkpoint: str | None = None
     output_dir: str | None = None
     data_overrides: dict[str, Any] = field(default_factory=dict)
