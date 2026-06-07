@@ -17,6 +17,7 @@ from p2.env.card_utils import (
     NUM_HANDS,
     PREFLOP_HANDS,
     board_allowed_hands,
+    canonical_full_boards_with_weights,
     combo_to_preflop_class_tensor,
     hand_combos_tensor,
     preflop_class_multiplicity_tensor,
@@ -34,6 +35,7 @@ except ImportError:  # pragma: no cover - optional CUDA dependency
 
 
 TOTAL_PREFLOP_BOARDS = math.comb(52, 5)
+TOTAL_TRIPLE_BOARDS = math.comb(46, 5)
 _MAX_CLASS_MULTIPLICITY = 12
 _FORMAT = "p2.allin.preflop_allin_169.v1"
 _COMPILED_3P_SHARE0_INNER: Callable[..., tuple[torch.Tensor, torch.Tensor]] | None = None
@@ -64,9 +66,9 @@ class PreflopAllIn169Tensors:
 
 def _rank_hands(board: torch.Tensor, *, use_triton: bool) -> torch.Tensor:
     if use_triton:
-        from p2.env.rules_triton import rank_hands_triton
+        from p2.env.rules_triton import rank_hand_scores_triton
 
-        ranks, _ = rank_hands_triton(board.int())
+        ranks = rank_hand_scores_triton(board.int())
     else:
         ranks, _ = rank_hands_torch(board.int())
     return ranks.to(torch.int32).contiguous()
@@ -96,24 +98,55 @@ def _exhaustive_full_boards(*, board_chunk: int) -> Iterator[torch.Tensor]:
         yield torch.tensor(buf, dtype=torch.long)
 
 
+def _canonical_full_board_chunks(
+    *,
+    board_chunk: int,
+) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+    boards, weights = canonical_full_boards_with_weights()
+    for start in range(0, boards.shape[0], board_chunk):
+        end = min(start + board_chunk, boards.shape[0])
+        yield boards[start:end], weights[start:end]
+
+
+def _weighted_board_chunks(
+    *,
+    sample_boards: int | None,
+    seed: int,
+    board_chunk: int,
+    canonical_boards: bool = False,
+) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+    if board_chunk <= 0:
+        raise ValueError("board_chunk must be positive")
+    if sample_boards is not None:
+        if sample_boards <= 0:
+            raise ValueError("sample_boards must be positive")
+        for boards in _sample_full_boards(
+            sample_boards,
+            seed=seed,
+            board_chunk=board_chunk,
+        ):
+            yield boards, torch.ones(boards.shape[0], dtype=torch.float32)
+        return
+    if canonical_boards:
+        yield from _canonical_full_board_chunks(board_chunk=board_chunk)
+        return
+    for boards in _exhaustive_full_boards(board_chunk=board_chunk):
+        yield boards, torch.ones(boards.shape[0], dtype=torch.float32)
+
+
 def _board_chunks(
     *,
     sample_boards: int | None,
     seed: int,
     board_chunk: int,
 ) -> Iterator[torch.Tensor]:
-    if board_chunk <= 0:
-        raise ValueError("board_chunk must be positive")
-    if sample_boards is not None:
-        if sample_boards <= 0:
-            raise ValueError("sample_boards must be positive")
-        yield from _sample_full_boards(
-            sample_boards,
-            seed=seed,
-            board_chunk=board_chunk,
-        )
-        return
-    yield from _exhaustive_full_boards(board_chunk=board_chunk)
+    for boards, _weights in _weighted_board_chunks(
+        sample_boards=sample_boards,
+        seed=seed,
+        board_chunk=board_chunk,
+        canonical_boards=False,
+    ):
+        yield boards
 
 
 def _class_combo_table(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
@@ -281,6 +314,7 @@ def _allin_3p_share0_accumulate_inner(
     ranks: torch.Tensor,
     allowed: torch.Tensor,
     tuples: torch.Tensor,
+    board_weights: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     h0 = tuples[:, 0]
     h1 = tuples[:, 1]
@@ -304,8 +338,9 @@ def _allin_3p_share0_accumulate_inner(
     share6 = torch.where((r0 == r1) & (r0 == r2), 2.0, share6)
     share6 = torch.where(valid, share6, torch.zeros_like(share6))
 
-    share6_by_tuple = share6.sum(dim=0)
-    count_by_tuple = valid.to(torch.float32).sum(dim=0)
+    weights = board_weights.to(dtype=torch.float32, device=ranks.device)[:, None]
+    share6_by_tuple = (share6 * weights).sum(dim=0)
+    count_by_tuple = (valid.to(torch.float32) * weights).sum(dim=0)
     return share6_by_tuple, count_by_tuple
 
 
@@ -331,6 +366,7 @@ if triton is not None:
     def _allin_3p_share0_accumulate_kernel(
         ranks_ptr,
         allowed_ptr,
+        board_weights_ptr,
         tuples_ptr,
         owners_ptr,
         share6_sum_ptr,
@@ -340,6 +376,7 @@ if triton is not None:
         H: tl.constexpr,
         BLOCK_T: tl.constexpr,
         BLOCK_B: tl.constexpr,
+        ACCUM_COUNT: tl.constexpr,
     ):
         t = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
         b = tl.program_id(1) * BLOCK_B + tl.arange(0, BLOCK_B)
@@ -368,22 +405,29 @@ if triton is not None:
         share6 = tl.where((r0 == r2) & (r0 > r1), 3.0, share6)
         share6 = tl.where((r0 == r1) & (r0 == r2), 2.0, share6)
         share6 = tl.where(valid, share6, 0.0)
+        board_weight = tl.load(board_weights_ptr + b, mask=b_mask, other=0.0).to(
+            tl.float32
+        )
+        share6 = share6 * board_weight[:, None]
 
         share6_by_tuple = tl.sum(share6, axis=0)
-        count_by_tuple = tl.sum(valid.to(tl.float32), axis=0)
         owner = tl.load(owners_ptr + t, mask=t_mask, other=0)
         tl.atomic_add(share6_sum_ptr + owner, share6_by_tuple, sem="relaxed", mask=t_mask)
-        tl.atomic_add(count_ptr + owner, count_by_tuple, sem="relaxed", mask=t_mask)
+        if ACCUM_COUNT:
+            count_by_tuple = tl.sum(valid.to(tl.float32) * board_weight[:, None], axis=0)
+            tl.atomic_add(count_ptr + owner, count_by_tuple, sem="relaxed", mask=t_mask)
 
 
 def _allin_3p_share0_triton_accumulate_(
     *,
     ranks: torch.Tensor,
     allowed: torch.Tensor,
+    board_weights: torch.Tensor,
     tuples: torch.Tensor,
     owners: torch.Tensor,
     share6_sum: torch.Tensor,
     count: torch.Tensor,
+    accumulate_count: bool,
     block_t: int,
     block_b: int,
 ) -> None:
@@ -398,6 +442,7 @@ def _allin_3p_share0_triton_accumulate_(
     _allin_3p_share0_accumulate_kernel[grid](
         ranks,
         allowed,
+        board_weights,
         tuples,
         owners,
         share6_sum,
@@ -407,6 +452,7 @@ def _allin_3p_share0_triton_accumulate_(
         NUM_HANDS,
         BLOCK_T=int(block_t),
         BLOCK_B=int(block_b),
+        ACCUM_COUNT=bool(accumulate_count),
         num_warps=8,
     )
 
@@ -555,9 +601,10 @@ def precompute_allin_3p_share0(
     compile_inner: bool | None = None,
     triton_block_t: int = 32,
     triton_block_b: int = 32,
+    canonical_boards: bool | None = None,
     progress: Callable[[dict[str, float]], None] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, object]]:
-    """Precompute canonical 3-player seat-0 shares with integer accumulation."""
+    """Precompute canonical 3-player seat-0 shares with weighted accumulation."""
     if class_chunk <= 0 or tuple_chunk <= 0:
         raise ValueError("class_chunk and tuple_chunk must be positive")
 
@@ -574,28 +621,58 @@ def precompute_allin_3p_share0(
         compile_inner = device.type == "cuda" and not use_accumulation_kernel
     if triton_block_t <= 0 or triton_block_b <= 0:
         raise ValueError("triton_block_t and triton_block_b must be positive")
+    if canonical_boards is None:
+        canonical_boards = sample_boards is None
 
     linear = _linear_class_ids(3, class_ids=class_ids, device=device)
     total_entries = PREFLOP_HANDS**3
     share6_sum = torch.zeros(total_entries, dtype=torch.float32, device=device)
-    count = torch.zeros(total_entries, dtype=torch.float32, device=device)
+    use_analytic_count = sample_boards is None
+    count_exact = (
+        torch.zeros(total_entries, dtype=torch.int64, device=device)
+        if use_analytic_count
+        else None
+    )
+    count_accum = torch.zeros(
+        1 if use_analytic_count else total_entries,
+        dtype=torch.float32,
+        device=device,
+    )
     class_combo, class_combo_mask = _class_combo_table(device)
     combo_masks = _combo_masks(device)
     inner = _allin_3p_share0_inner(compile_inner=compile_inner)
     started = time.perf_counter()
     board_total = TOTAL_PREFLOP_BOARDS if sample_boards is None else int(sample_boards)
-    done_boards = 0
+    board_representatives_total = (
+        canonical_full_boards_with_weights()[0].shape[0]
+        if sample_boards is None and canonical_boards
+        else board_total
+    )
+    done_boards = 0.0
+    done_board_representatives = 0
 
-    for boards_cpu in _board_chunks(
-        sample_boards=sample_boards,
-        seed=seed,
-        board_chunk=board_chunk,
-    ):
-        boards = boards_cpu.to(device=device, non_blocking=True)
-        ranks = _rank_hands(boards, use_triton=bool(use_triton))
-        allowed = board_allowed_hands(boards).contiguous()
-        done_boards += int(boards.shape[0])
+    if use_analytic_count:
+        if count_exact is None:
+            raise RuntimeError("count_exact missing for analytic count mode")
+        for start in range(0, linear.numel(), class_chunk):
+            ids = linear[start : start + class_chunk]
+            class_tuple = _decode_linear_classes(ids, 3)
+            _tuple_grid, tuple_valid = _class_tuple_combos(
+                class_tuple,
+                class_combo=class_combo,
+                class_combo_mask=class_combo_mask,
+                combo_masks=combo_masks,
+            )
+            compatible_triples = tuple_valid.sum(dim=1, dtype=torch.int64)
+            count_exact.index_copy_(0, ids, compatible_triples * TOTAL_TRIPLE_BOARDS)
 
+    def accumulate_board_batch(
+        *,
+        ranks: torch.Tensor,
+        allowed: torch.Tensor,
+        board_weights: torch.Tensor,
+        progress_by_class: bool,
+    ) -> None:
         for start in range(0, linear.numel(), class_chunk):
             ids = linear[start : start + class_chunk]
             class_tuple = _decode_linear_classes(ids, 3)
@@ -618,10 +695,12 @@ def precompute_allin_3p_share0(
                     _allin_3p_share0_triton_accumulate_(
                         ranks=ranks,
                         allowed=allowed,
+                        board_weights=board_weights,
                         tuples=tuples,
                         owners=owner,
                         share6_sum=share6_sum,
-                        count=count,
+                        count=count_accum,
+                        accumulate_count=not use_analytic_count,
                         block_t=triton_block_t,
                         block_b=triton_block_b,
                     )
@@ -630,30 +709,105 @@ def precompute_allin_3p_share0(
                         ranks,
                         allowed,
                         tuples,
+                        board_weights,
                     )
                     share6_sum.scatter_add_(0, owner, chunk_share6)
-                    count.scatter_add_(0, owner, chunk_count)
+                    if not use_analytic_count:
+                        count_accum.scatter_add_(0, owner, chunk_count)
 
-        if progress is not None:
-            elapsed = time.perf_counter() - started
-            progress(
-                {
-                    "players": 3.0,
-                    "boards_done": float(done_boards),
-                    "boards_total": float(board_total),
-                    "seconds": float(elapsed),
-                    "boards_per_second": float(done_boards / max(elapsed, 1.0e-9)),
-                }
+            if progress is not None and progress_by_class:
+                elapsed = time.perf_counter() - started
+                progress(
+                    {
+                        "players": 3.0,
+                        "boards_done": done_boards,
+                        "boards_total": float(board_total),
+                        "board_representatives_done": float(done_board_representatives),
+                        "board_representatives_total": float(
+                            board_representatives_total
+                        ),
+                        "class_entries_done": float(start + ids.numel()),
+                        "class_entries_total": float(linear.numel()),
+                        "seconds": float(elapsed),
+                        "boards_per_second": float(
+                            done_boards / max(elapsed, 1.0e-9)
+                        ),
+                    }
+                )
+
+    resident_board_tensors = (
+        sample_boards is None
+        and bool(canonical_boards)
+        and bool(use_accumulation_kernel)
+        and device.type == "cuda"
+    )
+
+    if resident_board_tensors:
+        boards_cpu, weights_cpu = canonical_full_boards_with_weights()
+        boards = boards_cpu.to(device=device, non_blocking=True)
+        board_weights = weights_cpu.to(device=device, non_blocking=True).contiguous()
+        ranks = _rank_hands(boards, use_triton=bool(use_triton))
+        allowed = board_allowed_hands(boards).contiguous()
+        done_boards = float(weights_cpu.sum().item())
+        done_board_representatives = int(boards.shape[0])
+        accumulate_board_batch(
+            ranks=ranks,
+            allowed=allowed,
+            board_weights=board_weights,
+            progress_by_class=True,
+        )
+    else:
+        for boards_cpu, weights_cpu in _weighted_board_chunks(
+            sample_boards=sample_boards,
+            seed=seed,
+            board_chunk=board_chunk,
+            canonical_boards=bool(canonical_boards),
+        ):
+            boards = boards_cpu.to(device=device, non_blocking=True)
+            board_weights = weights_cpu.to(device=device, non_blocking=True).contiguous()
+            ranks = _rank_hands(boards, use_triton=bool(use_triton))
+            allowed = board_allowed_hands(boards).contiguous()
+            done_boards += float(weights_cpu.sum().item())
+            done_board_representatives += int(boards.shape[0])
+            accumulate_board_batch(
+                ranks=ranks,
+                allowed=allowed,
+                board_weights=board_weights,
+                progress_by_class=False,
             )
 
+            if progress is not None:
+                elapsed = time.perf_counter() - started
+                progress(
+                    {
+                        "players": 3.0,
+                        "boards_done": done_boards,
+                        "boards_total": float(board_total),
+                        "board_representatives_done": float(done_board_representatives),
+                        "board_representatives_total": float(
+                            board_representatives_total
+                        ),
+                        "seconds": float(elapsed),
+                        "boards_per_second": float(
+                            done_boards / max(elapsed, 1.0e-9)
+                        ),
+                    }
+                )
+
+    count = (
+        count_exact
+        if use_analytic_count and count_exact is not None
+        else count_accum.round().to(torch.int64)
+    )
     share0 = torch.where(
         count > 0,
-        share6_sum / (count * 6.0).clamp_min(1.0),
+        share6_sum / (count.to(torch.float32) * 6.0).clamp_min(1.0),
         torch.zeros_like(share6_sum),
     )
     metadata: dict[str, object] = {
         "players": 3,
         "num_boards": board_total,
+        "num_board_representatives": int(board_representatives_total),
         "exact": sample_boards is None,
         "sample_seed": int(seed),
         "board_chunk": int(board_chunk),
@@ -666,14 +820,18 @@ def precompute_allin_3p_share0(
         "compile_inner": bool(compile_inner),
         "triton_block_t": int(triton_block_t),
         "triton_block_b": int(triton_block_b),
-        "share_accumulator": "fp32 sixths",
+        "canonical_boards": bool(canonical_boards),
+        "board_tensor_mode": "resident_exact_canonical"
+        if resident_board_tensors
+        else "streamed",
+        "share_accumulator": "fp32 weighted sixths",
+        "count_mode": "analytic_compatible_triples_x_C46_5"
+        if use_analytic_count
+        else "streamed_board_valid_fp32",
     }
     return (
         share0.reshape(PREFLOP_HANDS, PREFLOP_HANDS, PREFLOP_HANDS).contiguous(),
-        count.round()
-        .to(torch.int64)
-        .reshape(PREFLOP_HANDS, PREFLOP_HANDS, PREFLOP_HANDS)
-        .contiguous(),
+        count.reshape(PREFLOP_HANDS, PREFLOP_HANDS, PREFLOP_HANDS).contiguous(),
         metadata,
     )
 
@@ -696,6 +854,7 @@ def precompute_allin_169_tensors(
     compile_inner: bool | None = None,
     triton_block_t: int = 32,
     triton_block_b: int = 32,
+    canonical_boards: bool | None = None,
     progress: Callable[[dict[str, float]], None] | None = None,
 ) -> PreflopAllIn169Tensors:
     """Build and optionally save preflop all-in 169-class tensors."""
@@ -753,6 +912,7 @@ def precompute_allin_169_tensors(
             compile_inner=compile_inner,
             triton_block_t=triton_block_t,
             triton_block_b=triton_block_b,
+            canonical_boards=canonical_boards,
             progress=progress,
         )
         result.allin_3p_share0 = share0.cpu()
@@ -821,6 +981,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--triton-block-t", type=int, default=32)
     parser.add_argument("--triton-block-b", type=int, default=32)
+    parser.add_argument(
+        "--canonical-boards",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Use suit-canonical full-board representatives with orbit weights for "
+            "exact 3p; default auto-enables for exact runs."
+        ),
+    )
     parser.add_argument("--no-triton", action="store_true")
     return parser.parse_args()
 
@@ -835,9 +1004,17 @@ def main() -> None:
         )
 
     def progress(info: dict[str, float]) -> None:
+        reps = ""
+        if info.get("board_representatives_total", info["boards_total"]) != info[
+            "boards_total"
+        ]:
+            reps = (
+                f" reps={int(info['board_representatives_done']):,}/"
+                f"{int(info['board_representatives_total']):,}"
+            )
         print(
             f"p{int(info['players'])} boards={int(info['boards_done']):,}/"
-            f"{int(info['boards_total']):,} "
+            f"{int(info['boards_total']):,}{reps} "
             f"rate={info['boards_per_second']:,.1f}/s "
             f"elapsed={info['seconds'] / 60.0:.1f}m",
             flush=True,
@@ -859,6 +1036,7 @@ def main() -> None:
         compile_inner=args.compile_inner,
         triton_block_t=args.triton_block_t,
         triton_block_b=args.triton_block_b,
+        canonical_boards=args.canonical_boards,
         progress=progress,
     )
     payload = result.payload()

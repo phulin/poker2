@@ -200,7 +200,7 @@ def test_precompute_allin_3p_share0_matches_generic_share0() -> None:
         use_triton=False,
     )
 
-    assert metadata["share_accumulator"] == "fp32 sixths"
+    assert metadata["share_accumulator"] == "fp32 weighted sixths"
     torch.testing.assert_close(share0, generic[0])
     torch.testing.assert_close(counts, generic_counts)
 

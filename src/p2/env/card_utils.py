@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 from itertools import combinations, permutations
 
@@ -381,6 +382,65 @@ def canonical_flops_with_weights(
         flops = flops.to(device)
         weights = weights.to(device)
     return flops, weights
+
+
+@lru_cache(maxsize=1)
+def _canonical_full_boards_with_weights_cpu() -> tuple[torch.Tensor, torch.Tensor]:
+    counts: dict[tuple[int, ...], int] = {}
+    buf: list[tuple[int, int, int, int, int]] = []
+    suit_perms = suit_permutations_tensor()
+    key_weights = torch.tensor([52**4, 52**3, 52**2, 52, 1], dtype=torch.long)
+
+    def accumulate(chunk: list[tuple[int, int, int, int, int]]) -> None:
+        board_tensor = torch.tensor(chunk, dtype=torch.long)
+        ranks = board_tensor % 13
+        suits = board_tensor // 13
+        mapped_suits = suit_perms[:, None, :].expand(
+            -1, board_tensor.shape[0], -1
+        ).gather(2, suits[None, :, :].expand(suit_perms.shape[0], -1, -1))
+        mapped = (mapped_suits * 13 + ranks[None, :, :]).sort(dim=2).values
+        keys = (mapped * key_weights).sum(dim=2).min(dim=0).values
+        unique, unique_counts = torch.unique(keys, return_counts=True)
+        for key, count in zip(unique.tolist(), unique_counts.tolist(), strict=True):
+            cards: list[int] = []
+            rem = int(key)
+            for weight in key_weights.tolist():
+                card = rem // int(weight)
+                cards.append(card)
+                rem -= card * int(weight)
+            key_tuple = tuple(cards)
+            counts[key_tuple] = counts.get(key_tuple, 0) + int(count)
+
+    for board in combinations(range(52), 5):
+        buf.append(board)
+        if len(buf) == 65_536:
+            accumulate(buf)
+            buf.clear()
+    if buf:
+        accumulate(buf)
+
+    boards = torch.tensor(tuple(sorted(counts)), dtype=torch.long)
+    weights = torch.tensor(
+        [counts[tuple(board.tolist())] for board in boards], dtype=torch.float32
+    )
+    if boards.shape != (134459, 5):
+        raise RuntimeError(
+            f"Expected 134459 canonical full boards, got {boards.shape[0]}"
+        )
+    if int(weights.sum().item()) != math.comb(52, 5):
+        raise RuntimeError("Canonical full-board weights do not sum to C(52, 5)")
+    return boards, weights
+
+
+def canonical_full_boards_with_weights(
+    device: torch.device | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return canonical 5-card board representatives and raw-board orbit weights."""
+    boards, weights = _canonical_full_boards_with_weights_cpu()
+    if device is not None:
+        boards = boards.to(device)
+        weights = weights.to(device)
+    return boards, weights
 
 
 @lru_cache(maxsize=2)
