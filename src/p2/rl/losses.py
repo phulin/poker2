@@ -17,8 +17,10 @@ from p2.core.structured_config import (
 )
 from p2.env.card_utils import (
     NUM_HANDS,
+    PREFLOP_HANDS,
     combo_suit_permutation_tensor,
     hand_combos_tensor,
+    preflop_class_multiplicity_tensor,
 )
 from p2.models.model_output import ModelOutput
 from p2.rl.exponential_controller import ExponentialController
@@ -951,6 +953,11 @@ class RebelSupervisedLoss(nn.Module):
         output_permuted: ModelOutput,
         suit_permutation_idxs: torch.Tensor,
     ) -> torch.Tensor:
+        if output.hand_values.shape[-1] == PREFLOP_HANDS:
+            return F.mse_loss(
+                output.hand_values.float(),
+                output_permuted.hand_values.float(),
+            )
         combo_permutations = self._combo_suit_permutations[suit_permutation_idxs]
         hand_values_permuted_reversed = torch.gather(
             output_permuted.hand_values,
@@ -961,12 +968,155 @@ class RebelSupervisedLoss(nn.Module):
             output.hand_values.float(), hand_values_permuted_reversed.float()
         )
 
+    def _forward_compact_policy(
+        self,
+        logits: torch.Tensor,
+        batch: RebelBatch,
+    ) -> dict[str, torch.Tensor]:
+        device = logits.device
+        actor = batch.features.to_act
+        player_beliefs = batch.features.beliefs.view(
+            -1, self.num_players, PREFLOP_HANDS
+        )
+        actor_belief = player_beliefs.gather(
+            1, actor[:, None, None].expand(-1, 1, PREFLOP_HANDS)
+        ).squeeze(1)
+        multiplicity = preflop_class_multiplicity_tensor(device=device).to(
+            dtype=logits.dtype
+        )
+        policy_targets = batch.policy_targets.to(dtype=logits.dtype)
+        legal_masks = batch.legal_masks[:, None, :]
+        masked_logits = compute_masked_logits(logits, legal_masks)
+        log_probs = F.log_softmax(masked_logits, dim=-1)
+        probs = log_probs.exp()
+
+        policy_weights_unnormalized = actor_belief.to(logits.dtype) * multiplicity
+        policy_weight_sum = policy_weights_unnormalized.sum(
+            dim=-1, keepdim=True
+        ).clamp(min=1e-8)
+        policy_weights = policy_weights_unnormalized / policy_weight_sum
+        target_log_probs = policy_targets.clamp_min(1e-8).log()
+        target_entropy_per_hand = -(policy_targets * target_log_probs).sum(dim=-1)
+        policy_ce_per_hand = -(policy_targets * log_probs).sum(dim=-1)
+        policy_objective_per_hand = self._policy_objective_per_hand(
+            probs, policy_targets, policy_ce_per_hand
+        )
+        policy_loss_all = (policy_objective_per_hand * policy_weights).sum(dim=-1)
+        node_weights = self._policy_node_weights(batch, policy_loss_all.dtype)
+        policy_loss = self._reduce_policy_node_metric(policy_loss_all, node_weights)
+        target_entropy_per_sample = (target_entropy_per_hand * policy_weights).sum(
+            dim=-1
+        )
+        target_entropy = self._reduce_policy_node_metric(
+            target_entropy_per_sample, node_weights
+        )
+        model_entropy_per_hand = -(probs * log_probs).sum(dim=-1)
+        model_entropy_per_sample = (model_entropy_per_hand * policy_weights).sum(
+            dim=-1
+        )
+        model_entropy = self._reduce_policy_node_metric(
+            model_entropy_per_sample, node_weights
+        )
+        entropy_gap_all = model_entropy_per_sample - target_entropy_per_sample
+        entropy_gap = self._reduce_policy_node_metric(entropy_gap_all, node_weights)
+        target_model_kl_all = (
+            (policy_ce_per_hand - target_entropy_per_hand) * policy_weights
+        ).sum(dim=-1)
+        target_model_kl = self._reduce_policy_node_metric(
+            target_model_kl_all, node_weights
+        )
+        if self.policy_logit_l2_coef != 0.0:
+            policy_logit_l2, policy_logit_l2_all = self._policy_logit_l2(
+                logits, legal_masks, policy_weights, node_weights
+            )
+        else:
+            policy_logit_l2 = self._zero(device)
+            policy_logit_l2_all = None
+
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
+        total_loss = self.policy_weight * policy_loss
+        if self.policy_logit_l2_coef != 0.0:
+            total_loss = total_loss + self.policy_logit_l2_coef * policy_logit_l2
+        if self.entropy_coef is not None and self.entropy_coef != 0.0:
+            total_loss -= self.entropy_coef * entropy
+
+        zero = self._zero(device)
+        return {
+            "total_loss": total_loss,
+            "policy_loss": policy_loss,
+            "policy_loss_all": policy_loss_all.detach(),
+            "target_entropy": target_entropy,
+            "target_entropy_all": target_entropy_per_sample.detach(),
+            "model_entropy": model_entropy,
+            "model_entropy_all": model_entropy_per_sample.detach(),
+            "entropy_gap": entropy_gap,
+            "entropy_gap_all": entropy_gap_all.detach(),
+            "target_model_kl": target_model_kl,
+            "target_model_kl_all": target_model_kl_all.detach(),
+            "policy_logit_l2": policy_logit_l2,
+            "policy_logit_l2_all": (
+                policy_logit_l2_all.detach()
+                if policy_logit_l2_all is not None
+                else None
+            ),
+            "policy_weights": policy_weights,
+            "policy_node_weights": node_weights,
+            "value_loss": zero,
+            "value_loss_all": None,
+            "value_weights": None,
+            "entropy": entropy,
+            "permutation_loss": zero,
+        }
+
+    def _forward_compact_value(
+        self,
+        hand_values: torch.Tensor,
+        value_targets: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        device = hand_values.device
+        multiplicity = preflop_class_multiplicity_tensor(device=device).to(
+            dtype=hand_values.dtype
+        )
+        value_weights = multiplicity.view(1, 1, PREFLOP_HANDS).expand_as(hand_values)
+        sq_error = F.mse_loss(hand_values, value_targets, reduction="none")
+        value_loss_all = sq_error.detach() * value_weights
+        value_loss = (sq_error * value_weights).sum() / value_weights.sum().clamp(
+            min=1e-8
+        )
+        total_loss = self.value_weight * value_loss
+
+        zero = self._zero(device)
+        return {
+            "total_loss": total_loss,
+            "policy_loss": zero,
+            "policy_loss_all": None,
+            "target_entropy": zero,
+            "target_entropy_all": None,
+            "model_entropy": zero,
+            "model_entropy_all": None,
+            "entropy_gap": zero,
+            "entropy_gap_all": None,
+            "target_model_kl": zero,
+            "target_model_kl_all": None,
+            "policy_logit_l2": zero,
+            "policy_logit_l2_all": None,
+            "policy_weights": None,
+            "policy_node_weights": None,
+            "value_loss": value_loss,
+            "value_loss_all": value_loss_all,
+            "value_weights": value_weights,
+            "entropy": zero,
+            "permutation_loss": zero,
+        }
+
     def forward_policy(
         self,
         output: ModelOutput,
         batch: RebelBatch,
     ) -> dict[str, torch.Tensor]:
         logits = output.policy_logits.float()
+        if logits.shape[1] == PREFLOP_HANDS:
+            return self._forward_compact_policy(logits, batch)
         device = logits.device
         _, _, _, actor_belief, opp_matchup = self._policy_weights(batch)
         policy_targets = batch.policy_targets.to(dtype=logits.dtype)
@@ -1064,6 +1214,8 @@ class RebelSupervisedLoss(nn.Module):
         hand_values = output.hand_values.float()
         device = hand_values.device
         value_targets = batch.value_targets.to(dtype=hand_values.dtype)
+        if hand_values.shape[-1] == PREFLOP_HANDS:
+            return self._forward_compact_value(hand_values, value_targets)
         _, allowed_hands_float, unblocked_mass = self._base_weights(batch)
 
         value_weights = self._value_weights(unblocked_mass, allowed_hands_float)

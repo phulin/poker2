@@ -139,6 +139,8 @@ class SparseCFREvaluator(CFREvaluator):
         self.root_nodes = cfg.num_envs
         self.depth_offsets = [0]
         self.env: HUNLTensorEnv | PBSEnv | None = None
+        policy_model = getattr(model, "policy_model", model)
+        self.hand_dim = int(getattr(policy_model, "hand_dim", NUM_HANDS))
 
         self.leaf_mask = torch.empty(0, dtype=torch.bool, device=self.device)
         self.new_street_mask = torch.empty(0, dtype=torch.bool, device=self.device)
@@ -149,10 +151,10 @@ class SparseCFREvaluator(CFREvaluator):
             0, self.num_actions, dtype=torch.bool, device=self.device
         )
         self.allowed_hands = torch.empty(
-            0, NUM_HANDS, dtype=torch.bool, device=self.device
+            0, self.hand_dim, dtype=torch.bool, device=self.device
         )
         self.allowed_hands_prob = torch.empty(
-            0, NUM_HANDS, dtype=self.float_dtype, device=self.device
+            0, self.hand_dim, dtype=self.float_dtype, device=self.device
         )
 
         self.parent_index = torch.empty(0, dtype=torch.long, device=self.device)
@@ -162,15 +164,27 @@ class SparseCFREvaluator(CFREvaluator):
         self.prev_actor = torch.empty(0, dtype=torch.long, device=self.device)
 
         self.beliefs = torch.empty(
-            0, self.num_players, NUM_HANDS, dtype=self.float_dtype, device=self.device
+            0,
+            self.num_players,
+            self.hand_dim,
+            dtype=self.float_dtype,
+            device=self.device,
         )
         self.beliefs_avg = torch.empty_like(self.beliefs)
         self.beliefs_sample = torch.empty_like(self.beliefs)
         self.root_pre_chance_beliefs = torch.empty(
-            0, self.num_players, NUM_HANDS, dtype=self.float_dtype, device=self.device
+            0,
+            self.num_players,
+            self.hand_dim,
+            dtype=self.float_dtype,
+            device=self.device,
         )
         self.latest_values = torch.empty(
-            0, self.num_players, NUM_HANDS, dtype=self.float_dtype, device=self.device
+            0,
+            self.num_players,
+            self.hand_dim,
+            dtype=self.float_dtype,
+            device=self.device,
         )
         self.values_avg = torch.empty_like(self.latest_values)
         self.self_reach = torch.empty_like(self.beliefs)
@@ -181,7 +195,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.latent_z = torch.empty(0, self.model.hidden_dim, device=self.device)
 
         self.policy_probs = torch.empty(
-            0, NUM_HANDS, dtype=self.float_dtype, device=self.device
+            0, self.hand_dim, dtype=self.float_dtype, device=self.device
         )
         self.policy_probs_avg = torch.empty_like(self.policy_probs)
         self.average_policy_numerator = torch.empty_like(self.policy_probs)
@@ -356,7 +370,7 @@ class SparseCFREvaluator(CFREvaluator):
         ]
 
         self.policy_probs = torch.zeros(
-            self.total_nodes, NUM_HANDS, dtype=self.float_dtype, device=self.device
+            self.total_nodes, self.hand_dim, dtype=self.float_dtype, device=self.device
         )
         self.policy_probs_avg = torch.zeros_like(self.policy_probs)
         self.average_policy_numerator = torch.zeros_like(self.policy_probs)
@@ -373,12 +387,12 @@ class SparseCFREvaluator(CFREvaluator):
         self.uniform_policy = torch.zeros_like(self.policy_probs)
         self.uniform_policy[self.root_nodes :] = (1.0 / child_count_dest)[
             :, None
-        ].expand(-1, NUM_HANDS)
+        ].expand(-1, self.hand_dim)
 
         self.beliefs = torch.zeros(
             self.total_nodes,
             self.num_players,
-            NUM_HANDS,
+            self.hand_dim,
             dtype=self.float_dtype,
             device=self.device,
         )
@@ -387,7 +401,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.root_pre_chance_beliefs = torch.zeros(
             num_roots,
             self.num_players,
-            NUM_HANDS,
+            self.hand_dim,
             dtype=self.float_dtype,
             device=self.device,
         )
@@ -686,7 +700,7 @@ class SparseCFREvaluator(CFREvaluator):
     ) -> torch.Tensor:
         """Return policy targets for selected sparse parent nodes only."""
         out = torch.zeros(
-            (node_indices.numel(), self.num_actions, NUM_HANDS),
+            (node_indices.numel(), self.num_actions, self.hand_dim),
             dtype=self.policy_probs_avg.dtype,
             device=self.device,
         )

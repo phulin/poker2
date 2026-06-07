@@ -159,10 +159,17 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].net == "E_preflop"
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].from_net == "S_flop"
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"
+    assert flop_cfg.curriculum.substeps["distill_E_preflop"].model_overrides == {
+        "preflop_hand_dim": 169
+    }
     assert (
         flop_cfg.curriculum.substeps["distill_E_preflop"].train_overrides
         == distill_train_overrides
     )
+    assert flop_cfg.preflop_validation.enabled is True
+    assert flop_cfg.preflop_validation.interval == 100
+    assert flop_cfg.preflop_validation.examples == 1024
+    assert flop_cfg.preflop_validation.batch_size == 128
 
 
 def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
@@ -207,6 +214,9 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
     assert cfg.curriculum.substeps["flop"].closing_net == "E_flop"
     assert cfg.curriculum.substeps["flop"].from_net == "S_turn"
     assert cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"
+    assert cfg.curriculum.substeps["distill_E_preflop"].model_overrides == {
+        "preflop_hand_dim": 169
+    }
     assert cfg.curriculum.substeps["river"].train_overrides == {}
     assert (
         cfg.curriculum.substeps["distill_E_turn"].train_overrides
@@ -222,6 +232,7 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
         cfg.curriculum.substeps["distill_E_preflop"].train_overrides
         == distill_train_overrides
     )
+    assert cfg.preflop_validation.enabled is True
 
 
 def test_rebel_postflop_hybrid_holdout_config_loads_from_yaml():

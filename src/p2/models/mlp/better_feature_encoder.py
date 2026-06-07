@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import NUM_HANDS, PREFLOP_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.better_features import (
     ChancePhase,
@@ -171,7 +171,8 @@ class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
                 self._env_tensor("last_board_indices", indices),
                 self._env_tensor("board_indices", indices),
             ),
-            beliefs=beliefs.reshape(N, num_players * NUM_HANDS),
+            beliefs=beliefs.reshape(N, num_players * self.belief_dim),
+            hand_dim=self.belief_dim,
         )
 
 
@@ -261,8 +262,21 @@ class BetterStreetValueFeatureEncoder(_BetterFeatureEncoderBase):
                 self._env_tensor("last_board_indices", indices),
                 self._env_tensor("board_indices", indices),
             ),
-            beliefs=beliefs.reshape(N, num_players * NUM_HANDS),
+            beliefs=beliefs.reshape(N, num_players * self.belief_dim),
+            hand_dim=self.belief_dim,
         )
 
 
 BetterFeatureEncoder = BetterPolicyFeatureEncoder
+
+
+class BetterPreflopPolicyFeatureEncoder(BetterPolicyFeatureEncoder):
+    """Construct compact preflop policy features with 169 rank classes."""
+
+    belief_dim = PREFLOP_HANDS
+
+
+class BetterPreflopValueFeatureEncoder(BetterStreetValueFeatureEncoder):
+    """Construct compact preflop value features with 169 rank classes."""
+
+    belief_dim = PREFLOP_HANDS

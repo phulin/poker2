@@ -6,6 +6,7 @@ from itertools import combinations, permutations
 import torch
 
 NUM_HANDS = 1326
+PREFLOP_HANDS = 169
 
 # Rank mapping: A=12, K=11, Q=10, J=9, T=8, 9=7, 8=6, 7=5, 6=4, 5=3, 4=2, 3=1, 2=0
 IDX_TO_RANK = "23456789TJQKA"
@@ -79,6 +80,99 @@ def combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
     if device is not None:
         lookup = lookup.to(device)
     return lookup
+
+
+@lru_cache(maxsize=2)
+def combo_to_preflop_class_tensor(
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Return [1326] class ids for the 169 rank/suit preflop abstraction.
+
+    Diagonal entries are pairs. For non-pairs, ``hi * 13 + lo`` is suited and
+    ``lo * 13 + hi`` is offsuit, matching the conventional 13x13 grid split.
+    """
+    combos = hand_combos_tensor(device=device)
+    ranks = combos % 13
+    suits = combos // 13
+    rank_a = ranks[:, 0]
+    rank_b = ranks[:, 1]
+    hi = torch.maximum(rank_a, rank_b)
+    lo = torch.minimum(rank_a, rank_b)
+    suited = suits[:, 0] == suits[:, 1]
+    class_ids = torch.where(suited, hi * 13 + lo, lo * 13 + hi)
+    if device is not None:
+        class_ids = class_ids.to(device)
+    return class_ids.long()
+
+
+@lru_cache(maxsize=2)
+def preflop_class_multiplicity_tensor(
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Return [169] combo counts per preflop rank class.
+
+    Pairs have multiplicity 6, suited non-pairs 4, and offsuit non-pairs 12.
+    The tensor sums to 1326.
+    """
+    class_ids = combo_to_preflop_class_tensor(device=device)
+    weights = torch.ones(NUM_HANDS, dtype=torch.float32, device=device)
+    multiplicity = torch.zeros(PREFLOP_HANDS, dtype=torch.float32, device=device)
+    multiplicity.scatter_add_(0, class_ids, weights)
+    return multiplicity
+
+
+def expand_169_to_1326(
+    values_169: torch.Tensor,
+    *,
+    divide_by_multiplicity: bool = False,
+) -> torch.Tensor:
+    """Expand a tensor whose final axis is 169 preflop classes to 1326 combos.
+
+    Set ``divide_by_multiplicity=True`` for probability mass beliefs that should
+    be distributed uniformly within each class. Leave it false for class values
+    or logits that should be copied to every combo in the class.
+    """
+    if values_169.shape[-1] != PREFLOP_HANDS:
+        raise ValueError(
+            f"expected final axis {PREFLOP_HANDS}, got {values_169.shape[-1]}"
+        )
+    class_ids = combo_to_preflop_class_tensor(device=values_169.device)
+    expanded = values_169.index_select(-1, class_ids)
+    if divide_by_multiplicity:
+        multiplicity = preflop_class_multiplicity_tensor(
+            device=values_169.device
+        ).to(dtype=values_169.dtype)
+        expanded = expanded / multiplicity.index_select(0, class_ids)
+    return expanded
+
+
+def collapse_1326_to_169(
+    values_1326: torch.Tensor,
+    *,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """Collapse a tensor whose final axis is 1326 combos to 169 classes.
+
+    ``reduction="mean"`` is for class values/targets. ``reduction="sum"`` is
+    for probability mass beliefs.
+    """
+    if values_1326.shape[-1] != NUM_HANDS:
+        raise ValueError(
+            f"expected final axis {NUM_HANDS}, got {values_1326.shape[-1]}"
+        )
+    if reduction not in {"mean", "sum"}:
+        raise ValueError("reduction must be 'mean' or 'sum'")
+
+    class_ids = combo_to_preflop_class_tensor(device=values_1326.device)
+    out = values_1326.new_zeros(*values_1326.shape[:-1], PREFLOP_HANDS)
+    index = class_ids.expand(*values_1326.shape[:-1], NUM_HANDS)
+    out.scatter_add_(-1, index, values_1326)
+    if reduction == "mean":
+        multiplicity = preflop_class_multiplicity_tensor(
+            device=values_1326.device
+        ).to(dtype=values_1326.dtype)
+        out = out / multiplicity
+    return out
 
 
 def combo_index(card_a: int, card_b: int) -> int:

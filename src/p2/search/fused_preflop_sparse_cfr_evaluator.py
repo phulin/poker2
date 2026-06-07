@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import NUM_HANDS, PREFLOP_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
 from p2.models.mlp.mlp_features import MLPFeatures
@@ -38,6 +38,11 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        if int(getattr(self, "hand_dim", NUM_HANDS)) == PREFLOP_HANDS:
+            raise NotImplementedError(
+                "FusedPreflopSparseCFREvaluator still uses 1326-combo Triton "
+                "kernels; compact 169-hand preflop requires non-fused sparse CFR"
+            )
         self.warm_start_iterations = 0
 
     def _construct_subgame(

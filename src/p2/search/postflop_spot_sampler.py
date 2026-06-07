@@ -4,7 +4,13 @@ from dataclasses import dataclass
 
 import torch
 
-from p2.env.card_utils import NUM_HANDS, board_allowed_hands, hand_combos_tensor
+from p2.env.card_utils import (
+    NUM_HANDS,
+    PREFLOP_HANDS,
+    board_allowed_hands,
+    hand_combos_tensor,
+    preflop_class_multiplicity_tensor,
+)
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
 from p2.env.rules import rank_hands
@@ -179,6 +185,32 @@ def _uniform_board_legal_beliefs(
     allowed = board_allowed_hands(board)
     beliefs = allowed[:, None, :].expand(-1, num_players, -1).to(torch.float32)
     return beliefs / beliefs.sum(dim=-1, keepdim=True).clamp(min=1.0)
+
+
+def _compact_preflop_beliefs(
+    batch_size: int,
+    *,
+    num_players: int,
+    device: torch.device,
+    generator: torch.Generator | None,
+    randomize_beliefs: bool,
+) -> torch.Tensor:
+    multiplicity = preflop_class_multiplicity_tensor(device=device)
+    base = multiplicity.view(1, 1, PREFLOP_HANDS).expand(
+        batch_size, num_players, -1
+    )
+    if randomize_beliefs:
+        # Exponential noise gives a cheap Dirichlet-like positive class-mass
+        # sample while retaining multiplicity as the neutral preflop prior.
+        noise = -torch.rand(
+            batch_size,
+            num_players,
+            PREFLOP_HANDS,
+            device=device,
+            generator=generator,
+        ).clamp_min(1e-12).log()
+        base = base * noise
+    return base / base.sum(dim=-1, keepdim=True).clamp(min=1e-12)
 
 
 def _rank_shape_scores(board: torch.Tensor) -> torch.Tensor:
@@ -663,6 +695,7 @@ def sample_end_of_street_chance_roots(
     closed_street: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    compact_preflop_beliefs: bool = False,
 ) -> ChanceRootSample:
     """Sample roots for end-of-street chance-value targets.
 
@@ -684,7 +717,15 @@ def sample_end_of_street_chance_roots(
         generator=generator,
         randomize_beliefs=randomize_beliefs,
     )
-    if randomize_beliefs:
+    if compact_preflop_beliefs and closed_street == 0:
+        pre_chance_beliefs = _compact_preflop_beliefs(
+            batch_size,
+            num_players=2,
+            device=env_proto.device,
+            generator=generator,
+            randomize_beliefs=randomize_beliefs,
+        )
+    elif randomize_beliefs:
         pre_chance_beliefs = _random_board_legal_beliefs(
             pbs.env.last_board_indices,
             num_players=2,

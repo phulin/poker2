@@ -4,6 +4,7 @@ import torch
 
 from p2.env.card_utils import (
     NUM_HANDS,
+    PREFLOP_HANDS,
     combo_lookup_tensor,
     hand_combos_tensor,
 )
@@ -39,19 +40,25 @@ class MLPFeatures:
     to_act: torch.Tensor
     board: torch.Tensor
     beliefs: torch.Tensor
+    hand_dim: int = NUM_HANDS
 
     def __post_init__(self) -> None:
         N = self.context.shape[0]
+        if self.hand_dim not in (NUM_HANDS, PREFLOP_HANDS):
+            raise ValueError(
+                f"hand_dim must be one of {NUM_HANDS} or {PREFLOP_HANDS}; "
+                f"got {self.hand_dim}"
+            )
         assert self.street.shape == (N,)
         assert self.to_act.shape == (N,)
         assert self.board.shape == (N, 5)
         assert self.beliefs.dim() == 2
         assert self.beliefs.shape[0] == N
-        assert self.beliefs.shape[1] % NUM_HANDS == 0
+        assert self.beliefs.shape[1] % self.hand_dim == 0
 
     @property
     def num_players(self) -> int:
-        return self.beliefs.shape[1] // NUM_HANDS
+        return self.beliefs.shape[1] // self.hand_dim
 
     def __len__(self) -> int:
         """Get batch size."""
@@ -67,6 +74,7 @@ class MLPFeatures:
                     to_act=self.to_act[index],
                     board=self.board[index],
                     beliefs=self.beliefs[index],
+                    hand_dim=self.hand_dim,
                 )
             ctx, street, to_act, board, beliefs = _index_all(
                 self.context, self.street, self.to_act, self.board, self.beliefs, index
@@ -77,6 +85,7 @@ class MLPFeatures:
                 to_act=to_act,
                 board=board,
                 beliefs=beliefs,
+                hand_dim=self.hand_dim,
             )
         return MLPFeatures(
             context=self.context[index],
@@ -84,6 +93,7 @@ class MLPFeatures:
             to_act=self.to_act[index],
             board=self.board[index],
             beliefs=self.beliefs[index],
+            hand_dim=self.hand_dim,
         )
 
     def __setitem__(
@@ -103,6 +113,7 @@ class MLPFeatures:
             to_act=self.to_act.to(device),
             board=self.board.to(device),
             beliefs=self.beliefs.to(device),
+            hand_dim=self.hand_dim,
         )
 
     def clone(self) -> "MLPFeatures":
@@ -112,6 +123,7 @@ class MLPFeatures:
             to_act=self.to_act.clone(),
             board=self.board.clone(),
             beliefs=self.beliefs.clone(),
+            hand_dim=self.hand_dim,
         )
 
     @classmethod
@@ -119,6 +131,9 @@ class MLPFeatures:
         """Concatenate a list of MLPFeatures objects."""
         if not features_list:
             raise ValueError("Cannot concatenate an empty list of features.")
+        hand_dim = features_list[0].hand_dim
+        if any(f.hand_dim != hand_dim for f in features_list):
+            raise ValueError("Cannot concatenate features with different hand_dim.")
 
         return cls(
             context=torch.cat([f.context for f in features_list], dim=0),
@@ -126,6 +141,7 @@ class MLPFeatures:
             to_act=torch.cat([f.to_act for f in features_list], dim=0),
             board=torch.cat([f.board for f in features_list], dim=0),
             beliefs=torch.cat([f.beliefs for f in features_list], dim=0),
+            hand_dim=hand_dim,
         )
 
     def permute_suits(
@@ -168,6 +184,9 @@ class MLPFeatures:
         # Reconstruct card indices: only update valid cards
         new_board = torch.where(board_valid, new_suits * 13 + ranks, self.board)
         self.board[:] = new_board
+
+        if self.hand_dim == PREFLOP_HANDS:
+            return suit_permutations
 
         # Permute beliefs
         # Get hand combos and lookup helpers.

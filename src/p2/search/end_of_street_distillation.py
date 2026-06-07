@@ -4,6 +4,11 @@ from typing import Literal, Protocol
 
 import torch
 
+from p2.env.card_utils import (
+    PREFLOP_HANDS,
+    collapse_1326_to_169,
+    expand_169_to_1326,
+)
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
 from p2.rl.target_provenance import TARGET_SOURCE_CHANCE_EXPECTATION
@@ -89,24 +94,56 @@ def build_end_of_street_value_batch(
         )
 
     root_indices = torch.arange(batch_size, device=device, dtype=torch.long)
-    post_features = value_encoder.encode(pbs.beliefs, pre_chance_node=False)
-    pre_features = value_encoder.encode(pre_chance_beliefs, pre_chance_node=True)
+    target_encoder = value_encoder
+    if closed_street == 0 and hasattr(target_model, "create_feature_encoder"):
+        target_encoder = target_model.create_feature_encoder(
+            env=pbs.env,
+            device=device,
+            dtype=dtype,
+        )
+    post_features = target_encoder.encode(pbs.beliefs, pre_chance_node=False)
+
+    compact_preflop = (
+        closed_street == 0
+        and int(getattr(value_encoder, "belief_dim", 0)) == PREFLOP_HANDS
+    )
+    target_pre_chance_beliefs = pre_chance_beliefs
+    if compact_preflop:
+        if pre_chance_beliefs.shape[-1] == PREFLOP_HANDS:
+            pre_chance_beliefs_169 = pre_chance_beliefs
+        else:
+            pre_chance_beliefs_169 = collapse_1326_to_169(
+                pre_chance_beliefs,
+                reduction="sum",
+            )
+        pre_chance_beliefs_169 = pre_chance_beliefs_169.contiguous()
+        pre_features = value_encoder.encode(
+            pre_chance_beliefs_169, pre_chance_node=True
+        )
+        target_pre_chance_beliefs = expand_169_to_1326(
+            pre_chance_beliefs_169,
+            divide_by_multiplicity=True,
+        ).contiguous()
+    else:
+        pre_features = value_encoder.encode(pre_chance_beliefs, pre_chance_node=True)
 
     if chance == "sample_flops":
         value_targets = helper.flop_chance_values(
-            root_indices, post_features, pre_chance_beliefs
+            root_indices, post_features, target_pre_chance_beliefs
         )
     elif chance == "canonical_flops":
         value_targets = helper.canonical_flop_chance_values(
-            root_indices, post_features, pre_chance_beliefs
+            root_indices, post_features, target_pre_chance_beliefs
         )
     else:
         value_targets = helper.single_card_chance_values(
             root_indices,
             post_features,
-            pre_chance_beliefs,
+            target_pre_chance_beliefs,
             env.last_board_indices,
         )
+    if compact_preflop:
+        value_targets = collapse_1326_to_169(value_targets, reduction="mean")
 
     closed_street_tensor = torch.full(
         (batch_size,), closed_street, dtype=torch.long, device=device

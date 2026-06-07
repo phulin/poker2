@@ -8,11 +8,14 @@ import torch.nn as nn
 
 from p2.core.structured_config import NonlinearityType, StreetValueHeads
 from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
+from p2.env.card_utils import PREFLOP_HANDS
 from p2.models.activation_utils import get_activation, SwiGLU
 from p2.models.base_mlp_model import BaseMLPModel
 from p2.models.mlp.better_feature_encoder import (
     BetterFeatureEncoder,
     BetterPolicyFeatureEncoder,
+    BetterPreflopPolicyFeatureEncoder,
+    BetterPreflopValueFeatureEncoder,
     BetterStreetValueFeatureEncoder,
 )
 from p2.models.mlp.better_features import (
@@ -1320,6 +1323,446 @@ class BetterStreetValueFFN(BetterFFN):
         dtype: torch.dtype | None = None,
     ) -> BetterStreetValueFeatureEncoder:
         return BetterStreetValueFeatureEncoder(env=env, device=device, dtype=dtype)
+
+
+def _preflop_class_ranks() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ids = torch.arange(PREFLOP_HANDS, dtype=torch.long)
+    row = ids // 13
+    col = ids % 13
+    pair = row == col
+    suited = row > col
+    hi = torch.where(suited | pair, row, col)
+    lo = torch.where(suited | pair, col, row)
+    return hi, lo, suited
+
+
+class _BetterPreflopCompactFFN(BaseMLPModel):
+    """Shared compact 169-hand preflop MLP trunk."""
+
+    hand_dim = PREFLOP_HANDS
+
+    def __init__(
+        self,
+        num_actions: int,
+        hidden_dim: int = 1024,
+        range_hidden_dim: int = 256,
+        ffn_dim: int = 1024,
+        num_hidden_layers: int = 3,
+        num_policy_layers: int = 3,
+        num_value_layers: int = 3,
+        num_players: int = 2,
+        shared_trunk: bool = True,
+        enforce_zero_sum: bool = True,
+        board_interaction_dim: int = 0,
+        policy_rank: int = 64,
+        policy_hand_bias_rank: int = 32,
+        nonlinearity: NonlinearityType = NonlinearityType.gelu,
+    ) -> None:
+        super().__init__()
+        if range_hidden_dim < 0:
+            raise ValueError("range_hidden_dim must be non-negative")
+        if board_interaction_dim != 0:
+            raise ValueError("compact preflop models do not support board interaction")
+        if policy_rank <= 0:
+            raise ValueError("policy_rank must be positive")
+        if policy_hand_bias_rank <= 0:
+            raise ValueError("policy_hand_bias_rank must be positive")
+
+        self.num_actions = int(num_actions)
+        self.hidden_dim = hidden_dim
+        self.ffn_dim = ffn_dim
+        self.num_hidden_layers = num_hidden_layers
+        self.num_policy_layers = num_policy_layers
+        self.num_value_layers = num_value_layers
+        self.num_players = num_players
+        self.shared_trunk = shared_trunk
+        self.enforce_zero_sum = enforce_zero_sum
+        self.board_interaction_dim = board_interaction_dim
+        self.policy_rank = policy_rank
+        self.policy_hand_bias_rank = policy_hand_bias_rank
+        self.nonlinearity = nonlinearity
+
+        self.street_embedding = nn.Embedding(5, hidden_dim)
+        self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
+        self.suit_embedding = nn.Embedding(4 + 1, hidden_dim, padding_idx=4)
+        hi, lo, suited = _preflop_class_ranks()
+        self.register_buffer("class_hi_rank", hi, persistent=False)
+        self.register_buffer("class_lo_rank", lo, persistent=False)
+        self.register_buffer("class_suited", suited, persistent=False)
+        self.class_hi_embedding = nn.Embedding(13, hidden_dim)
+        self.class_lo_embedding = nn.Embedding(13, hidden_dim)
+        self.class_type_embedding = nn.Embedding(3, hidden_dim)
+        self.class_feature_proj = nn.Linear(HAND_STATIC_FEATURE_DIM, hidden_dim)
+
+        if range_hidden_dim == 0 and ffn_dim % num_players != 0:
+            raise ValueError(
+                "ffn_dim must be divisible by num_players when range_hidden_dim is 0"
+            )
+        effective_range_hidden_dim = (
+            ffn_dim // num_players if range_hidden_dim == 0 else range_hidden_dim
+        )
+        self.belief_proj = ffn_block(
+            num_players * hidden_dim,
+            num_players * effective_range_hidden_dim,
+            hidden_dim,
+            nonlinearity,
+        )
+        self.context_encoder = ffn_block(
+            context_length(num_players), hidden_dim, hidden_dim, nonlinearity
+        )
+
+        alpha = 1 / math.sqrt(num_hidden_layers + max(1, num_value_layers))
+        self.trunk = nn.Sequential(
+            *[
+                ResidualBlock(
+                    ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), alpha
+                )
+                for _ in range(num_hidden_layers)
+            ]
+        )
+
+    def _class_static_features(self) -> torch.Tensor:
+        hi = self.class_hi_rank.to(torch.float32)
+        lo = self.class_lo_rank.to(torch.float32)
+        suited = self.class_suited
+        pair = self.class_hi_rank == self.class_lo_rank
+        gap = (hi - lo).clamp(min=0.0)
+        return torch.stack(
+            [
+                pair.to(torch.float32),
+                suited.to(torch.float32),
+                gap / 12.0,
+                hi / 12.0,
+                lo / 12.0,
+                (hi == 12).to(torch.float32),
+                (lo >= 8).to(torch.float32),
+                (gap <= 1).to(torch.float32),
+            ],
+            dim=-1,
+        )
+
+    def _hand_embedding(self) -> torch.Tensor:
+        pair = self.class_hi_rank == self.class_lo_rank
+        class_type = torch.where(
+            pair,
+            torch.zeros_like(self.class_hi_rank),
+            torch.where(
+                self.class_suited,
+                torch.ones_like(self.class_hi_rank),
+                torch.full_like(self.class_hi_rank, 2),
+            ),
+        )
+        static = self._class_static_features().to(self.class_hi_embedding.weight.dtype)
+        return (
+            self.class_hi_embedding(self.class_hi_rank)
+            + self.class_lo_embedding(self.class_lo_rank)
+            + self.class_type_embedding(class_type)
+            + self.class_feature_proj(static)
+        )
+
+    def static_feature_base(self, features: MLPFeatures) -> torch.Tensor:
+        return self.static_feature_base_from_prefix(
+            self.static_feature_prefix(features.context, features.street),
+            features.board,
+        )
+
+    def static_feature_prefix(
+        self, context: torch.Tensor, street: torch.Tensor
+    ) -> torch.Tensor:
+        return self.street_embedding(street) + self.context_encoder(context)
+
+    def static_feature_base_from_prefix(
+        self, prefix: torch.Tensor, board: torch.Tensor
+    ) -> torch.Tensor:
+        ranks = torch.where(board >= 0, board % 13, torch.full_like(board, 13))
+        suits = torch.where(board >= 0, board // 13, torch.full_like(board, 4))
+        board_features = self.rank_embedding(ranks) + self.suit_embedding(suits)
+        return board_features.sum(dim=1) + prefix
+
+    def _forward_base_from_static(
+        self,
+        features: MLPFeatures,
+        static_base_features: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if features.hand_dim != PREFLOP_HANDS:
+            raise ValueError(
+                f"compact preflop model requires hand_dim={PREFLOP_HANDS}, "
+                f"got {features.hand_dim}"
+            )
+        player_beliefs = features.beliefs.view(
+            -1, self.num_players, PREFLOP_HANDS
+        )
+        hand_emb = self._hand_embedding()
+        per_player_belief = player_beliefs @ hand_emb
+        flat_features = static_base_features + self.belief_proj(
+            per_player_belief.flatten(1)
+        )
+        x = self.trunk(flat_features)
+        return player_beliefs, flat_features, x, hand_emb
+
+    def _forward_base(
+        self, features: MLPFeatures
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self._forward_base_from_static(
+            features, static_base_features=self.static_feature_base(features)
+        )
+
+    def init_weights(self, rng: torch.Generator | None = None) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, generator=rng)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, (nn.RMSNorm, nn.LayerNorm)):
+                nn.init.ones_(module.weight)
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(module.weight, mean=0.0, std=0.02, generator=rng)
+
+        expansion_gain = math.sqrt(self.ffn_dim / self.hidden_dim)
+        for sequential in (
+            self.trunk,
+            getattr(self, "policy_tower", None),
+            getattr(self, "value_tower", None),
+        ):
+            if sequential is None:
+                continue
+            for block in sequential.modules():
+                if not isinstance(block, ResidualBlock):
+                    continue
+                inner = block.inner
+                if "swiglu" in dict(inner.named_children()):
+                    swiglu = inner.get_submodule("swiglu")
+                    nn.init.orthogonal_(
+                        swiglu.gate.weight, expansion_gain, generator=rng
+                    )
+                    nn.init.orthogonal_(swiglu.up.weight, expansion_gain, generator=rng)
+                else:
+                    nn.init.orthogonal_(
+                        inner.get_submodule("linear_in").weight,
+                        1.532 * expansion_gain,
+                        generator=rng,
+                    )
+        value_head = getattr(self, "value_head", None)
+        if value_head is not None:
+            value_head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
+        policy_action_head = getattr(self, "policy_action_head", None)
+        if policy_action_head is not None:
+            policy_action_head.get_submodule("linear_out").weight.data.mul_(0.1)
+
+    def repeat(
+        self,
+        features: MLPFeatures,
+        count: int,
+        include_policy: bool = False,
+        include_value: bool = True,
+    ) -> ModelOutput:
+        return self(
+            features, include_policy=include_policy, include_value=include_value
+        )
+
+
+class BetterPreflopValueFFN(_BetterPreflopCompactFFN):
+    """Compact 169-hand preflop value model for `E_preflop`."""
+
+    def __init__(self, *args, value_heads=None, **kwargs) -> None:
+        if not args:
+            kwargs.setdefault("num_actions", 1)
+        super().__init__(*args, **kwargs)
+        del value_heads
+        alpha = 1 / math.sqrt(self.num_hidden_layers + self.num_value_layers)
+        layers = [
+            ResidualBlock(
+                ffn_block(
+                    self.hidden_dim, self.ffn_dim, nonlinearity=self.nonlinearity
+                ),
+                alpha,
+            )
+            for _ in range(self.num_value_layers)
+        ]
+        layers.append(
+            output_projection(self.hidden_dim, self.num_players * PREFLOP_HANDS)
+        )
+        self.value_head = nn.Sequential(*layers)
+
+    def _value_from_base(
+        self,
+        player_beliefs: torch.Tensor,
+        x: torch.Tensor,
+        apply_zero_sum: bool = True,
+    ) -> ModelOutput:
+        hand_values_raw = self.value_head(x).view(
+            -1, self.num_players, PREFLOP_HANDS
+        )
+        if self.enforce_zero_sum and apply_zero_sum:
+            hand_value_sums = (
+                (hand_values_raw * player_beliefs)
+                .sum(dim=2, keepdim=True)
+                .mean(dim=1, keepdim=True)
+            )
+            hand_values = hand_values_raw - hand_value_sums
+        else:
+            hand_values = hand_values_raw
+        return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
+
+    def forward_policy(self, features: MLPFeatures, latent=None) -> torch.Tensor:
+        raise RuntimeError("BetterPreflopValueFFN does not provide policy outputs")
+
+    def forward_value(
+        self,
+        features: MLPFeatures,
+        latent=None,
+        apply_zero_sum: bool = True,
+        static_base_features: torch.Tensor | None = None,
+        value_head: str = "auto",
+    ) -> ModelOutput:
+        del latent, value_head
+        if static_base_features is None:
+            player_beliefs, _, x, _ = self._forward_base(features)
+        else:
+            player_beliefs, _, x, _ = self._forward_base_from_static(
+                features, static_base_features
+            )
+        return self._value_from_base(player_beliefs, x, apply_zero_sum=apply_zero_sum)
+
+    def forward_value_static_base(
+        self,
+        features: MLPFeatures,
+        static_base_features: torch.Tensor,
+        latent=None,
+        apply_zero_sum: bool = True,
+        value_head: str = "auto",
+    ) -> ModelOutput:
+        return self.forward_value(
+            features,
+            latent=latent,
+            apply_zero_sum=apply_zero_sum,
+            static_base_features=static_base_features,
+            value_head=value_head,
+        )
+
+    def forward_both(
+        self,
+        features: MLPFeatures,
+        latent=None,
+        apply_zero_sum: bool = True,
+    ) -> ModelOutput:
+        return self.forward_value(
+            features, latent=latent, apply_zero_sum=apply_zero_sum
+        )
+
+    @profile
+    def forward(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = False,
+        include_value: bool = True,
+        apply_zero_sum: bool = True,
+        static_base_features: torch.Tensor | None = None,
+        latent=None,
+        value_head: str = "auto",
+    ) -> ModelOutput:
+        if include_policy:
+            raise RuntimeError("BetterPreflopValueFFN does not provide policy outputs")
+        if not include_value:
+            raise ValueError("BetterPreflopValueFFN requires include_value=True")
+        return self._call_forward_value(
+            features,
+            latent=latent,
+            apply_zero_sum=apply_zero_sum,
+            static_base_features=static_base_features,
+            value_head=value_head,
+        )
+
+    def create_feature_encoder(
+        self,
+        env,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> BetterPreflopValueFeatureEncoder:
+        return BetterPreflopValueFeatureEncoder(env=env, device=device, dtype=dtype)
+
+
+class BetterPreflopPolicyFFN(_BetterPreflopCompactFFN):
+    """Compact 169-hand preflop policy model for `S_preflop`."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        policy_alpha = (
+            1 / math.sqrt(self.num_hidden_layers + max(1, self.num_value_layers))
+            if self.shared_trunk
+            else 1 / math.sqrt(self.num_policy_layers)
+        )
+        self.policy_tower = nn.Sequential(
+            *[
+                ResidualBlock(
+                    ffn_block(
+                        self.hidden_dim, self.ffn_dim, nonlinearity=self.nonlinearity
+                    ),
+                    policy_alpha,
+                )
+                for _ in range(self.num_policy_layers)
+            ]
+        )
+        self.policy_hand_proj = output_projection(self.hidden_dim, self.policy_rank)
+        self.policy_action_head = output_projection(
+            self.hidden_dim, self.num_actions * self.policy_rank
+        )
+        self.policy_action_bias = output_projection(self.hidden_dim, self.num_actions)
+        self.policy_hand_bias = output_projection(
+            self.hidden_dim, self.policy_hand_bias_rank
+        )
+        self.policy_hand_bias_action = output_projection(
+            self.hidden_dim, self.num_actions * self.policy_hand_bias_rank
+        )
+        self.policy_hand_norm = nn.RMSNorm(self.hidden_dim, eps=1e-5)
+
+    def forward_policy(self, features: MLPFeatures, latent=None) -> torch.Tensor:
+        player_beliefs, flat_features, x, hand_emb = self._forward_base(features)
+        del player_beliefs
+        policy_input = x if self.shared_trunk else flat_features.detach()
+        policy_state = self.policy_tower(policy_input)
+        action_emb = self.policy_action_head(policy_state).view(
+            -1, self.num_actions, self.policy_rank
+        )
+        hand_vec = self.policy_hand_proj(self.policy_hand_norm(hand_emb))
+        logits = torch.einsum("hr,bar->bha", hand_vec, action_emb)
+        logits = logits / math.sqrt(self.policy_rank)
+        hand_bias = self.policy_hand_bias(hand_emb)
+        hand_bias_action = self.policy_hand_bias_action(policy_state).view(
+            -1, self.num_actions, self.policy_hand_bias_rank
+        )
+        logits = logits + torch.einsum("hk,bak->bha", hand_bias, hand_bias_action)
+        return logits + self.policy_action_bias(policy_state)[:, None, :]
+
+    def forward_value(
+        self, features: MLPFeatures, latent=None, **kwargs
+    ) -> ModelOutput:
+        raise RuntimeError("BetterPreflopPolicyFFN does not provide value outputs")
+
+    def forward_both(self, features: MLPFeatures, latent=None, **kwargs) -> ModelOutput:
+        return ModelOutput(policy_logits=self._call_forward_policy(features))
+
+    @profile
+    def forward(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = False,
+        **kwargs,
+    ) -> ModelOutput:
+        if include_value:
+            raise RuntimeError("BetterPreflopPolicyFFN does not provide value outputs")
+        if not include_policy:
+            raise ValueError("BetterPreflopPolicyFFN requires include_policy=True")
+        return ModelOutput(policy_logits=self._call_forward_policy(features))
+
+    def create_feature_encoder(
+        self,
+        env,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> BetterPreflopPolicyFeatureEncoder:
+        return BetterPreflopPolicyFeatureEncoder(env=env, device=device, dtype=dtype)
 
 
 class BetterSplitFFN(BaseMLPModel):

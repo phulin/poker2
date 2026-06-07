@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import torch
 
-from p2.env.card_utils import board_allowed_hands
+from p2.env.card_utils import (
+    PREFLOP_HANDS,
+    board_allowed_hands,
+    preflop_class_multiplicity_tensor,
+)
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.search.postflop_spot_sampler import (
     BOARD_TEXTURE_DRY,
@@ -340,6 +344,52 @@ def test_sample_end_of_street_chance_roots_builds_pre_chance_beliefs():
             atol=1e-6,
             rtol=0.0,
         )
+
+
+def test_sample_end_of_street_chance_roots_can_use_compact_preflop_beliefs():
+    device = torch.device("cpu")
+    env = HUNLTensorEnv(
+        num_envs=2,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=device,
+        float_dtype=torch.float32,
+    )
+
+    uniform_sample = sample_end_of_street_chance_roots(
+        env,
+        batch_size=3,
+        closed_street=0,
+        generator=torch.Generator(device=device).manual_seed(322),
+        randomize_beliefs=False,
+        compact_preflop_beliefs=True,
+    )
+    assert uniform_sample.pre_chance_beliefs.shape == (3, 2, PREFLOP_HANDS)
+    expected = preflop_class_multiplicity_tensor().view(1, 1, PREFLOP_HANDS)
+    expected = expected / expected.sum(dim=-1, keepdim=True)
+    torch.testing.assert_close(
+        uniform_sample.pre_chance_beliefs,
+        expected.expand_as(uniform_sample.pre_chance_beliefs),
+    )
+
+    random_sample = sample_end_of_street_chance_roots(
+        env,
+        batch_size=3,
+        closed_street=0,
+        generator=torch.Generator(device=device).manual_seed(323),
+        randomize_beliefs=True,
+        compact_preflop_beliefs=True,
+    )
+    assert random_sample.pre_chance_beliefs.shape == (3, 2, PREFLOP_HANDS)
+    torch.testing.assert_close(
+        random_sample.pre_chance_beliefs.sum(dim=-1),
+        torch.ones(3, 2),
+    )
+    assert not torch.allclose(
+        random_sample.pre_chance_beliefs,
+        uniform_sample.pre_chance_beliefs,
+    )
 
 
 def test_sample_end_of_street_chance_roots_randomizes_pre_chance_beliefs():

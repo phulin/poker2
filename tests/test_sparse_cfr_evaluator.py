@@ -15,7 +15,11 @@ from p2.core.structured_config import (
     SearchConfig,
     TrainingConfig,
 )
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import (
+    NUM_HANDS,
+    PREFLOP_HANDS,
+    preflop_class_multiplicity_tensor,
+)
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
 from p2.models.mlp.mlp_features import MLPFeatures
@@ -107,6 +111,72 @@ class MockModel:
             policy_logits=logits,
             value=torch.zeros(batch, device=device, dtype=dtype),
             hand_values=hand_values,
+        )
+
+    def eval(self) -> None:
+        pass
+
+
+class CompactPreflopMockModel:
+    """Compact 169-hand policy/value mock for preflop evaluator tests."""
+
+    hand_dim = PREFLOP_HANDS
+
+    def __init__(
+        self,
+        num_actions: int,
+        num_players: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        self.num_actions = num_actions
+        self.num_players = num_players
+        self.device = device
+        self.dtype = dtype
+        self.enforce_zero_sum = False
+        self.hidden_dim = 1
+        hand_values = torch.linspace(
+            -0.2, 0.2, steps=PREFLOP_HANDS, device=device, dtype=dtype
+        )
+        self.base_values = torch.stack(
+            [hand_values + 0.01 * player for player in range(num_players)], dim=0
+        )
+
+    def create_feature_encoder(self, env, device=None, dtype=None):
+        from p2.models.mlp.better_feature_encoder import (
+            BetterPreflopPolicyFeatureEncoder,
+        )
+
+        return BetterPreflopPolicyFeatureEncoder(env=env, device=device, dtype=dtype)
+
+    def __call__(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = True,
+        **kwargs,
+    ) -> ModelOutput:
+        del kwargs
+        batch = len(features)
+        device = features.context.device
+        dtype = features.context.dtype
+        logits = None
+        if include_policy:
+            action_logits = torch.linspace(
+                -0.25, 0.25, steps=self.num_actions, device=device, dtype=dtype
+            )
+            logits = action_logits.view(1, 1, -1).expand(
+                batch, PREFLOP_HANDS, self.num_actions
+            )
+        values = None
+        if include_value:
+            values = self.base_values.to(device=device, dtype=dtype).expand(
+                batch, self.num_players, PREFLOP_HANDS
+            )
+        return ModelOutput(
+            policy_logits=logits,
+            value=None if values is None else values.mean(dim=-1),
+            hand_values=values,
         )
 
     def eval(self) -> None:
@@ -628,6 +698,106 @@ def test_preflop_sparse_evaluator_enforces_pbs_preflop_roots() -> None:
     hunl_env = make_env(1, device=device)
     with pytest.raises(TypeError, match="PBSEnv"):
         evaluator.initialize_subgame(hunl_env, torch.arange(1, device=device))
+
+
+def test_preflop_sparse_evaluator_uses_compact_169_tensors() -> None:
+    device = get_device()
+    num_players = 3
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.allin_call_terminal_abstraction = False
+    env = PBSEnv(
+        num_envs=1,
+        num_players=num_players,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(1, dtype=torch.long, device=device),
+        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+    )
+    model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = PreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+
+    evaluator.initialize_subgame(env, torch.arange(1, device=device))
+
+    prior = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    prior = prior / prior.sum()
+    torch.testing.assert_close(evaluator.beliefs[0], prior.expand(num_players, -1))
+    for tensor in (
+        evaluator.beliefs,
+        evaluator.beliefs_avg,
+        evaluator.self_reach,
+        evaluator.latest_values,
+        evaluator.values_avg,
+        evaluator.policy_probs,
+        evaluator.policy_probs_avg,
+        evaluator.cumulative_regrets,
+        evaluator.average_policy_numerator,
+        evaluator.average_policy_denominator,
+    ):
+        assert tensor.shape[-1] == PREFLOP_HANDS
+
+
+def test_preflop_sparse_evaluator_runs_compact_iteration_and_policy_batch() -> None:
+    device = get_device()
+    num_players = 3
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.allin_call_terminal_abstraction = False
+    cfg.search.iterations = 1
+    env = PBSEnv(
+        num_envs=1,
+        num_players=num_players,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(1, dtype=torch.long, device=device),
+        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+    )
+    model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = PreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+    beliefs = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    beliefs = (beliefs / beliefs.sum()).expand(1, num_players, PREFLOP_HANDS).clone()
+
+    evaluator.initialize_subgame(env, torch.arange(1, device=device), beliefs)
+    next_pbs = evaluator.evaluate_cfr()
+    value_batch, pre_value_batch, policy_batch = evaluator.training_data(
+        include_pre_chance_value_batch=False
+    )
+
+    assert next_pbs.beliefs.shape[1:] == (num_players, PREFLOP_HANDS)
+    assert value_batch.features.beliefs.shape[1] == num_players * PREFLOP_HANDS
+    assert pre_value_batch is None
+    assert policy_batch is not None
+    assert policy_batch.policy_targets.shape[1:] == (
+        PREFLOP_HANDS,
+        evaluator.num_actions,
+    )
+    assert policy_batch.features.beliefs.shape[1] == num_players * PREFLOP_HANDS
 
 
 def test_preflop_sparse_evaluator_rejects_fused_config() -> None:

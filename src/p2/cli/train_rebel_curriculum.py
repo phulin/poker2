@@ -192,8 +192,13 @@ def _stage_config(
     stage_cfg.trueskill.enabled = False
     if substep.kind == "distill":
         stage_cfg.model.street_value_heads = StreetValueHeads.pre
+    if substep.net in {"E_preflop", "S_preflop", "S_0"}:
+        stage_cfg.model.preflop_hand_dim = 169
     _apply_overrides(
         stage_cfg.data, substep.data_overrides, label=f"{substep_name}.data"
+    )
+    _apply_overrides(
+        stage_cfg.model, substep.model_overrides, label=f"{substep_name}.model"
     )
     _apply_overrides(
         stage_cfg.train, substep.train_overrides, label=f"{substep_name}.train"
@@ -495,6 +500,7 @@ def _run_distill_substep(
                 batch_size=stage_cfg.train.batch_size,
                 closed_street=closed_street,
                 generator=trainer.rng,
+                compact_preflop_beliefs=closed_street == 0,
             )
             value_encoder = value_model.create_feature_encoder(
                 env=sample.pbs.env,
@@ -511,6 +517,19 @@ def _run_distill_substep(
                 generator=trainer.rng,
             )
             metrics = trainer.train_value_batch(batch, step, sync_inference_model=False)
+            if (
+                closed_street == 0
+                and stage_cfg.preflop_validation.enabled
+                and stage_cfg.preflop_validation.interval > 0
+                and (step + 1) % stage_cfg.preflop_validation.interval == 0
+            ):
+                metrics.update(
+                    _validate_preflop_value_169(
+                        trainer,
+                        source_model=source_model,
+                        chance=chance,
+                    )
+                )
             step_elapsed = time.time() - step_start
             total_elapsed = time.time() - loop_start
             print_rebel_training_stats(
@@ -561,6 +580,76 @@ def _run_distill_substep(
     promoted_path = _promote_checkpoint(cfg, substep, final_path)
     print(f"Promoted distill substep {substep_name}: {promoted_path}")
     return promoted_path
+
+
+@torch.no_grad()
+def _validate_preflop_value_169(
+    trainer: RebelCFRTrainer,
+    *,
+    source_model: torch.nn.Module,
+    chance: str,
+) -> dict[str, float | str]:
+    cfg = trainer.cfg.preflop_validation
+    examples = max(0, int(cfg.examples))
+    batch_size = max(1, int(cfg.batch_size))
+    if examples == 0:
+        return {
+            "validation_value_loss_169": 0.0,
+            "validation_examples": 0.0,
+            "validation_time_s": 0.0,
+            "validation_chance_mode": "canonical_orbit",
+        }
+
+    value_model = _value_model(trainer.model)
+    value_model.eval()
+    source_model.eval()
+    start_time = time.time()
+    weighted_loss = 0.0
+    seen = 0
+    helper = ChanceNodeHelper(
+        device=trainer.device,
+        float_dtype=trainer.float_dtype,
+        num_players=trainer.num_players,
+        model=source_model,
+        generator=trainer.rng,
+        flop_sample_size=0,
+    )
+
+    while seen < examples:
+        current = min(batch_size, examples - seen)
+        sample = sample_end_of_street_chance_roots(
+            trainer.env,
+            batch_size=current,
+            closed_street=0,
+            generator=trainer.rng,
+            compact_preflop_beliefs=True,
+        )
+        value_encoder = value_model.create_feature_encoder(
+            env=sample.pbs.env,
+            device=trainer.device,
+            dtype=trainer.float_dtype,
+        )
+        batch = build_end_of_street_value_batch(
+            sample,
+            value_encoder=value_encoder,
+            target_model=source_model,
+            chance_helper=helper,
+            chance=chance,
+            float_dtype=trainer.float_dtype,
+            generator=trainer.rng,
+        ).to(trainer.device)
+        with trainer._model_autocast():
+            output = trainer.model(batch.features, include_policy=False)
+        loss_dict = trainer.loss_fn._call_forward_value(output, batch)
+        weighted_loss += float(loss_dict["value_loss"].detach().item()) * current
+        seen += current
+
+    return {
+        "validation_value_loss_169": weighted_loss / max(1, seen),
+        "validation_examples": float(seen),
+        "validation_time_s": time.time() - start_time,
+        "validation_chance_mode": "canonical_orbit",
+    }
 
 
 def train_rebel_curriculum(cfg: Config) -> None:

@@ -256,8 +256,9 @@ class CFREvaluator(ABC):
     def _sample_root_hands_by_player(self) -> torch.Tensor:
         """Sample one private hand per root and player from root beliefs."""
         N = self.root_nodes
+        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
         return torch.multinomial(
-            self.beliefs[:N].reshape(N * self.num_players, NUM_HANDS),
+            self.beliefs[:N].reshape(N * self.num_players, hand_dim),
             1,
             generator=self.generator,
         ).view(N, self.num_players)
@@ -959,13 +960,14 @@ class CFREvaluator(ABC):
         for depth in range(self.tree_depth):
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
+            hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
 
             target_dest = target[offset_next:offset_next_next]
             target_dest[:] = self._fan_out(target, level=depth)
 
             prev_actor_dest = self.prev_actor[offset_next:offset_next_next]
             prev_actor_indices = prev_actor_dest[:, None, None].expand(
-                -1, -1, NUM_HANDS
+                -1, -1, hand_dim
             )
             policy_dest = policy[offset_next:offset_next_next]
             target_dest.scatter_reduce_(
@@ -1447,10 +1449,11 @@ class CFREvaluator(ABC):
         N = self.root_nodes
 
         # Handle initial beliefs
+        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
         if initial_beliefs is None:
             initial_beliefs = torch.full(
-                (N, self.num_players, NUM_HANDS),
-                1.0 / NUM_HANDS,
+                (N, self.num_players, hand_dim),
+                1.0 / hand_dim,
                 dtype=self.float_dtype,
                 device=self.device,
             )
@@ -1472,9 +1475,18 @@ class CFREvaluator(ABC):
         self._validate_model_leaf_phases()
         self.latent = None
 
-        # Compute allowed hands from root board
-        board_mask_root = self.env.board_onehot[:N].any(dim=1).reshape(N, -1).float()
-        root_allowed = (self.combo_onehot_float @ board_mask_root.T).T < 0.5
+        # Compute allowed hands from root board. Compact preflop rank classes have
+        # no public-board blockers inside the evaluator; exact class blocker
+        # weighting is handled by dedicated preflop code paths when enabled.
+        if hand_dim == NUM_HANDS:
+            board_mask_root = (
+                self.env.board_onehot[:N].any(dim=1).reshape(N, -1).float()
+            )
+            root_allowed = (self.combo_onehot_float @ board_mask_root.T).T < 0.5
+        else:
+            root_allowed = torch.ones(
+                N, hand_dim, dtype=torch.bool, device=self.device
+            )
         root_allowed_prob = root_allowed.to(dtype=self.float_dtype)
         root_allowed_prob /= root_allowed_prob.sum(dim=-1, keepdim=True).clamp(min=1.0)
 
@@ -1533,8 +1545,9 @@ class CFREvaluator(ABC):
 
         # Pre-allocate policy_probs_src for efficiency (used by sparse, but harmless for dense)
         top = self.depth_offsets[-2] if len(self.depth_offsets) > 1 else self.root_nodes
+        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
         policy_probs_src = torch.empty(
-            top, self.num_actions, NUM_HANDS, device=self.device, dtype=self.float_dtype
+            top, self.num_actions, hand_dim, device=self.device, dtype=self.float_dtype
         )
 
         for depth in range(self.tree_depth):
@@ -1975,8 +1988,9 @@ class CFREvaluator(ABC):
             self.latest_values = new_values.clone()
             self.last_model_values = last_model_values.clone()
         else:
+            hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
             self.last_model_values = self.latest_values.new_empty(
-                (0, self.num_players, NUM_HANDS)
+                (0, self.num_players, hand_dim)
             )
 
         # Set showdown values. Heads-up keeps the exact per-hand river resolver;
@@ -2029,9 +2043,10 @@ class CFREvaluator(ABC):
             )
 
         bottom, top = self.depth_offsets[1], self.depth_offsets[-2]
+        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
         actor_indices = self.env.to_act[:top]
         actor_indices_expanded = actor_indices[:top, None, None].expand(
-            -1, -1, NUM_HANDS
+            -1, -1, hand_dim
         )
         actor_beliefs = beliefs[:top].gather(1, actor_indices_expanded).squeeze(1)
         beliefs_dest = self._fan_out(actor_beliefs)
@@ -2084,9 +2099,10 @@ class CFREvaluator(ABC):
 
         regrets = torch.zeros_like(self.policy_probs)
 
-        src_actor_indices = self.env.to_act[:, None, None].expand(-1, -1, NUM_HANDS)
+        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
+        src_actor_indices = self.env.to_act[:, None, None].expand(-1, -1, hand_dim)
         prev_actor_indices = self.prev_actor[bottom:, None, None].expand(
-            -1, -1, NUM_HANDS
+            -1, -1, hand_dim
         )
 
         # This represents other players' reach mass at the source node, projected
@@ -2192,7 +2208,8 @@ class CFREvaluator(ABC):
         # Get actor indices at source nodes (nodes that have children)
         # _fan_out expects tensors aligned with source nodes (0 to depth_offsets[-2])
         top = self.depth_offsets[-2]
-        actor_indices = self.env.to_act[:top, None, None].expand(-1, -1, NUM_HANDS)
+        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
+        actor_indices = self.env.to_act[:top, None, None].expand(-1, -1, hand_dim)
         reach_actor = self.self_reach[:top].gather(1, actor_indices).squeeze(1)
 
         # Fan out actor reach to get per-action CFR average weights.
@@ -2211,7 +2228,7 @@ class CFREvaluator(ABC):
 
         policy_sum = torch.zeros(
             self.depth_offsets[-2],
-            NUM_HANDS,
+            hand_dim,
             device=self.device,
             dtype=self.float_dtype,
         )

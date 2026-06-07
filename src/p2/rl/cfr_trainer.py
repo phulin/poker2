@@ -24,6 +24,8 @@ from p2.models.mlp import RebelFFN
 from p2.models.mlp.better_features import context_length
 from p2.models.mlp.better_ffn import (
     BetterPolicyFFN,
+    BetterPreflopPolicyFFN,
+    BetterPreflopValueFFN,
     BetterSplitFFN,
     BetterStreetValueFFN,
 )
@@ -624,6 +626,17 @@ class RebelCFRTrainer:
             policy_hand_bias_rank=cfg.model.policy_hand_bias_rank,
             nonlinearity=cfg.model.nonlinearity,
         )
+        if int(getattr(cfg.model, "preflop_hand_dim", NUM_HANDS)) == 169:
+            return BetterSplitFFN(
+                policy_model=BetterPreflopPolicyFFN(
+                    num_actions=self.num_actions, **common
+                ),
+                value_model=BetterPreflopValueFFN(
+                    num_actions=1,
+                    value_heads=cfg.model.street_value_heads,
+                    **common,
+                ),
+            )
         return BetterSplitFFN(
             policy_model=BetterPolicyFFN(num_actions=self.num_actions, **common),
             value_model=BetterStreetValueFFN(

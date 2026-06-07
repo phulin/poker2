@@ -269,6 +269,7 @@ class ModelConfig:
     policy_hand_bias_rank: int = 32
     value_rank: int = 128
     street_value_heads: StreetValueHeads = StreetValueHeads.both
+    preflop_hand_dim: int = 1326
 
     # Better TRM parameters
     num_recursions: int = 6
@@ -445,6 +446,7 @@ class CurriculumSubstepConfig:
     checkpoint: str | None = None
     output_dir: str | None = None
     data_overrides: dict[str, Any] = field(default_factory=dict)
+    model_overrides: dict[str, Any] = field(default_factory=dict)
     train_overrides: dict[str, Any] = field(default_factory=dict)
     search_overrides: dict[str, Any] = field(default_factory=dict)
 
@@ -477,6 +479,14 @@ class ValidationSetConfig:
     interval: int = 50
     batch_size: int = 1024
     max_examples: int | None = None
+
+
+@dataclass
+class PreflopValidationConfig:
+    enabled: bool = False
+    interval: int = 100
+    examples: int = 1024
+    batch_size: int = 128
 
 
 @dataclass
@@ -522,6 +532,9 @@ class Config:
         default_factory=RebelPregenerateConfig
     )
     validation_set: ValidationSetConfig = field(default_factory=ValidationSetConfig)
+    preflop_validation: PreflopValidationConfig = field(
+        default_factory=PreflopValidationConfig
+    )
 
     def __post_init__(self):
         if self.wandb_tags is None:
@@ -607,6 +620,9 @@ class Config:
         )
         container["validation_set"] = ValidationSetConfig(
             **container.get("validation_set", {})
+        )
+        container["preflop_validation"] = PreflopValidationConfig(
+            **container.get("preflop_validation", {})
         )
         return cls(**container)
 

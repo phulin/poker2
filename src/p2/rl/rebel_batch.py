@@ -7,6 +7,7 @@ import torch
 
 from p2.env.card_utils import (
     NUM_HANDS,
+    PREFLOP_HANDS,
     combo_suit_permutation_inverse_tensor,
     suit_permutations_tensor,
 )
@@ -115,30 +116,47 @@ class RebelBatch:
         )
 
         feature_players = permuted_features.num_players
-        beliefs = permuted_features.beliefs.view(-1, feature_players, NUM_HANDS)
-        permuted_features.beliefs[:] = torch.gather(
-            beliefs,
-            2,
-            combo_permutations_inverse[:, None, :].expand(-1, beliefs.shape[1], -1),
-        ).reshape(len(self), -1)
+        if permuted_features.hand_dim == NUM_HANDS:
+            beliefs = permuted_features.beliefs.view(-1, feature_players, NUM_HANDS)
+            permuted_features.beliefs[:] = torch.gather(
+                beliefs,
+                2,
+                combo_permutations_inverse[:, None, :].expand(-1, beliefs.shape[1], -1),
+            ).reshape(len(self), -1)
+        elif permuted_features.hand_dim != PREFLOP_HANDS:
+            raise ValueError(f"Unsupported hand_dim={permuted_features.hand_dim}")
 
         value_targets = None
         if self.value_targets is not None:
-            value_targets = torch.gather(
-                self.value_targets,
-                2,
-                combo_permutations_inverse[:, None, :].expand(-1, num_players, -1),
-            )
+            if self.value_targets.shape[-1] == NUM_HANDS:
+                value_targets = torch.gather(
+                    self.value_targets,
+                    2,
+                    combo_permutations_inverse[:, None, :].expand(-1, num_players, -1),
+                )
+            elif self.value_targets.shape[-1] == PREFLOP_HANDS:
+                value_targets = self.value_targets.clone()
+            else:
+                raise ValueError(
+                    f"Unsupported value target hand dim {self.value_targets.shape[-1]}"
+                )
 
         policy_targets = None
         if self.policy_targets is not None:
-            policy_targets = torch.gather(
-                self.policy_targets,
-                1,
-                combo_permutations_inverse[:, :, None].expand(
-                    -1, -1, self.policy_targets.shape[2]
-                ),
-            )
+            if self.policy_targets.shape[1] == NUM_HANDS:
+                policy_targets = torch.gather(
+                    self.policy_targets,
+                    1,
+                    combo_permutations_inverse[:, :, None].expand(
+                        -1, -1, self.policy_targets.shape[2]
+                    ),
+                )
+            elif self.policy_targets.shape[1] == PREFLOP_HANDS:
+                policy_targets = self.policy_targets.clone()
+            else:
+                raise ValueError(
+                    f"Unsupported policy target hand dim {self.policy_targets.shape[1]}"
+                )
 
         return (
             RebelBatch(
