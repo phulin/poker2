@@ -8,6 +8,7 @@ Python unit and integration tests for environments, rules, models, training util
 - `test_showdown_package.py`: Package export and explicit triangle-weight checks for reusable showdown evaluators.
 - `test_showdown_per_hand_equity.py`: Per-hand exact, A+xB, tiered approximation, and blocked-hand showdown equity vector coverage.
 - `test_allin_equity_model.py`: Preflop all-in random batch generation, browser-friendly LeakyReLU/RMSNorm model shape checks, pregenerated dataset helpers, and random/exhaustive all-in target sampler smoke coverage.
+- `test_allin_precompute.py`: Compact 169-class all-in precompute helpers, covering combo-table 2-player collapse and board-streamed 2/3-player class share tensors against brute-force class tuple checks.
 - `test_preflop_169.py`: Compact 169-hand preflop mapping, expand/collapse, multiplicity-weighted loss, and compact Better preflop model shape coverage.
 - `test_*cfr*.py`, `test_allin_payoff.py`, `test_chance_node_helper.py`, `test_rebel_data_generator.py`, `test_rebel_pipeline.py`, `test_sparse_cfr_evaluator.py`, `test_high_exploitability_save.py`: Sparse CFR/search, compact non-fused preflop evaluator, all-in payoff kernels, and ReBeL pipeline coverage.
 - `test_end_of_street_distillation.py`: End-of-street `E_X` distillation target-batch coverage for pre-chance features, compact `E_preflop` batches, and chance-mode validation.

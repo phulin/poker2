@@ -1,0 +1,568 @@
+from __future__ import annotations
+
+import argparse
+import io
+import math
+import os
+import time
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
+from itertools import combinations
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from p2.env.card_utils import (
+    NUM_HANDS,
+    PREFLOP_HANDS,
+    board_allowed_hands,
+    combo_to_preflop_class_tensor,
+    hand_combos_tensor,
+    preflop_class_multiplicity_tensor,
+)
+from p2.env.rules import rank_hands as rank_hands_torch
+from p2.env.rules_triton import triton_is_available
+from p2.search.allin_payoff import I16_SCALE, load_preflop_payoff_i16
+
+
+TOTAL_PREFLOP_BOARDS = math.comb(52, 5)
+_MAX_CLASS_MULTIPLICITY = 12
+_FORMAT = "p2.allin.preflop_allin_169.v1"
+
+
+@dataclass
+class PreflopAllIn169Tensors:
+    """Exact class-level preflop all-in showdown tensors."""
+
+    allin_2p_share0: torch.Tensor | None = None
+    allin_2p_count: torch.Tensor | None = None
+    allin_3p_share0: torch.Tensor | None = None
+    allin_3p_count: torch.Tensor | None = None
+    metadata: dict[str, Any] | None = None
+
+    def payload(self) -> dict[str, object]:
+        out: dict[str, object] = {"format": _FORMAT, "metadata": self.metadata or {}}
+        if self.allin_2p_share0 is not None:
+            out["allin_2p_share0"] = self.allin_2p_share0
+        if self.allin_2p_count is not None:
+            out["allin_2p_count"] = self.allin_2p_count
+        if self.allin_3p_share0 is not None:
+            out["allin_3p_share0"] = self.allin_3p_share0
+        if self.allin_3p_count is not None:
+            out["allin_3p_count"] = self.allin_3p_count
+        return out
+
+
+def _rank_hands(board: torch.Tensor, *, use_triton: bool) -> torch.Tensor:
+    if use_triton:
+        from p2.env.rules_triton import rank_hands_triton
+
+        ranks, _ = rank_hands_triton(board.int())
+    else:
+        ranks, _ = rank_hands_torch(board.int())
+    return ranks.to(torch.int32).contiguous()
+
+
+def _sample_full_boards(
+    count: int,
+    *,
+    seed: int,
+    board_chunk: int,
+) -> Iterator[torch.Tensor]:
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    for start in range(0, count, board_chunk):
+        cur = min(board_chunk, count - start)
+        keys = torch.rand(cur, 52, generator=generator)
+        yield keys.topk(5, dim=1).indices.sort(dim=1).values.to(torch.long)
+
+
+def _exhaustive_full_boards(*, board_chunk: int) -> Iterator[torch.Tensor]:
+    buf: list[tuple[int, int, int, int, int]] = []
+    for board in combinations(range(52), 5):
+        buf.append(board)
+        if len(buf) == board_chunk:
+            yield torch.tensor(buf, dtype=torch.long)
+            buf.clear()
+    if buf:
+        yield torch.tensor(buf, dtype=torch.long)
+
+
+def _board_chunks(
+    *,
+    sample_boards: int | None,
+    seed: int,
+    board_chunk: int,
+) -> Iterator[torch.Tensor]:
+    if board_chunk <= 0:
+        raise ValueError("board_chunk must be positive")
+    if sample_boards is not None:
+        if sample_boards <= 0:
+            raise ValueError("sample_boards must be positive")
+        yield from _sample_full_boards(
+            sample_boards,
+            seed=seed,
+            board_chunk=board_chunk,
+        )
+        return
+    yield from _exhaustive_full_boards(board_chunk=board_chunk)
+
+
+def _class_combo_table(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    class_ids = combo_to_preflop_class_tensor(device=torch.device("cpu"))
+    table = torch.full(
+        (PREFLOP_HANDS, _MAX_CLASS_MULTIPLICITY),
+        -1,
+        dtype=torch.long,
+    )
+    mask = torch.zeros_like(table, dtype=torch.bool)
+    for class_id in range(PREFLOP_HANDS):
+        combos = torch.nonzero(class_ids == class_id, as_tuple=False).flatten()
+        count = int(combos.numel())
+        table[class_id, :count] = combos
+        mask[class_id, :count] = True
+    return table.to(device), mask.to(device)
+
+
+def _combo_masks(device: torch.device) -> torch.Tensor:
+    combos = hand_combos_tensor(device=device)
+    one = torch.ones((), dtype=torch.int64, device=device)
+    return (
+        torch.bitwise_left_shift(one, combos[:, 0])
+        | torch.bitwise_left_shift(one, combos[:, 1])
+    ).contiguous()
+
+
+def _linear_class_ids(
+    players: int,
+    *,
+    class_ids: Sequence[int] | None,
+    device: torch.device,
+) -> torch.Tensor:
+    if players not in (2, 3):
+        raise ValueError("players must be 2 or 3")
+    if class_ids is None:
+        return torch.arange(PREFLOP_HANDS**players, dtype=torch.long, device=device)
+
+    classes = torch.tensor(tuple(class_ids), dtype=torch.long, device=device)
+    if classes.numel() == 0:
+        raise ValueError("class_ids cannot be empty")
+    if bool(((classes < 0) | (classes >= PREFLOP_HANDS)).any()):
+        raise ValueError(f"class ids must be in [0, {PREFLOP_HANDS})")
+    grids = torch.cartesian_prod(*([classes] * players))
+    if players == 2:
+        return grids[:, 0] * PREFLOP_HANDS + grids[:, 1]
+    return (grids[:, 0] * PREFLOP_HANDS + grids[:, 1]) * PREFLOP_HANDS + grids[:, 2]
+
+
+def _decode_linear_classes(linear: torch.Tensor, players: int) -> torch.Tensor:
+    if players == 2:
+        c0 = linear // PREFLOP_HANDS
+        c1 = linear - c0 * PREFLOP_HANDS
+        return torch.stack((c0, c1), dim=1)
+    c0 = linear // (PREFLOP_HANDS * PREFLOP_HANDS)
+    rem = linear - c0 * PREFLOP_HANDS * PREFLOP_HANDS
+    c1 = rem // PREFLOP_HANDS
+    c2 = rem - c1 * PREFLOP_HANDS
+    return torch.stack((c0, c1, c2), dim=1)
+
+
+def allin_2p_169_share0_from_combo_payoff(
+    payoff: torch.Tensor,
+    *,
+    scale: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Collapse a combo-level preflop payoff table to seat-0 ``[169, 169]`` share."""
+    if tuple(payoff.shape) != (NUM_HANDS, NUM_HANDS):
+        raise ValueError(
+            f"expected payoff shape {(NUM_HANDS, NUM_HANDS)}, got {tuple(payoff.shape)}"
+        )
+
+    device = payoff.device
+    class_ids = combo_to_preflop_class_tensor(device=device)
+    combo_masks = _combo_masks(device)
+    compatible = (combo_masks[:, None] & combo_masks[None, :]) == 0
+    pair_ids = (class_ids[:, None] * PREFLOP_HANDS + class_ids[None, :]).reshape(-1)
+    flat_compatible = compatible.reshape(-1)
+    flat_ids = pair_ids[flat_compatible]
+
+    sums = torch.zeros(PREFLOP_HANDS * PREFLOP_HANDS, dtype=torch.float64, device=device)
+    counts = torch.zeros_like(sums, dtype=torch.int64)
+    values = 0.5 * (payoff.reshape(-1)[flat_compatible].to(torch.float64) / float(scale) + 1.0)
+    sums.scatter_add_(0, flat_ids, values)
+    counts.scatter_add_(0, flat_ids, torch.ones_like(flat_ids, dtype=torch.int64))
+    avg = torch.where(
+        counts > 0,
+        sums / counts.to(torch.float64).clamp_min(1),
+        torch.zeros_like(sums),
+    )
+    return (
+        avg.reshape(PREFLOP_HANDS, PREFLOP_HANDS).to(torch.float32).contiguous(),
+        counts.reshape(PREFLOP_HANDS, PREFLOP_HANDS).contiguous(),
+    )
+
+
+def _class_tuple_combos(
+    class_tuple: torch.Tensor,
+    *,
+    class_combo: torch.Tensor,
+    class_combo_mask: torch.Tensor,
+    combo_masks: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    players = int(class_tuple.shape[1])
+    gathered = class_combo.index_select(0, class_tuple.reshape(-1)).reshape(
+        class_tuple.shape[0],
+        players,
+        _MAX_CLASS_MULTIPLICITY,
+    )
+    gathered_mask = class_combo_mask.index_select(0, class_tuple.reshape(-1)).reshape(
+        class_tuple.shape[0],
+        players,
+        _MAX_CLASS_MULTIPLICITY,
+    )
+    if players == 2:
+        h0 = gathered[:, 0, :, None]
+        h1 = gathered[:, 1, None, :]
+        m0 = gathered_mask[:, 0, :, None]
+        m1 = gathered_mask[:, 1, None, :]
+        cm0 = combo_masks.index_select(0, h0.clamp_min(0).reshape(-1)).reshape_as(h0)
+        cm1 = combo_masks.index_select(0, h1.clamp_min(0).reshape(-1)).reshape_as(h1)
+        valid = m0 & m1 & ((cm0 & cm1) == 0)
+        combos = torch.stack(
+            (
+                h0.expand(-1, -1, _MAX_CLASS_MULTIPLICITY),
+                h1.expand(-1, _MAX_CLASS_MULTIPLICITY, -1),
+            ),
+            dim=-1,
+        )
+        return combos.reshape(class_tuple.shape[0], -1, players), valid.reshape(
+            class_tuple.shape[0], -1
+        )
+
+    h0 = gathered[:, 0, :, None, None]
+    h1 = gathered[:, 1, None, :, None]
+    h2 = gathered[:, 2, None, None, :]
+    m0 = gathered_mask[:, 0, :, None, None]
+    m1 = gathered_mask[:, 1, None, :, None]
+    m2 = gathered_mask[:, 2, None, None, :]
+    cm0 = combo_masks.index_select(0, h0.clamp_min(0).reshape(-1)).reshape_as(h0)
+    cm1 = combo_masks.index_select(0, h1.clamp_min(0).reshape(-1)).reshape_as(h1)
+    cm2 = combo_masks.index_select(0, h2.clamp_min(0).reshape(-1)).reshape_as(h2)
+    valid = (
+        m0
+        & m1
+        & m2
+        & ((cm0 & cm1) == 0)
+        & ((cm0 & cm2) == 0)
+        & ((cm1 & cm2) == 0)
+    )
+    combos = torch.stack(
+        (
+            h0.expand(-1, -1, _MAX_CLASS_MULTIPLICITY, _MAX_CLASS_MULTIPLICITY),
+            h1.expand(-1, _MAX_CLASS_MULTIPLICITY, -1, _MAX_CLASS_MULTIPLICITY),
+            h2.expand(-1, _MAX_CLASS_MULTIPLICITY, _MAX_CLASS_MULTIPLICITY, -1),
+        ),
+        dim=-1,
+    )
+    return combos.reshape(class_tuple.shape[0], -1, players), valid.reshape(
+        class_tuple.shape[0], -1
+    )
+
+
+@torch.no_grad()
+def precompute_allin_class_shares(
+    *,
+    players: int,
+    device: torch.device | str,
+    sample_boards: int | None = None,
+    seed: int = 0,
+    board_chunk: int = 256,
+    class_chunk: int = 64,
+    tuple_chunk: int = 65_536,
+    class_ids: Sequence[int] | None = None,
+    use_triton: bool | None = None,
+    progress: Callable[[dict[str, float]], None] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, object]]:
+    """Precompute exact ordered 2-player or 3-player class all-in shares.
+
+    Exactness is with respect to the board source: pass ``sample_boards=None``
+    for all ``C(52, 5)`` boards, or a positive ``sample_boards`` for a
+    deterministic smoke/approximation run.
+    """
+    if players not in (2, 3):
+        raise ValueError("players must be 2 or 3")
+    if class_chunk <= 0 or tuple_chunk <= 0:
+        raise ValueError("class_chunk and tuple_chunk must be positive")
+
+    device = torch.device(device)
+    if use_triton is None:
+        use_triton = device.type == "cuda" and triton_is_available()
+    if use_triton and device.type != "cuda":
+        raise ValueError("Triton ranker requires CUDA")
+
+    linear = _linear_class_ids(players, class_ids=class_ids, device=device)
+    total_entries = PREFLOP_HANDS**players
+    share_sum = torch.zeros(players, total_entries, dtype=torch.float64, device=device)
+    count = torch.zeros(total_entries, dtype=torch.int64, device=device)
+    class_combo, class_combo_mask = _class_combo_table(device)
+    combo_masks = _combo_masks(device)
+    started = time.perf_counter()
+    board_total = TOTAL_PREFLOP_BOARDS if sample_boards is None else int(sample_boards)
+    done_boards = 0
+
+    for boards_cpu in _board_chunks(
+        sample_boards=sample_boards,
+        seed=seed,
+        board_chunk=board_chunk,
+    ):
+        boards = boards_cpu.to(device=device, non_blocking=True)
+        ranks = _rank_hands(boards, use_triton=bool(use_triton))
+        allowed = board_allowed_hands(boards)
+        done_boards += int(boards.shape[0])
+
+        for start in range(0, linear.numel(), class_chunk):
+            ids = linear[start : start + class_chunk]
+            class_tuple = _decode_linear_classes(ids, players)
+            tuple_grid, tuple_valid = _class_tuple_combos(
+                class_tuple,
+                class_combo=class_combo,
+                class_combo_mask=class_combo_mask,
+                combo_masks=combo_masks,
+            )
+            flat_valid = tuple_valid.reshape(-1)
+            if not bool(flat_valid.any()):
+                continue
+            flat_tuple = tuple_grid.reshape(-1, players)[flat_valid].contiguous()
+            owners = ids.repeat_interleave(tuple_valid.shape[1])[flat_valid]
+
+            for tuple_start in range(0, flat_tuple.shape[0], tuple_chunk):
+                tuples = flat_tuple[tuple_start : tuple_start + tuple_chunk]
+                owner = owners[tuple_start : tuple_start + tuple_chunk]
+                flat_hands = tuples.reshape(-1)
+                tuple_ranks = ranks.index_select(1, flat_hands).reshape(
+                    boards.shape[0],
+                    tuples.shape[0],
+                    players,
+                )
+                tuple_allowed = allowed.index_select(1, flat_hands).reshape(
+                    boards.shape[0],
+                    tuples.shape[0],
+                    players,
+                )
+                board_valid = tuple_allowed.all(dim=2)
+                max_rank = tuple_ranks.max(dim=2, keepdim=True).values
+                winners = tuple_ranks == max_rank
+                winner_count = winners.sum(dim=2, keepdim=True).clamp_min(1)
+                shares = winners.to(torch.float64) / winner_count.to(torch.float64)
+                shares = torch.where(board_valid[:, :, None], shares, 0.0)
+                share_by_tuple = shares.sum(dim=0).T.contiguous()
+                count_by_tuple = board_valid.sum(dim=0, dtype=torch.int64)
+                for player in range(players):
+                    share_sum[player].scatter_add_(0, owner, share_by_tuple[player])
+                count.scatter_add_(0, owner, count_by_tuple)
+
+        if progress is not None:
+            elapsed = time.perf_counter() - started
+            progress(
+                {
+                    "players": float(players),
+                    "boards_done": float(done_boards),
+                    "boards_total": float(board_total),
+                    "seconds": float(elapsed),
+                    "boards_per_second": float(done_boards / max(elapsed, 1.0e-9)),
+                }
+            )
+
+    avg = torch.where(
+        count[None, :] > 0,
+        share_sum / count[None, :].to(torch.float64).clamp_min(1),
+        torch.zeros_like(share_sum),
+    )
+    shape = (players, *([PREFLOP_HANDS] * players))
+    metadata: dict[str, object] = {
+        "players": players,
+        "num_boards": board_total,
+        "exact": sample_boards is None,
+        "sample_seed": int(seed),
+        "board_chunk": int(board_chunk),
+        "class_chunk": int(class_chunk),
+        "tuple_chunk": int(tuple_chunk),
+        "class_ids": None if class_ids is None else [int(x) for x in class_ids],
+        "device": str(device),
+        "ranker": "triton" if use_triton else "torch",
+    }
+    return (
+        avg.reshape(shape).to(torch.float32).contiguous(),
+        count.reshape(*([PREFLOP_HANDS] * players)).contiguous(),
+        metadata,
+    )
+
+
+@torch.no_grad()
+def precompute_allin_169_tensors(
+    *,
+    output: str | Path | None = None,
+    device: torch.device | str = "cuda",
+    players: Sequence[int] = (2, 3),
+    preflop_payoff_path: str | Path | None = None,
+    sample_boards: int | None = None,
+    seed: int = 0,
+    board_chunk: int = 256,
+    class_chunk: int = 64,
+    tuple_chunk: int = 65_536,
+    class_ids: Sequence[int] | None = None,
+    use_triton: bool | None = None,
+    progress: Callable[[dict[str, float]], None] | None = None,
+) -> PreflopAllIn169Tensors:
+    """Build and optionally save preflop all-in 169-class tensors."""
+    device = torch.device(device)
+    wanted = tuple(int(p) for p in players)
+    if any(p not in (2, 3) for p in wanted):
+        raise ValueError("players entries must be 2 or 3")
+
+    result = PreflopAllIn169Tensors(metadata={"format": _FORMAT})
+    timings: dict[str, float] = {}
+
+    if 2 in wanted and preflop_payoff_path is not None and class_ids is None:
+        start = time.perf_counter()
+        table = load_preflop_payoff_i16(preflop_payoff_path, device)
+        share0, counts = allin_2p_169_share0_from_combo_payoff(table, scale=I16_SCALE)
+        result.allin_2p_share0 = share0.cpu()
+        result.allin_2p_count = counts.cpu()
+        timings["allin_2p_seconds"] = time.perf_counter() - start
+    elif 2 in wanted:
+        start = time.perf_counter()
+        shares, counts, meta = precompute_allin_class_shares(
+            players=2,
+            device=device,
+            sample_boards=sample_boards,
+            seed=seed,
+            board_chunk=board_chunk,
+            class_chunk=class_chunk,
+            tuple_chunk=tuple_chunk,
+            class_ids=class_ids,
+            use_triton=use_triton,
+            progress=progress,
+        )
+        share0 = torch.where(
+            counts > 0,
+            shares[0],
+            torch.zeros_like(shares[0]),
+        )
+        result.allin_2p_share0 = share0.cpu()
+        result.allin_2p_count = counts.cpu()
+        timings["allin_2p_seconds"] = time.perf_counter() - start
+        result.metadata = {**(result.metadata or {}), "allin_2p_stream": meta}
+
+    if 3 in wanted:
+        start = time.perf_counter()
+        shares, counts, meta = precompute_allin_class_shares(
+            players=3,
+            device=device,
+            sample_boards=sample_boards,
+            seed=seed,
+            board_chunk=board_chunk,
+            class_chunk=class_chunk,
+            tuple_chunk=tuple_chunk,
+            class_ids=class_ids,
+            use_triton=use_triton,
+            progress=progress,
+        )
+        result.allin_3p_share0 = shares[0].cpu()
+        result.allin_3p_count = counts.cpu()
+        timings["allin_3p_seconds"] = time.perf_counter() - start
+        result.metadata = {**(result.metadata or {}), "allin_3p_stream": meta}
+
+    result.metadata = {
+        **(result.metadata or {}),
+        "created_unix_time": time.time(),
+        "players": list(wanted),
+        "preflop_payoff_path": None
+        if preflop_payoff_path is None
+        else str(preflop_payoff_path),
+        "sample_boards": sample_boards,
+        "exact": sample_boards is None,
+        "class_order": "p2.env.card_utils.combo_to_preflop_class_tensor",
+        "class_multiplicity": preflop_class_multiplicity_tensor().to(torch.int16),
+        "timings": timings,
+    }
+    if output is not None:
+        save_allin_169_tensors(result, output)
+    return result
+
+
+def save_allin_169_tensors(result: PreflopAllIn169Tensors, output: str | Path) -> None:
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = result.payload()
+    tmp = output.with_name(f".{output.name}.{os.getpid()}.tmp")
+    if output.suffix == ".zst":
+        import zstandard as zstd
+
+        buffer = io.BytesIO()
+        torch.save(payload, buffer)
+        tmp.write_bytes(zstd.ZstdCompressor(level=10).compress(buffer.getvalue()))
+        tmp.replace(output)
+        return
+    torch.save(payload, tmp)
+    tmp.replace(output)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--players", type=int, nargs="+", default=[2, 3], choices=[2, 3])
+    parser.add_argument("--preflop-payoff-path", type=Path, default=None)
+    parser.add_argument("--sample-boards", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--board-chunk", type=int, default=256)
+    parser.add_argument("--class-chunk", type=int, default=64)
+    parser.add_argument("--tuple-chunk", type=int, default=65_536)
+    parser.add_argument("--class-ids", type=int, nargs="*", default=None)
+    parser.add_argument("--no-triton", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if args.sample_boards is None and args.device == "cpu":
+        print(
+            "Warning: exhaustive CPU generation is expected to be very slow; "
+            "use CUDA or --sample-boards for a smoke run.",
+            flush=True,
+        )
+
+    def progress(info: dict[str, float]) -> None:
+        print(
+            f"p{int(info['players'])} boards={int(info['boards_done']):,}/"
+            f"{int(info['boards_total']):,} "
+            f"rate={info['boards_per_second']:,.1f}/s "
+            f"elapsed={info['seconds'] / 60.0:.1f}m",
+            flush=True,
+        )
+
+    result = precompute_allin_169_tensors(
+        output=args.output,
+        device=args.device,
+        players=args.players,
+        preflop_payoff_path=args.preflop_payoff_path,
+        sample_boards=args.sample_boards,
+        seed=args.seed,
+        board_chunk=args.board_chunk,
+        class_chunk=args.class_chunk,
+        tuple_chunk=args.tuple_chunk,
+        class_ids=args.class_ids,
+        use_triton=False if args.no_triton else None,
+        progress=progress,
+    )
+    payload = result.payload()
+    print(f"wrote {args.output}", flush=True)
+    for key, value in payload.items():
+        if torch.is_tensor(value):
+            mb = value.numel() * value.element_size() / 1024 / 1024
+            print(f"{key}: shape={tuple(value.shape)} dtype={value.dtype} {mb:.2f} MiB")
+
+
+if __name__ == "__main__":
+    main()
