@@ -150,6 +150,26 @@ def test_rebel_cfr_trainer_loads_pre_only_value_checkpoint(tmp_path):
     assert not hasattr(frozen, "post_value_head")
 
 
+def test_rebel_cfr_trainer_loads_frozen_checkpoint_with_source_player_count(tmp_path):
+    source_cfg = _tiny_rebel_cfg()
+    source_cfg.model.name = ModelType.better_ffn
+    source_cfg.model.street_value_heads = StreetValueHeads.pre
+    source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
+    checkpoint_path = tmp_path / "E_preflop.pt"
+    source_trainer.save_value_checkpoint(
+        checkpoint_path, step=7, save_optimizer=False
+    )
+
+    cfg = _tiny_rebel_cfg()
+    cfg.env.num_players = 3
+    cfg.model.name = ModelType.better_ffn
+    cfg.model.street_value_heads = StreetValueHeads.both
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    frozen = trainer._load_closing_leaf_model(str(checkpoint_path))
+
+    assert frozen.num_players == 2
+
+
 def _tiny_rebel_cfg() -> Config:
     cfg = Config()
     cfg.num_envs = 1
@@ -451,9 +471,57 @@ def test_rebel_cfr_trainer_constructs_multiway_pbs_env():
 
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
 
+    from p2.search.preflop_sparse_cfr_evaluator import PreflopSparseCFREvaluator
+
     assert trainer.num_players == 3
     assert trainer.env.num_players == 3
+    assert isinstance(trainer.cfr_evaluator, PreflopSparseCFREvaluator)
     assert cfg.model.enforce_zero_sum is False
+
+
+def test_rebel_cfr_trainer_routes_multiway_pbs_env_to_fused_preflop(
+    monkeypatch,
+):
+    from p2.search import fused_preflop_sparse_cfr_evaluator as fused_preflop_module
+    from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
+
+    class FakeFusedPreflopSparseCFREvaluator(SparseCFREvaluator):
+        pass
+
+    monkeypatch.setattr(
+        fused_preflop_module,
+        "FusedPreflopSparseCFREvaluator",
+        FakeFusedPreflopSparseCFREvaluator,
+    )
+
+    cfg = Config()
+    cfg.num_envs = 1
+    cfg.env.num_players = 3
+    cfg.env.bet_bins = [0.5]
+    cfg.search.depth = 1
+    cfg.search.iterations = 1
+    cfg.search.warm_start_iterations = 0
+    cfg.search.sparse = True
+    cfg.search.sparse_fused = True
+    cfg.search.allin_call_terminal_abstraction = False
+    cfg.train.batch_size = 1
+    cfg.train.replay_buffer_batches = 1
+    cfg.train.value_reuse_goal = 1.0
+    cfg.train.policy_capacity_factor = 1.0
+    cfg.model.hidden_dim = 16
+    cfg.model.range_hidden_dim = 8
+    cfg.model.ffn_dim = 48
+    cfg.model.num_hidden_layers = 1
+    cfg.model.num_policy_layers = 1
+    cfg.model.num_value_layers = 1
+    cfg.model.policy_rank = 8
+    cfg.model.policy_hand_bias_rank = 4
+    cfg.model.board_interaction_dim = 4
+    cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+
+    assert isinstance(trainer.cfr_evaluator, FakeFusedPreflopSparseCFREvaluator)
 
 
 def test_rebel_feature_encoder_shapes():

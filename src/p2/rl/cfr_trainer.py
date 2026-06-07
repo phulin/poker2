@@ -205,8 +205,11 @@ class RebelCFRTrainer:
                 high_stack_mass_ratio=cfg.env.high_stack_mass_ratio,
             )
         else:
-            if cfg.search.sparse_fused:
-                raise ValueError("Fused sparse CFR is still heads-up only.")
+            if cfg.search.sparse_fused and cfg.data.live_root_source != "self_play":
+                raise ValueError(
+                    "Multiway fused sparse CFR is only available for preflop "
+                    "self-play roots."
+                )
             self.env = PBSEnv(
                 num_envs=self.cfg.num_envs,
                 num_players=self.num_players,
@@ -365,7 +368,20 @@ class RebelCFRTrainer:
                 "Dense RebelCFREvaluator has been removed; set search.sparse=true."
             )
         evaluator_cls: type[SparseCFREvaluator] = SparseCFREvaluator
-        if cfg.search.sparse_fused:
+        if self.num_players != 2 and cfg.data.live_root_source == "self_play":
+            if cfg.search.sparse_fused:
+                from p2.search.fused_preflop_sparse_cfr_evaluator import (
+                    FusedPreflopSparseCFREvaluator,
+                )
+
+                evaluator_cls = FusedPreflopSparseCFREvaluator
+            else:
+                from p2.search.preflop_sparse_cfr_evaluator import (
+                    PreflopSparseCFREvaluator,
+                )
+
+                evaluator_cls = PreflopSparseCFREvaluator
+        elif cfg.search.sparse_fused:
             from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
             evaluator_cls = FusedSparseCFREvaluator
@@ -676,15 +692,30 @@ class RebelCFRTrainer:
             if isinstance(checkpoint_config, dict)
             else {}
         )
+        checkpoint_env_config = (
+            checkpoint_config.get("env", {}) if isinstance(checkpoint_config, dict) else {}
+        )
         checkpoint_value_heads = checkpoint_model_config.get("street_value_heads")
+        checkpoint_num_players = checkpoint_env_config.get("num_players")
         original_value_heads = getattr(self.cfg.model, "street_value_heads", None)
+        original_enforce_zero_sum = getattr(self.cfg.model, "enforce_zero_sum", None)
+        original_num_players = self.num_players
         if checkpoint_value_heads is not None:
             self.cfg.model.street_value_heads = checkpoint_value_heads
+        if "enforce_zero_sum" in checkpoint_model_config:
+            self.cfg.model.enforce_zero_sum = bool(
+                checkpoint_model_config["enforce_zero_sum"]
+            )
+        if checkpoint_num_players is not None:
+            self.num_players = int(checkpoint_num_players)
         try:
             model = self._make_eval_twin(compile_model=False)
         finally:
             if original_value_heads is not None:
                 self.cfg.model.street_value_heads = original_value_heads
+            if original_enforce_zero_sum is not None:
+                self.cfg.model.enforce_zero_sum = original_enforce_zero_sum
+            self.num_players = original_num_players
         model_state = checkpoint["model"]
         model_state = {
             key: value.to(self.float_dtype) if value.dtype.is_floating_point else value
@@ -801,7 +832,9 @@ class RebelCFRTrainer:
         # warm_start_multiplier) has an iteration-count-independent optimum
         # (~30), so scaling it with the iteration budget pushes it into the
         # harmful regime as iterations grow.
-        warm_now = max(1, int(self.cfg.search.warm_start_iterations))
+        configured_warm = int(self.cfg.search.warm_start_iterations)
+        warm_floor = 0 if self.num_players != 2 else 1
+        warm_now = max(warm_floor, configured_warm)
         delay_now = int(round(iterations_now * 0.2))
         iterations_now = max(warm_now + 1, iterations_now)
         self.cfr_evaluator.cfr_iterations = iterations_now

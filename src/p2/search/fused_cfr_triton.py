@@ -665,6 +665,102 @@ def fused_avg_values_zero_sum_(
     )
 
 
+if triton is not None:
+
+    @triton.jit
+    def _fused_avg_values_multiway_kernel(
+        values_avg_ptr,  # [N, P, H] in/out
+        latest_ptr,  # [N, P, H]
+        beliefs_ptr,  # [N, P, H]
+        ignore_mask_ptr,  # [N] bool (only read if HAS_IGNORE)
+        old_ptr,  # 0-D
+        new_ptr,  # 0-D
+        inv_total_ptr,  # 0-D
+        N,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        HAS_IGNORE: tl.constexpr,
+        ENFORCE_ZS: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        n = tl.program_id(0)
+        if n >= N:
+            return
+        old = tl.load(old_ptr)
+        new = tl.load(new_ptr)
+        inv_total = tl.load(inv_total_ptr)
+
+        players = tl.arange(0, BLOCK_P)
+        offs = tl.arange(0, BLOCK_H)
+        player_mask = players < NUM_PLAYERS
+        hand_mask = offs < H
+        mask = player_mask[:, None] & hand_mask[None, :]
+        ptrs = (n * NUM_PLAYERS + players[:, None]) * H + offs[None, :]
+
+        avg = tl.load(values_avg_ptr + ptrs, mask=mask, other=0.0).to(tl.float32)
+        latest = tl.load(latest_ptr + ptrs, mask=mask, other=0.0).to(tl.float32)
+        mixed = (avg * old + latest * new) * inv_total
+
+        correction = tl.zeros((), dtype=tl.float32)
+        if ENFORCE_ZS:
+            beliefs = tl.load(beliefs_ptr + ptrs, mask=mask, other=0.0).to(tl.float32)
+            total = tl.sum(tl.where(mask, mixed * beliefs, 0.0))
+            correction = total / NUM_PLAYERS
+            if HAS_IGNORE:
+                ignore = tl.load(ignore_mask_ptr + n).to(tl.int1)
+                correction = tl.where(ignore, 0.0, correction)
+
+        tl.store(values_avg_ptr + ptrs, mixed - correction, mask=mask)
+
+
+def fused_avg_values_multiway_(
+    values_avg: torch.Tensor,  # [N, P, H] in/out
+    latest_values: torch.Tensor,  # [N, P, H]
+    beliefs: torch.Tensor,  # [N, P, H]
+    old: torch.Tensor,  # 0-D
+    new: torch.Tensor,  # 0-D
+    inv_total: torch.Tensor,  # 0-D
+    enforce_zero_sum: bool,
+    ignore_mask: torch.Tensor | None = None,  # [N] bool
+    block_h: int = 2048,
+) -> None:
+    """Multiway average-value mix with optional row zero-sum projection."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values_avg.is_contiguous() and latest_values.is_contiguous()
+    assert beliefs.is_contiguous()
+    assert values_avg.shape == latest_values.shape == beliefs.shape
+    assert values_avg.dim() == 3 and values_avg.shape[1] >= 2
+    n_rows, players, h = values_avg.shape
+    assert h <= block_h, f"BLOCK_H={block_h} must cover H={h}"
+    if ignore_mask is not None:
+        assert ignore_mask.is_contiguous() and ignore_mask.shape == (n_rows,)
+        ignore_ptr = ignore_mask
+    else:
+        ignore_ptr = values_avg
+    block_p = 1
+    while block_p < players:
+        block_p *= 2
+    _fused_avg_values_multiway_kernel[(n_rows,)](
+        values_avg,
+        latest_values,
+        beliefs,
+        ignore_ptr,
+        old,
+        new,
+        inv_total,
+        n_rows,
+        h,
+        NUM_PLAYERS=players,
+        HAS_IGNORE=ignore_mask is not None,
+        ENFORCE_ZS=enforce_zero_sum,
+        BLOCK_P=block_p,
+        BLOCK_H=block_h,
+        num_warps=8,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Kernel 6: compute_instantaneous_regrets tail (fan_out + gather + sub + mul).
 # ---------------------------------------------------------------------------
@@ -769,6 +865,93 @@ def fused_regret_tail_(
         bottom,
         total,
         h,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_regret_tail_multiway_kernel(
+        values_achieved_ptr,  # [total, P, H]
+        values_expected_ptr,  # [top, P, H]
+        to_act_ptr,  # [top]
+        src_weights_ptr,  # [top, H]
+        parent_index_ptr,  # [total]
+        prev_actor_ptr,  # [total]
+        regrets_ptr,  # [total, H] output (only rows [bottom, total) written)
+        bottom,
+        total,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        c = tl.program_id(0) + bottom
+        if c >= total:
+            return
+        parent = tl.load(parent_index_ptr + c)
+        prev_actor = tl.load(prev_actor_ptr + c)
+        actor_p = tl.load(to_act_ptr + parent)
+
+        exp_row = values_expected_ptr + (parent * NUM_PLAYERS + actor_p) * H
+        ach_row = values_achieved_ptr + (c * NUM_PLAYERS + prev_actor) * H
+        w_row = src_weights_ptr + parent * H
+        out_row = regrets_ptr + c * H
+
+        for start in tl.range(0, H, BLOCK_H):
+            offs = start + tl.arange(0, BLOCK_H)
+            mask = offs < H
+            expected = tl.load(exp_row + offs, mask=mask, other=0.0)
+            achieved = tl.load(ach_row + offs, mask=mask, other=0.0)
+            w = tl.load(w_row + offs, mask=mask, other=0.0)
+            tl.store(out_row + offs, w * (achieved - expected), mask=mask)
+
+
+def fused_regret_tail_multiway_(
+    regrets: torch.Tensor,  # [total, H]
+    values_achieved: torch.Tensor,  # [total, P, H]
+    values_expected: torch.Tensor,  # [top, P, H]
+    to_act: torch.Tensor,  # [top]
+    src_weights: torch.Tensor,  # [top, H]
+    parent_index: torch.Tensor,  # [total]
+    prev_actor: torch.Tensor,  # [total]
+    bottom: int,
+    block_h: int = 512,
+) -> None:
+    """Multiway fused tail of ``compute_instantaneous_regrets``."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert regrets.is_contiguous() and regrets.dim() == 2
+    assert values_achieved.is_contiguous() and values_achieved.dim() == 3
+    assert values_expected.is_contiguous() and values_expected.dim() == 3
+    assert src_weights.is_contiguous() and src_weights.dim() == 2
+    assert to_act.is_contiguous() and to_act.dim() == 1
+    assert parent_index.is_contiguous() and parent_index.dim() == 1
+    assert prev_actor.is_contiguous() and prev_actor.dim() == 1
+
+    total, h = regrets.shape
+    top, p, h_expected = values_expected.shape
+    assert h_expected == h
+    assert values_achieved.shape == (total, p, h)
+    assert src_weights.shape == (top, h)
+    assert to_act.shape == (top,)
+    assert parent_index.shape == (total,)
+    assert prev_actor.shape == (total,)
+
+    grid = (total - bottom,)
+    _fused_regret_tail_multiway_kernel[grid](
+        values_achieved,
+        values_expected,
+        to_act,
+        src_weights,
+        parent_index,
+        prev_actor,
+        regrets,
+        bottom,
+        total,
+        h,
+        NUM_PLAYERS=p,
         BLOCK_H=block_h,
         num_warps=4,
     )
@@ -1183,6 +1366,115 @@ def fused_average_policy_mix_with_tensors_(
     )
 
 
+if triton is not None:
+
+    @triton.jit
+    def _fused_average_policy_mix_multiway_kernel(
+        self_reach_ptr,  # [total, P, H]
+        policy_probs_ptr,  # [total, H]
+        policy_probs_avg_ptr,  # [total, H] in/out
+        avg_num_ptr,  # [total, H] in/out
+        avg_den_ptr,  # [total, H] in/out
+        to_act_ptr,  # [total] int64
+        parent_index_ptr,  # [total] int64
+        new_scalar_ptr,
+        bottom,
+        total,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        EPS,
+        WRITE_AVG: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        c = tl.program_id(0)
+        if c >= total:
+            return
+        if c < bottom:
+            if WRITE_AVG:
+                for start in tl.range(0, H, BLOCK_H):
+                    offs = start + tl.arange(0, BLOCK_H)
+                    mask = offs < H
+                    tl.store(policy_probs_avg_ptr + c * H + offs, 0.0, mask=mask)
+            return
+
+        parent = tl.load(parent_index_ptr + c)
+        actor = tl.load(to_act_ptr + parent)
+        new_scalar = tl.load(new_scalar_ptr)
+        reach_row = self_reach_ptr + (parent * NUM_PLAYERS + actor) * H
+        policy_row = policy_probs_ptr + c * H
+        avg_row = policy_probs_avg_ptr + c * H
+        num_row = avg_num_ptr + c * H
+        den_row = avg_den_ptr + c * H
+
+        for start in tl.range(0, H, BLOCK_H):
+            offs = start + tl.arange(0, BLOCK_H)
+            mask = offs < H
+            reach_n = tl.load(reach_row + offs, mask=mask, other=0.0) * new_scalar
+            cur = tl.load(policy_row + offs, mask=mask, other=0.0)
+            num_old = tl.load(num_row + offs, mask=mask, other=0.0)
+            den_old = tl.load(den_row + offs, mask=mask, other=0.0)
+
+            num = num_old + reach_n * cur
+            den = den_old + reach_n
+            tl.store(num_row + offs, num, mask=mask)
+            tl.store(den_row + offs, den, mask=mask)
+            if WRITE_AVG:
+                out = tl.where(den > EPS, num / tl.maximum(den, EPS), cur)
+                tl.store(avg_row + offs, out, mask=mask)
+
+
+def fused_average_policy_mix_multiway_with_tensors_(
+    policy_probs_avg: torch.Tensor,
+    average_policy_numerator: torch.Tensor,
+    average_policy_denominator: torch.Tensor,
+    policy_probs: torch.Tensor,
+    self_reach: torch.Tensor,
+    to_act: torch.Tensor,
+    parent_index: torch.Tensor,
+    new: torch.Tensor,
+    bottom: int,
+    eps: float = 1e-5,
+    block_h: int = 512,
+    write_policy: bool = True,
+) -> None:
+    """Multiway true-CFR average-policy accumulation."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert policy_probs_avg.is_contiguous() and policy_probs_avg.dim() == 2
+    assert average_policy_numerator.is_contiguous()
+    assert average_policy_denominator.is_contiguous()
+    assert policy_probs.is_contiguous() and policy_probs.dim() == 2
+    assert self_reach.is_contiguous() and self_reach.dim() == 3
+    assert to_act.is_contiguous() and parent_index.is_contiguous()
+    total, h = policy_probs_avg.shape
+    players = self_reach.shape[1]
+    assert players >= 2
+    assert average_policy_numerator.shape == (total, h)
+    assert average_policy_denominator.shape == (total, h)
+    assert policy_probs.shape == (total, h)
+    assert self_reach.shape == (total, players, h)
+    assert to_act.shape == (total,)
+    assert parent_index.shape == (total,)
+    _fused_average_policy_mix_multiway_kernel[(total,)](
+        self_reach,
+        policy_probs,
+        policy_probs_avg,
+        average_policy_numerator,
+        average_policy_denominator,
+        to_act,
+        parent_index,
+        new,
+        bottom,
+        total,
+        h,
+        NUM_PLAYERS=players,
+        EPS=eps,
+        WRITE_AVG=write_policy,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Kernel 8: unblocked mass in O(N) (replaces fp64 [1326, 1326] GEMM).
 # ---------------------------------------------------------------------------
@@ -1583,6 +1875,103 @@ def select_actor_beliefs_and_marginal_policy_triton_out_(
     )
 
 
+if triton is not None:
+
+    @triton.jit
+    def _select_actor_beliefs_and_marginal_policy_multiway_kernel(
+        beliefs_ptr,  # [total, P, H]
+        to_act_ptr,  # [top]
+        policy_ptr,  # [total, H]
+        child_offsets_ptr,  # [top], absolute first child
+        child_count_ptr,  # [top]
+        actor_out_ptr,  # [top, H]
+        marginal_out_ptr,  # [total - bottom, H]
+        bottom,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        parent = tl.program_id(0)
+        hb = tl.program_id(1)
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        actor = tl.load(to_act_ptr + parent)
+        belief = tl.load(
+            beliefs_ptr + (parent * NUM_PLAYERS + actor) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        tl.store(actor_out_ptr + parent * H + offs, belief, mask=mask)
+
+        first = tl.load(child_offsets_ptr + parent)
+        count = tl.load(child_count_ptr + parent)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                child_rel = child - bottom
+                pol = tl.load(
+                    policy_ptr + child * H + offs,
+                    mask=mask,
+                    other=0.0,
+                )
+                tl.store(
+                    marginal_out_ptr + child_rel * H + offs,
+                    belief * pol,
+                    mask=mask,
+                )
+
+
+def select_actor_beliefs_and_marginal_policy_multiway_triton_out_(
+    beliefs: torch.Tensor,
+    to_act: torch.Tensor,
+    policy: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    bottom: int,
+    actor_out: torch.Tensor,
+    marginal_out: torch.Tensor,
+    max_children: int,
+    block_h: int = 512,
+) -> None:
+    """Multiway actor-belief select plus child marginal-policy materialization."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert beliefs.is_contiguous() and beliefs.dim() == 3
+    assert beliefs.shape[1] >= 2
+    assert to_act.is_contiguous() and to_act.dim() == 1
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert child_offsets.is_contiguous() and child_offsets.shape == to_act.shape
+    assert child_count.is_contiguous() and child_count.shape == to_act.shape
+    top = to_act.numel()
+    total, p, h = beliefs.shape
+    assert policy.shape == (total, h)
+    assert actor_out.is_contiguous() and actor_out.shape == (top, h)
+    assert marginal_out.is_contiguous() and marginal_out.dim() == 2
+    assert marginal_out.shape[1] == h
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    _select_actor_beliefs_and_marginal_policy_multiway_kernel[
+        (top, triton.cdiv(h, block_h))
+    ](
+        beliefs,
+        to_act,
+        policy,
+        child_offsets,
+        child_count,
+        actor_out,
+        marginal_out,
+        bottom,
+        h,
+        NUM_PLAYERS=p,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
 class ParentBeliefUnblockedStats:
     """Caches S + cardsum at parent shape for both player slices of beliefs.
 
@@ -1672,6 +2061,141 @@ def unblocked_mass_opp_at_parents_triton(
         HAS_ALLOWED=has_allowed,
         BLOCK_H=2048,
         num_warps=8,
+    )
+    return out
+
+
+if triton is not None:
+
+    @triton.jit
+    def _multiway_regret_src_weights_at_parents_kernel(
+        beliefs_ptr,  # [total, P, H]
+        stats_s_ptr,  # [top * P]
+        stats_cardsum_ptr,  # [top * P, 52]
+        to_act_ptr,  # [top]
+        has_folded_ptr,  # optional [total, P]
+        allowed_ptr,  # optional [top, H]
+        card_a_ptr,  # [H]
+        card_b_ptr,  # [H]
+        out_ptr,  # [top, H]
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        NUM_CARDS: tl.constexpr,
+        HAS_FOLDED: tl.constexpr,
+        HAS_ALLOWED: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        parent = tl.program_id(0)
+        hb = tl.program_id(1)
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+        actor = tl.load(to_act_ptr + parent)
+        ca = tl.load(card_a_ptr + offs, mask=mask, other=0)
+        cb = tl.load(card_b_ptr + offs, mask=mask, other=0)
+
+        prod = tl.full([BLOCK_H], 1.0, dtype=tl.float32)
+        for player in tl.static_range(0, BLOCK_P):
+            if player < NUM_PLAYERS:
+                include = player != actor
+                if HAS_FOLDED:
+                    folded = tl.load(has_folded_ptr + parent * NUM_PLAYERS + player).to(
+                        tl.int1
+                    )
+                    include = include & (~folded)
+                stats_row = parent * NUM_PLAYERS + player
+                target = tl.load(
+                    beliefs_ptr + stats_row * H + offs,
+                    mask=mask,
+                    other=0.0,
+                )
+                s = tl.load(stats_s_ptr + stats_row)
+                csa = tl.load(
+                    stats_cardsum_ptr + stats_row * NUM_CARDS + ca,
+                    mask=mask,
+                    other=0.0,
+                )
+                csb = tl.load(
+                    stats_cardsum_ptr + stats_row * NUM_CARDS + cb,
+                    mask=mask,
+                    other=0.0,
+                )
+                mass = tl.maximum(s - csa - csb + target, 0.0)
+                mass = tl.maximum(mass, 1.0e-12)
+                prod *= tl.where(include, mass, 1.0)
+
+        if HAS_ALLOWED:
+            allowed = tl.load(allowed_ptr + parent * H + offs, mask=mask, other=0).to(
+                tl.int1
+            )
+            prod = tl.where(allowed, prod, 0.0)
+        tl.store(out_ptr + parent * H + offs, prod, mask=mask)
+
+
+def multiway_regret_src_weights_at_parents_triton(
+    beliefs: torch.Tensor,  # [total, P, H]
+    to_act: torch.Tensor,  # [top]
+    top: int,
+    has_folded: torch.Tensor | None = None,  # [total, P]
+    allowed_mask: torch.Tensor | None = None,  # [top, H]
+    block_h: int = 512,
+) -> torch.Tensor:
+    """Compute multiway opponent reach products at parent rows.
+
+    Matches the reference source-weight path in ``CFREvaluator``:
+    blocker-project each non-acting live player's reach mass into the acting
+    player's hand space, clamp each included player to ``1e-12``, multiply
+    across players, and apply the parent allowed-hand mask.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert beliefs.is_contiguous() and beliefs.dim() == 3
+    total, p, h = beliefs.shape
+    assert p >= 2 and h == _UNBLOCKED_NUM_HANDS
+    assert 0 <= top <= total
+    assert to_act.is_contiguous() and to_act.dim() == 1 and to_act.numel() >= top
+
+    flat = beliefs[:top].reshape(top * p, h).contiguous()
+    stats_s, stats_cardsum = _preprocess_unblocked_stats(flat)
+    out = torch.empty((top, h), device=beliefs.device, dtype=beliefs.dtype)
+    has_folds = has_folded is not None
+    if has_folds:
+        assert has_folded is not None
+        assert has_folded.is_contiguous() and has_folded.shape == (total, p)
+        folded_ptr = has_folded
+    else:
+        folded_ptr = beliefs
+    has_allowed = allowed_mask is not None
+    if has_allowed:
+        assert allowed_mask is not None
+        assert allowed_mask.is_contiguous() and allowed_mask.shape == (top, h)
+        allowed_ptr = allowed_mask
+    else:
+        allowed_ptr = out
+    block_p = 1
+    while block_p < p:
+        block_p *= 2
+    card_a, card_b = _get_combo_cards(beliefs.device)
+    _multiway_regret_src_weights_at_parents_kernel[
+        (top, triton.cdiv(h, block_h))
+    ](
+        beliefs,
+        stats_s,
+        stats_cardsum,
+        to_act,
+        folded_ptr,
+        allowed_ptr,
+        card_a,
+        card_b,
+        out,
+        h,
+        NUM_PLAYERS=p,
+        NUM_CARDS=_UNBLOCKED_NUM_CARDS,
+        HAS_FOLDED=has_folds,
+        HAS_ALLOWED=has_allowed,
+        BLOCK_P=block_p,
+        BLOCK_H=block_h,
+        num_warps=4,
     )
     return out
 
@@ -2122,6 +2646,132 @@ def fused_policy_renorm_reach_depth_(
         h,
         eps,
         MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _policy_renorm_reach_depth_multiway_kernel(
+        policy_ptr,  # [total, H] in/out
+        reach_ptr,  # [total, P, H] in/out
+        allowed_mask_ptr,  # [total, H] bool
+        child_offsets_ptr,  # [num_parents]
+        child_count_ptr,  # [num_parents]
+        prev_actor_ptr,  # [total]
+        parent_base,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        EPS,
+        UPDATE_REACH: tl.constexpr,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        hb = tl.program_id(1)
+        parent = parent_base + p
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        if count == 0:
+            return
+
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask_h = offs < H
+        denom = tl.zeros([BLOCK_H], dtype=tl.float32)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                denom += tl.load(policy_ptr + child * H + offs, mask=mask_h, other=0.0)
+        use_div = denom > EPS
+        denom_safe = tl.maximum(denom, EPS)
+
+        players = tl.arange(0, BLOCK_P)
+        player_mask = players < NUM_PLAYERS
+        value_mask = player_mask[:, None] & mask_h[None, :]
+        parent_reach = tl.load(
+            reach_ptr + (parent * NUM_PLAYERS + players[:, None]) * H + offs[None, :],
+            mask=value_mask,
+            other=0.0,
+        )
+
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                raw = tl.load(policy_ptr + child * H + offs, mask=mask_h, other=0.0)
+                pol = tl.where(use_div, raw / denom_safe, raw)
+                tl.store(policy_ptr + child * H + offs, pol, mask=mask_h)
+
+                if UPDATE_REACH:
+                    prev_actor = tl.load(prev_actor_ptr + child)
+                    allowed = tl.load(
+                        allowed_mask_ptr + child * H + offs,
+                        mask=mask_h,
+                        other=0,
+                    ).to(tl.int1)
+                    child_reach = tl.where(
+                        players[:, None] == prev_actor,
+                        parent_reach * pol[None, :],
+                        parent_reach,
+                    )
+                    child_reach = tl.where(allowed[None, :], child_reach, 0.0)
+                    tl.store(
+                        reach_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + offs[None, :],
+                        child_reach,
+                        mask=value_mask,
+                    )
+
+
+def fused_policy_renorm_reach_depth_multiway_(
+    policy: torch.Tensor,
+    reach: torch.Tensor,
+    allowed_mask: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    prev_actor: torch.Tensor,
+    parent_base: int,
+    max_children: int,
+    update_reach: bool,
+    eps: float = 1e-5,
+    block_h: int = 512,
+) -> None:
+    """Multiway average-policy sibling renorm with optional reach propagation."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert reach.is_contiguous() and reach.dim() == 3
+    total, h = policy.shape
+    players = reach.shape[1]
+    assert players >= 2 and reach.shape == (total, players, h)
+    assert allowed_mask.is_contiguous() and allowed_mask.shape == policy.shape
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    assert prev_actor.is_contiguous()
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    block_p = 1
+    while block_p < players:
+        block_p *= 2
+    _policy_renorm_reach_depth_multiway_kernel[
+        (child_offsets.shape[0], triton.cdiv(h, block_h))
+    ](
+        policy,
+        reach,
+        allowed_mask,
+        child_offsets,
+        child_count,
+        prev_actor,
+        parent_base,
+        h,
+        NUM_PLAYERS=players,
+        EPS=eps,
+        UPDATE_REACH=update_reach,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_P=block_p,
         BLOCK_H=block_h,
         num_warps=4,
     )
@@ -2691,6 +3341,113 @@ def fused_model_values_writeback_(
 if triton is not None:
 
     @triton.jit
+    def _fused_model_values_writeback_multiway_kernel(
+        h_ptr,  # [M, P, H] hand_values
+        l_ptr,  # [M, P, H] previous last_model_values
+        b_ptr,  # [M, P, H] beliefs
+        idx_ptr,  # [M] absolute latest_values row
+        latest_ptr,  # [T, P, H]
+        last_out_ptr,  # [M, P, H]
+        onon_ptr,  # 0-D (old + new) / new
+        oon_ptr,  # 0-D old / new
+        M,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        DO_MIX: tl.constexpr,
+        ENFORCE_ZS: tl.constexpr,
+        STORE_LAST: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        if m >= M:
+            return
+        row = tl.load(idx_ptr + m)
+        onon = tl.load(onon_ptr)
+        oon = tl.load(oon_ptr)
+
+        players = tl.arange(0, BLOCK_P)
+        offs = tl.arange(0, BLOCK_H)
+        player_mask = players < NUM_PLAYERS
+        hand_mask = offs < H
+        mask = player_mask[:, None] & hand_mask[None, :]
+        model_ptrs = (m * NUM_PLAYERS + players[:, None]) * H + offs[None, :]
+        latest_ptrs = (row * NUM_PLAYERS + players[:, None]) * H + offs[None, :]
+
+        h_vals = tl.load(h_ptr + model_ptrs, mask=mask, other=0.0).to(tl.float32)
+        vals = h_vals
+        if DO_MIX:
+            last_vals = tl.load(l_ptr + model_ptrs, mask=mask, other=0.0).to(tl.float32)
+            vals = h_vals * onon - last_vals * oon
+
+        correction = tl.zeros((), dtype=tl.float32)
+        if ENFORCE_ZS:
+            beliefs = tl.load(b_ptr + model_ptrs, mask=mask, other=0.0).to(tl.float32)
+            correction = tl.sum(tl.where(mask, vals * beliefs, 0.0)) / NUM_PLAYERS
+
+        tl.store(latest_ptr + latest_ptrs, vals - correction, mask=mask)
+        if STORE_LAST:
+            tl.store(last_out_ptr + model_ptrs, h_vals, mask=mask)
+
+
+def fused_model_values_writeback_multiway_(
+    hand_values: torch.Tensor,  # [M, P, H]
+    last_model_values: torch.Tensor,  # [M, P, H]
+    beliefs: torch.Tensor,  # [M, P, H]
+    model_indices: torch.Tensor,  # [M]
+    latest_values: torch.Tensor,  # [T, P, H]
+    last_out: torch.Tensor,  # [M, P, H]
+    old_plus_new_over_new: torch.Tensor,  # 0-D
+    old_over_new: torch.Tensor,  # 0-D
+    do_mix: bool,
+    enforce_zero_sum: bool,
+    store_last: bool = True,
+    block_h: int = 2048,
+) -> None:
+    """Multiway model leaf writeback with optional CFR-AVG value mixing."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert hand_values.is_contiguous()
+    assert last_model_values.is_contiguous()
+    assert beliefs.is_contiguous()
+    assert model_indices.is_contiguous()
+    assert latest_values.is_contiguous()
+    assert last_out.is_contiguous()
+    assert (
+        hand_values.shape == last_model_values.shape == beliefs.shape == last_out.shape
+    )
+    assert hand_values.dim() == 3 and hand_values.shape[1] >= 2
+    m, players, h = hand_values.shape
+    assert model_indices.shape == (m,)
+    assert latest_values.shape[1:] == (players, h)
+    assert h <= block_h, f"BLOCK_H={block_h} must cover H={h}"
+    block_p = 1
+    while block_p < players:
+        block_p *= 2
+    _fused_model_values_writeback_multiway_kernel[(m,)](
+        hand_values,
+        last_model_values,
+        beliefs,
+        model_indices,
+        latest_values,
+        last_out,
+        old_plus_new_over_new,
+        old_over_new,
+        m,
+        h,
+        NUM_PLAYERS=players,
+        DO_MIX=do_mix,
+        ENFORCE_ZS=enforce_zero_sum,
+        STORE_LAST=store_last,
+        BLOCK_P=block_p,
+        BLOCK_H=block_h,
+        num_warps=8 if do_mix else 4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
     def _fused_weighted_parent_sum_inline_opp_both_kernel(
         values_ptr,  # [total, 2, H] in/out
         leaf_values_ptr,  # optional [total, 2, H]
@@ -3069,6 +3826,231 @@ def fused_weighted_parent_sum_inline_opp_both_noleaf(
         MAX_CHILDREN=max_children,
         BLOCK_H=block_h,
         num_warps=num_warps,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_weighted_parent_sum_inline_opp_multiway_kernel(
+        values_ptr,  # [total, P, H] in/out
+        leaf_values_ptr,  # optional [total, P, H]
+        leaf_mask_ptr,  # optional [total] bool
+        prev_actor_ptr,  # [total]
+        policy_hero_ptr,  # [total, H]
+        actor_beliefs_ptr,  # [top, H]
+        numer_s_ptr,  # [num_children]
+        numer_cardsum_ptr,  # [num_children, 52]
+        denom_s_ptr,  # [top]
+        denom_cardsum_ptr,  # [top, 52]
+        card_a_ptr,  # [H]
+        card_b_ptr,  # [H]
+        child_offsets_ptr,  # [num_parents] absolute first-child row
+        child_count_ptr,  # [num_parents]
+        parent_base,  # absolute row of first parent in this depth slice
+        child_base,  # absolute row corresponding to numer row 0
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        NUM_CARDS: tl.constexpr,
+        EPS,
+        HAS_LEAF_SOURCE: tl.constexpr,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        parent_rel = tl.program_id(0)
+        hb = tl.program_id(1)
+        row = parent_base + parent_rel
+        first = tl.load(child_offsets_ptr + parent_rel)
+        count = tl.load(child_count_ptr + parent_rel)
+        col_offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        col_mask = col_offs < H
+        players = tl.arange(0, BLOCK_P)
+        player_mask = players < NUM_PLAYERS
+        value_mask = player_mask[:, None] & col_mask[None, :]
+
+        if count == 0:
+            if HAS_LEAF_SOURCE:
+                is_leaf = tl.load(leaf_mask_ptr + row).to(tl.int1)
+                src = tl.load(
+                    leaf_values_ptr
+                    + (row * NUM_PLAYERS + players[:, None]) * H
+                    + col_offs[None, :],
+                    mask=value_mask & is_leaf,
+                    other=0.0,
+                )
+                tl.store(
+                    values_ptr
+                    + (row * NUM_PLAYERS + players[:, None]) * H
+                    + col_offs[None, :],
+                    src,
+                    mask=value_mask,
+                )
+            return
+
+        ca = tl.load(card_a_ptr + col_offs, mask=col_mask, other=0)
+        cb = tl.load(card_b_ptr + col_offs, mask=col_mask, other=0)
+        dt = tl.load(
+            actor_beliefs_ptr + row * H + col_offs,
+            mask=col_mask,
+            other=0.0,
+        )
+        sd = tl.load(denom_s_ptr + row)
+        dcsa = tl.load(denom_cardsum_ptr + row * NUM_CARDS + ca, mask=col_mask)
+        dcsb = tl.load(denom_cardsum_ptr + row * NUM_CARDS + cb, mask=col_mask)
+
+        acc = tl.zeros([BLOCK_P, BLOCK_H], dtype=tl.float32)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                child_rel = child - child_base
+                prev_actor = tl.load(prev_actor_ptr + child)
+                hero_pol = tl.load(
+                    policy_hero_ptr + child * H + col_offs,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                nt = dt * hero_pol
+                sn = tl.load(numer_s_ptr + child_rel)
+                ncsa = tl.load(
+                    numer_cardsum_ptr + child_rel * NUM_CARDS + ca,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                ncsb = tl.load(
+                    numer_cardsum_ptr + child_rel * NUM_CARDS + cb,
+                    mask=col_mask,
+                    other=0.0,
+                )
+                numer = tl.maximum(sn - ncsa - ncsb + nt, 0.0)
+                denom = tl.maximum(sd - dcsa - dcsb + dt, 0.0)
+                opp_pol = tl.where(denom > EPS, numer / denom, 0.0)
+                pol = tl.where(
+                    players[:, None] == prev_actor,
+                    hero_pol[None, :],
+                    opp_pol[None, :],
+                )
+                vals = tl.load(
+                    values_ptr
+                    + (child * NUM_PLAYERS + players[:, None]) * H
+                    + col_offs[None, :],
+                    mask=value_mask,
+                    other=0.0,
+                )
+                if HAS_LEAF_SOURCE:
+                    leaf_vals = tl.load(
+                        leaf_values_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + col_offs[None, :],
+                        mask=value_mask,
+                        other=0.0,
+                    )
+                    child_is_leaf = tl.load(leaf_mask_ptr + child).to(tl.int1)
+                    vals = tl.where(child_is_leaf, leaf_vals, vals)
+                    tl.store(
+                        values_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + col_offs[None, :],
+                        leaf_vals,
+                        mask=value_mask & child_is_leaf,
+                    )
+                acc += vals * pol
+
+        tl.store(
+            values_ptr
+            + (row * NUM_PLAYERS + players[:, None]) * H
+            + col_offs[None, :],
+            acc,
+            mask=value_mask,
+        )
+
+
+def fused_weighted_parent_sum_inline_opp_multiway(
+    values: torch.Tensor,
+    prev_actor: torch.Tensor,
+    policy_hero: torch.Tensor,
+    actor_beliefs: torch.Tensor,
+    numer_s: torch.Tensor,
+    numer_cardsum: torch.Tensor,
+    denom_s: torch.Tensor,
+    denom_cardsum: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    parent_base: int,
+    child_base: int,
+    max_children: int,
+    max_children_pow2: int | None = None,
+    eps: float = 1e-5,
+    leaf_values: torch.Tensor | None = None,
+    leaf_mask: torch.Tensor | None = None,
+    block_h: int = 256,
+) -> None:
+    """Multiway inline-opponent EV backup."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values.is_contiguous() and values.dim() == 3
+    assert policy_hero.is_contiguous() and actor_beliefs.is_contiguous()
+    assert numer_s.is_contiguous() and numer_cardsum.is_contiguous()
+    assert denom_s.is_contiguous() and denom_cardsum.is_contiguous()
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    total, p, h = values.shape
+    top = actor_beliefs.shape[0]
+    num_children = numer_s.shape[0]
+    assert p >= 2 and policy_hero.shape == (total, h)
+    assert actor_beliefs.shape == (top, h)
+    assert numer_cardsum.shape == (num_children, _UNBLOCKED_NUM_CARDS)
+    assert denom_cardsum.shape == (top, _UNBLOCKED_NUM_CARDS)
+    assert denom_s.shape == (top,)
+    assert prev_actor.shape == (total,)
+    has_leaf_source = leaf_values is not None
+    if has_leaf_source:
+        assert leaf_values is not None and leaf_mask is not None
+        assert leaf_values.is_contiguous() and leaf_values.shape == values.shape
+        assert leaf_mask.is_contiguous() and leaf_mask.shape == (total,)
+        leaf_values_ptr = leaf_values
+        leaf_mask_ptr = leaf_mask
+    else:
+        leaf_values_ptr = values
+        leaf_mask_ptr = child_count
+    if max_children_pow2 is None:
+        mc_pow2 = 1
+        while mc_pow2 < max_children:
+            mc_pow2 *= 2
+    else:
+        mc_pow2 = max_children_pow2
+    block_p = 1
+    while block_p < p:
+        block_p *= 2
+    num_parents = child_offsets.shape[0]
+    card_a, card_b = _get_combo_cards(values.device)
+    _fused_weighted_parent_sum_inline_opp_multiway_kernel[
+        (num_parents, triton.cdiv(h, block_h))
+    ](
+        values,
+        leaf_values_ptr,
+        leaf_mask_ptr,
+        prev_actor,
+        policy_hero,
+        actor_beliefs,
+        numer_s,
+        numer_cardsum,
+        denom_s,
+        denom_cardsum,
+        card_a,
+        card_b,
+        child_offsets,
+        child_count,
+        parent_base,
+        child_base,
+        h,
+        NUM_PLAYERS=p,
+        NUM_CARDS=_UNBLOCKED_NUM_CARDS,
+        EPS=eps,
+        HAS_LEAF_SOURCE=has_leaf_source,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_P=block_p,
+        BLOCK_H=block_h,
+        num_warps=8,
     )
 
 

@@ -2329,13 +2329,16 @@ class CFREvaluator(ABC):
         ):  # Alternate updates.
             regrets.masked_fill_(self.prev_actor[:, None] == t % self.num_players, 0.0)
         elif self.cfr_type == CFRType.discounted or self._predictive_cfr_uses_dcfr():
+            t_discount = max(1, t)
             numerator = torch.where(
-                self.cumulative_regrets > 0, t**self.dcfr_alpha, t**self.dcfr_beta
+                self.cumulative_regrets > 0,
+                t_discount**self.dcfr_alpha,
+                t_discount**self.dcfr_beta,
             )
             denominator = torch.where(
                 self.cumulative_regrets > 0,
-                t**self.dcfr_alpha + 1,
-                t**self.dcfr_beta + 1,
+                t_discount**self.dcfr_alpha + 1,
+                t_discount**self.dcfr_beta + 1,
             )
             self.cumulative_regrets *= numerator
             self.cumulative_regrets /= denominator

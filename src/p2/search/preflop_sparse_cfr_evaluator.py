@@ -41,6 +41,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             generator=generator,
             closing_leaf_model=closing_leaf_model,
         )
+        self.warm_start_iterations = 0
 
     def _continuation_value_target_sampling_enabled(self) -> bool:
         return True
@@ -50,6 +51,9 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
 
     def _continuation_value_target_streets(self) -> tuple[int, ...]:
         return (0,)
+
+    def warm_start(self) -> None:
+        return None
 
     def initialize_subgame(
         self,

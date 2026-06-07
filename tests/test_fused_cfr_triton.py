@@ -600,6 +600,369 @@ def test_fused_regret_tail_matches_pytorch() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_multiway_regret_src_weights_and_tail_match_pytorch() -> None:
+    pytest.importorskip("triton")
+    from p2.env.card_utils import calculate_unblocked_mass
+    from p2.search.fused_cfr_triton import (
+        fused_regret_tail_multiway_,
+        multiway_regret_src_weights_at_parents_triton,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(1901)
+    total, top, players, h = 17, 9, 4, 1326
+    bottom = top
+
+    beliefs = torch.rand(total, players, h, device=device)
+    beliefs /= beliefs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    to_act = torch.randint(0, players, (top,), device=device, dtype=torch.long)
+    has_folded = torch.rand(total, players, device=device) < 0.2
+    has_folded[torch.arange(top, device=device), to_act] = False
+    allowed = torch.rand(top, h, device=device) > 0.05
+
+    unblocked = calculate_unblocked_mass(beliefs[:top])
+    player_ids = torch.arange(players, device=device)
+    other_live = player_ids[None, :, None] != to_act[:, None, None]
+    other_live &= ~has_folded[:top, :, None]
+    ref_weights = torch.where(
+        other_live,
+        unblocked.clamp_min(1e-12),
+        torch.ones_like(unblocked),
+    ).prod(dim=1)
+    ref_weights *= allowed.to(ref_weights.dtype)
+
+    weights = multiway_regret_src_weights_at_parents_triton(
+        beliefs.contiguous(),
+        to_act.contiguous(),
+        top,
+        has_folded=has_folded.contiguous(),
+        allowed_mask=allowed.contiguous(),
+    )
+    torch.testing.assert_close(weights, ref_weights, rtol=1e-4, atol=1e-6)
+
+    values_achieved = torch.randn(total, players, h, device=device) * 0.1
+    values_expected = torch.randn(top, players, h, device=device) * 0.1
+    parent_index = torch.randint(0, top, (total,), device=device, dtype=torch.long)
+    prev_actor = torch.randint(0, players, (total,), device=device, dtype=torch.long)
+
+    ref = torch.zeros(total, h, device=device)
+    child_parents = parent_index[bottom:]
+    expected = values_expected[
+        child_parents,
+        to_act[child_parents],
+        :,
+    ]
+    idx = torch.arange(total - bottom, device=device)
+    achieved = values_achieved[bottom:][idx, prev_actor[bottom:], :]
+    ref[bottom:] = ref_weights[child_parents] * (achieved - expected)
+
+    out = torch.zeros(total, h, device=device).contiguous()
+    fused_regret_tail_multiway_(
+        regrets=out,
+        values_achieved=values_achieved.contiguous(),
+        values_expected=values_expected.contiguous(),
+        to_act=to_act.contiguous(),
+        src_weights=weights.contiguous(),
+        parent_index=parent_index.contiguous(),
+        prev_actor=prev_actor.contiguous(),
+        bottom=bottom,
+    )
+    torch.testing.assert_close(out, ref, rtol=1e-4, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_multiway_ev_backup_matches_pytorch() -> None:
+    pytest.importorskip("triton")
+    from p2.env.card_utils import calculate_unblocked_mass
+    from p2.search.fused_cfr_triton import (
+        _preprocess_unblocked_stats,
+        fused_weighted_parent_sum_inline_opp_multiway,
+        select_actor_beliefs_and_marginal_policy_multiway_triton_out_,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(1902)
+    players, h = 4, 1326
+    child_counts = torch.tensor([2, 3, 1], device=device, dtype=torch.long)
+    top = child_counts.numel()
+    bottom = top
+    child_offsets = torch.empty_like(child_counts)
+    child_offsets[0] = bottom
+    child_offsets[1:] = bottom + child_counts[:-1].cumsum(0)
+    total = int((bottom + child_counts.sum()).item())
+
+    beliefs = torch.rand(total, players, h, device=device)
+    beliefs /= beliefs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    to_act = torch.randint(0, players, (top,), device=device, dtype=torch.long)
+    prev_actor = torch.zeros(total, device=device, dtype=torch.long)
+    policy = torch.zeros(total, h, device=device)
+    for parent in range(top):
+        first = int(child_offsets[parent].item())
+        count = int(child_counts[parent].item())
+        prev_actor[first : first + count] = to_act[parent]
+        raw = torch.rand(count, h, device=device)
+        policy[first : first + count] = raw / raw.sum(dim=0, keepdim=True)
+    values = torch.randn(total, players, h, device=device) * 0.1
+
+    actor_beliefs_ref = beliefs[
+        torch.arange(top, device=device),
+        to_act,
+        :,
+    ]
+    parent_index = torch.repeat_interleave(
+        torch.arange(top, device=device),
+        child_counts,
+    )
+    beliefs_dest = actor_beliefs_ref[parent_index]
+    marginal_ref = beliefs_dest * policy[bottom:]
+    policy_blocked = calculate_unblocked_mass(marginal_ref)
+    matchup = calculate_unblocked_mass(beliefs_dest)
+    opp_policy = torch.where(
+        matchup > 1e-5,
+        policy_blocked / matchup.clamp_min(1e-20),
+        torch.zeros_like(matchup),
+    )
+
+    ref = values.clone()
+    player_ids = torch.arange(players, device=device)
+    for parent in range(top):
+        first = int(child_offsets[parent].item())
+        count = int(child_counts[parent].item())
+        acc = torch.zeros(players, h, device=device)
+        for child in range(first, first + count):
+            rel = child - bottom
+            weights = torch.where(
+                player_ids[:, None] == prev_actor[child],
+                policy[child][None, :],
+                opp_policy[rel][None, :],
+            )
+            acc += ref[child] * weights
+        ref[parent] = acc
+
+    actor_beliefs = torch.empty(top, h, device=device)
+    marginal = torch.empty(total - bottom, h, device=device)
+    select_actor_beliefs_and_marginal_policy_multiway_triton_out_(
+        beliefs.contiguous(),
+        to_act.contiguous(),
+        policy.contiguous(),
+        child_offsets.contiguous(),
+        child_counts.contiguous(),
+        bottom,
+        actor_beliefs,
+        marginal,
+        max_children=4,
+    )
+    torch.testing.assert_close(actor_beliefs, actor_beliefs_ref, rtol=0, atol=0)
+    torch.testing.assert_close(marginal, marginal_ref, rtol=1e-6, atol=1e-7)
+
+    numer_s, numer_cardsum = _preprocess_unblocked_stats(marginal.contiguous())
+    denom_s, denom_cardsum = _preprocess_unblocked_stats(actor_beliefs.contiguous())
+    out = values.clone().contiguous()
+    fused_weighted_parent_sum_inline_opp_multiway(
+        values=out,
+        prev_actor=prev_actor.contiguous(),
+        policy_hero=policy.contiguous(),
+        actor_beliefs=actor_beliefs.contiguous(),
+        numer_s=numer_s,
+        numer_cardsum=numer_cardsum,
+        denom_s=denom_s,
+        denom_cardsum=denom_cardsum,
+        child_offsets=child_offsets.contiguous(),
+        child_count=child_counts.contiguous(),
+        parent_base=0,
+        child_base=bottom,
+        max_children=4,
+    )
+    torch.testing.assert_close(out[:top], ref[:top], rtol=1e-4, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_multiway_average_policy_update_matches_pytorch() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import (
+        fused_average_policy_mix_multiway_with_tensors_,
+        fused_policy_renorm_reach_depth_multiway_,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(1903)
+    parents, players, h = 4, 4, 1326
+    child_counts = torch.tensor([2, 1, 3, 2], device=device, dtype=torch.long)
+    bottom = parents
+    child_offsets = torch.empty_like(child_counts)
+    child_offsets[0] = bottom
+    child_offsets[1:] = bottom + child_counts[:-1].cumsum(0)
+    total = int((bottom + child_counts.sum()).item())
+    parent_index = torch.zeros(total, device=device, dtype=torch.long)
+    for parent in range(parents):
+        first = int(child_offsets[parent].item())
+        count = int(child_counts[parent].item())
+        parent_index[first : first + count] = parent
+
+    to_act = torch.randint(0, players, (total,), device=device, dtype=torch.long)
+    prev_actor = torch.zeros(total, device=device, dtype=torch.long)
+    policy = torch.zeros(total, h, device=device)
+    for parent in range(parents):
+        first = int(child_offsets[parent].item())
+        count = int(child_counts[parent].item())
+        prev_actor[first : first + count] = to_act[parent]
+        raw = torch.rand(count, h, device=device)
+        policy[first : first + count] = raw / raw.sum(dim=0, keepdim=True)
+
+    self_reach = torch.rand(total, players, h, device=device)
+    avg = torch.rand(total, h, device=device)
+    num = torch.rand(total, h, device=device) * 0.1
+    den = torch.rand(total, h, device=device) * 0.1
+    allowed = torch.rand(total, h, device=device) > 0.05
+    new = torch.tensor(7.0, device=device)
+
+    ref_avg = avg.clone()
+    ref_num = num.clone()
+    ref_den = den.clone()
+    row = torch.arange(total - bottom, device=device) + bottom
+    parents_for_child = parent_index[bottom:]
+    actor_reach = self_reach[parents_for_child, to_act[parents_for_child]]
+    contribution = actor_reach * new
+    ref_num[bottom:] += contribution * policy[bottom:]
+    ref_den[bottom:] += contribution
+    ref_avg[:bottom] = 0.0
+    ref_avg[bottom:] = torch.where(
+        ref_den[bottom:] > 1e-5,
+        ref_num[bottom:] / ref_den[bottom:].clamp_min(1e-5),
+        policy[bottom:],
+    )
+
+    ref_reach = self_reach.clone()
+    player_ids = torch.arange(players, device=device)
+    for parent in range(parents):
+        first = int(child_offsets[parent].item())
+        count = int(child_counts[parent].item())
+        denom = ref_avg[first : first + count].sum(dim=0)
+        for child in range(first, first + count):
+            pol = torch.where(
+                denom > 1e-5,
+                ref_avg[child] / denom.clamp_min(1e-5),
+                ref_avg[child],
+            )
+            ref_avg[child] = pol
+            child_reach = torch.where(
+                player_ids[:, None] == prev_actor[child],
+                ref_reach[parent] * pol[None, :],
+                ref_reach[parent],
+            )
+            ref_reach[child] = torch.where(allowed[child][None, :], child_reach, 0.0)
+
+    out_avg = avg.clone().contiguous()
+    out_num = num.clone().contiguous()
+    out_den = den.clone().contiguous()
+    out_reach = self_reach.clone().contiguous()
+    fused_average_policy_mix_multiway_with_tensors_(
+        policy_probs_avg=out_avg,
+        average_policy_numerator=out_num,
+        average_policy_denominator=out_den,
+        policy_probs=policy.contiguous(),
+        self_reach=self_reach.contiguous(),
+        to_act=to_act.contiguous(),
+        parent_index=parent_index.contiguous(),
+        new=new,
+        bottom=bottom,
+    )
+    fused_policy_renorm_reach_depth_multiway_(
+        policy=out_avg,
+        reach=out_reach,
+        allowed_mask=allowed.contiguous(),
+        child_offsets=child_offsets.contiguous(),
+        child_count=child_counts.contiguous(),
+        prev_actor=prev_actor.contiguous(),
+        parent_base=0,
+        max_children=4,
+        update_reach=True,
+    )
+
+    torch.testing.assert_close(out_num[row], ref_num[row], rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(out_den[row], ref_den[row], rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(out_avg, ref_avg, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(out_reach[bottom:], ref_reach[bottom:], rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_multiway_average_values_update_matches_pytorch() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import fused_avg_values_multiway_
+
+    device = torch.device("cuda")
+    torch.manual_seed(1904)
+    rows, players, h = 13, 4, 1326
+    avg = torch.randn(rows, players, h, device=device) * 0.1
+    latest = torch.randn_like(avg) * 0.1
+    beliefs = torch.rand_like(avg)
+    beliefs /= beliefs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    ignore = torch.zeros(rows, dtype=torch.bool, device=device)
+    ignore[3] = True
+    old = torch.tensor(5.0, device=device)
+    new = torch.tensor(2.0, device=device)
+    inv = torch.tensor(1.0 / 7.0, device=device)
+
+    ref = (avg * old + latest * new) * inv
+    correction = (ref * beliefs).sum(dim=2, keepdim=True).mean(dim=1, keepdim=True)
+    correction.masked_fill_(ignore[:, None, None], 0.0)
+    ref -= correction
+
+    out = avg.clone().contiguous()
+    fused_avg_values_multiway_(
+        values_avg=out,
+        latest_values=latest.contiguous(),
+        beliefs=beliefs.contiguous(),
+        old=old,
+        new=new,
+        inv_total=inv,
+        enforce_zero_sum=True,
+        ignore_mask=ignore.contiguous(),
+    )
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_multiway_model_values_writeback_matches_pytorch() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import fused_model_values_writeback_multiway_
+
+    device = torch.device("cuda")
+    torch.manual_seed(1905)
+    model_rows, total, players, h = 5, 11, 4, 1326
+    hand_values = torch.randn(model_rows, players, h, device=device) * 0.1
+    last_model = torch.randn_like(hand_values) * 0.1
+    beliefs = torch.rand_like(hand_values)
+    beliefs /= beliefs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    model_indices = torch.tensor([0, 2, 5, 7, 10], device=device, dtype=torch.long)
+    latest = torch.randn(total, players, h, device=device) * 0.1
+    last_out = torch.empty_like(hand_values)
+    onon = torch.tensor(1.75, device=device)
+    oon = torch.tensor(0.75, device=device)
+
+    mixed = hand_values * onon - last_model * oon
+    correction = (mixed * beliefs).sum(dim=2, keepdim=True).mean(dim=1, keepdim=True)
+    ref_latest = latest.clone()
+    ref_latest[model_indices] = mixed - correction
+
+    fused_model_values_writeback_multiway_(
+        hand_values=hand_values.contiguous(),
+        last_model_values=last_model.contiguous(),
+        beliefs=beliefs.contiguous(),
+        model_indices=model_indices.contiguous(),
+        latest_values=latest,
+        last_out=last_out,
+        old_plus_new_over_new=onon,
+        old_over_new=oon,
+        do_mix=True,
+        enforce_zero_sum=True,
+        store_last=True,
+    )
+    torch.testing.assert_close(latest, ref_latest, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(last_out, hand_values, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_unblocked_mass_ratio_indirect_matches_baseline() -> None:
     pytest.importorskip("triton")
     from p2.env.card_utils import calculate_unblocked_mass
