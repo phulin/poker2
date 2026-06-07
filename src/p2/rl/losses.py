@@ -21,6 +21,7 @@ from p2.env.card_utils import (
     combo_suit_permutation_tensor,
     hand_combos_tensor,
     preflop_class_multiplicity_tensor,
+    preflop_class_unblocked_mass,
 )
 from p2.models.model_output import ModelOutput
 from p2.rl.exponential_controller import ExponentialController
@@ -981,16 +982,23 @@ class RebelSupervisedLoss(nn.Module):
         actor_belief = player_beliefs.gather(
             1, actor[:, None, None].expand(-1, 1, PREFLOP_HANDS)
         ).squeeze(1)
-        multiplicity = preflop_class_multiplicity_tensor(device=device).to(
-            dtype=logits.dtype
-        )
         policy_targets = batch.policy_targets.to(dtype=logits.dtype)
         legal_masks = batch.legal_masks[:, None, :]
         masked_logits = compute_masked_logits(logits, legal_masks)
         log_probs = F.log_softmax(masked_logits, dim=-1)
         probs = log_probs.exp()
 
-        policy_weights_unnormalized = actor_belief.to(logits.dtype) * multiplicity
+        unblocked_mass = preflop_class_unblocked_mass(
+            player_beliefs.to(dtype=logits.dtype)
+        )
+        player_ids = torch.arange(self.num_players, device=device)
+        non_actor = player_ids[None, :, None] != actor[:, None, None]
+        other_matchup = torch.where(
+            non_actor,
+            unblocked_mass,
+            torch.ones_like(unblocked_mass),
+        ).prod(dim=1)
+        policy_weights_unnormalized = actor_belief.to(logits.dtype) * other_matchup
         policy_weight_sum = policy_weights_unnormalized.sum(
             dim=-1, keepdim=True
         ).clamp(min=1e-8)

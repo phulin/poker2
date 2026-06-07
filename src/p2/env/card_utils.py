@@ -121,6 +121,65 @@ def preflop_class_multiplicity_tensor(
     return multiplicity
 
 
+@lru_cache(maxsize=2)
+def preflop_class_compatibility_counts_tensor(
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Return [169, 169] disjoint-combo counts between preflop classes.
+
+    Entry ``[hero_class, opp_class]`` is the number of combos in
+    ``opp_class`` that do not share a card with any fixed combo from
+    ``hero_class``. Suit symmetry makes this count invariant within each
+    hero class, so the table exactly reproduces combo-level unblocked-mass
+    projection for class-constant preflop ranges.
+    """
+    class_ids = combo_to_preflop_class_tensor(device=device)
+    combo_cards = combo_to_onehot_tensor(device=device).to(torch.float32)
+    compatible = (combo_cards @ combo_cards.T) < 0.5
+
+    opp_class_onehot = torch.zeros(
+        NUM_HANDS, PREFLOP_HANDS, dtype=torch.float32, device=device
+    )
+    opp_class_onehot.scatter_(1, class_ids[:, None], 1.0)
+    per_combo_counts = compatible.to(torch.float32) @ opp_class_onehot
+
+    counts = torch.zeros(
+        PREFLOP_HANDS, PREFLOP_HANDS, dtype=torch.float32, device=device
+    )
+    counts.scatter_add_(
+        0,
+        class_ids[:, None].expand(-1, PREFLOP_HANDS),
+        per_combo_counts,
+    )
+    multiplicity = preflop_class_multiplicity_tensor(device=device).to(
+        dtype=counts.dtype
+    )
+    return counts / multiplicity[:, None]
+
+
+def preflop_class_unblocked_mass(class_mass: torch.Tensor) -> torch.Tensor:
+    """Project class mass through exact preflop card-removal compatibility.
+
+    ``class_mass`` is a tensor whose final axis is the 169-class preflop
+    abstraction and whose entries are probability/reach mass per class. The
+    returned tensor has the same shape; each output class is the combo-level
+    mass compatible with a fixed combo in that class, assuming uniform mass
+    inside every preflop class.
+    """
+    if class_mass.shape[-1] != PREFLOP_HANDS:
+        raise ValueError(
+            f"expected final axis {PREFLOP_HANDS}, got {class_mass.shape[-1]}"
+        )
+    multiplicity = preflop_class_multiplicity_tensor(device=class_mass.device).to(
+        dtype=class_mass.dtype
+    )
+    compatibility = preflop_class_compatibility_counts_tensor(
+        device=class_mass.device
+    ).to(dtype=class_mass.dtype)
+    combo_mass_per_class = class_mass / multiplicity
+    return combo_mass_per_class @ compatibility.T
+
+
 def expand_169_to_1326(
     values_169: torch.Tensor,
     *,

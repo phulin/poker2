@@ -8,6 +8,7 @@ from p2.env.card_utils import (
     PREFLOP_HANDS,
     collapse_1326_to_169,
     preflop_class_multiplicity_tensor,
+    preflop_class_unblocked_mass,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
@@ -156,18 +157,23 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             return super()._compute_policy_node_reach(top)
         allowed = self.allowed_hands[:top].to(dtype=self.float_dtype)
         reach = self.self_reach_avg[:top].to(dtype=self.float_dtype)
-        live_players = torch.ones(
-            top, self.num_players, 1, dtype=torch.bool, device=self.device
-        )
+        unblocked = preflop_class_unblocked_mass(reach)
+        player_ids = torch.arange(self.num_players, device=self.device)
+        other_live = player_ids[None, :, None] != 0
         if hasattr(self.env, "has_folded"):
-            live_players = ~self.env.has_folded[:top, :, None]
-        reach_product = torch.where(
-            live_players,
-            reach.clamp_min(1e-12),
-            torch.ones_like(reach),
+            other_live &= ~self.env.has_folded[:top, :, None]
+        other_reach = torch.where(
+            other_live,
+            unblocked.clamp_min(1e-12),
+            torch.ones_like(unblocked),
         ).prod(dim=1)
-        numer = (reach_product * allowed).sum(dim=-1)
-        denom = allowed.sum(dim=-1).clamp(min=1.0)
+        numer = (reach[:, 0] * other_reach * allowed).sum(dim=-1)
+
+        allowed_unblocked = preflop_class_unblocked_mass(allowed)
+        other_allowed = allowed_unblocked.clamp_min(1e-12).pow(
+            max(0, self.num_players - 1)
+        )
+        denom = (allowed * other_allowed).sum(dim=-1).clamp(min=1e-12)
         return (numer / denom).clamp(min=0.0, max=1.0)
 
     def compute_expected_values(
@@ -218,14 +224,20 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                 1,
                 prev_actor[:, None, None].expand(-1, 1, PREFLOP_HANDS),
             ).squeeze(1)
-            public_action_weight = (actor_beliefs * child_policy).sum(
-                dim=-1
-            ).clamp_min(0.0)
+            matchup_mass = preflop_class_unblocked_mass(actor_beliefs)
+            policy_blocked = preflop_class_unblocked_mass(
+                actor_beliefs * child_policy
+            )
+            opponent_conditioned_policy = torch.where(
+                matchup_mass > 1e-8,
+                policy_blocked / matchup_mass.clamp(min=1e-8),
+                torch.zeros_like(policy_blocked),
+            )
             is_actor = player_ids[None, :, None] == prev_actor[:, None, None]
             action_weights = torch.where(
                 is_actor,
                 child_policy[:, None, :],
-                public_action_weight[:, None, None],
+                opponent_conditioned_policy[:, None, :],
             )
             child_values *= action_weights
             self._pull_back_sum(child_values, values, level=depth)
@@ -241,6 +253,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             values_expected = values_achieved
 
         bottom = self.depth_offsets[1]
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
         regrets = torch.zeros_like(self.policy_probs)
         src_actor_indices = self.env.to_act[:, None, None].expand(
             -1, 1, PREFLOP_HANDS
@@ -254,9 +267,20 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         actor_values_achieved = values_achieved[bottom:].gather(
             1, prev_actor_indices
         ).squeeze(1)
-        regrets[bottom:] = (
-            actor_values_achieved - actor_values_expected
-        ) * self.allowed_hands[bottom:].to(dtype=self.float_dtype)
+        unblocked_reach = preflop_class_unblocked_mass(beliefs)
+        player_ids = torch.arange(self.num_players, device=self.device)
+        other_live = player_ids[None, :, None] != self.env.to_act[:, None, None]
+        if hasattr(self.env, "has_folded"):
+            other_live &= ~self.env.has_folded[:, :, None]
+        src_weights = torch.where(
+            other_live,
+            unblocked_reach.clamp_min(1e-12),
+            torch.ones_like(unblocked_reach),
+        ).prod(dim=1)
+        src_weights *= self.allowed_hands.to(dtype=self.float_dtype)
+        weights = self._fan_out(src_weights)
+
+        regrets[bottom:] = weights * (actor_values_achieved - actor_values_expected)
         self._mask_invalid(regrets)
         return regrets
 

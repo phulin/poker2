@@ -6,11 +6,14 @@ import torch.nn.functional as F
 from p2.env.card_utils import (
     NUM_HANDS,
     PREFLOP_HANDS,
+    calculate_unblocked_mass,
     collapse_1326_to_169,
     combo_suit_permutation_tensor,
     combo_to_preflop_class_tensor,
     expand_169_to_1326,
+    preflop_class_compatibility_counts_tensor,
     preflop_class_multiplicity_tensor,
+    preflop_class_unblocked_mass,
 )
 from p2.models.mlp.better_features import context_length
 from p2.models.mlp.better_ffn import BetterPreflopPolicyFFN, BetterPreflopValueFFN
@@ -71,6 +74,59 @@ def test_expand_collapse_round_trip_for_values_and_beliefs() -> None:
     )
 
 
+def test_preflop_class_unblocked_mass_matches_expanded_combo_projection() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(123)
+    class_mass = torch.rand(3, 2, PREFLOP_HANDS, generator=generator)
+    class_mass = class_mass / class_mass.sum(dim=-1, keepdim=True)
+
+    compact_unblocked = preflop_class_unblocked_mass(class_mass)
+    expanded_mass = expand_169_to_1326(
+        class_mass,
+        divide_by_multiplicity=True,
+    )
+    expanded_unblocked = calculate_unblocked_mass(expanded_mass)
+    collapsed_unblocked = collapse_1326_to_169(expanded_unblocked, reduction="mean")
+
+    torch.testing.assert_close(compact_unblocked, collapsed_unblocked)
+
+
+def test_preflop_class_conditioned_policy_matches_expanded_combo_projection() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(124)
+    actor_belief = torch.rand(4, PREFLOP_HANDS, generator=generator)
+    actor_belief = actor_belief / actor_belief.sum(dim=-1, keepdim=True)
+    actor_policy = torch.rand(4, PREFLOP_HANDS, generator=generator)
+
+    compact_matchup = preflop_class_unblocked_mass(actor_belief)
+    compact_policy_blocked = preflop_class_unblocked_mass(actor_belief * actor_policy)
+    compact_conditioned = compact_policy_blocked / compact_matchup.clamp(min=1e-8)
+
+    expanded_belief = expand_169_to_1326(actor_belief, divide_by_multiplicity=True)
+    expanded_policy = expand_169_to_1326(actor_policy)
+    expanded_matchup = calculate_unblocked_mass(expanded_belief)
+    expanded_policy_blocked = calculate_unblocked_mass(
+        expanded_belief * expanded_policy
+    )
+    expanded_conditioned = expanded_policy_blocked / expanded_matchup.clamp(min=1e-8)
+    collapsed_conditioned = collapse_1326_to_169(
+        expanded_conditioned,
+        reduction="mean",
+    )
+
+    torch.testing.assert_close(compact_conditioned, collapsed_conditioned)
+
+
+def test_preflop_class_compatibility_counts_are_class_symmetric() -> None:
+    counts = preflop_class_compatibility_counts_tensor()
+    multiplicity = preflop_class_multiplicity_tensor()
+
+    assert counts.shape == (PREFLOP_HANDS, PREFLOP_HANDS)
+    assert torch.all(counts >= 0)
+    torch.testing.assert_close(
+        counts * multiplicity[:, None],
+        counts.T * multiplicity[None, :],
+    )
+
+
 def test_multiplicity_weighted_169_value_loss_matches_expanded_loss() -> None:
     batch_size = 4
     num_players = 2
@@ -93,6 +149,88 @@ def test_multiplicity_weighted_169_value_loss_matches_expanded_loss() -> None:
     )
 
     torch.testing.assert_close(loss, expected)
+
+
+def test_compact_policy_weights_match_expanded_combo_weights() -> None:
+    batch_size = 3
+    num_players = 2
+    num_actions = 4
+    generator = torch.Generator(device="cpu").manual_seed(125)
+    beliefs_169 = torch.rand(
+        batch_size, num_players, PREFLOP_HANDS, generator=generator
+    )
+    beliefs_169 = beliefs_169 / beliefs_169.sum(dim=-1, keepdim=True)
+    beliefs_1326 = expand_169_to_1326(
+        beliefs_169,
+        divide_by_multiplicity=True,
+    )
+    context = torch.zeros(batch_size, context_length(num_players))
+    street = torch.zeros(batch_size, dtype=torch.long)
+    to_act = torch.tensor([0, 1, 0], dtype=torch.long)
+    board = torch.full((batch_size, 5), -1, dtype=torch.long)
+    legal_masks = torch.ones(batch_size, num_actions, dtype=torch.bool)
+
+    logits_169 = torch.randn(
+        batch_size, PREFLOP_HANDS, num_actions, generator=generator
+    )
+    class_ids = combo_to_preflop_class_tensor()
+    logits_1326 = logits_169.index_select(1, class_ids)
+    targets_169 = F.softmax(
+        torch.randn(batch_size, PREFLOP_HANDS, num_actions, generator=generator),
+        dim=-1,
+    )
+    targets_1326 = targets_169.index_select(1, class_ids)
+
+    compact_batch = RebelBatch(
+        features=MLPFeatures(
+            context=context,
+            street=street,
+            to_act=to_act,
+            board=board,
+            beliefs=beliefs_169.reshape(batch_size, -1),
+            hand_dim=PREFLOP_HANDS,
+        ),
+        legal_masks=legal_masks,
+        policy_targets=targets_169,
+    )
+    expanded_batch = RebelBatch(
+        features=MLPFeatures(
+            context=context,
+            street=street,
+            to_act=to_act,
+            board=board,
+            beliefs=beliefs_1326.reshape(batch_size, -1),
+        ),
+        legal_masks=legal_masks,
+        policy_targets=targets_1326,
+    )
+    loss_fn = RebelSupervisedLoss(num_players=num_players)
+
+    compact_loss = loss_fn.forward_policy(
+        ModelOutput(policy_logits=logits_169),
+        compact_batch,
+    )
+    expanded_loss = loss_fn.forward_policy(
+        ModelOutput(policy_logits=logits_1326),
+        expanded_batch,
+    )
+    expanded_weights_169 = collapse_1326_to_169(
+        expanded_loss["policy_weights"],
+        reduction="sum",
+    )
+
+    torch.testing.assert_close(
+        compact_loss["policy_weights"],
+        expanded_weights_169,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    torch.testing.assert_close(
+        compact_loss["policy_loss"],
+        expanded_loss["policy_loss"],
+        rtol=1e-5,
+        atol=1e-6,
+    )
 
 
 def test_compact_preflop_model_shapes_and_policy_loss() -> None:
