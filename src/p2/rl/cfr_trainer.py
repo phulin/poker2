@@ -167,6 +167,13 @@ class RebelCFRTrainer:
                 "training; multiway constant-sum projection needs joint blockers."
             )
             cfg.model.enforce_zero_sum = False
+        if self.num_players != 2 and cfg.data.live_root_source == "self_play":
+            if cfg.model.name != ModelType.better_ffn:
+                raise ValueError(
+                    "Multiway preflop self-play requires model.name=better_ffn "
+                    "so the evaluator can use compact 169-hand preflop models."
+                )
+            cfg.model.preflop_hand_dim = 169
         self.policy_extra_updates_per_step = cfg.train.policy_extra_updates_per_step
         if self.policy_extra_updates_per_step < 0:
             raise ValueError("train.policy_extra_updates_per_step must be >= 0")

@@ -457,6 +457,8 @@ def test_rebel_cfr_trainer_constructs_multiway_pbs_env():
     cfg.train.replay_buffer_batches = 1
     cfg.train.value_reuse_goal = 1.0
     cfg.train.policy_capacity_factor = 1.0
+    cfg.model.name = ModelType.better_ffn
+    cfg.model.preflop_hand_dim = 169
     cfg.model.hidden_dim = 16
     cfg.model.range_hidden_dim = 8
     cfg.model.ffn_dim = 48
@@ -465,7 +467,7 @@ def test_rebel_cfr_trainer_constructs_multiway_pbs_env():
     cfg.model.num_value_layers = 1
     cfg.model.policy_rank = 8
     cfg.model.policy_hand_bias_rank = 4
-    cfg.model.board_interaction_dim = 4
+    cfg.model.board_interaction_dim = 0
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
     cfg.model.enforce_zero_sum = True
 
@@ -508,6 +510,8 @@ def test_rebel_cfr_trainer_routes_multiway_pbs_env_to_fused_preflop(
     cfg.train.replay_buffer_batches = 1
     cfg.train.value_reuse_goal = 1.0
     cfg.train.policy_capacity_factor = 1.0
+    cfg.model.name = ModelType.better_ffn
+    cfg.model.preflop_hand_dim = 169
     cfg.model.hidden_dim = 16
     cfg.model.range_hidden_dim = 8
     cfg.model.ffn_dim = 48
@@ -516,7 +520,7 @@ def test_rebel_cfr_trainer_routes_multiway_pbs_env_to_fused_preflop(
     cfg.model.num_value_layers = 1
     cfg.model.policy_rank = 8
     cfg.model.policy_hand_bias_rank = 4
-    cfg.model.board_interaction_dim = 4
+    cfg.model.board_interaction_dim = 0
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
 
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))

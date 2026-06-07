@@ -673,7 +673,7 @@ def test_preflop_sparse_evaluator_enforces_pbs_preflop_roots() -> None:
         force_button=torch.zeros(1, dtype=torch.long, device=device),
         force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
     )
-    model = MockModel(
+    model = CompactPreflopMockModel(
         num_actions=len(cfg.env.bet_bins) + 3,
         num_players=num_players,
         device=device,
@@ -683,7 +683,8 @@ def test_preflop_sparse_evaluator_enforces_pbs_preflop_roots() -> None:
         device=device,
         cfg=cfg,
     )
-    beliefs = torch.full((1, num_players, NUM_HANDS), 1.0 / NUM_HANDS)
+    beliefs = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    beliefs = (beliefs / beliefs.sum()).expand(1, num_players, PREFLOP_HANDS).clone()
 
     evaluator.initialize_subgame(env, torch.arange(1, device=device), beliefs)
 
@@ -812,6 +813,71 @@ def test_preflop_sparse_evaluator_rejects_fused_config() -> None:
     with pytest.raises(ValueError, match="non-fused sparse CFR"):
         PreflopSparseCFREvaluator(
             model=model,  # type: ignore[arg-type]
+            device=device,
+            cfg=cfg,
+        )
+
+
+def test_fused_preflop_sparse_evaluator_is_compact_only(monkeypatch) -> None:
+    from p2.search.fused_preflop_sparse_cfr_evaluator import (
+        FusedPreflopSparseCFREvaluator,
+    )
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    monkeypatch.setattr(
+        FusedSparseCFREvaluator,
+        "__init__",
+        SparseCFREvaluator.__init__,
+    )
+    device = get_device()
+    num_players = 3
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.allin_call_terminal_abstraction = False
+    env = PBSEnv(
+        num_envs=1,
+        num_players=num_players,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(1, dtype=torch.long, device=device),
+        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+    )
+    model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = FusedPreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+
+    evaluator.initialize_subgame(env, torch.arange(1, device=device))
+    features = evaluator._model_features_for_beliefs(
+        evaluator.beliefs[evaluator.model_indices]
+    )
+
+    assert evaluator.hand_dim == PREFLOP_HANDS
+    assert evaluator.beliefs.shape[-1] == PREFLOP_HANDS
+    assert evaluator.policy_probs.shape[-1] == PREFLOP_HANDS
+    assert evaluator.latest_values.shape[-1] == PREFLOP_HANDS
+    assert features.hand_dim == PREFLOP_HANDS
+    assert features.beliefs.shape[1] == num_players * PREFLOP_HANDS
+
+    bad_model = MockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    with pytest.raises(ValueError, match="compact-only"):
+        FusedPreflopSparseCFREvaluator(
+            model=bad_model,  # type: ignore[arg-type]
             device=device,
             cfg=cfg,
         )

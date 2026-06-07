@@ -48,11 +48,16 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             generator=generator,
             closing_leaf_model=closing_leaf_model,
         )
+        if int(getattr(self, "hand_dim", NUM_HANDS)) != PREFLOP_HANDS:
+            raise ValueError(
+                "PreflopSparseCFREvaluator is compact-only; attach a "
+                f"{PREFLOP_HANDS}-hand preflop policy/value model"
+            )
         self.warm_start_iterations = 0
 
     @property
     def _compact_preflop(self) -> bool:
-        return int(getattr(self, "hand_dim", NUM_HANDS)) == PREFLOP_HANDS
+        return True
 
     def _continuation_value_target_sampling_enabled(self) -> bool:
         return True
@@ -84,13 +89,11 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         root_boards = src_env.board_indices[src_indices]
         if (root_boards >= 0).any():
             raise ValueError("PreflopSparseCFREvaluator roots must have no public board")
-        if self._compact_preflop:
-            initial_beliefs = self._compact_initial_beliefs(
-                src_indices.numel(), initial_beliefs
-            )
+        initial_beliefs = self._compact_initial_beliefs(
+            src_indices.numel(), initial_beliefs
+        )
         super().initialize_subgame(src_env, src_indices, initial_beliefs)
-        if self._compact_preflop:
-            self._validate_compact_shapes()
+        self._validate_compact_shapes()
 
     def _compact_initial_beliefs(
         self,
@@ -139,22 +142,17 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             raise RuntimeError(f"compact preflop tensors are not 169-wide: {bad}")
 
     def _init_hand_rank_data(self) -> None:
-        if self._compact_preflop:
-            self.hand_rank_data = None
-            return
-        super()._init_hand_rank_data()
+        self.hand_rank_data = None
 
     def _set_allin_call_values(self, beliefs: torch.Tensor) -> None:
-        if self._compact_preflop and self.allin_call_indices.numel() > 0:
+        del beliefs
+        if self.allin_call_indices.numel() > 0:
             raise NotImplementedError(
                 "compact preflop all-in terminal values require a 169-class "
                 "all-in resolver; disable allin_call_terminal_abstraction for now"
             )
-        super()._set_allin_call_values(beliefs)
 
     def _compute_policy_node_reach(self, top: int) -> torch.Tensor:
-        if not self._compact_preflop:
-            return super()._compute_policy_node_reach(top)
         allowed = self.allowed_hands[:top].to(dtype=self.float_dtype)
         reach = self.self_reach_avg[:top].to(dtype=self.float_dtype)
         unblocked = preflop_class_unblocked_mass(reach)
@@ -183,13 +181,6 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         leaf_values: torch.Tensor | None = None,
         values: torch.Tensor | None = None,
     ) -> None:
-        if not self._compact_preflop:
-            return super().compute_expected_values(
-                policy=policy,
-                beliefs=beliefs,
-                leaf_values=leaf_values,
-                values=values,
-            )
         if policy is None:
             policy = self.policy_probs
         if beliefs is None:
@@ -245,10 +236,6 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
     def compute_instantaneous_regrets(
         self, values_achieved: torch.Tensor, values_expected: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if not self._compact_preflop:
-            return super().compute_instantaneous_regrets(
-                values_achieved, values_expected=values_expected
-            )
         if values_expected is None:
             values_expected = values_achieved
 
