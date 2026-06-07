@@ -39,6 +39,8 @@ TOTAL_PREFLOP_BOARDS = math.comb(52, 5)
 TOTAL_TRIPLE_BOARDS = math.comb(46, 5)
 _MAX_CLASS_MULTIPLICITY = 12
 _FORMAT = "p2.allin.preflop_allin_169.v1"
+_QUANTIZED_FORMAT = "p2.allin.preflop_allin_169.u16.v1"
+_U16_SCALE = float(torch.iinfo(torch.uint16).max)
 _COMPILED_3P_SHARE0_INNER: Callable[..., tuple[torch.Tensor, torch.Tensor]] | None = None
 
 
@@ -638,7 +640,7 @@ def precompute_allin_class_shares(
     sample_boards: int | None = None,
     seed: int = 0,
     board_chunk: int = 256,
-    class_chunk: int = 1024,
+    class_chunk: int = 8192,
     tuple_chunk: int = 65_536,
     class_ids: Sequence[int] | None = None,
     use_triton: bool | None = None,
@@ -766,15 +768,15 @@ def precompute_allin_3p_share0(
     sample_boards: int | None = None,
     seed: int = 0,
     board_chunk: int = 256,
-    class_chunk: int = 1024,
+    class_chunk: int = 8192,
     tuple_chunk: int = 65_536,
     class_ids: Sequence[int] | None = None,
     use_triton: bool | None = None,
     use_accumulation_kernel: bool | None = None,
     compile_inner: bool | None = None,
-    triton_block_t: int = 32,
-    triton_block_b: int = 32,
-    triton_board_group: int = 8,
+    triton_block_t: int = 64,
+    triton_block_b: int = 16,
+    triton_board_group: int = 24,
     canonical_boards: bool | None = None,
     tuple_orbits: bool | None = None,
     opponent_symmetry: bool = True,
@@ -1088,15 +1090,15 @@ def precompute_allin_169_tensors(
     sample_boards: int | None = None,
     seed: int = 0,
     board_chunk: int = 256,
-    class_chunk: int = 1024,
+    class_chunk: int = 8192,
     tuple_chunk: int = 65_536,
     class_ids: Sequence[int] | None = None,
     use_triton: bool | None = None,
     use_accumulation_kernel: bool | None = None,
     compile_inner: bool | None = None,
-    triton_block_t: int = 32,
-    triton_block_b: int = 32,
-    triton_board_group: int = 8,
+    triton_block_t: int = 64,
+    triton_block_b: int = 16,
+    triton_board_group: int = 24,
     canonical_boards: bool | None = None,
     tuple_orbits: bool | None = None,
     opponent_symmetry: bool = True,
@@ -1203,16 +1205,71 @@ def save_allin_169_tensors(result: PreflopAllIn169Tensors, output: str | Path) -
     tmp.replace(output)
 
 
+def _quantize_share_u16(share: torch.Tensor) -> torch.Tensor:
+    return (
+        share.to(torch.float32)
+        .clamp(0.0, 1.0)
+        .mul(_U16_SCALE)
+        .round()
+        .to(torch.uint16)
+        .contiguous()
+    )
+
+
+def quantized_allin_169_payload(result: PreflopAllIn169Tensors) -> dict[str, object]:
+    metadata = {
+        **(result.metadata or {}),
+        "format": _QUANTIZED_FORMAT,
+        "share_quantization": {
+            "dtype": "uint16",
+            "scale": int(_U16_SCALE),
+            "quantization": "round(clamp(share, 0, 1) * 65535).to(uint16)",
+            "dequantization": "share_u16.float() / 65535",
+        },
+    }
+    payload: dict[str, object] = {"format": _QUANTIZED_FORMAT, "metadata": metadata}
+    if result.allin_2p_share0 is not None:
+        payload["allin_2p_share0_u16"] = _quantize_share_u16(result.allin_2p_share0)
+    if result.allin_3p_share0 is not None:
+        payload["allin_3p_share0_u16"] = _quantize_share_u16(result.allin_3p_share0)
+    return payload
+
+
+def save_quantized_allin_169_tensors(
+    result: PreflopAllIn169Tensors,
+    output: str | Path,
+) -> None:
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = quantized_allin_169_payload(result)
+    tmp = output.with_name(f".{output.name}.{os.getpid()}.tmp")
+    if output.suffix == ".zst":
+        import zstandard as zstd
+
+        buffer = io.BytesIO()
+        torch.save(payload, buffer)
+        tmp.write_bytes(zstd.ZstdCompressor(level=10).compress(buffer.getvalue()))
+        tmp.replace(output)
+        return
+    torch.save(payload, tmp)
+    tmp.replace(output)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--quantized-shares",
+        action="store_true",
+        help="Save share tensors as uint16 with implicit division by 65535.",
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--players", type=int, nargs="+", default=[2, 3], choices=[2, 3])
     parser.add_argument("--preflop-payoff-path", type=Path, default=None)
     parser.add_argument("--sample-boards", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--board-chunk", type=int, default=256)
-    parser.add_argument("--class-chunk", type=int, default=1024)
+    parser.add_argument("--class-chunk", type=int, default=8192)
     parser.add_argument("--tuple-chunk", type=int, default=65_536)
     parser.add_argument("--class-ids", type=int, nargs="*", default=None)
     parser.add_argument(
@@ -1227,9 +1284,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Force torch.compile on/off for the 3p CUDA inner loop; default auto-enables on CUDA.",
     )
-    parser.add_argument("--triton-block-t", type=int, default=32)
-    parser.add_argument("--triton-block-b", type=int, default=32)
-    parser.add_argument("--triton-board-group", type=int, default=8)
+    parser.add_argument("--triton-block-t", type=int, default=64)
+    parser.add_argument("--triton-block-b", type=int, default=16)
+    parser.add_argument("--triton-board-group", type=int, default=24)
     parser.add_argument(
         "--canonical-boards",
         action=argparse.BooleanOptionalAction,
@@ -1285,7 +1342,7 @@ def main() -> None:
         )
 
     result = precompute_allin_169_tensors(
-        output=args.output,
+        output=None if args.quantized_shares else args.output,
         device=args.device,
         players=args.players,
         preflop_payoff_path=args.preflop_payoff_path,
@@ -1306,9 +1363,12 @@ def main() -> None:
         opponent_symmetry=args.opponent_symmetry,
         progress=progress,
     )
+    if args.quantized_shares:
+        save_quantized_allin_169_tensors(result, args.output)
     payload = result.payload()
     print(f"wrote {args.output}", flush=True)
-    for key, value in payload.items():
+    printed_payload = quantized_allin_169_payload(result) if args.quantized_shares else payload
+    for key, value in printed_payload.items():
         if torch.is_tensor(value):
             mb = value.numel() * value.element_size() / 1024 / 1024
             print(f"{key}: shape={tuple(value.shape)} dtype={value.dtype} {mb:.2f} MiB")

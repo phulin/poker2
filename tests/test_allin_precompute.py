@@ -9,6 +9,7 @@ from p2.allin.precompute import (
     precompute_allin_3p_share0,
     precompute_allin_169_tensors,
     precompute_allin_class_shares,
+    quantized_allin_169_payload,
 )
 from p2.env.card_utils import (
     PREFLOP_HANDS,
@@ -258,3 +259,27 @@ def test_precompute_allin_169_tensors_stores_canonical_3p_share0_only() -> None:
         PREFLOP_HANDS,
     )
     assert "allin_3p_share" not in result.payload()
+
+
+def test_quantized_allin_169_payload_stores_share_u16() -> None:
+    result = precompute_allin_169_tensors(
+        players=(2, 3),
+        device="cpu",
+        sample_boards=2,
+        seed=777,
+        board_chunk=1,
+        class_chunk=2,
+        tuple_chunk=16,
+        class_ids=[0, 1],
+        use_triton=False,
+    )
+
+    payload = quantized_allin_169_payload(result)
+
+    assert payload["format"] == "p2.allin.preflop_allin_169.u16.v1"
+    assert payload["allin_2p_share0_u16"].dtype == torch.uint16
+    assert payload["allin_3p_share0_u16"].dtype == torch.uint16
+    assert "allin_2p_count" not in payload
+    assert "allin_3p_count" not in payload
+    dequant = payload["allin_3p_share0_u16"].to(torch.float32) / 65535.0
+    torch.testing.assert_close(dequant, result.allin_3p_share0, atol=1 / 65535, rtol=0)

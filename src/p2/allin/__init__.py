@@ -12,6 +12,8 @@ from .precompute import (
     precompute_allin_3p_share0,
     precompute_allin_169_tensors,
     precompute_allin_class_shares,
+    quantized_allin_169_payload,
+    save_quantized_allin_169_tensors,
 )
 from .sampler import estimate_preflop_allin_values, estimate_preflop_allin_values_169
 
@@ -28,4 +30,6 @@ __all__ = [
     "precompute_allin_3p_share0",
     "precompute_allin_169_tensors",
     "precompute_allin_class_shares",
+    "quantized_allin_169_payload",
+    "save_quantized_allin_169_tensors",
 ]
