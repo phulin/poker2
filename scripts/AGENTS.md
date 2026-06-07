@@ -23,6 +23,7 @@ Reusable profiling and benchmark scripts that are broader than a single repro bu
 - `independent_river_exploitability.py`: River CFR exploitability diagnostic harness; prints evaluator-consistent exact-final exploitability and a legacy from-scratch checker that is not authoritative for PBS terminal values.
 - `evaluate_rebel_value_loss.py`: Evaluates a promoted ReBeL checkpoint's value head on a solved dataset value stream and reports weighted supervised value loss.
 - `eturn_distill_mab_search.py`: Runs sequential W&B-enabled MAB-style E_turn distillation hyperparameter trials, including initial and follow-up presets, while recording planned/running experiments to YAML and results to JSONL.
+- `eflop_distill_lr_sweep.py`: Runs fixed sequential W&B-enabled E_flop distillation LR sweeps from a promoted S_turn checkpoint, overriding curriculum substep train overrides and recording logs/results.
 - `test_survey_runner.py`: Runs pytest files or node ids with per-invocation timeouts and records structured audit results.
 
 ### Subdirectories
