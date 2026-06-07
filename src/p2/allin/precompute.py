@@ -19,6 +19,7 @@ from p2.env.card_utils import (
     board_allowed_hands,
     canonical_full_boards_with_weights,
     combo_to_preflop_class_tensor,
+    combo_suit_permutation_tensor,
     hand_combos_tensor,
     preflop_class_multiplicity_tensor,
 )
@@ -174,6 +175,99 @@ def _combo_masks(device: torch.device) -> torch.Tensor:
     ).contiguous()
 
 
+def _combo_card_masks26(device: torch.device) -> torch.Tensor:
+    combos = hand_combos_tensor(device=device)
+    one = torch.ones((), dtype=torch.int64, device=device)
+    low_shift = combos.clamp_max(25)
+    high_shift = (combos - 26).clamp_min(0)
+    low = torch.where(
+        combos < 26,
+        torch.bitwise_left_shift(one, low_shift),
+        torch.zeros((), dtype=torch.int64, device=device),
+    ).sum(dim=1)
+    high = torch.where(
+        combos >= 26,
+        torch.bitwise_left_shift(one, high_shift),
+        torch.zeros((), dtype=torch.int64, device=device),
+    ).sum(dim=1)
+    return torch.stack((low, high), dim=1).to(torch.int32).contiguous()
+
+
+def _board_card_masks26(boards: torch.Tensor) -> torch.Tensor:
+    boards = boards.long()
+    one = torch.ones((), dtype=torch.int64, device=boards.device)
+    low_shift = boards.clamp_max(25)
+    high_shift = (boards - 26).clamp_min(0)
+    low = torch.where(
+        boards < 26,
+        torch.bitwise_left_shift(one, low_shift),
+        torch.zeros((), dtype=torch.int64, device=boards.device),
+    ).sum(dim=1)
+    high = torch.where(
+        boards >= 26,
+        torch.bitwise_left_shift(one, high_shift),
+        torch.zeros((), dtype=torch.int64, device=boards.device),
+    ).sum(dim=1)
+    return torch.stack((low, high), dim=1).to(torch.int32).contiguous()
+
+
+def _tuple_card_masks26(
+    tuples: torch.Tensor,
+    *,
+    combo_card_masks: torch.Tensor,
+) -> torch.Tensor:
+    masks = combo_card_masks.index_select(0, tuples.reshape(-1)).reshape(-1, 3, 2)
+    return torch.bitwise_or(
+        torch.bitwise_or(masks[:, 0], masks[:, 1]),
+        masks[:, 2],
+    ).contiguous()
+
+
+def _mirror_3p_caller_order_(flat: torch.Tensor) -> None:
+    values = flat.reshape(PREFLOP_HANDS, PREFLOP_HANDS, PREFLOP_HANDS)
+    lower = torch.tril_indices(
+        PREFLOP_HANDS,
+        PREFLOP_HANDS,
+        offset=-1,
+        device=flat.device,
+    )
+    values[:, lower[0], lower[1]] = values[:, lower[1], lower[0]]
+
+
+def _canonicalize_tuple_suit_orbits(
+    tuples: torch.Tensor,
+    *,
+    combo_suit_permutation: torch.Tensor,
+    combo_class_ids: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if tuples.numel() == 0:
+        return (
+            tuples,
+            torch.empty(0, dtype=torch.float32, device=tuples.device),
+            torch.empty(0, dtype=torch.long, device=tuples.device),
+        )
+
+    h0 = combo_suit_permutation[:, tuples[:, 0]].to(torch.int64)
+    h1 = combo_suit_permutation[:, tuples[:, 1]].to(torch.int64)
+    h2 = combo_suit_permutation[:, tuples[:, 2]].to(torch.int64)
+    keys = (h0 * NUM_HANDS + h1) * NUM_HANDS + h2
+    canonical_keys = keys.min(dim=0).values
+    unique_keys, counts = torch.unique(canonical_keys, sorted=True, return_counts=True)
+    c0 = unique_keys // (NUM_HANDS * NUM_HANDS)
+    rem = unique_keys - c0 * NUM_HANDS * NUM_HANDS
+    c1 = rem // NUM_HANDS
+    c2 = rem - c1 * NUM_HANDS
+    canonical_tuples = torch.stack((c0, c1, c2), dim=1).to(torch.long).contiguous()
+    classes = combo_class_ids.index_select(0, canonical_tuples.reshape(-1)).reshape(
+        -1,
+        3,
+    )
+    owners = (classes[:, 0] * PREFLOP_HANDS + classes[:, 1]) * PREFLOP_HANDS + classes[
+        :, 2
+    ]
+    return canonical_tuples, counts.to(torch.float32).contiguous(), owners.contiguous()
+
+
 def _linear_class_ids(
     players: int,
     *,
@@ -194,6 +288,38 @@ def _linear_class_ids(
     if players == 2:
         return grids[:, 0] * PREFLOP_HANDS + grids[:, 1]
     return (grids[:, 0] * PREFLOP_HANDS + grids[:, 1]) * PREFLOP_HANDS + grids[:, 2]
+
+
+def _linear_3p_share0_class_ids(
+    *,
+    class_ids: Sequence[int] | None,
+    device: torch.device,
+    opponent_symmetry: bool,
+) -> torch.Tensor:
+    if not opponent_symmetry:
+        return _linear_class_ids(3, class_ids=class_ids, device=device)
+    if class_ids is None:
+        classes = torch.arange(PREFLOP_HANDS, dtype=torch.long, device=device)
+    else:
+        classes = torch.tensor(tuple(class_ids), dtype=torch.long, device=device)
+        if classes.numel() == 0:
+            raise ValueError("class_ids cannot be empty")
+        if bool(((classes < 0) | (classes >= PREFLOP_HANDS)).any()):
+            raise ValueError(f"class ids must be in [0, {PREFLOP_HANDS})")
+        classes = classes.unique(sorted=True)
+
+    caller_pairs = torch.triu_indices(
+        classes.numel(),
+        classes.numel(),
+        offset=0,
+        device=device,
+    )
+    c1 = classes.index_select(0, caller_pairs[0])
+    c2 = classes.index_select(0, caller_pairs[1])
+    c0 = classes[:, None].expand(-1, c1.numel()).reshape(-1)
+    c1 = c1[None, :].expand(classes.numel(), -1).reshape(-1)
+    c2 = c2[None, :].expand(classes.numel(), -1).reshape(-1)
+    return (c0 * PREFLOP_HANDS + c1) * PREFLOP_HANDS + c2
 
 
 def _decode_linear_classes(linear: torch.Tensor, players: int) -> torch.Tensor:
@@ -315,6 +441,7 @@ def _allin_3p_share0_accumulate_inner(
     allowed: torch.Tensor,
     tuples: torch.Tensor,
     board_weights: torch.Tensor,
+    tuple_weights: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     h0 = tuples[:, 0]
     h1 = tuples[:, 1]
@@ -339,8 +466,9 @@ def _allin_3p_share0_accumulate_inner(
     share6 = torch.where(valid, share6, torch.zeros_like(share6))
 
     weights = board_weights.to(dtype=torch.float32, device=ranks.device)[:, None]
-    share6_by_tuple = (share6 * weights).sum(dim=0)
-    count_by_tuple = (valid.to(torch.float32) * weights).sum(dim=0)
+    tuple_weight = tuple_weights.to(dtype=torch.float32, device=ranks.device)
+    share6_by_tuple = (share6 * weights).sum(dim=0) * tuple_weight
+    count_by_tuple = (valid.to(torch.float32) * weights).sum(dim=0) * tuple_weight
     return share6_by_tuple, count_by_tuple
 
 
@@ -365,10 +493,13 @@ if triton is not None:
     @triton.jit
     def _allin_3p_share0_accumulate_kernel(
         ranks_ptr,
-        allowed_ptr,
+        board_masks_ptr,
         board_weights_ptr,
         tuples_ptr,
+        tuple_masks_ptr,
+        tuple_weights_ptr,
         owners_ptr,
+        mirror_owners_ptr,
         share6_sum_ptr,
         count_ptr,
         tuple_count: tl.constexpr,
@@ -376,60 +507,97 @@ if triton is not None:
         H: tl.constexpr,
         BLOCK_T: tl.constexpr,
         BLOCK_B: tl.constexpr,
+        BOARD_GROUP: tl.constexpr,
         ACCUM_COUNT: tl.constexpr,
+        USE_MIRROR: tl.constexpr,
     ):
         t = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
-        b = tl.program_id(1) * BLOCK_B + tl.arange(0, BLOCK_B)
+        b0 = tl.program_id(1) * BLOCK_B * BOARD_GROUP
+        b_inner = tl.arange(0, BLOCK_B)
         t_mask = t < tuple_count
-        b_mask = b < board_count
 
         h0 = tl.load(tuples_ptr + t * 3, mask=t_mask, other=0)
         h1 = tl.load(tuples_ptr + t * 3 + 1, mask=t_mask, other=0)
         h2 = tl.load(tuples_ptr + t * 3 + 2, mask=t_mask, other=0)
-        offsets0 = b[:, None] * H + h0[None, :]
-        offsets1 = b[:, None] * H + h1[None, :]
-        offsets2 = b[:, None] * H + h2[None, :]
-        load_mask = b_mask[:, None] & t_mask[None, :]
-
-        r0 = tl.load(ranks_ptr + offsets0, mask=load_mask, other=-1)
-        r1 = tl.load(ranks_ptr + offsets1, mask=load_mask, other=-1)
-        r2 = tl.load(ranks_ptr + offsets2, mask=load_mask, other=-1)
-        a0 = tl.load(allowed_ptr + offsets0, mask=load_mask, other=0) != 0
-        a1 = tl.load(allowed_ptr + offsets1, mask=load_mask, other=0) != 0
-        a2 = tl.load(allowed_ptr + offsets2, mask=load_mask, other=0) != 0
-        valid = load_mask & a0 & a1 & a2
-
-        share6 = tl.zeros((BLOCK_B, BLOCK_T), tl.float32)
-        share6 = tl.where((r0 > r1) & (r0 > r2), 6.0, share6)
-        share6 = tl.where((r0 == r1) & (r0 > r2), 3.0, share6)
-        share6 = tl.where((r0 == r2) & (r0 > r1), 3.0, share6)
-        share6 = tl.where((r0 == r1) & (r0 == r2), 2.0, share6)
-        share6 = tl.where(valid, share6, 0.0)
-        board_weight = tl.load(board_weights_ptr + b, mask=b_mask, other=0.0).to(
+        tuple_weight = tl.load(tuple_weights_ptr + t, mask=t_mask, other=0.0).to(
             tl.float32
         )
-        share6 = share6 * board_weight[:, None]
+        tuple_low = tl.load(tuple_masks_ptr + t * 2, mask=t_mask, other=0)
+        tuple_high = tl.load(tuple_masks_ptr + t * 2 + 1, mask=t_mask, other=0)
+        share6_acc = tl.zeros((BLOCK_T,), tl.float32)
+        count_acc = tl.zeros((BLOCK_T,), tl.float32)
+        for group in tl.range(0, BOARD_GROUP):
+            b = b0 + group * BLOCK_B + b_inner
+            b_mask = b < board_count
+            board_low = tl.load(board_masks_ptr + b * 2, mask=b_mask, other=-1)
+            board_high = tl.load(board_masks_ptr + b * 2 + 1, mask=b_mask, other=-1)
+            offsets0 = b[:, None] * H + h0[None, :]
+            offsets1 = b[:, None] * H + h1[None, :]
+            offsets2 = b[:, None] * H + h2[None, :]
+            load_mask = b_mask[:, None] & t_mask[None, :]
+            blocks_board = ((board_low[:, None] & tuple_low[None, :]) != 0) | (
+                (board_high[:, None] & tuple_high[None, :]) != 0
+            )
+            valid = load_mask & ~blocks_board
 
-        share6_by_tuple = tl.sum(share6, axis=0)
+            r0 = tl.load(ranks_ptr + offsets0, mask=valid, other=-1)
+            r1 = tl.load(ranks_ptr + offsets1, mask=valid, other=-1)
+            r2 = tl.load(ranks_ptr + offsets2, mask=valid, other=-1)
+
+            share6 = tl.zeros((BLOCK_B, BLOCK_T), tl.float32)
+            share6 = tl.where((r0 > r1) & (r0 > r2), 6.0, share6)
+            share6 = tl.where((r0 == r1) & (r0 > r2), 3.0, share6)
+            share6 = tl.where((r0 == r2) & (r0 > r1), 3.0, share6)
+            share6 = tl.where((r0 == r1) & (r0 == r2), 2.0, share6)
+            share6 = tl.where(valid, share6, 0.0)
+            board_weight = tl.load(board_weights_ptr + b, mask=b_mask, other=0.0).to(
+                tl.float32
+            )
+            share6_acc += tl.sum(share6 * board_weight[:, None], axis=0)
+            if ACCUM_COUNT:
+                count_acc += tl.sum(valid.to(tl.float32) * board_weight[:, None], axis=0)
+
+        share6_by_tuple = share6_acc * tuple_weight
         owner = tl.load(owners_ptr + t, mask=t_mask, other=0)
         tl.atomic_add(share6_sum_ptr + owner, share6_by_tuple, sem="relaxed", mask=t_mask)
+        if USE_MIRROR:
+            mirror_owner = tl.load(mirror_owners_ptr + t, mask=t_mask, other=-1)
+            mirror_mask = t_mask & (mirror_owner >= 0)
+            tl.atomic_add(
+                share6_sum_ptr + mirror_owner,
+                share6_by_tuple,
+                sem="relaxed",
+                mask=mirror_mask,
+            )
         if ACCUM_COUNT:
-            count_by_tuple = tl.sum(valid.to(tl.float32) * board_weight[:, None], axis=0)
+            count_by_tuple = count_acc * tuple_weight
             tl.atomic_add(count_ptr + owner, count_by_tuple, sem="relaxed", mask=t_mask)
+            if USE_MIRROR:
+                tl.atomic_add(
+                    count_ptr + mirror_owner,
+                    count_by_tuple,
+                    sem="relaxed",
+                    mask=mirror_mask,
+                )
 
 
 def _allin_3p_share0_triton_accumulate_(
     *,
     ranks: torch.Tensor,
-    allowed: torch.Tensor,
+    board_masks: torch.Tensor,
     board_weights: torch.Tensor,
     tuples: torch.Tensor,
+    tuple_masks: torch.Tensor,
+    tuple_weights: torch.Tensor,
     owners: torch.Tensor,
+    mirror_owners: torch.Tensor,
     share6_sum: torch.Tensor,
     count: torch.Tensor,
     accumulate_count: bool,
+    use_mirror: bool,
     block_t: int,
     block_b: int,
+    board_group: int,
 ) -> None:
     if triton is None:
         raise RuntimeError("Triton is not available")
@@ -437,14 +605,17 @@ def _allin_3p_share0_triton_accumulate_(
         return
     grid = (
         triton.cdiv(int(tuples.shape[0]), int(block_t)),
-        triton.cdiv(int(ranks.shape[0]), int(block_b)),
+        triton.cdiv(int(ranks.shape[0]), int(block_b) * int(board_group)),
     )
     _allin_3p_share0_accumulate_kernel[grid](
         ranks,
-        allowed,
+        board_masks,
         board_weights,
         tuples,
+        tuple_masks,
+        tuple_weights,
         owners,
+        mirror_owners,
         share6_sum,
         count,
         int(tuples.shape[0]),
@@ -452,7 +623,9 @@ def _allin_3p_share0_triton_accumulate_(
         NUM_HANDS,
         BLOCK_T=int(block_t),
         BLOCK_B=int(block_b),
+        BOARD_GROUP=int(board_group),
         ACCUM_COUNT=bool(accumulate_count),
+        USE_MIRROR=bool(use_mirror),
         num_warps=8,
     )
 
@@ -601,7 +774,10 @@ def precompute_allin_3p_share0(
     compile_inner: bool | None = None,
     triton_block_t: int = 32,
     triton_block_b: int = 32,
+    triton_board_group: int = 8,
     canonical_boards: bool | None = None,
+    tuple_orbits: bool | None = None,
+    opponent_symmetry: bool = True,
     progress: Callable[[dict[str, float]], None] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, object]]:
     """Precompute canonical 3-player seat-0 shares with weighted accumulation."""
@@ -621,10 +797,22 @@ def precompute_allin_3p_share0(
         compile_inner = device.type == "cuda" and not use_accumulation_kernel
     if triton_block_t <= 0 or triton_block_b <= 0:
         raise ValueError("triton_block_t and triton_block_b must be positive")
+    if triton_board_group <= 0:
+        raise ValueError("triton_board_group must be positive")
     if canonical_boards is None:
         canonical_boards = sample_boards is None
+    if tuple_orbits is None:
+        tuple_orbits = sample_boards is None and not canonical_boards
+    if tuple_orbits and sample_boards is not None:
+        raise ValueError("tuple_orbits is only exact for exhaustive board runs")
+    if tuple_orbits and canonical_boards:
+        raise ValueError("tuple_orbits cannot be combined with canonical_boards")
 
-    linear = _linear_class_ids(3, class_ids=class_ids, device=device)
+    linear = _linear_3p_share0_class_ids(
+        class_ids=class_ids,
+        device=device,
+        opponent_symmetry=opponent_symmetry,
+    )
     total_entries = PREFLOP_HANDS**3
     share6_sum = torch.zeros(total_entries, dtype=torch.float32, device=device)
     use_analytic_count = sample_boards is None
@@ -640,6 +828,11 @@ def precompute_allin_3p_share0(
     )
     class_combo, class_combo_mask = _class_combo_table(device)
     combo_masks = _combo_masks(device)
+    combo_card_masks = _combo_card_masks26(device)
+    combo_suit_permutation = (
+        combo_suit_permutation_tensor(device=device) if tuple_orbits else None
+    )
+    combo_class_ids = combo_to_preflop_class_tensor(device=device) if tuple_orbits else None
     inner = _allin_3p_share0_inner(compile_inner=compile_inner)
     started = time.perf_counter()
     board_total = TOTAL_PREFLOP_BOARDS if sample_boards is None else int(sample_boards)
@@ -669,7 +862,8 @@ def precompute_allin_3p_share0(
     def accumulate_board_batch(
         *,
         ranks: torch.Tensor,
-        allowed: torch.Tensor,
+        allowed: torch.Tensor | None,
+        board_masks: torch.Tensor | None,
         board_weights: torch.Tensor,
         progress_by_class: bool,
     ) -> None:
@@ -687,29 +881,61 @@ def precompute_allin_3p_share0(
                 continue
             flat_tuple = tuple_grid.reshape(-1, 3)[flat_valid].contiguous()
             owners = ids.repeat_interleave(tuple_valid.shape[1])[flat_valid].contiguous()
+            mirror_owners = torch.empty(0, dtype=torch.long, device=device)
+            if tuple_orbits:
+                if combo_suit_permutation is None:
+                    raise RuntimeError("combo_suit_permutation missing")
+                if combo_class_ids is None:
+                    raise RuntimeError("combo_class_ids missing")
+                flat_tuple, tuple_weights, owners = _canonicalize_tuple_suit_orbits(
+                    flat_tuple,
+                    combo_suit_permutation=combo_suit_permutation,
+                    combo_class_ids=combo_class_ids,
+                )
+            else:
+                tuple_weights = torch.ones(
+                    flat_tuple.shape[0],
+                    dtype=torch.float32,
+                    device=device,
+                )
 
             for tuple_start in range(0, flat_tuple.shape[0], tuple_chunk):
                 tuples = flat_tuple[tuple_start : tuple_start + tuple_chunk]
+                tuple_masks = _tuple_card_masks26(
+                    tuples,
+                    combo_card_masks=combo_card_masks,
+                )
+                tuple_weight = tuple_weights[tuple_start : tuple_start + tuple_chunk]
                 owner = owners[tuple_start : tuple_start + tuple_chunk]
                 if use_accumulation_kernel:
+                    if board_masks is None:
+                        raise RuntimeError("board_masks missing for accumulation kernel")
                     _allin_3p_share0_triton_accumulate_(
                         ranks=ranks,
-                        allowed=allowed,
+                        board_masks=board_masks,
                         board_weights=board_weights,
                         tuples=tuples,
+                        tuple_masks=tuple_masks,
+                        tuple_weights=tuple_weight,
                         owners=owner,
+                        mirror_owners=mirror_owners,
                         share6_sum=share6_sum,
                         count=count_accum,
                         accumulate_count=not use_analytic_count,
+                        use_mirror=False,
                         block_t=triton_block_t,
                         block_b=triton_block_b,
+                        board_group=triton_board_group,
                     )
                 else:
+                    if allowed is None:
+                        raise RuntimeError("allowed missing for torch accumulation")
                     chunk_share6, chunk_count = inner(
                         ranks,
                         allowed,
                         tuples,
                         board_weights,
+                        tuple_weight,
                     )
                     share6_sum.scatter_add_(0, owner, chunk_share6)
                     if not use_analytic_count:
@@ -747,12 +973,16 @@ def precompute_allin_3p_share0(
         boards = boards_cpu.to(device=device, non_blocking=True)
         board_weights = weights_cpu.to(device=device, non_blocking=True).contiguous()
         ranks = _rank_hands(boards, use_triton=bool(use_triton))
-        allowed = board_allowed_hands(boards).contiguous()
+        allowed = None if use_accumulation_kernel else board_allowed_hands(boards)
+        if allowed is not None:
+            allowed = allowed.contiguous()
+        board_masks = _board_card_masks26(boards) if use_accumulation_kernel else None
         done_boards = float(weights_cpu.sum().item())
         done_board_representatives = int(boards.shape[0])
         accumulate_board_batch(
             ranks=ranks,
             allowed=allowed,
+            board_masks=board_masks,
             board_weights=board_weights,
             progress_by_class=True,
         )
@@ -766,12 +996,16 @@ def precompute_allin_3p_share0(
             boards = boards_cpu.to(device=device, non_blocking=True)
             board_weights = weights_cpu.to(device=device, non_blocking=True).contiguous()
             ranks = _rank_hands(boards, use_triton=bool(use_triton))
-            allowed = board_allowed_hands(boards).contiguous()
+            allowed = None if use_accumulation_kernel else board_allowed_hands(boards)
+            if allowed is not None:
+                allowed = allowed.contiguous()
+            board_masks = _board_card_masks26(boards) if use_accumulation_kernel else None
             done_boards += float(weights_cpu.sum().item())
             done_board_representatives += int(boards.shape[0])
             accumulate_board_batch(
                 ranks=ranks,
                 allowed=allowed,
+                board_masks=board_masks,
                 board_weights=board_weights,
                 progress_by_class=False,
             )
@@ -794,11 +1028,16 @@ def precompute_allin_3p_share0(
                     }
                 )
 
+    if opponent_symmetry:
+        _mirror_3p_caller_order_(share6_sum)
+
     count = (
         count_exact
         if use_analytic_count and count_exact is not None
         else count_accum.round().to(torch.int64)
     )
+    if opponent_symmetry:
+        _mirror_3p_caller_order_(count)
     share0 = torch.where(
         count > 0,
         share6_sum / (count.to(torch.float32) * 6.0).clamp_min(1.0),
@@ -820,7 +1059,10 @@ def precompute_allin_3p_share0(
         "compile_inner": bool(compile_inner),
         "triton_block_t": int(triton_block_t),
         "triton_block_b": int(triton_block_b),
+        "triton_board_group": int(triton_board_group),
         "canonical_boards": bool(canonical_boards),
+        "tuple_orbits": bool(tuple_orbits),
+        "opponent_symmetry": bool(opponent_symmetry),
         "board_tensor_mode": "resident_exact_canonical"
         if resident_board_tensors
         else "streamed",
@@ -854,7 +1096,10 @@ def precompute_allin_169_tensors(
     compile_inner: bool | None = None,
     triton_block_t: int = 32,
     triton_block_b: int = 32,
+    triton_board_group: int = 8,
     canonical_boards: bool | None = None,
+    tuple_orbits: bool | None = None,
+    opponent_symmetry: bool = True,
     progress: Callable[[dict[str, float]], None] | None = None,
 ) -> PreflopAllIn169Tensors:
     """Build and optionally save preflop all-in 169-class tensors."""
@@ -912,7 +1157,10 @@ def precompute_allin_169_tensors(
             compile_inner=compile_inner,
             triton_block_t=triton_block_t,
             triton_block_b=triton_block_b,
+            triton_board_group=triton_board_group,
             canonical_boards=canonical_boards,
+            tuple_orbits=tuple_orbits,
+            opponent_symmetry=opponent_symmetry,
             progress=progress,
         )
         result.allin_3p_share0 = share0.cpu()
@@ -981,6 +1229,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--triton-block-t", type=int, default=32)
     parser.add_argument("--triton-block-b", type=int, default=32)
+    parser.add_argument("--triton-board-group", type=int, default=8)
     parser.add_argument(
         "--canonical-boards",
         action=argparse.BooleanOptionalAction,
@@ -989,6 +1238,21 @@ def parse_args() -> argparse.Namespace:
             "Use suit-canonical full-board representatives with orbit weights for "
             "exact 3p; default auto-enables for exact runs."
         ),
+    )
+    parser.add_argument(
+        "--tuple-orbits",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Use suit-canonical concrete hole-tuple representatives with orbit "
+            "weights for exact 3p; default auto-enables for exact runs."
+        ),
+    )
+    parser.add_argument(
+        "--opponent-symmetry",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Mirror 3p seat-0 results across caller order; default enabled.",
     )
     parser.add_argument("--no-triton", action="store_true")
     return parser.parse_args()
@@ -1036,7 +1300,10 @@ def main() -> None:
         compile_inner=args.compile_inner,
         triton_block_t=args.triton_block_t,
         triton_block_b=args.triton_block_b,
+        triton_board_group=args.triton_board_group,
         canonical_boards=args.canonical_boards,
+        tuple_orbits=args.tuple_orbits,
+        opponent_symmetry=args.opponent_symmetry,
         progress=progress,
     )
     payload = result.payload()
