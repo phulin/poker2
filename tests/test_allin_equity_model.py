@@ -1250,6 +1250,12 @@ def test_pregenerate_all_boards_config_uses_samples_per_board() -> None:
     assert cfg.tuple_samples == 3
 
 
+def test_pregenerate_config_passes_native_169_hand_dim() -> None:
+    cfg = _data_config(PregenerateConfig(range_hand_dim=PREFLOP_HANDS))
+
+    assert cfg.range_hand_dim == PREFLOP_HANDS
+
+
 def test_pregenerate_all_boards_requires_samples_per_board() -> None:
     with pytest.raises(ValueError, match="--all-boards requires"):
         _data_config(

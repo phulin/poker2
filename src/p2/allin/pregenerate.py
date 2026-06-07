@@ -9,6 +9,7 @@ import torch
 
 from p2.allin.sampler import NUM_FULL_BOARDS
 from p2.allin.training_data import AllInDataGenConfig, save_allin_training_dataset
+from p2.env.card_utils import NUM_HANDS
 
 
 @dataclass
@@ -20,6 +21,7 @@ class PregenerateConfig:
     seed: int = 0
     device: str = "cuda"
     players: int = 4
+    range_hand_dim: int = NUM_HANDS
     sample_count: int = 50_000
     board_samples: int = 256
     tuple_samples: int = 0
@@ -65,6 +67,7 @@ def _data_config(cfg: PregenerateConfig) -> AllInDataGenConfig:
 
     kwargs: dict[str, Any] = {
         "players": cfg.players,
+        "range_hand_dim": cfg.range_hand_dim,
         "sample_count": sample_count,
         "board_samples": board_samples,
         "tuple_samples": tuple_samples,
