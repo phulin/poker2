@@ -25,10 +25,18 @@ from p2.env.rules import rank_hands as rank_hands_torch
 from p2.env.rules_triton import triton_is_available
 from p2.search.allin_payoff import I16_SCALE, load_preflop_payoff_i16
 
+try:
+    import triton
+    import triton.language as tl
+except ImportError:  # pragma: no cover - optional CUDA dependency
+    triton = None
+    tl = None
+
 
 TOTAL_PREFLOP_BOARDS = math.comb(52, 5)
 _MAX_CLASS_MULTIPLICITY = 12
 _FORMAT = "p2.allin.preflop_allin_169.v1"
+_COMPILED_3P_SHARE0_INNER: Callable[..., tuple[torch.Tensor, torch.Tensor]] | None = None
 
 
 @dataclass
@@ -269,6 +277,140 @@ def _class_tuple_combos(
     )
 
 
+def _allin_3p_share0_accumulate_inner(
+    ranks: torch.Tensor,
+    allowed: torch.Tensor,
+    tuples: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    h0 = tuples[:, 0]
+    h1 = tuples[:, 1]
+    h2 = tuples[:, 2]
+    r0 = ranks.index_select(1, h0)
+    r1 = ranks.index_select(1, h1)
+    r2 = ranks.index_select(1, h2)
+    valid = (
+        allowed.index_select(1, h0)
+        & allowed.index_select(1, h1)
+        & allowed.index_select(1, h2)
+    )
+
+    # Store shares in sixths: win=6, two-way tie=3, three-way tie=2. Keep this
+    # as fp32 on CUDA; int64 scatter/add is much slower and the artifact share
+    # is emitted as fp32.
+    share6 = torch.zeros(r0.shape, dtype=torch.float32, device=ranks.device)
+    share6 = torch.where((r0 > r1) & (r0 > r2), 6.0, share6)
+    share6 = torch.where((r0 == r1) & (r0 > r2), 3.0, share6)
+    share6 = torch.where((r0 == r2) & (r0 > r1), 3.0, share6)
+    share6 = torch.where((r0 == r1) & (r0 == r2), 2.0, share6)
+    share6 = torch.where(valid, share6, torch.zeros_like(share6))
+
+    share6_by_tuple = share6.sum(dim=0)
+    count_by_tuple = valid.to(torch.float32).sum(dim=0)
+    return share6_by_tuple, count_by_tuple
+
+
+def _allin_3p_share0_inner(
+    *,
+    compile_inner: bool,
+) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+    global _COMPILED_3P_SHARE0_INNER
+    if not compile_inner:
+        return _allin_3p_share0_accumulate_inner
+    if _COMPILED_3P_SHARE0_INNER is None:
+        _COMPILED_3P_SHARE0_INNER = torch.compile(
+            _allin_3p_share0_accumulate_inner,
+            dynamic=True,
+            fullgraph=False,
+        )
+    return _COMPILED_3P_SHARE0_INNER
+
+
+if triton is not None:
+
+    @triton.jit
+    def _allin_3p_share0_accumulate_kernel(
+        ranks_ptr,
+        allowed_ptr,
+        tuples_ptr,
+        owners_ptr,
+        share6_sum_ptr,
+        count_ptr,
+        tuple_count: tl.constexpr,
+        board_count: tl.constexpr,
+        H: tl.constexpr,
+        BLOCK_T: tl.constexpr,
+        BLOCK_B: tl.constexpr,
+    ):
+        t = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
+        b = tl.program_id(1) * BLOCK_B + tl.arange(0, BLOCK_B)
+        t_mask = t < tuple_count
+        b_mask = b < board_count
+
+        h0 = tl.load(tuples_ptr + t * 3, mask=t_mask, other=0)
+        h1 = tl.load(tuples_ptr + t * 3 + 1, mask=t_mask, other=0)
+        h2 = tl.load(tuples_ptr + t * 3 + 2, mask=t_mask, other=0)
+        offsets0 = b[:, None] * H + h0[None, :]
+        offsets1 = b[:, None] * H + h1[None, :]
+        offsets2 = b[:, None] * H + h2[None, :]
+        load_mask = b_mask[:, None] & t_mask[None, :]
+
+        r0 = tl.load(ranks_ptr + offsets0, mask=load_mask, other=-1)
+        r1 = tl.load(ranks_ptr + offsets1, mask=load_mask, other=-1)
+        r2 = tl.load(ranks_ptr + offsets2, mask=load_mask, other=-1)
+        a0 = tl.load(allowed_ptr + offsets0, mask=load_mask, other=0) != 0
+        a1 = tl.load(allowed_ptr + offsets1, mask=load_mask, other=0) != 0
+        a2 = tl.load(allowed_ptr + offsets2, mask=load_mask, other=0) != 0
+        valid = load_mask & a0 & a1 & a2
+
+        share6 = tl.zeros((BLOCK_B, BLOCK_T), tl.float32)
+        share6 = tl.where((r0 > r1) & (r0 > r2), 6.0, share6)
+        share6 = tl.where((r0 == r1) & (r0 > r2), 3.0, share6)
+        share6 = tl.where((r0 == r2) & (r0 > r1), 3.0, share6)
+        share6 = tl.where((r0 == r1) & (r0 == r2), 2.0, share6)
+        share6 = tl.where(valid, share6, 0.0)
+
+        share6_by_tuple = tl.sum(share6, axis=0)
+        count_by_tuple = tl.sum(valid.to(tl.float32), axis=0)
+        owner = tl.load(owners_ptr + t, mask=t_mask, other=0)
+        tl.atomic_add(share6_sum_ptr + owner, share6_by_tuple, sem="relaxed", mask=t_mask)
+        tl.atomic_add(count_ptr + owner, count_by_tuple, sem="relaxed", mask=t_mask)
+
+
+def _allin_3p_share0_triton_accumulate_(
+    *,
+    ranks: torch.Tensor,
+    allowed: torch.Tensor,
+    tuples: torch.Tensor,
+    owners: torch.Tensor,
+    share6_sum: torch.Tensor,
+    count: torch.Tensor,
+    block_t: int,
+    block_b: int,
+) -> None:
+    if triton is None:
+        raise RuntimeError("Triton is not available")
+    if tuples.numel() == 0:
+        return
+    grid = (
+        triton.cdiv(int(tuples.shape[0]), int(block_t)),
+        triton.cdiv(int(ranks.shape[0]), int(block_b)),
+    )
+    _allin_3p_share0_accumulate_kernel[grid](
+        ranks,
+        allowed,
+        tuples,
+        owners,
+        share6_sum,
+        count,
+        int(tuples.shape[0]),
+        int(ranks.shape[0]),
+        NUM_HANDS,
+        BLOCK_T=int(block_t),
+        BLOCK_B=int(block_b),
+        num_warps=8,
+    )
+
+
 @torch.no_grad()
 def precompute_allin_class_shares(
     *,
@@ -277,7 +419,7 @@ def precompute_allin_class_shares(
     sample_boards: int | None = None,
     seed: int = 0,
     board_chunk: int = 256,
-    class_chunk: int = 64,
+    class_chunk: int = 1024,
     tuple_chunk: int = 65_536,
     class_ids: Sequence[int] | None = None,
     use_triton: bool | None = None,
@@ -399,6 +541,144 @@ def precompute_allin_class_shares(
 
 
 @torch.no_grad()
+def precompute_allin_3p_share0(
+    *,
+    device: torch.device | str,
+    sample_boards: int | None = None,
+    seed: int = 0,
+    board_chunk: int = 256,
+    class_chunk: int = 1024,
+    tuple_chunk: int = 65_536,
+    class_ids: Sequence[int] | None = None,
+    use_triton: bool | None = None,
+    use_accumulation_kernel: bool | None = None,
+    compile_inner: bool | None = None,
+    triton_block_t: int = 32,
+    triton_block_b: int = 32,
+    progress: Callable[[dict[str, float]], None] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, object]]:
+    """Precompute canonical 3-player seat-0 shares with integer accumulation."""
+    if class_chunk <= 0 or tuple_chunk <= 0:
+        raise ValueError("class_chunk and tuple_chunk must be positive")
+
+    device = torch.device(device)
+    if use_triton is None:
+        use_triton = device.type == "cuda" and triton_is_available()
+    if use_triton and device.type != "cuda":
+        raise ValueError("Triton ranker requires CUDA")
+    if use_accumulation_kernel is None:
+        use_accumulation_kernel = device.type == "cuda" and triton is not None
+    if use_accumulation_kernel and (device.type != "cuda" or triton is None):
+        raise ValueError("Triton accumulation kernel requires CUDA and Triton")
+    if compile_inner is None:
+        compile_inner = device.type == "cuda" and not use_accumulation_kernel
+    if triton_block_t <= 0 or triton_block_b <= 0:
+        raise ValueError("triton_block_t and triton_block_b must be positive")
+
+    linear = _linear_class_ids(3, class_ids=class_ids, device=device)
+    total_entries = PREFLOP_HANDS**3
+    share6_sum = torch.zeros(total_entries, dtype=torch.float32, device=device)
+    count = torch.zeros(total_entries, dtype=torch.float32, device=device)
+    class_combo, class_combo_mask = _class_combo_table(device)
+    combo_masks = _combo_masks(device)
+    inner = _allin_3p_share0_inner(compile_inner=compile_inner)
+    started = time.perf_counter()
+    board_total = TOTAL_PREFLOP_BOARDS if sample_boards is None else int(sample_boards)
+    done_boards = 0
+
+    for boards_cpu in _board_chunks(
+        sample_boards=sample_boards,
+        seed=seed,
+        board_chunk=board_chunk,
+    ):
+        boards = boards_cpu.to(device=device, non_blocking=True)
+        ranks = _rank_hands(boards, use_triton=bool(use_triton))
+        allowed = board_allowed_hands(boards).contiguous()
+        done_boards += int(boards.shape[0])
+
+        for start in range(0, linear.numel(), class_chunk):
+            ids = linear[start : start + class_chunk]
+            class_tuple = _decode_linear_classes(ids, 3)
+            tuple_grid, tuple_valid = _class_tuple_combos(
+                class_tuple,
+                class_combo=class_combo,
+                class_combo_mask=class_combo_mask,
+                combo_masks=combo_masks,
+            )
+            flat_valid = tuple_valid.reshape(-1)
+            if not bool(flat_valid.any()):
+                continue
+            flat_tuple = tuple_grid.reshape(-1, 3)[flat_valid].contiguous()
+            owners = ids.repeat_interleave(tuple_valid.shape[1])[flat_valid].contiguous()
+
+            for tuple_start in range(0, flat_tuple.shape[0], tuple_chunk):
+                tuples = flat_tuple[tuple_start : tuple_start + tuple_chunk]
+                owner = owners[tuple_start : tuple_start + tuple_chunk]
+                if use_accumulation_kernel:
+                    _allin_3p_share0_triton_accumulate_(
+                        ranks=ranks,
+                        allowed=allowed,
+                        tuples=tuples,
+                        owners=owner,
+                        share6_sum=share6_sum,
+                        count=count,
+                        block_t=triton_block_t,
+                        block_b=triton_block_b,
+                    )
+                else:
+                    chunk_share6, chunk_count = inner(
+                        ranks,
+                        allowed,
+                        tuples,
+                    )
+                    share6_sum.scatter_add_(0, owner, chunk_share6)
+                    count.scatter_add_(0, owner, chunk_count)
+
+        if progress is not None:
+            elapsed = time.perf_counter() - started
+            progress(
+                {
+                    "players": 3.0,
+                    "boards_done": float(done_boards),
+                    "boards_total": float(board_total),
+                    "seconds": float(elapsed),
+                    "boards_per_second": float(done_boards / max(elapsed, 1.0e-9)),
+                }
+            )
+
+    share0 = torch.where(
+        count > 0,
+        share6_sum / (count * 6.0).clamp_min(1.0),
+        torch.zeros_like(share6_sum),
+    )
+    metadata: dict[str, object] = {
+        "players": 3,
+        "num_boards": board_total,
+        "exact": sample_boards is None,
+        "sample_seed": int(seed),
+        "board_chunk": int(board_chunk),
+        "class_chunk": int(class_chunk),
+        "tuple_chunk": int(tuple_chunk),
+        "class_ids": None if class_ids is None else [int(x) for x in class_ids],
+        "device": str(device),
+        "ranker": "triton" if use_triton else "torch",
+        "accumulation_kernel": "triton" if use_accumulation_kernel else "torch",
+        "compile_inner": bool(compile_inner),
+        "triton_block_t": int(triton_block_t),
+        "triton_block_b": int(triton_block_b),
+        "share_accumulator": "fp32 sixths",
+    }
+    return (
+        share0.reshape(PREFLOP_HANDS, PREFLOP_HANDS, PREFLOP_HANDS).contiguous(),
+        count.round()
+        .to(torch.int64)
+        .reshape(PREFLOP_HANDS, PREFLOP_HANDS, PREFLOP_HANDS)
+        .contiguous(),
+        metadata,
+    )
+
+
+@torch.no_grad()
 def precompute_allin_169_tensors(
     *,
     output: str | Path | None = None,
@@ -408,10 +688,14 @@ def precompute_allin_169_tensors(
     sample_boards: int | None = None,
     seed: int = 0,
     board_chunk: int = 256,
-    class_chunk: int = 64,
+    class_chunk: int = 1024,
     tuple_chunk: int = 65_536,
     class_ids: Sequence[int] | None = None,
     use_triton: bool | None = None,
+    use_accumulation_kernel: bool | None = None,
+    compile_inner: bool | None = None,
+    triton_block_t: int = 32,
+    triton_block_b: int = 32,
     progress: Callable[[dict[str, float]], None] | None = None,
 ) -> PreflopAllIn169Tensors:
     """Build and optionally save preflop all-in 169-class tensors."""
@@ -456,8 +740,7 @@ def precompute_allin_169_tensors(
 
     if 3 in wanted:
         start = time.perf_counter()
-        shares, counts, meta = precompute_allin_class_shares(
-            players=3,
+        share0, counts, meta = precompute_allin_3p_share0(
             device=device,
             sample_boards=sample_boards,
             seed=seed,
@@ -466,9 +749,13 @@ def precompute_allin_169_tensors(
             tuple_chunk=tuple_chunk,
             class_ids=class_ids,
             use_triton=use_triton,
+            use_accumulation_kernel=use_accumulation_kernel,
+            compile_inner=compile_inner,
+            triton_block_t=triton_block_t,
+            triton_block_b=triton_block_b,
             progress=progress,
         )
-        result.allin_3p_share0 = shares[0].cpu()
+        result.allin_3p_share0 = share0.cpu()
         result.allin_3p_count = counts.cpu()
         timings["allin_3p_seconds"] = time.perf_counter() - start
         result.metadata = {**(result.metadata or {}), "allin_3p_stream": meta}
@@ -517,9 +804,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-boards", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--board-chunk", type=int, default=256)
-    parser.add_argument("--class-chunk", type=int, default=64)
+    parser.add_argument("--class-chunk", type=int, default=1024)
     parser.add_argument("--tuple-chunk", type=int, default=65_536)
     parser.add_argument("--class-ids", type=int, nargs="*", default=None)
+    parser.add_argument(
+        "--accumulation-kernel",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Force Triton accumulation kernel on/off; default auto-enables on CUDA.",
+    )
+    parser.add_argument(
+        "--compile-inner",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Force torch.compile on/off for the 3p CUDA inner loop; default auto-enables on CUDA.",
+    )
+    parser.add_argument("--triton-block-t", type=int, default=32)
+    parser.add_argument("--triton-block-b", type=int, default=32)
     parser.add_argument("--no-triton", action="store_true")
     return parser.parse_args()
 
@@ -554,6 +855,10 @@ def main() -> None:
         tuple_chunk=args.tuple_chunk,
         class_ids=args.class_ids,
         use_triton=False if args.no_triton else None,
+        use_accumulation_kernel=args.accumulation_kernel,
+        compile_inner=args.compile_inner,
+        triton_block_t=args.triton_block_t,
+        triton_block_b=args.triton_block_b,
         progress=progress,
     )
     payload = result.payload()

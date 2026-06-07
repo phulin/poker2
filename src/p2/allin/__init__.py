@@ -9,6 +9,7 @@ from .model import (
 from .precompute import (
     PreflopAllIn169Tensors,
     allin_2p_169_share0_from_combo_payoff,
+    precompute_allin_3p_share0,
     precompute_allin_169_tensors,
     precompute_allin_class_shares,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "estimate_preflop_allin_values",
     "estimate_preflop_allin_values_169",
     "make_random_preflop_allin_batch",
+    "precompute_allin_3p_share0",
     "precompute_allin_169_tensors",
     "precompute_allin_class_shares",
 ]

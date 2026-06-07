@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import torch
+import pytest
 
 from p2.allin.precompute import (
     _board_chunks,
     allin_2p_169_share0_from_combo_payoff,
+    precompute_allin_3p_share0,
     precompute_allin_169_tensors,
     precompute_allin_class_shares,
 )
@@ -172,6 +174,66 @@ def test_precompute_allin_class_shares_3p_matches_brute_force_sample_boards() ->
         actual = shares[(slice(None), *class_tuple)]
         torch.testing.assert_close(actual, expected.to(torch.float32))
         assert int(counts[class_tuple].item()) == count
+
+
+def test_precompute_allin_3p_share0_matches_generic_share0() -> None:
+    class_ids = [0, 1, 14]
+    generic, generic_counts, _ = precompute_allin_class_shares(
+        players=3,
+        device="cpu",
+        sample_boards=3,
+        seed=789,
+        board_chunk=2,
+        class_chunk=4,
+        tuple_chunk=32,
+        class_ids=class_ids,
+        use_triton=False,
+    )
+    share0, counts, metadata = precompute_allin_3p_share0(
+        device="cpu",
+        sample_boards=3,
+        seed=789,
+        board_chunk=2,
+        class_chunk=4,
+        tuple_chunk=32,
+        class_ids=class_ids,
+        use_triton=False,
+    )
+
+    assert metadata["share_accumulator"] == "fp32 sixths"
+    torch.testing.assert_close(share0, generic[0])
+    torch.testing.assert_close(counts, generic_counts)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_precompute_allin_3p_share0_triton_matches_torch_cuda() -> None:
+    pytest.importorskip("triton")
+    kwargs = dict(
+        device="cuda",
+        sample_boards=3,
+        seed=987,
+        board_chunk=2,
+        class_chunk=4,
+        tuple_chunk=64,
+        class_ids=[0, 1, 14],
+        use_triton=True,
+        compile_inner=False,
+    )
+
+    torch_path = precompute_allin_3p_share0(
+        **kwargs,
+        use_accumulation_kernel=False,
+    )
+    triton_path = precompute_allin_3p_share0(
+        **kwargs,
+        use_accumulation_kernel=True,
+        triton_block_t=16,
+        triton_block_b=2,
+    )
+
+    assert triton_path[2]["accumulation_kernel"] == "triton"
+    torch.testing.assert_close(triton_path[0], torch_path[0])
+    torch.testing.assert_close(triton_path[1], torch_path[1])
 
 
 def test_precompute_allin_169_tensors_stores_canonical_3p_share0_only() -> None:
