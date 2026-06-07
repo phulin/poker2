@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import NUM_HANDS, PREFLOP_HANDS
 
 
 @dataclass
@@ -16,6 +16,10 @@ class PreflopAllInBatch:
     allin_mask: torch.Tensor
     folded_mask: torch.Tensor
     scale: torch.Tensor
+
+    @property
+    def hand_dim(self) -> int:
+        return int(self.beliefs.shape[-1])
 
     def to(self, device: torch.device | str) -> "PreflopAllInBatch":
         device = torch.device(device)
@@ -102,6 +106,7 @@ def make_random_preflop_allin_batch(
     concentration: float = 1.0,
     min_allin_players: int = 2,
     folded_commit_max_frac: float = 0.35,
+    hand_dim: int = NUM_HANDS,
     device: torch.device | str | None = None,
     generator: torch.Generator | None = None,
 ) -> PreflopAllInBatch:
@@ -120,12 +125,14 @@ def make_random_preflop_allin_batch(
         raise ValueError("concentration must be positive")
     if not 0.0 <= folded_commit_max_frac <= 1.0:
         raise ValueError("folded_commit_max_frac must be in [0, 1]")
+    if hand_dim not in (NUM_HANDS, PREFLOP_HANDS):
+        raise ValueError(f"hand_dim must be {NUM_HANDS} or {PREFLOP_HANDS}")
 
     device = torch.device(device) if device is not None else torch.device("cpu")
     weights = torch.empty(
         batch_size,
         players,
-        NUM_HANDS,
+        hand_dim,
         device=device,
         dtype=torch.float32,
     ).exponential_(generator=generator)

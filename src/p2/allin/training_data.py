@@ -16,7 +16,12 @@ from p2.allin.sampler import (
     PreflopAllInEstimatorWorkspace,
     estimate_preflop_allin_values,
 )
-from p2.env.card_utils import NUM_HANDS, combo_suit_permutation_inverse_tensor
+from p2.env.card_utils import (
+    NUM_HANDS,
+    PREFLOP_HANDS,
+    collapse_1326_to_169,
+    combo_suit_permutation_inverse_tensor,
+)
 
 
 FEATURE_KEYS = (
@@ -49,6 +54,7 @@ class AllInDataGenConfig:
     high_stack_mass_ratio: float = 1.0 / 3.0
     concentration: float = 1.0
     folded_commit_max_frac: float = 0.35
+    range_hand_dim: int = NUM_HANDS
     preflop_table_path: str = str(DEFAULT_PREFLOP_ALLIN_TABLE)
     use_exact_two_player: bool = True
 
@@ -92,6 +98,8 @@ def permute_allin_batch_by_suit(
     *,
     suit_permutation_idxs: torch.Tensor,
 ) -> tuple[PreflopAllInBatch, torch.Tensor]:
+    if batch.beliefs.shape[-1] == PREFLOP_HANDS:
+        return batch, targets
     combo_permutations_inverse = combo_suit_permutation_inverse_tensor(
         device=suit_permutation_idxs.device
     )[suit_permutation_idxs]
@@ -216,6 +224,28 @@ def _concat_batches(
     )
 
 
+def _convert_allin_tensors_hand_dim(
+    tensors: dict[str, torch.Tensor],
+    *,
+    target_hands: int,
+) -> dict[str, torch.Tensor]:
+    current_hands = int(tensors["beliefs"].shape[-1])
+    if current_hands == target_hands:
+        return tensors
+    if current_hands == NUM_HANDS and target_hands == PREFLOP_HANDS:
+        converted = dict(tensors)
+        converted["beliefs"] = collapse_1326_to_169(
+            converted["beliefs"], reduction="sum"
+        )
+        converted[TARGET_KEY] = collapse_1326_to_169(
+            converted[TARGET_KEY], reduction="mean"
+        )
+        return converted
+    raise ValueError(
+        f"cannot convert all-in tensors from {current_hands} hands to {target_hands}"
+    )
+
+
 def generate_allin_training_chunk(
     count: int,
     cfg: AllInDataGenConfig,
@@ -225,6 +255,11 @@ def generate_allin_training_chunk(
     compute_stats: bool,
     workspace: PreflopAllInEstimatorWorkspace | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
+    if cfg.range_hand_dim not in (NUM_HANDS, PREFLOP_HANDS):
+        raise ValueError(
+            f"range_hand_dim must be {NUM_HANDS} or {PREFLOP_HANDS}, "
+            f"got {cfg.range_hand_dim}"
+        )
     batch = make_random_preflop_allin_batch(
         count,
         cfg.players,
@@ -235,6 +270,7 @@ def generate_allin_training_chunk(
         high_stack_mass_ratio=cfg.high_stack_mass_ratio,
         concentration=cfg.concentration,
         folded_commit_max_frac=cfg.folded_commit_max_frac,
+        hand_dim=cfg.range_hand_dim,
         device=device,
         generator=generator,
     )
@@ -253,7 +289,12 @@ def generate_allin_training_chunk(
         workspace=workspace,
         exhaustive_boards=cfg.all_boards,
     )
-    return batch_to_tensors(batch, targets), diag
+    tensors = batch_to_tensors(batch, targets)
+    tensors = _convert_allin_tensors_hand_dim(
+        tensors,
+        target_hands=cfg.range_hand_dim,
+    )
+    return tensors, diag
 
 
 def save_allin_training_dataset(
@@ -333,7 +374,7 @@ def save_allin_training_dataset(
         "format": "p2.allin.training_data.v1",
         "examples": examples,
         "players": cfg.players,
-        "hands": NUM_HANDS,
+        "hands": cfg.range_hand_dim,
         "feature_keys": list(FEATURE_KEYS),
         "target_key": TARGET_KEY,
         "config": asdict(cfg),
@@ -348,6 +389,7 @@ class PregeneratedAllInDataset:
         self,
         path: str | Path,
         *,
+        target_hands: int | None = None,
         pin_memory: bool = False,
         async_shard_prefetch: bool = False,
     ) -> None:
@@ -360,8 +402,18 @@ class PregeneratedAllInDataset:
         self.examples = int(self.manifest["examples"])
         self.players = int(self.manifest["players"])
         self.hands = int(self.manifest["hands"])
-        if self.hands != NUM_HANDS:
-            raise ValueError(f"expected {NUM_HANDS} hands, got {self.hands}")
+        if self.hands not in (NUM_HANDS, PREFLOP_HANDS):
+            raise ValueError(
+                f"expected {NUM_HANDS} or {PREFLOP_HANDS} hands, got {self.hands}"
+            )
+        self.target_hands = int(target_hands if target_hands is not None else self.hands)
+        if self.target_hands not in (NUM_HANDS, PREFLOP_HANDS):
+            raise ValueError(
+                f"target_hands must be {NUM_HANDS} or {PREFLOP_HANDS}, "
+                f"got {self.target_hands}"
+            )
+        if self.hands == PREFLOP_HANDS and self.target_hands == NUM_HANDS:
+            raise ValueError("cannot expand compact 169 all-in data to 1326")
         self.shards = list(self.manifest["shards"])
         self._loaded_index: int | None = None
         self._loaded_tensors: dict[str, torch.Tensor] | None = None
@@ -468,6 +520,10 @@ class PregeneratedAllInDataset:
         if not parts:
             raise IndexError(f"no pregenerated rows found for [{start}, {end})")
         tensors = parts[0] if len(parts) == 1 else _concat_tensor_chunks(parts)
+        tensors = _convert_allin_tensors_hand_dim(
+            tensors,
+            target_hands=self.target_hands,
+        )
         return tensors_to_batch(tensors, device=device)
 
     def get_wrapped_batch(

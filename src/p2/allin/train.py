@@ -18,7 +18,11 @@ from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
 
 from p2.allin.data import PreflopAllInBatch
-from p2.allin.model import PreflopAllInEquityModel, PreflopAllInTransformerModel
+from p2.allin.model import (
+    PreflopAllIn169EquityModel,
+    PreflopAllInEquityModel,
+    PreflopAllInTransformerModel,
+)
 from p2.allin.training_data import (
     AllInDataGenConfig,
     PregeneratedAllInDataset,
@@ -28,6 +32,7 @@ from p2.allin.training_data import (
     permute_allin_batch_by_suit,
     tensors_to_batch,
 )
+from p2.env.card_utils import NUM_HANDS, PREFLOP_HANDS
 from p2.rl.optimizers import TrainOptimizer, build_optimizer
 
 
@@ -55,6 +60,7 @@ class AllInTrainConfig:
     cosine_lr_decay_ratio: float = 1.0
     cosine_lr_decay_steps: int = 0
     model_type: str = "mlp"
+    range_hand_dim: int = NUM_HANDS
     hidden_dim: int = 512
     hand_dim: int = 128
     layers: int = 4
@@ -153,6 +159,26 @@ def _save_checkpoint(
 
 def _build_model(cfg: TrainConfig) -> torch.nn.Module:
     model_type = str(cfg.model_type).strip().lower()
+    if cfg.range_hand_dim not in (NUM_HANDS, PREFLOP_HANDS):
+        raise ValueError(
+            f"range_hand_dim must be {NUM_HANDS} or {PREFLOP_HANDS}, "
+            f"got {cfg.range_hand_dim}"
+        )
+    if cfg.range_hand_dim == PREFLOP_HANDS:
+        if model_type not in {"compact_169", "native_169", "mlp_169"}:
+            raise ValueError(
+                "range_hand_dim=169 requires model_type=compact_169, "
+                "native_169, or mlp_169"
+            )
+        return PreflopAllIn169EquityModel(
+            players=cfg.players,
+            hidden_dim=cfg.hidden_dim,
+            hand_dim=cfg.hand_dim,
+            num_layers=cfg.layers,
+            film_rank=cfg.film_rank,
+            dense_belief_residual=cfg.dense_belief_residual,
+            dense_output_residual=cfg.dense_output_residual,
+        )
     if model_type in {"mlp", "ffn"}:
         return PreflopAllInEquityModel(
             players=cfg.players,
@@ -176,7 +202,7 @@ def _build_model(cfg: TrainConfig) -> torch.nn.Module:
             mask_folded_player_tokens=cfg.mask_folded_player_tokens,
         )
     raise ValueError(
-        "model_type must be one of: mlp, player_transformer; "
+        "model_type must be one of: mlp, player_transformer, compact_169; "
         f"got {cfg.model_type!r}"
     )
 
@@ -270,6 +296,7 @@ def _data_config_from_train(cfg: TrainConfig) -> AllInDataGenConfig:
         high_stack_mass_ratio=cfg.high_stack_mass_ratio,
         concentration=cfg.concentration,
         folded_commit_max_frac=cfg.folded_commit_max_frac,
+        range_hand_dim=cfg.range_hand_dim,
     )
 
 
@@ -362,6 +389,44 @@ def _prediction_and_loss_target(
     pred_values = _eligible_pot_share_to_values(pred, batch)
     live_mask = (~batch.folded_mask)[:, :, None].expand_as(targets)
     return pred, share_targets, pred_values, live_mask
+
+
+def _predict_allin_values(
+    model: torch.nn.Module,
+    batch: PreflopAllInBatch,
+    *,
+    target_mode: str,
+) -> torch.Tensor:
+    hardcode = target_mode == "net_value"
+    base_model = getattr(model, "_orig_mod", model)
+    if isinstance(base_model, PreflopAllIn169EquityModel):
+        pred_hand_major = model(
+            batch.beliefs.transpose(1, 2).contiguous(),
+            batch.starting_stacks,
+            batch.committed,
+            batch.stacks_after,
+            batch.allin_mask,
+            batch.folded_mask,
+            hardcode_folded_values=hardcode,
+        )
+        return pred_hand_major.transpose(1, 2).contiguous()
+    kwargs = (
+        {"hardcode_folded_values": hardcode}
+        if isinstance(
+            base_model,
+            (PreflopAllInEquityModel, PreflopAllInTransformerModel),
+        )
+        else {}
+    )
+    return model(
+        batch.beliefs,
+        batch.starting_stacks,
+        batch.committed,
+        batch.stacks_after,
+        batch.allin_mask,
+        batch.folded_mask,
+        **kwargs,
+    )
 
 
 def _pregenerated_suit_permutation_idxs(
@@ -483,22 +548,10 @@ def _evaluate_pregenerated_dataset(
     while row_start < len(dataset):
         cur = min(batch_size, len(dataset) - row_start)
         batch, targets = dataset.get_batch(row_start, cur, device=device)
-        model_kwargs = (
-            {"hardcode_folded_values": target_mode == "net_value"}
-            if isinstance(
-                model,
-                (PreflopAllInEquityModel, PreflopAllInTransformerModel),
-            )
-            else {}
-        )
-        pred = model(
-            batch.beliefs,
-            batch.starting_stacks,
-            batch.committed,
-            batch.stacks_after,
-            batch.allin_mask,
-            batch.folded_mask,
-            **model_kwargs,
+        pred = _predict_allin_values(
+            model,
+            batch,
+            target_mode=target_mode,
         )
         _, _, pred_values, _ = _prediction_and_loss_target(
             pred,
@@ -857,6 +910,7 @@ def train(cfg: TrainConfig) -> None:
     pregenerated_dataset = (
         PregeneratedAllInDataset(
             cfg.pregenerated_data,
+            target_hands=cfg.range_hand_dim,
             pin_memory=device.type == "cuda",
             async_shard_prefetch=device.type == "cuda",
         )
@@ -864,7 +918,7 @@ def train(cfg: TrainConfig) -> None:
         else None
     )
     validation_dataset = (
-        PregeneratedAllInDataset(cfg.validation_data)
+        PregeneratedAllInDataset(cfg.validation_data, target_hands=cfg.range_hand_dim)
         if cfg.validation_data is not None
         else None
     )
@@ -994,14 +1048,10 @@ def train(cfg: TrainConfig) -> None:
                         else {}
                     )
 
-                pred = compiled_model(
-                    batch.beliefs,
-                    batch.starting_stacks,
-                    batch.committed,
-                    batch.stacks_after,
-                    batch.allin_mask,
-                    batch.folded_mask,
-                    hardcode_folded_values=(target_mode == "net_value"),
+                pred = _predict_allin_values(
+                    compiled_model,
+                    batch,
+                    target_mode=target_mode,
                 )
                 loss_pred, loss_target, pred_values, loss_mask = (
                     _prediction_and_loss_target(

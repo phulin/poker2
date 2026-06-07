@@ -15,7 +15,14 @@ from p2.allin.kernels import (
     make_allin_cdf_workspace,
     triton_available,
 )
-from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
+from p2.env.card_utils import (
+    NUM_HANDS,
+    PREFLOP_HANDS,
+    combo_to_preflop_class_tensor,
+    hand_combos_tensor,
+    preflop_class_multiplicity_tensor,
+    preflop_class_unblocked_mass,
+)
 from p2.env.rules import rank_hands as rank_hands_torch
 from p2.env.rules_triton import (
     rank_hand_scores_triton,
@@ -38,6 +45,27 @@ def _combo_masks(device: torch.device) -> torch.Tensor:
     return ((1 << combos[:, 0]) | (1 << combos[:, 1])).to(torch.int64)
 
 
+@lru_cache(maxsize=4)
+def _preflop_class_members_cached(
+    device_type: str, device_index: int | None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    device = torch.device(device_type, device_index)
+    class_ids = combo_to_preflop_class_tensor(device=None)
+    members_cpu = torch.full((PREFLOP_HANDS, 12), -1, dtype=torch.long)
+    counts = [0] * PREFLOP_HANDS
+    for combo_idx, class_id in enumerate(class_ids.tolist()):
+        slot = counts[class_id]
+        members_cpu[class_id, slot] = combo_idx
+        counts[class_id] += 1
+    members = members_cpu.to(device=device, non_blocking=True)
+    member_mask = members >= 0
+    return members, member_mask
+
+
+def _preflop_class_members(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    return _preflop_class_members_cached(*_device_cache_key(device))
+
+
 def _board_allowed_from_combo_masks(
     board: torch.Tensor,
     combo_masks: torch.Tensor,
@@ -49,6 +77,26 @@ def _board_allowed_from_combo_masks(
     )
     board_masks = torch.where(valid, card_bits, torch.zeros_like(card_bits)).sum(dim=-1)
     return (combo_masks[None, :] & board_masks[:, None]) == 0
+
+
+def _board_class_live_counts(
+    allowed_combos: torch.Tensor,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    class_ids = combo_to_preflop_class_tensor(device=device)
+    out = torch.zeros(
+        allowed_combos.shape[0],
+        PREFLOP_HANDS,
+        dtype=torch.float32,
+        device=device,
+    )
+    out.scatter_add_(
+        1,
+        class_ids[None, :].expand(allowed_combos.shape[0], -1),
+        allowed_combos.to(torch.float32),
+    )
+    return out
 
 
 def _board_masks(board: torch.Tensor) -> torch.Tensor:
@@ -125,6 +173,37 @@ def _slice_batch(batch: PreflopAllInBatch, rows: torch.Tensor) -> PreflopAllInBa
     )
 
 
+_PREFLOP_169_PAYOFF_SUM_CACHE: dict[tuple[str, str], torch.Tensor] = {}
+
+
+def _preflop_169_payoff_sum_per_hero(
+    preflop_table_path: str | Path,
+    device: torch.device,
+) -> torch.Tensor:
+    key = (str(Path(preflop_table_path).expanduser().resolve()), str(device))
+    cached = _PREFLOP_169_PAYOFF_SUM_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    table = load_preflop_payoff_i16(preflop_table_path, device).to(torch.float32)
+    table = table / float(I16_SCALE)
+    class_ids = combo_to_preflop_class_tensor(device=device)
+    pair_ids = (
+        class_ids[:, None] * PREFLOP_HANDS + class_ids[None, :]
+    ).reshape(-1)
+    sums = torch.zeros(
+        PREFLOP_HANDS * PREFLOP_HANDS,
+        dtype=torch.float32,
+        device=device,
+    )
+    sums.scatter_add_(0, pair_ids, table.reshape(-1))
+    sums = sums.view(PREFLOP_HANDS, PREFLOP_HANDS)
+    multiplicity = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    compact = sums / multiplicity[:, None].clamp_min(1.0)
+    _PREFLOP_169_PAYOFF_SUM_CACHE[key] = compact
+    return compact
+
+
 @torch.no_grad()
 def _estimate_two_player_preflop_exact(
     batch: PreflopAllInBatch,
@@ -155,6 +234,80 @@ def _estimate_two_player_preflop_exact(
         pair_beliefs,
         scale=I16_SCALE,
     ).to(torch.float32)
+    showdown_share = (0.5 * (payoff_ev + 1.0)).clamp(0.0, 1.0)
+
+    layer_amount, eligible = _side_pot_layers(batch)
+    pair_eligible = eligible.gather(
+        2,
+        live_indices[:, None, :].expand(-1, P, -1),
+    )
+    layer_live_count = pair_eligible.sum(dim=2)
+    pair_payout = torch.zeros(B, 2, H, dtype=torch.float32, device=device)
+    for slot in range(2):
+        hero_eligible = pair_eligible[:, :, slot]
+        uncontested = (
+            layer_amount
+            * hero_eligible.to(torch.float32)
+            * (layer_live_count == 1).to(torch.float32)
+        ).sum(dim=1)
+        contested = (
+            layer_amount
+            * hero_eligible.to(torch.float32)
+            * (layer_live_count == 2).to(torch.float32)
+        ).sum(dim=1)
+        pair_payout[:, slot] = (
+            uncontested[:, None] + contested[:, None] * showdown_share[:, slot]
+        )
+
+    folded_value = (batch.stacks_after - batch.starting_stacks) / batch.scale[
+        :, None
+    ].clamp_min(1.0)
+    values = folded_value[:, :, None].expand(-1, -1, H).clone()
+    pair_starting = batch.starting_stacks.gather(1, live_indices)
+    pair_after = batch.stacks_after.gather(1, live_indices)
+    pair_values = (
+        pair_after[:, :, None].to(torch.float32)
+        + pair_payout
+        - pair_starting[:, :, None].to(torch.float32)
+    ) / batch.scale[:, None, None].to(torch.float32).clamp_min(1.0)
+    values.scatter_(1, live_indices[:, :, None].expand(-1, -1, H), pair_values)
+    return values.to(batch.beliefs.dtype)
+
+
+@torch.no_grad()
+def _estimate_two_player_preflop_exact_169(
+    batch: PreflopAllInBatch,
+    *,
+    preflop_table_path: str | Path,
+) -> torch.Tensor:
+    """Exact preflop all-in values for two live players in 169-class space."""
+    device = batch.beliefs.device
+    B, P, H = batch.beliefs.shape
+    if H != PREFLOP_HANDS:
+        raise ValueError(f"expected {PREFLOP_HANDS} hands, got {H}")
+    live_mask = ~batch.folded_mask
+    live_counts = live_mask.sum(dim=1)
+    if not torch.equal(live_counts, torch.full_like(live_counts, 2)):
+        raise ValueError(
+            "exact compact preflop all-in requires exactly two live players per row"
+        )
+
+    live_coords = torch.nonzero(live_mask, as_tuple=False)
+    live_indices = live_coords[:, 1].reshape(B, 2)
+    pair_beliefs = batch.beliefs.gather(
+        1,
+        live_indices[:, :, None].expand(-1, -1, H),
+    ).to(torch.float32)
+    payoff_sum = _preflop_169_payoff_sum_per_hero(preflop_table_path, device)
+    multiplicity = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+
+    payoff_ev = torch.empty(B, 2, H, dtype=torch.float32, device=device)
+    for slot in range(2):
+        opp_mass = pair_beliefs[:, 1 - slot]
+        opp_combo_mass = opp_mass / multiplicity.clamp_min(1.0)
+        numer = opp_combo_mass @ payoff_sum.T
+        denom = preflop_class_unblocked_mass(opp_mass).clamp_min(1.0e-8)
+        payoff_ev[:, slot] = numer / denom
     showdown_share = (0.5 * (payoff_ev + 1.0)).clamp(0.0, 1.0)
 
     layer_amount, eligible = _side_pot_layers(batch)
@@ -457,6 +610,361 @@ def _estimate_preflop_allin_values_triton(
 
 
 @torch.no_grad()
+def _estimate_preflop_allin_values_169_mc(
+    batch: PreflopAllInBatch,
+    *,
+    board_samples: int,
+    tuple_samples: int,
+    tuple_tries: int,
+    board_chunk: int,
+    generator: torch.Generator | None,
+    compute_stats: bool = True,
+    exhaustive_boards: bool = False,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    start = time.perf_counter()
+    device = batch.beliefs.device
+    beliefs = batch.beliefs.to(torch.float32)
+    B, P, H = beliefs.shape
+    if H != PREFLOP_HANDS:
+        raise ValueError(f"expected {PREFLOP_HANDS} hands, got {H}")
+
+    combo_masks = _combo_masks(device)
+    class_members, class_member_mask = _preflop_class_members(device)
+    class_members_safe = class_members.clamp_min(0)
+    class_combo_masks = combo_masks.index_select(0, class_members_safe.reshape(-1))
+    class_combo_masks = class_combo_masks.view(PREFLOP_HANDS, 12)
+    multiplicity = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    live_mask = ~batch.folded_mask
+    layer_amount, eligible = _side_pot_layers(batch)
+    payout_sum = torch.zeros(B, P, H, dtype=torch.float32, device=device)
+    denom_sum = torch.zeros_like(payout_sum)
+    full_chunk = min(board_chunk, board_samples)
+    full_root_ids = torch.arange(B, device=device).repeat_interleave(full_chunk)
+    full_live_rep = live_mask.index_select(0, full_root_ids)
+    full_layer_amount_rep = layer_amount.index_select(0, full_root_ids)
+    full_eligible_rep = eligible.index_select(0, full_root_ids)
+    class_ids = combo_to_preflop_class_tensor(device=device)
+    player_ids = torch.arange(P, device=device)
+
+    done_boards = 0
+    while done_boards < board_samples:
+        cur_boards = min(board_chunk, board_samples - done_boards)
+        row_count = B * cur_boards
+        if cur_boards == full_chunk:
+            root_ids = full_root_ids
+            live_rep = full_live_rep
+            layer_amount_rep = full_layer_amount_rep
+            eligible_rep = full_eligible_rep
+        else:
+            root_ids = torch.arange(B, device=device).repeat_interleave(cur_boards)
+            live_rep = live_mask.index_select(0, root_ids)
+            layer_amount_rep = layer_amount.index_select(0, root_ids)
+            eligible_rep = eligible.index_select(0, root_ids)
+        if exhaustive_boards:
+            board_chunk_rows = _full_boards(device)[
+                done_boards : done_boards + cur_boards
+            ]
+            boards = board_chunk_rows.repeat(B, 1)
+            ranks = _rank_hands(board_chunk_rows).repeat(B, 1)
+        else:
+            boards = _sample_full_boards(row_count, device=device, generator=generator)
+            ranks = _rank_hands(boards)
+
+        allowed = _board_allowed_from_combo_masks(boards, combo_masks)
+        class_live_counts = _board_class_live_counts(allowed, device=device)
+        board_class_beliefs = beliefs.index_select(0, root_ids)
+        board_class_beliefs = board_class_beliefs * (
+            class_live_counts[:, None, :] / multiplicity[None, None, :]
+        )
+        board_class_beliefs = board_class_beliefs / board_class_beliefs.sum(
+            dim=-1,
+            keepdim=True,
+        ).clamp_min(1.0e-30)
+        flat_beliefs = board_class_beliefs.reshape(row_count * P, H)
+
+        hero_allowed_members = allowed.gather(
+            1,
+            class_members_safe.reshape(1, -1).expand(row_count, -1),
+        ).view(row_count, H, 12) & class_member_mask[None, :, :]
+        hero_member_ranks = ranks.gather(
+            1,
+            class_members_safe.reshape(1, -1).expand(row_count, -1),
+        ).view(row_count, H, 12)
+
+        processed_samples = 0
+        sample_chunk = min(64, tuple_samples)
+        while processed_samples < tuple_samples:
+            cur_samples = min(sample_chunk, tuple_samples - processed_samples)
+            candidate_classes = torch.multinomial(
+                flat_beliefs,
+                cur_samples * tuple_tries,
+                replacement=True,
+                generator=generator,
+            ).reshape(row_count, P, tuple_tries, cur_samples)
+            candidate_members = class_members_safe.index_select(
+                0, candidate_classes.reshape(-1)
+            ).reshape(row_count, P, tuple_tries, cur_samples, 12)
+            candidate_member_mask = class_member_mask.index_select(
+                0, candidate_classes.reshape(-1)
+            ).reshape(row_count, P, tuple_tries, cur_samples, 12)
+            candidate_allowed = allowed.gather(
+                1,
+                candidate_members.reshape(row_count, -1),
+            ).reshape(row_count, P, tuple_tries, cur_samples, 12)
+            candidate_allowed &= candidate_member_mask
+            slot_scores = torch.rand(
+                row_count,
+                P,
+                tuple_tries,
+                cur_samples,
+                12,
+                device=device,
+                generator=generator,
+            )
+            slot_scores = slot_scores.masked_fill(~candidate_allowed, -1.0)
+            candidate_slots = slot_scores.argmax(dim=-1)
+            candidate_valid = candidate_allowed.gather(
+                -1,
+                candidate_slots[..., None],
+            ).squeeze(-1)
+            candidates = candidate_members.gather(
+                -1,
+                candidate_slots[..., None],
+            ).squeeze(-1)
+            candidate_masks = combo_masks.index_select(
+                0, candidates.reshape(-1)
+            ).reshape(row_count, P, tuple_tries, cur_samples)
+            candidate_ranks = ranks.gather(
+                1,
+                candidates.reshape(row_count, P * tuple_tries * cur_samples),
+            ).reshape(row_count, P, tuple_tries, cur_samples)
+
+            for hero in range(P):
+                hero_live = live_rep[:, hero]
+                opp_live = live_rep.clone()
+                opp_live[:, hero] = False
+                alive = torch.zeros(
+                    row_count, cur_samples, dtype=torch.bool, device=device
+                )
+                selected = torch.zeros(
+                    row_count, P, cur_samples, dtype=torch.long, device=device
+                )
+                selected_ranks = torch.full(
+                    (row_count, P, cur_samples),
+                    -1,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                for attempt in range(tuple_tries):
+                    hands = candidates[:, :, attempt, :]
+                    masks = candidate_masks[:, :, attempt, :]
+                    valid = hero_live[:, None].expand(-1, cur_samples).clone()
+                    for player in range(P):
+                        valid &= (~opp_live[:, player, None]) | candidate_valid[
+                            :, player, attempt, :
+                        ]
+                    for left in range(P):
+                        for right in range(left + 1, P):
+                            both = opp_live[:, left] & opp_live[:, right]
+                            valid &= (~both[:, None]) | (
+                                (masks[:, left] & masks[:, right]) == 0
+                            )
+                    take = (~alive) & valid
+                    selected = torch.where(take[:, None, :], hands, selected)
+                    selected_ranks = torch.where(
+                        take[:, None, :],
+                        candidate_ranks[:, :, attempt, :],
+                        selected_ranks,
+                    )
+                    alive |= take
+
+                selected_masks = combo_masks.index_select(
+                    0, selected.reshape(-1)
+                ).reshape(row_count, P, cur_samples)
+                used_mask = torch.zeros(
+                    row_count, cur_samples, dtype=torch.int64, device=device
+                )
+                for player in range(P):
+                    used_mask |= torch.where(
+                        opp_live[:, player, None],
+                        selected_masks[:, player],
+                        torch.zeros_like(used_mask),
+                    )
+                opp_eligible = eligible_rep & (player_ids[None, None, :] != hero)
+                layer_best_opp = torch.where(
+                    opp_eligible[:, :, :, None],
+                    selected_ranks[:, None, :, :],
+                    torch.full((), -1, dtype=torch.int32, device=device),
+                ).amax(dim=2)
+                hero_layer_weight = (
+                    eligible_rep[:, :, hero].to(torch.float32) * layer_amount_rep
+                )
+
+                hero_masks = class_combo_masks
+                compatible = (
+                    alive[:, None, None, :]
+                    & hero_allowed_members[:, :, :, None]
+                    & ((used_mask[:, None, None, :] & hero_masks[None, :, :, None]) == 0)
+                )
+                layer_tie_count = 1.0 + (
+                    opp_eligible[:, :, None, None, :, None]
+                    & (
+                        selected_ranks[:, None, None, None, :, :]
+                        == hero_member_ranks[:, None, :, :, None, None]
+                    )
+                ).to(torch.float32).sum(dim=4)
+                wins = (
+                    hero_member_ranks[:, None, :, :, None]
+                    > layer_best_opp[:, :, None, None, :]
+                )
+                ties = (
+                    hero_member_ranks[:, None, :, :, None]
+                    == layer_best_opp[:, :, None, None, :]
+                )
+                share = torch.where(
+                    wins,
+                    torch.ones_like(layer_tie_count),
+                    torch.where(
+                        ties,
+                        1.0 / layer_tie_count,
+                        torch.zeros_like(layer_tie_count),
+                    ),
+                )
+                payout = (hero_layer_weight[:, :, None, None, None] * share).sum(dim=1)
+                comp_f = compatible.to(torch.float32)
+                payout_part = (comp_f * payout).sum(dim=(2, 3))
+                denom_part = comp_f.sum(dim=(2, 3))
+                payout_sum[:, hero] += payout_part.reshape(B, cur_boards, H).sum(dim=1)
+                denom_sum[:, hero] += denom_part.reshape(B, cur_boards, H).sum(dim=1)
+
+            processed_samples += cur_samples
+        done_boards += cur_boards
+
+    expected_payout = torch.where(
+        denom_sum > 0.0,
+        payout_sum / denom_sum.clamp_min(1.0e-30),
+        torch.zeros_like(payout_sum),
+    )
+    values = (
+        batch.stacks_after[:, :, None].to(torch.float32)
+        + expected_payout
+        - batch.starting_stacks[:, :, None].to(torch.float32)
+    ) / batch.scale[:, None, None].to(torch.float32).clamp_min(1.0)
+    folded_value = (batch.stacks_after - batch.starting_stacks) / batch.scale[
+        :, None
+    ].clamp_min(1.0)
+    values = torch.where(
+        batch.folded_mask[:, :, None], folded_value[:, :, None], values
+    )
+    if not compute_stats:
+        return values.to(batch.beliefs.dtype), {}
+    elapsed = time.perf_counter() - start
+    total_samples = B * board_samples * tuple_samples
+    diagnostics = {
+        "target_seconds": elapsed,
+        "target_boards_per_second": float(B * board_samples / max(elapsed, 1.0e-9)),
+        "target_samples_per_second": float(total_samples / max(elapsed, 1.0e-9)),
+        "target_zero_denom_frac": float((denom_sum == 0).float().mean().item()),
+        "target_value_mean": float(values.mean().item()),
+        "target_value_std": float(values.std().item()),
+        "target_board_samples": float(board_samples),
+        "target_tuple_samples": float(tuple_samples),
+        "target_exhaustive_boards": float(exhaustive_boards),
+        "target_hand_dim": float(PREFLOP_HANDS),
+    }
+    return values.to(batch.beliefs.dtype), diagnostics
+
+
+@torch.no_grad()
+def estimate_preflop_allin_values_169(
+    batch: PreflopAllInBatch,
+    *,
+    sample_count: int | None = 50_000,
+    board_samples: int | None = None,
+    tuple_samples: int | None = None,
+    tuple_tries: int = 4,
+    board_chunk: int = 8,
+    generator: torch.Generator | None = None,
+    preflop_table_path: str | Path = DEFAULT_PREFLOP_ALLIN_TABLE,
+    use_exact_two_player: bool = True,
+    compute_stats: bool = True,
+    exhaustive_boards: bool = False,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Estimate preflop all-in targets natively in 169 rank classes."""
+    board_samples, tuple_samples = _resolve_sample_split(
+        sample_count,
+        board_samples,
+        tuple_samples,
+        exhaustive_boards=exhaustive_boards,
+    )
+    if tuple_tries <= 0:
+        raise ValueError("tuple_tries must be positive")
+    if board_chunk <= 0:
+        raise ValueError("board_chunk must be positive")
+    if batch.beliefs.shape[-1] != PREFLOP_HANDS:
+        raise ValueError(f"expected {PREFLOP_HANDS} hands, got {batch.beliefs.shape[-1]}")
+
+    start = time.perf_counter()
+    live_counts = (~batch.folded_mask).sum(dim=1)
+    exact_mask = (
+        live_counts == 2
+        if use_exact_two_player
+        else torch.zeros_like(live_counts, dtype=torch.bool)
+    )
+    if bool(exact_mask.any()):
+        exact_rows = torch.nonzero(exact_mask, as_tuple=False).flatten()
+        mc_rows = torch.nonzero(~exact_mask, as_tuple=False).flatten()
+        values = torch.empty_like(batch.beliefs)
+        exact_values = _estimate_two_player_preflop_exact_169(
+            _slice_batch(batch, exact_rows),
+            preflop_table_path=preflop_table_path,
+        )
+        values.index_copy_(0, exact_rows, exact_values)
+        mc_diag: dict[str, float] = {}
+        if mc_rows.numel() > 0:
+            mc_values, mc_diag = _estimate_preflop_allin_values_169_mc(
+                _slice_batch(batch, mc_rows),
+                board_samples=board_samples,
+                tuple_samples=tuple_samples,
+                tuple_tries=tuple_tries,
+                board_chunk=board_chunk,
+                generator=generator,
+                compute_stats=compute_stats,
+                exhaustive_boards=exhaustive_boards,
+            )
+            values.index_copy_(0, mc_rows, mc_values)
+        if not compute_stats:
+            return values, {}
+        elapsed = time.perf_counter() - start
+        diagnostics = {
+            "target_seconds": elapsed,
+            "target_boards_per_second": mc_diag.get("target_boards_per_second", 0.0),
+            "target_samples_per_second": mc_diag.get("target_samples_per_second", 0.0),
+            "target_zero_denom_frac": mc_diag.get("target_zero_denom_frac", 0.0),
+            "target_value_mean": float(values.mean().item()),
+            "target_value_std": float(values.std().item()),
+            "target_board_samples": float(board_samples),
+            "target_tuple_samples": float(tuple_samples),
+            "target_exhaustive_boards": float(exhaustive_boards),
+            "target_exact_two_player_rows": float(exact_rows.numel()),
+            "target_mc_rows": float(mc_rows.numel()),
+            "target_hand_dim": float(PREFLOP_HANDS),
+        }
+        return values, diagnostics
+
+    return _estimate_preflop_allin_values_169_mc(
+        batch,
+        board_samples=board_samples,
+        tuple_samples=tuple_samples,
+        tuple_tries=tuple_tries,
+        board_chunk=board_chunk,
+        generator=generator,
+        compute_stats=compute_stats,
+        exhaustive_boards=exhaustive_boards,
+    )
+
+
+@torch.no_grad()
 def estimate_preflop_allin_values(
     batch: PreflopAllInBatch,
     *,
@@ -492,6 +1000,21 @@ def estimate_preflop_allin_values(
     fixed number of opponent tuple samples per one of the 2,598,960 possible
     five-card boards. Random board sampling and ``sample_count`` are bypassed.
     """
+    if batch.beliefs.shape[-1] == PREFLOP_HANDS:
+        return estimate_preflop_allin_values_169(
+            batch,
+            sample_count=sample_count,
+            board_samples=board_samples,
+            tuple_samples=tuple_samples,
+            tuple_tries=tuple_tries,
+            board_chunk=board_chunk,
+            generator=generator,
+            preflop_table_path=preflop_table_path,
+            use_exact_two_player=use_exact_two_player,
+            compute_stats=compute_stats,
+            exhaustive_boards=exhaustive_boards,
+        )
+
     board_samples, tuple_samples = _resolve_sample_split(
         sample_count,
         board_samples,

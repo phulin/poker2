@@ -29,6 +29,7 @@ cosine_lr_decay_ratio: 0.005
 cosine_lr_decay_steps: 8000
 
 model_type: player_transformer
+range_hand_dim: 1326
 hidden_dim: 512
 hand_dim: 256
 layers: 4

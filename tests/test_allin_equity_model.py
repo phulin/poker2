@@ -4,10 +4,12 @@ import pytest
 import torch
 
 from p2.allin import (
+    PreflopAllIn169EquityModel,
     PreflopAllInBatch,
     PreflopAllInEquityModel,
     PreflopAllInTransformerModel,
     estimate_preflop_allin_values,
+    estimate_preflop_allin_values_169,
     make_random_preflop_allin_batch,
 )
 from p2.allin.pregenerate import PregenerateConfig, _data_config
@@ -24,20 +26,25 @@ from p2.allin.train import (
     _build_model,
     _eligible_pot_share_to_values,
     _evaluate_pregenerated_dataset,
+    _predict_allin_values,
     _pregenerated_player_permutations,
     _pregenerated_suit_permutation_idxs,
     _values_to_eligible_pot_share,
 )
 from p2.allin.training_data import (
+    AllInDataGenConfig,
     MANIFEST_NAME,
     TARGET_KEY,
     PregeneratedAllInDataset,
     batch_to_tensors,
+    generate_allin_training_chunk,
     permute_allin_batch_by_players,
     permute_allin_batch_by_suit,
 )
 from p2.env.card_utils import (
     NUM_HANDS,
+    PREFLOP_HANDS,
+    collapse_1326_to_169,
     combo_index,
     combo_suit_permutation_inverse_tensor,
 )
@@ -70,6 +77,30 @@ def test_random_preflop_allin_batch_shapes_and_stack_distribution() -> None:
     assert torch.all(live_mask.sum(dim=1) >= 2)
     assert torch.all((live_mask & ~batch.allin_mask).sum(dim=1) <= 1)
     torch.testing.assert_close(batch.scale, batch.starting_stacks.mean(dim=1))
+
+
+def test_random_preflop_allin_batch_supports_native_169_mode() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(124)
+    batch = make_random_preflop_allin_batch(
+        8,
+        players=3,
+        bb=100,
+        hand_dim=PREFLOP_HANDS,
+        device="cpu",
+        generator=generator,
+    )
+
+    assert batch.hand_dim == PREFLOP_HANDS
+    assert batch.beliefs.shape == (8, 3, PREFLOP_HANDS)
+    torch.testing.assert_close(
+        batch.beliefs.sum(dim=-1),
+        torch.ones(8, 3),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+    with pytest.raises(ValueError, match="hand_dim"):
+        make_random_preflop_allin_batch(1, hand_dim=170)
 
 
 def test_allin_suit_permutation_remaps_beliefs_and_targets() -> None:
@@ -951,6 +982,255 @@ def test_preflop_allin_sampler_small_smoke() -> None:
     assert torch.isfinite(values).all()
     assert diagnostics["target_seconds"] >= 0.0
     assert diagnostics["target_boards_per_second"] > 0.0
+
+
+def test_preflop_allin_sampler_native_169_small_smoke() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(789)
+    batch = make_random_preflop_allin_batch(
+        2,
+        players=3,
+        bb=100,
+        hand_dim=PREFLOP_HANDS,
+        device="cpu",
+        generator=generator,
+    )
+    values, diagnostics = estimate_preflop_allin_values_169(
+        batch,
+        board_samples=3,
+        tuple_samples=2,
+        tuple_tries=2,
+        board_chunk=1,
+        generator=generator,
+        use_exact_two_player=False,
+    )
+
+    assert values.shape == (2, 3, PREFLOP_HANDS)
+    assert torch.isfinite(values).all()
+    assert diagnostics["target_hand_dim"] == float(PREFLOP_HANDS)
+    assert diagnostics["target_board_samples"] == 3.0
+
+
+def test_preflop_allin_sampler_dispatches_native_169_exact_two_player() -> None:
+    batch = make_random_preflop_allin_batch(
+        2,
+        players=2,
+        bb=100,
+        hand_dim=PREFLOP_HANDS,
+        device="cpu",
+        generator=torch.Generator(device="cpu").manual_seed(788),
+    )
+    values, diagnostics = estimate_preflop_allin_values(
+        batch,
+        sample_count=1,
+        board_samples=1,
+        tuple_samples=None,
+    )
+
+    assert values.shape == (2, 2, PREFLOP_HANDS)
+    assert torch.isfinite(values).all()
+    assert diagnostics["target_hand_dim"] == float(PREFLOP_HANDS)
+    assert diagnostics["target_exact_two_player_rows"] == 2.0
+
+
+def test_preflop_allin_169_model_uses_hand_major_boundary() -> None:
+    batch = make_random_preflop_allin_batch(
+        2,
+        players=3,
+        bb=100,
+        hand_dim=PREFLOP_HANDS,
+        device="cpu",
+        generator=torch.Generator(device="cpu").manual_seed(790),
+    )
+    model = PreflopAllIn169EquityModel(
+        players=3,
+        hidden_dim=48,
+        hand_dim=16,
+        num_layers=1,
+        film_rank=8,
+    )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(791))
+
+    out = model(
+        batch.beliefs.transpose(1, 2).contiguous(),
+        batch.starting_stacks,
+        batch.committed,
+        batch.stacks_after,
+        batch.allin_mask,
+        batch.folded_mask,
+    )
+
+    assert out.shape == (2, PREFLOP_HANDS, 3)
+    assert torch.isfinite(out).all()
+    with pytest.raises(ValueError, match=r"\[batch, 169, 3\]"):
+        model(
+            batch.beliefs,
+            batch.starting_stacks,
+            batch.committed,
+            batch.stacks_after,
+            batch.allin_mask,
+            batch.folded_mask,
+        )
+
+
+def test_allin_train_builds_native_169_model_and_predicts_player_major_loss_shape() -> None:
+    batch = make_random_preflop_allin_batch(
+        2,
+        players=3,
+        hand_dim=PREFLOP_HANDS,
+        device="cpu",
+        generator=torch.Generator(device="cpu").manual_seed(792),
+    )
+    cfg = AllInTrainConfig(
+        model_type="compact_169",
+        range_hand_dim=PREFLOP_HANDS,
+        players=3,
+        hidden_dim=48,
+        hand_dim=16,
+        layers=1,
+        film_rank=8,
+    )
+
+    model = _build_model(cfg)
+    assert isinstance(model, PreflopAllIn169EquityModel)
+    pred = _predict_allin_values(
+        model,
+        batch,
+        target_mode="net_value",
+    )
+
+    assert pred.shape == (2, 3, PREFLOP_HANDS)
+    assert torch.isfinite(pred).all()
+    with pytest.raises(ValueError, match="range_hand_dim=169"):
+        _build_model(AllInTrainConfig(range_hand_dim=PREFLOP_HANDS))
+
+
+def test_generate_allin_training_chunk_can_emit_compact_169_targets() -> None:
+    cfg = AllInDataGenConfig(
+        players=3,
+        range_hand_dim=PREFLOP_HANDS,
+        board_samples=2,
+        tuple_samples=1,
+        tuple_tries=1,
+        board_chunk=1,
+        hand_chunk=512,
+        use_exact_two_player=False,
+    )
+
+    tensors, diagnostics = generate_allin_training_chunk(
+        2,
+        cfg,
+        device=torch.device("cpu"),
+        generator=torch.Generator(device="cpu").manual_seed(793),
+        compute_stats=True,
+    )
+
+    assert tensors["beliefs"].shape == (2, 3, PREFLOP_HANDS)
+    assert tensors[TARGET_KEY].shape == (2, 3, PREFLOP_HANDS)
+    torch.testing.assert_close(
+        tensors["beliefs"].sum(dim=-1),
+        torch.ones(2, 3),
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert diagnostics["target_hand_dim"] == float(PREFLOP_HANDS)
+
+
+def test_generate_allin_training_chunk_routes_169_batch_to_estimator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import p2.allin.training_data as training_data
+
+    seen_hand_dims: list[int] = []
+
+    def fake_estimator(batch: PreflopAllInBatch, **kwargs):
+        del kwargs
+        seen_hand_dims.append(batch.hand_dim)
+        return torch.zeros_like(batch.beliefs), {"target_hand_dim": float(batch.hand_dim)}
+
+    monkeypatch.setattr(training_data, "estimate_preflop_allin_values", fake_estimator)
+    cfg = AllInDataGenConfig(
+        players=3,
+        range_hand_dim=PREFLOP_HANDS,
+    )
+
+    tensors, diagnostics = training_data.generate_allin_training_chunk(
+        2,
+        cfg,
+        device=torch.device("cpu"),
+        generator=torch.Generator(device="cpu").manual_seed(794),
+        compute_stats=True,
+    )
+
+    assert seen_hand_dims == [PREFLOP_HANDS]
+    assert tensors["beliefs"].shape == (2, 3, PREFLOP_HANDS)
+    assert tensors[TARGET_KEY].shape == (2, 3, PREFLOP_HANDS)
+    assert diagnostics["target_hand_dim"] == float(PREFLOP_HANDS)
+
+
+def test_pregenerated_dataset_can_load_1326_data_as_compact_169(tmp_path) -> None:
+    examples = 2
+    players = 2
+    beliefs = torch.zeros(examples, players, NUM_HANDS)
+    beliefs[..., :10] = 1.0
+    beliefs = beliefs / beliefs.sum(dim=-1, keepdim=True)
+    targets = torch.arange(
+        examples * players * NUM_HANDS,
+        dtype=torch.float32,
+    ).view(examples, players, NUM_HANDS)
+    batch = PreflopAllInBatch(
+        beliefs=beliefs,
+        starting_stacks=torch.ones(examples, players),
+        committed=torch.zeros(examples, players),
+        stacks_after=torch.ones(examples, players),
+        allin_mask=torch.ones(examples, players, dtype=torch.bool),
+        folded_mask=torch.zeros(examples, players, dtype=torch.bool),
+        scale=torch.ones(examples),
+    )
+    torch.save(batch_to_tensors(batch, targets), tmp_path / "shard_000000.pt")
+    manifest = {
+        "format": "p2.allin.training_data.v1",
+        "examples": examples,
+        "players": players,
+        "hands": NUM_HANDS,
+        "feature_keys": [
+            "beliefs",
+            "starting_stacks",
+            "committed",
+            "stacks_after",
+            "allin_mask",
+            "folded_mask",
+            "scale",
+        ],
+        "target_key": TARGET_KEY,
+        "config": {},
+        "shards": [
+            {
+                "file": "shard_000000.pt",
+                "examples": examples,
+                "start": 0,
+                "end": examples,
+            }
+        ],
+    }
+    (tmp_path / MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    dataset = PregeneratedAllInDataset(tmp_path, target_hands=PREFLOP_HANDS)
+    compact_batch, compact_targets = dataset.get_batch(
+        0,
+        examples,
+        device=torch.device("cpu"),
+    )
+
+    assert compact_batch.beliefs.shape == (examples, players, PREFLOP_HANDS)
+    assert compact_targets.shape == (examples, players, PREFLOP_HANDS)
+    torch.testing.assert_close(
+        compact_batch.beliefs,
+        collapse_1326_to_169(beliefs, reduction="sum"),
+    )
+    torch.testing.assert_close(
+        compact_targets,
+        collapse_1326_to_169(targets, reduction="mean"),
+    )
 
 
 def test_pregenerate_all_boards_config_uses_samples_per_board() -> None:
