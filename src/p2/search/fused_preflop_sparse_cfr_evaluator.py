@@ -20,6 +20,7 @@ from p2.search.fused_cfr_triton import (
     fused_preflop169_parent_sum_opp_,
     fused_policy_renorm_reach_depth_multiway_,
     fused_preflop_multiway_beliefs_from_reach_,
+    fused_regret_tail_multiway_,
     select_actor_beliefs_and_marginal_policy_multiway_triton_out_,
 )
 from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
@@ -395,11 +396,52 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         values_achieved: torch.Tensor,
         values_expected: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return PreflopSparseCFREvaluator.compute_instantaneous_regrets(
-            self,
-            values_achieved,
-            values_expected=values_expected,
+        if values_expected is None:
+            values_expected = values_achieved
+        if values_achieved.device.type != "cuda":
+            return PreflopSparseCFREvaluator.compute_instantaneous_regrets(
+                self,
+                values_achieved,
+                values_expected=values_expected,
+            )
+
+        self._prepare_tree_slices()
+        bottom = self._bottom
+        top = self._top
+        parent_index_all = self._parent_index_all
+        to_act_top = self._to_act_top
+        assert bottom is not None
+        assert top is not None
+        assert parent_index_all is not None
+        assert to_act_top is not None
+
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+        unblocked_reach = self._preflop_unblocked_mass(beliefs[:top])
+        player_ids = torch.arange(self.num_players, device=self.device)
+        other_live = player_ids[None, :, None] != to_act_top[:, None, None]
+        if hasattr(self.env, "has_folded"):
+            other_live &= ~self.env.has_folded[:top, :, None]
+        src_weights = torch.where(
+            other_live,
+            unblocked_reach.clamp_min(1e-12),
+            torch.ones_like(unblocked_reach),
+        ).prod(dim=1)
+        src_weights *= self.allowed_hands[:top].to(dtype=self.float_dtype)
+
+        regrets = torch.zeros_like(self.policy_probs)
+        fused_regret_tail_multiway_(
+            regrets=regrets,
+            values_achieved=values_achieved.contiguous(),
+            values_expected=values_expected[:top].contiguous(),
+            to_act=to_act_top,
+            src_weights=src_weights.contiguous(),
+            parent_index=parent_index_all,
+            prev_actor=self.prev_actor.contiguous(),
+            bottom=bottom,
+            block_h=256,
         )
+        self._mask_invalid(regrets)
+        return regrets
 
     def _renormalize_policy_reach(
         self,
