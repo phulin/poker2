@@ -31,6 +31,7 @@ Fusion points
 from __future__ import annotations
 
 import copy
+import inspect
 import os
 from contextlib import contextmanager
 
@@ -45,7 +46,6 @@ from p2.env.rules_triton import (
     rank_hands_triton,
     triton_is_available as _rules_triton_ok,
 )
-from p2.models.mlp.better_ffn import BetterFFN
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.search.allin_payoff import (
     FLOP_I8_SCALE,
@@ -2321,7 +2321,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 model_output = model(features, include_policy=False, latent=self.latent)
                 self.latent = model_output.latent
                 model_applied_zero_sum = bool(base_model.enforce_zero_sum)
-            elif isinstance(base_model, BetterFFN):
+            elif hasattr(base_model, "static_feature_base") and hasattr(
+                base_model, "forward_value_static_base"
+            ):
                 model_key = id(base_model)
                 if (
                     self._static_model_base_fn is None
@@ -2339,6 +2341,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     else:
                         self._static_model_base_fn = base_model.static_feature_base
                     self._static_model_base_fn_key = model_key
+                    self._static_model_base_accepts_value_head = (
+                        "value_head"
+                        in inspect.signature(
+                            base_model.forward_value_static_base
+                        ).parameters
+                    )
                 key = (
                     int(self._subgame_generation),
                     int(features.context.data_ptr()),
@@ -2356,12 +2364,18 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         features
                     ).clone()
                     self._static_model_base_key = key
-                model_output = model(
+                value_kwargs = {"apply_zero_sum": True}
+                if getattr(self, "_static_model_base_accepts_value_head", False):
+                    value_kwargs["value_head"] = "pre" if use_pre_head else "auto"
+                call_static_value = getattr(
+                    base_model,
+                    "_call_forward_value_static_base",
+                    base_model.forward_value_static_base,
+                )
+                model_output = call_static_value(
                     features,
-                    include_policy=False,
-                    apply_zero_sum=True,
-                    static_base_features=self._static_model_base_features,
-                    value_head="pre" if use_pre_head else "auto",
+                    self._static_model_base_features,
+                    **value_kwargs,
                 )
                 model_applied_zero_sum = bool(base_model.enforce_zero_sum)
             else:
