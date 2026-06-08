@@ -75,28 +75,35 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
     def warm_start(self) -> None:
         return None
 
-    def _preflop_unblocked_mass(self, class_mass: torch.Tensor) -> torch.Tensor:
-        if class_mass.shape[-1] != PREFLOP_HANDS:
-            raise ValueError(
-                f"expected final axis {PREFLOP_HANDS}, got {class_mass.shape[-1]}"
-            )
-        key = (class_mass.device, class_mass.dtype)
+    def _preflop_unblocked_projection_for(
+        self,
+        ref: torch.Tensor,
+    ) -> torch.Tensor:
+        key = (ref.device, ref.dtype)
         projection = getattr(self, "_preflop_unblocked_projection", None)
         if (
             projection is None
             or getattr(self, "_preflop_unblocked_projection_key", None) != key
         ):
             multiplicity = preflop_class_multiplicity_tensor(
-                device=class_mass.device
-            ).to(dtype=class_mass.dtype)
+                device=ref.device
+            ).to(dtype=ref.dtype)
             compatibility = preflop_class_compatibility_counts_tensor(
-                device=class_mass.device
-            ).to(dtype=class_mass.dtype)
+                device=ref.device
+            ).to(dtype=ref.dtype)
             inv_multiplicity = multiplicity.reciprocal()
             projection = compatibility.T * inv_multiplicity[:, None]
             self._preflop_unblocked_projection = projection.contiguous()
             self._preflop_unblocked_projection_key = key
-        return class_mass @ self._preflop_unblocked_projection
+        assert self._preflop_unblocked_projection is not None
+        return self._preflop_unblocked_projection
+
+    def _preflop_unblocked_mass(self, class_mass: torch.Tensor) -> torch.Tensor:
+        if class_mass.shape[-1] != PREFLOP_HANDS:
+            raise ValueError(
+                f"expected final axis {PREFLOP_HANDS}, got {class_mass.shape[-1]}"
+            )
+        return class_mass @ self._preflop_unblocked_projection_for(class_mass)
 
     def _preflop_ev_buffers(
         self,

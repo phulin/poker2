@@ -2870,6 +2870,197 @@ def fused_preflop_multiway_beliefs_from_reach_(
     )
 
 
+if triton is not None:
+
+    @triton.jit
+    def _fused_preflop169_parent_sum_opp_kernel(
+        values_ptr,  # [total, P, H] in/out
+        leaf_values_ptr,  # optional [total, P, H]
+        leaf_mask_ptr,  # optional [total]
+        prev_actor_ptr,  # [total]
+        policy_ptr,  # [total, H]
+        numer_unblocked_ptr,  # [num_children, H]
+        denom_unblocked_ptr,  # [top, H]
+        child_offsets_ptr,  # [num_parents] absolute first child
+        child_count_ptr,  # [num_parents]
+        parent_base,
+        child_base,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        EPS,
+        HAS_LEAF_SOURCE: tl.constexpr,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        parent_rel = tl.program_id(0)
+        hb = tl.program_id(1)
+        row = parent_base + parent_rel
+        first = tl.load(child_offsets_ptr + parent_rel)
+        count = tl.load(child_count_ptr + parent_rel)
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask_h = offs < H
+        players = tl.arange(0, BLOCK_P)
+        player_mask = players < NUM_PLAYERS
+        value_mask = player_mask[:, None] & mask_h[None, :]
+
+        if count == 0:
+            if HAS_LEAF_SOURCE:
+                is_leaf = tl.load(leaf_mask_ptr + row).to(tl.int1)
+                src = tl.load(
+                    leaf_values_ptr
+                    + (row * NUM_PLAYERS + players[:, None]) * H
+                    + offs[None, :],
+                    mask=value_mask & is_leaf,
+                    other=0.0,
+                )
+                tl.store(
+                    values_ptr
+                    + (row * NUM_PLAYERS + players[:, None]) * H
+                    + offs[None, :],
+                    src,
+                    mask=value_mask,
+                )
+            return
+
+        denom = tl.load(
+            denom_unblocked_ptr + row * H + offs,
+            mask=mask_h,
+            other=0.0,
+        )
+        denom_safe = tl.maximum(denom, EPS)
+        acc = tl.zeros([BLOCK_P, BLOCK_H], dtype=tl.float32)
+
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                child_rel = child - child_base
+                prev_actor = tl.load(prev_actor_ptr + child)
+                hero_pol = tl.load(
+                    policy_ptr + child * H + offs,
+                    mask=mask_h,
+                    other=0.0,
+                )
+                numer = tl.load(
+                    numer_unblocked_ptr + child_rel * H + offs,
+                    mask=mask_h,
+                    other=0.0,
+                )
+                opp_pol = tl.where(denom > EPS, numer / denom_safe, 0.0)
+                pol = tl.where(
+                    players[:, None] == prev_actor,
+                    hero_pol[None, :],
+                    opp_pol[None, :],
+                )
+                vals = tl.load(
+                    values_ptr
+                    + (child * NUM_PLAYERS + players[:, None]) * H
+                    + offs[None, :],
+                    mask=value_mask,
+                    other=0.0,
+                )
+                if HAS_LEAF_SOURCE:
+                    leaf_vals = tl.load(
+                        leaf_values_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + offs[None, :],
+                        mask=value_mask,
+                        other=0.0,
+                    )
+                    child_is_leaf = tl.load(leaf_mask_ptr + child).to(tl.int1)
+                    vals = tl.where(child_is_leaf, leaf_vals, vals)
+                    tl.store(
+                        values_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + offs[None, :],
+                        leaf_vals,
+                        mask=value_mask & child_is_leaf,
+                    )
+                acc += vals * pol
+
+        tl.store(
+            values_ptr + (row * NUM_PLAYERS + players[:, None]) * H + offs[None, :],
+            acc,
+            mask=value_mask,
+        )
+
+
+def fused_preflop169_parent_sum_opp_(
+    values: torch.Tensor,
+    prev_actor: torch.Tensor,
+    policy: torch.Tensor,
+    numer_unblocked: torch.Tensor,
+    denom_unblocked: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    parent_base: int,
+    child_base: int,
+    max_children: int,
+    max_children_pow2: int | None = None,
+    eps: float = 1.0e-8,
+    leaf_values: torch.Tensor | None = None,
+    leaf_mask: torch.Tensor | None = None,
+    block_h: int = 256,
+) -> None:
+    """Preflop-169 analogue of fused sparse inline-opponent EV backup."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values.is_contiguous() and values.dim() == 3
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert numer_unblocked.is_contiguous() and numer_unblocked.dim() == 2
+    assert denom_unblocked.is_contiguous() and denom_unblocked.dim() == 2
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    assert prev_actor.is_contiguous()
+    total, players, h = values.shape
+    assert policy.shape == (total, h)
+    assert numer_unblocked.shape[1] == h
+    assert denom_unblocked.shape[1] == h
+    has_leaf_source = leaf_values is not None
+    if has_leaf_source:
+        assert leaf_values is not None and leaf_mask is not None
+        assert leaf_values.is_contiguous() and leaf_values.shape == values.shape
+        assert leaf_mask.is_contiguous() and leaf_mask.shape == (total,)
+        leaf_values_ptr = leaf_values
+        leaf_mask_ptr = leaf_mask
+    else:
+        leaf_values_ptr = values
+        leaf_mask_ptr = child_count
+    if max_children_pow2 is None:
+        mc_pow2 = 1
+        while mc_pow2 < max_children:
+            mc_pow2 *= 2
+    else:
+        mc_pow2 = max_children_pow2
+    block_p = 1
+    while block_p < players:
+        block_p *= 2
+    if child_offsets.numel() == 0:
+        return
+    _fused_preflop169_parent_sum_opp_kernel[
+        (child_offsets.shape[0], triton.cdiv(h, block_h))
+    ](
+        values,
+        leaf_values_ptr,
+        leaf_mask_ptr,
+        prev_actor,
+        policy,
+        numer_unblocked,
+        denom_unblocked,
+        child_offsets,
+        child_count,
+        parent_base,
+        child_base,
+        h,
+        NUM_PLAYERS=players,
+        EPS=eps,
+        HAS_LEAF_SOURCE=has_leaf_source,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_P=block_p,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
 def fused_sibling_sum(
     values: torch.Tensor,  # [total, H]
     child_offsets: torch.Tensor,  # [num_parents] — child_offsets[p] gives first child idx

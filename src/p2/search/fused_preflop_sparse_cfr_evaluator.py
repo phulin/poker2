@@ -17,8 +17,10 @@ from p2.search.fused_cfr_triton import (
     fused_avg_values_multiway_,
     fused_model_values_writeback_multiway_,
     fused_parent_sum_divide_,
+    fused_preflop169_parent_sum_opp_,
     fused_policy_renorm_reach_depth_multiway_,
     fused_preflop_multiway_beliefs_from_reach_,
+    select_actor_beliefs_and_marginal_policy_multiway_triton_out_,
 )
 from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 from p2.search.preflop_sparse_cfr_evaluator import PreflopSparseCFREvaluator
@@ -44,6 +46,10 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             )
         self._ensure_fused_attrs()
         self.warm_start_iterations = 0
+        self._preflop_ev_actor_beliefs_buf: torch.Tensor | None = None
+        self._preflop_ev_marginal_policy_buf: torch.Tensor | None = None
+        self._preflop_ev_numer_unblocked_buf: torch.Tensor | None = None
+        self._preflop_ev_denom_unblocked_buf: torch.Tensor | None = None
 
     @property
     def _compact_preflop(self) -> bool:
@@ -78,6 +84,58 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self,
             rows,
             dtype=dtype,
+        )
+
+    def _preflop_unblocked_projection_for(
+        self,
+        ref: torch.Tensor,
+    ) -> torch.Tensor:
+        return PreflopSparseCFREvaluator._preflop_unblocked_projection_for(self, ref)
+
+    def _ensure_preflop_fused_ev_buffers(
+        self,
+        top: int,
+        num_children: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        actor_shape = (top, PREFLOP_HANDS)
+        child_shape = (num_children, PREFLOP_HANDS)
+        actor_buf = getattr(self, "_preflop_ev_actor_beliefs_buf", None)
+        denom_buf = getattr(self, "_preflop_ev_denom_unblocked_buf", None)
+        marginal_buf = getattr(self, "_preflop_ev_marginal_policy_buf", None)
+        numer_buf = getattr(self, "_preflop_ev_numer_unblocked_buf", None)
+        if (
+            actor_buf is None
+            or actor_buf.shape != actor_shape
+            or actor_buf.device != self.device
+        ):
+            actor_buf = self.beliefs.new_empty(actor_shape)
+            self._preflop_ev_actor_beliefs_buf = actor_buf
+        if (
+            denom_buf is None
+            or denom_buf.shape != actor_shape
+            or denom_buf.device != self.device
+        ):
+            denom_buf = self.beliefs.new_empty(actor_shape)
+            self._preflop_ev_denom_unblocked_buf = denom_buf
+        if (
+            marginal_buf is None
+            or marginal_buf.shape != child_shape
+            or marginal_buf.device != self.device
+        ):
+            marginal_buf = self.policy_probs.new_empty(child_shape)
+            self._preflop_ev_marginal_policy_buf = marginal_buf
+        if (
+            numer_buf is None
+            or numer_buf.shape != child_shape
+            or numer_buf.device != self.device
+        ):
+            numer_buf = self.policy_probs.new_empty(child_shape)
+            self._preflop_ev_numer_unblocked_buf = numer_buf
+        return (
+            actor_buf,
+            marginal_buf,
+            denom_buf,
+            numer_buf,
         )
 
     def initialize_subgame(
@@ -251,13 +309,86 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         leaf_values: torch.Tensor | None = None,
         values: torch.Tensor | None = None,
     ) -> None:
-        PreflopSparseCFREvaluator.compute_expected_values(
-            self,
-            policy=policy,
-            beliefs=beliefs,
-            leaf_values=leaf_values,
-            values=values,
+        if policy is None:
+            policy = self.policy_probs
+        if beliefs is None:
+            beliefs = self.beliefs
+        if leaf_values is None:
+            leaf_values = self.latest_values
+        if values is None:
+            values = leaf_values
+        if values.device.type != "cuda":
+            PreflopSparseCFREvaluator.compute_expected_values(
+                self,
+                policy=policy,
+                beliefs=beliefs,
+                leaf_values=leaf_values,
+                values=values,
+            )
+            return
+
+        use_leaf_source = leaf_values is not values
+        if not use_leaf_source:
+            pass
+        elif self.tree_depth == 0:
+            torch.where(
+                self.leaf_mask[:, None, None],
+                leaf_values,
+                torch.zeros_like(values),
+                out=values,
+            )
+
+        self._prepare_tree_slices()
+        bottom, top = self._bottom, self._top
+        parent_index_bottom = self._parent_index_bottom
+        child_offsets_top = self._child_offsets_top
+        child_count_top = self._child_count_top
+        to_act_top = self._to_act_top
+        assert bottom is not None
+        assert top is not None
+        assert parent_index_bottom is not None
+        assert child_offsets_top is not None
+        assert child_count_top is not None
+        assert to_act_top is not None
+
+        actor_beliefs, marginal_policy, denom_unblocked, numer_unblocked = (
+            self._ensure_preflop_fused_ev_buffers(top, parent_index_bottom.numel())
         )
+        beliefs_c = beliefs.contiguous()
+        policy_c = policy.contiguous()
+        prev_actor_c = self.prev_actor.contiguous()
+        select_actor_beliefs_and_marginal_policy_multiway_triton_out_(
+            beliefs_c,
+            to_act_top,
+            policy_c,
+            child_offsets_top,
+            child_count_top,
+            bottom,
+            actor_beliefs,
+            marginal_policy,
+            max_children=self.num_actions,
+            block_h=256,
+        )
+        projection = self._preflop_unblocked_projection_for(beliefs_c).contiguous()
+        torch.mm(actor_beliefs, projection, out=denom_unblocked)
+        torch.mm(marginal_policy, projection, out=numer_unblocked)
+
+        for depth in range(self.tree_depth - 1, -1, -1):
+            fused_preflop169_parent_sum_opp_(
+                values=values,
+                prev_actor=prev_actor_c,
+                policy=policy_c,
+                numer_unblocked=numer_unblocked,
+                denom_unblocked=denom_unblocked,
+                child_offsets=self._child_offsets_by_depth[depth],
+                child_count=self._child_count_by_depth[depth],
+                parent_base=self.depth_offsets[depth],
+                child_base=bottom,
+                max_children=self.num_actions,
+                max_children_pow2=self._child_count_pow2_by_depth[depth],
+                leaf_values=leaf_values if use_leaf_source else None,
+                leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
+            )
 
     def compute_instantaneous_regrets(
         self,
