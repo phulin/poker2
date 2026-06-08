@@ -8,8 +8,8 @@ from p2.env.card_utils import (
     NUM_HANDS,
     PREFLOP_HANDS,
     collapse_1326_to_169,
+    preflop_class_compatibility_counts_tensor,
     preflop_class_multiplicity_tensor,
-    preflop_class_unblocked_mass,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
@@ -53,8 +53,12 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             raise ValueError(
                 "PreflopSparseCFREvaluator is compact-only; attach a "
                 f"{PREFLOP_HANDS}-hand preflop policy/value model"
-            )
+        )
         self.warm_start_iterations = 0
+        self._preflop_unblocked_projection: torch.Tensor | None = None
+        self._preflop_unblocked_projection_key: tuple[torch.device, torch.dtype] | None = (
+            None
+        )
 
     @property
     def _compact_preflop(self) -> bool:
@@ -68,6 +72,29 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
 
     def warm_start(self) -> None:
         return None
+
+    def _preflop_unblocked_mass(self, class_mass: torch.Tensor) -> torch.Tensor:
+        if class_mass.shape[-1] != PREFLOP_HANDS:
+            raise ValueError(
+                f"expected final axis {PREFLOP_HANDS}, got {class_mass.shape[-1]}"
+            )
+        key = (class_mass.device, class_mass.dtype)
+        projection = getattr(self, "_preflop_unblocked_projection", None)
+        if (
+            projection is None
+            or getattr(self, "_preflop_unblocked_projection_key", None) != key
+        ):
+            multiplicity = preflop_class_multiplicity_tensor(
+                device=class_mass.device
+            ).to(dtype=class_mass.dtype)
+            compatibility = preflop_class_compatibility_counts_tensor(
+                device=class_mass.device
+            ).to(dtype=class_mass.dtype)
+            inv_multiplicity = multiplicity.reciprocal()
+            projection = compatibility.T * inv_multiplicity[:, None]
+            self._preflop_unblocked_projection = projection.contiguous()
+            self._preflop_unblocked_projection_key = key
+        return class_mass @ self._preflop_unblocked_projection
 
     def initialize_subgame(
         self,
@@ -405,7 +432,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
     def _compute_policy_node_reach(self, top: int) -> torch.Tensor:
         allowed = self.allowed_hands[:top].to(dtype=self.float_dtype)
         reach = self.self_reach_avg[:top].to(dtype=self.float_dtype)
-        unblocked = preflop_class_unblocked_mass(reach)
+        unblocked = self._preflop_unblocked_mass(reach)
         player_ids = torch.arange(self.num_players, device=self.device)
         other_live = player_ids[None, :, None] != 0
         if hasattr(self.env, "has_folded"):
@@ -417,7 +444,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         ).prod(dim=1)
         numer = (reach[:, 0] * other_reach * allowed).sum(dim=-1)
 
-        allowed_unblocked = preflop_class_unblocked_mass(allowed)
+        allowed_unblocked = self._preflop_unblocked_mass(allowed)
         other_allowed = allowed_unblocked.clamp_min(1e-12).pow(
             max(0, self.num_players - 1)
         )
@@ -465,10 +492,8 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                 1,
                 prev_actor[:, None, None].expand(-1, 1, PREFLOP_HANDS),
             ).squeeze(1)
-            matchup_mass = preflop_class_unblocked_mass(actor_beliefs)
-            policy_blocked = preflop_class_unblocked_mass(
-                actor_beliefs * child_policy
-            )
+            matchup_mass = self._preflop_unblocked_mass(actor_beliefs)
+            policy_blocked = self._preflop_unblocked_mass(actor_beliefs * child_policy)
             opponent_conditioned_policy = torch.where(
                 matchup_mass > 1e-8,
                 policy_blocked / matchup_mass.clamp(min=1e-8),
@@ -504,7 +529,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         actor_values_achieved = values_achieved[bottom:].gather(
             1, prev_actor_indices
         ).squeeze(1)
-        unblocked_reach = preflop_class_unblocked_mass(beliefs)
+        unblocked_reach = self._preflop_unblocked_mass(beliefs)
         player_ids = torch.arange(self.num_players, device=self.device)
         other_live = player_ids[None, :, None] != self.env.to_act[:, None, None]
         if hasattr(self.env, "has_folded"):

@@ -65,6 +65,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def warm_start(self) -> None:
         return None
 
+    def _preflop_unblocked_mass(self, class_mass: torch.Tensor) -> torch.Tensor:
+        return PreflopSparseCFREvaluator._preflop_unblocked_mass(self, class_mass)
+
     def initialize_subgame(
         self,
         src_env: HUNLTensorEnv | PBSEnv,

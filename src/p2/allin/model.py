@@ -10,7 +10,8 @@ from p2.env.card_utils import (
     NUM_HANDS,
     PREFLOP_HANDS,
     hand_combos_tensor,
-    preflop_class_unblocked_mass,
+    preflop_class_compatibility_counts_tensor,
+    preflop_class_multiplicity_tensor,
 )
 
 
@@ -21,6 +22,37 @@ RANGE_BUCKET_FEATURE_DIM = 20
 PREFLOP_169_BUCKET_FEATURE_DIM = 16
 OUTPUT_HEAD_INIT_SCALE = 1.464
 OUTPUT_HEAD_INIT_BIAS = 0.382
+
+
+def _preflop_unblocked_projection() -> torch.Tensor:
+    multiplicity = preflop_class_multiplicity_tensor()
+    compatibility = preflop_class_compatibility_counts_tensor()
+    return (compatibility.T * multiplicity.reciprocal()[:, None]).contiguous()
+
+
+def _preflop_bucket_projection() -> torch.Tensor:
+    class_ids = torch.arange(PREFLOP_HANDS)
+    row = torch.div(class_ids, 13, rounding_mode="floor")
+    col = class_ids.remainder(13)
+    hi = torch.maximum(row, col)
+    lo = torch.minimum(row, col)
+    pair = row == col
+    suited = row > col
+    projection = torch.zeros(PREFLOP_HANDS, PREFLOP_169_BUCKET_FEATURE_DIM)
+    projection.scatter_add_(
+        1,
+        hi[:, None],
+        torch.ones(PREFLOP_HANDS, 1, dtype=projection.dtype),
+    )
+    projection.scatter_add_(
+        1,
+        lo[:, None],
+        torch.ones(PREFLOP_HANDS, 1, dtype=projection.dtype),
+    )
+    projection[:, 13] = pair.to(projection.dtype)
+    projection[:, 14] = suited.to(projection.dtype)
+    projection[:, 15] = (hi == 12).to(projection.dtype)
+    return projection.contiguous()
 
 
 class _LeakyRMSBlock(nn.Module):
@@ -498,6 +530,16 @@ class PreflopAllIn169EquityModel(nn.Module):
         self.register_buffer("hand_lo_rank", lo.long(), persistent=False)
         self.register_buffer("hand_pair", pair, persistent=False)
         self.register_buffer("hand_suited", suited, persistent=False)
+        self.register_buffer(
+            "preflop_unblocked_projection",
+            _preflop_unblocked_projection(),
+            persistent=False,
+        )
+        self.register_buffer(
+            "preflop_bucket_projection",
+            _preflop_bucket_projection(),
+            persistent=False,
+        )
 
         self.hand_encoder = nn.Sequential(
             nn.Linear(HAND_FEATURE_DIM, hand_dim),
@@ -579,39 +621,22 @@ class PreflopAllIn169EquityModel(nn.Module):
         )
 
     def _range_mass_features(self, beliefs: torch.Tensor) -> torch.Tensor:
-        batch_size, players, _ = beliefs.shape
-        rank_mass = torch.zeros(
-            batch_size, players, 13, device=beliefs.device, dtype=beliefs.dtype
+        projection = self.preflop_bucket_projection.to(
+            device=beliefs.device,
+            dtype=beliefs.dtype,
         )
-        hi = self.hand_hi_rank.to(beliefs.device)
-        lo = self.hand_lo_rank.to(beliefs.device)
-        rank_mass.scatter_add_(
-            2,
-            hi[None, None, :].expand(batch_size, players, -1),
-            beliefs,
-        )
-        rank_mass.scatter_add_(
-            2,
-            lo[None, None, :].expand(batch_size, players, -1),
-            beliefs,
-        )
-        pair_mass = beliefs[..., self.hand_pair.to(beliefs.device)].sum(
-            dim=-1, keepdim=True
-        )
-        suited_mass = beliefs[..., self.hand_suited.to(beliefs.device)].sum(
-            dim=-1, keepdim=True
-        )
-        ace_mass = beliefs[..., self.hand_hi_rank.to(beliefs.device) == 12].sum(
-            dim=-1, keepdim=True
-        )
-        return torch.cat((rank_mass, pair_mass, suited_mass, ace_mass), dim=-1)
+        return beliefs @ projection
 
     def _blocker_features(
         self,
         beliefs: torch.Tensor,
         folded_mask: torch.Tensor,
     ) -> torch.Tensor:
-        unblocked = preflop_class_unblocked_mass(beliefs)
+        projection = self.preflop_unblocked_projection.to(
+            device=beliefs.device,
+            dtype=beliefs.dtype,
+        )
+        unblocked = beliefs @ projection
         player_ids = torch.arange(self.players, device=beliefs.device)
         non_self = player_ids[None, :, None] != player_ids[None, None, :]
         live_opp = (~folded_mask).to(beliefs.dtype)[:, None, :]
@@ -776,6 +801,16 @@ class PreflopAllIn169TransformerModel(PreflopAllIn169EquityModel):
         self.register_buffer("hand_lo_rank", lo.long(), persistent=False)
         self.register_buffer("hand_pair", pair, persistent=False)
         self.register_buffer("hand_suited", suited, persistent=False)
+        self.register_buffer(
+            "preflop_unblocked_projection",
+            _preflop_unblocked_projection(),
+            persistent=False,
+        )
+        self.register_buffer(
+            "preflop_bucket_projection",
+            _preflop_bucket_projection(),
+            persistent=False,
+        )
 
         self.hand_encoder = nn.Sequential(
             nn.Linear(HAND_FEATURE_DIM, hand_dim),
