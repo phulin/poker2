@@ -460,6 +460,8 @@ class PreflopAllIn169Oracle:
             raise ValueError("all-in oracle model checkpoint is not native 169")
         model = _build_model(cfg).to(self.device)
         model.load_state_dict(checkpoint["model_state_dict"])
+        if self.device.type == "cuda":
+            model.to(dtype=torch.bfloat16)
         model.eval()
         if self.compile_model:
             model = torch.compile(model, dynamic=True)
@@ -820,11 +822,13 @@ class PreflopAllIn169Oracle:
             ).to(beliefs.dtype)
 
         model = self._ensure_model()
+        base_model = getattr(model, "_orig_mod", model)
+        model_dtype = next(base_model.parameters()).dtype
         pred_hand_major = model(
-            beliefs.transpose(1, 2).contiguous(),
-            starting_stacks,
-            committed,
-            stacks_after,
+            beliefs.to(model_dtype).transpose(1, 2).contiguous(),
+            starting_stacks.to(model_dtype),
+            committed.to(model_dtype),
+            stacks_after.to(model_dtype),
             allin_mask,
             folded_mask,
             hardcode_folded_values=self._model_target_mode == "net_value",

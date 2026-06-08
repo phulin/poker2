@@ -15,6 +15,7 @@ from p2.rl.target_provenance import (
 from p2.search.cfr_evaluator import CFREvaluator, ExploitabilityStats
 from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_multiway_with_tensors_,
+    fused_average_policy_reach_beliefs_depth_preflop_multiway_,
     fused_avg_values_multiway_,
     fused_compact_regret_dcfr_update_multiway_with_tensors_,
     fused_model_values_writeback_multiway_,
@@ -592,6 +593,38 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             new = torch.tensor(
                 float(weight_override), dtype=self.float_dtype, device=self.device
             )
+        if (
+            update_reach
+            and update_beliefs
+            and not defer_avg_policy
+            and self.num_actions <= 8
+        ):
+            self.policy_probs_avg[:root_count] = 0.0
+            root_index = self._get_root_index()
+            prev_actor = self.prev_actor.contiguous()
+            to_act = self.env.to_act.contiguous()
+            for depth in range(self.tree_depth):
+                fused_average_policy_reach_beliefs_depth_preflop_multiway_(
+                    policy_probs_avg=self.policy_probs_avg,
+                    average_policy_numerator=numerator,
+                    average_policy_denominator=denominator,
+                    policy_probs=self.policy_probs,
+                    self_reach=self.self_reach,
+                    self_reach_avg=self.self_reach_avg,
+                    beliefs_avg=self.beliefs_avg,
+                    allowed_mask=self.allowed_hands,
+                    allowed_prob=self.allowed_hands_prob,
+                    root_index=root_index,
+                    child_offsets=self._child_offsets_by_depth[depth],
+                    child_count=self._child_count_by_depth[depth],
+                    prev_actor=prev_actor,
+                    to_act=to_act,
+                    new=new,
+                    parent_base=self.depth_offsets[depth],
+                    max_children=self.num_actions,
+                )
+            self.average_policy_initialized = True
+            return True
         fused_average_policy_mix_multiway_with_tensors_(
             policy_probs_avg=self.policy_probs_avg,
             average_policy_numerator=numerator,

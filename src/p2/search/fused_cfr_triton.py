@@ -3148,6 +3148,261 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
 if triton is not None:
 
     @triton.jit
+    def _average_policy_reach_beliefs_depth_preflop_multiway_kernel(
+        policy_avg_ptr,  # [total, H] out/current avg policy
+        avg_num_ptr,  # [total, H] in/out
+        avg_den_ptr,  # [total, H] in/out
+        policy_ptr,  # [total, H] current policy
+        current_reach_ptr,  # [total, P, H]
+        avg_reach_ptr,  # [total, P, H] in/out
+        beliefs_ptr,  # [total, P, H] in/out
+        allowed_mask_ptr,  # [total, H] bool
+        allowed_prob_ptr,  # [total, H]
+        root_index_ptr,  # [total]
+        child_offsets_ptr,  # [num_parents]
+        child_count_ptr,  # [num_parents]
+        prev_actor_ptr,  # [total]
+        to_act_ptr,  # [total]
+        new_scalar_ptr,
+        parent_base,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        EPS,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        parent = parent_base + p
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        if count == 0:
+            return
+
+        hands = tl.arange(0, BLOCK_H)
+        hand_mask = hands < H
+        players = tl.arange(0, BLOCK_P)
+        player_mask = players < NUM_PLAYERS
+        value_mask = player_mask[:, None] & hand_mask[None, :]
+
+        actor = tl.load(to_act_ptr + parent)
+        new_scalar = tl.load(new_scalar_ptr)
+        reach_n = (
+            tl.load(
+                current_reach_ptr + (parent * NUM_PLAYERS + actor) * H + hands,
+                mask=hand_mask,
+                other=0.0,
+            )
+            * new_scalar
+        )
+
+        raw0 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        raw1 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        raw2 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        raw3 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        raw4 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        raw5 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        raw6 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        raw7 = tl.zeros([BLOCK_H], dtype=tl.float32)
+        denom_policy = tl.zeros([BLOCK_H], dtype=tl.float32)
+
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                cur = tl.load(policy_ptr + child * H + hands, mask=hand_mask, other=0.0)
+                num_old = tl.load(avg_num_ptr + child * H + hands, mask=hand_mask, other=0.0)
+                den_old = tl.load(avg_den_ptr + child * H + hands, mask=hand_mask, other=0.0)
+                num = num_old + reach_n * cur
+                den = den_old + reach_n
+                tl.store(avg_num_ptr + child * H + hands, num, mask=hand_mask)
+                tl.store(avg_den_ptr + child * H + hands, den, mask=hand_mask)
+                raw = tl.where(den > EPS, num / tl.maximum(den, EPS), cur)
+                denom_policy += raw
+                if i == 0:
+                    raw0 = raw
+                elif i == 1:
+                    raw1 = raw
+                elif i == 2:
+                    raw2 = raw
+                elif i == 3:
+                    raw3 = raw
+                elif i == 4:
+                    raw4 = raw
+                elif i == 5:
+                    raw5 = raw
+                elif i == 6:
+                    raw6 = raw
+                else:
+                    raw7 = raw
+
+        use_div = denom_policy > EPS
+        denom_safe = tl.maximum(denom_policy, EPS)
+        parent_reach = tl.load(
+            avg_reach_ptr
+            + (parent * NUM_PLAYERS + players[:, None]) * H
+            + hands[None, :],
+            mask=value_mask,
+            other=0.0,
+        )
+
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                raw = raw0
+                if i == 1:
+                    raw = raw1
+                elif i == 2:
+                    raw = raw2
+                elif i == 3:
+                    raw = raw3
+                elif i == 4:
+                    raw = raw4
+                elif i == 5:
+                    raw = raw5
+                elif i == 6:
+                    raw = raw6
+                elif i >= 7:
+                    raw = raw7
+                pol = tl.where(use_div, raw / denom_safe, raw)
+                tl.store(policy_avg_ptr + child * H + hands, pol, mask=hand_mask)
+
+                prev_actor = tl.load(prev_actor_ptr + child)
+                allowed = tl.load(
+                    allowed_mask_ptr + child * H + hands,
+                    mask=hand_mask,
+                    other=0,
+                ).to(tl.int1)
+                child_reach = tl.where(
+                    players[:, None] == prev_actor,
+                    parent_reach * pol[None, :],
+                    parent_reach,
+                )
+                child_reach = tl.where(allowed[None, :], child_reach, 0.0)
+                tl.store(
+                    avg_reach_ptr
+                    + (child * NUM_PLAYERS + players[:, None]) * H
+                    + hands[None, :],
+                    child_reach,
+                    mask=value_mask,
+                )
+
+                root = tl.load(root_index_ptr + child)
+                root_belief = tl.load(
+                    beliefs_ptr
+                    + (root * NUM_PLAYERS + players[:, None]) * H
+                    + hands[None, :],
+                    mask=value_mask,
+                    other=0.0,
+                )
+                unnorm = root_belief * child_reach
+                belief_denom = tl.sum(unnorm, axis=1)
+                fallback = tl.load(
+                    allowed_prob_ptr + child * H + hands,
+                    mask=hand_mask,
+                    other=0.0,
+                )
+                belief = tl.where(
+                    belief_denom[:, None] > EPS,
+                    unnorm / tl.maximum(belief_denom[:, None], EPS),
+                    fallback[None, :],
+                )
+                tl.store(
+                    beliefs_ptr
+                    + (child * NUM_PLAYERS + players[:, None]) * H
+                    + hands[None, :],
+                    belief,
+                    mask=value_mask,
+                )
+
+
+def fused_average_policy_reach_beliefs_depth_preflop_multiway_(
+    policy_probs_avg: torch.Tensor,
+    average_policy_numerator: torch.Tensor,
+    average_policy_denominator: torch.Tensor,
+    policy_probs: torch.Tensor,
+    self_reach: torch.Tensor,
+    self_reach_avg: torch.Tensor,
+    beliefs_avg: torch.Tensor,
+    allowed_mask: torch.Tensor,
+    allowed_prob: torch.Tensor,
+    root_index: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    prev_actor: torch.Tensor,
+    to_act: torch.Tensor,
+    new: torch.Tensor,
+    parent_base: int,
+    max_children: int,
+    eps: float = 1e-5,
+    block_h: int = 256,
+) -> None:
+    """Average-policy mix + renorm + avg reach/beliefs for one preflop depth."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert policy_probs_avg.is_contiguous() and policy_probs_avg.dim() == 2
+    assert average_policy_numerator.is_contiguous()
+    assert average_policy_denominator.is_contiguous()
+    assert policy_probs.is_contiguous() and policy_probs.shape == policy_probs_avg.shape
+    assert self_reach.is_contiguous() and self_reach_avg.is_contiguous()
+    assert beliefs_avg.is_contiguous() and beliefs_avg.shape == self_reach_avg.shape
+    total, h = policy_probs_avg.shape
+    players = self_reach.shape[1]
+    assert self_reach.shape == (total, players, h)
+    assert self_reach_avg.shape == (total, players, h)
+    assert average_policy_numerator.shape == (total, h)
+    assert average_policy_denominator.shape == (total, h)
+    assert allowed_mask.is_contiguous() and allowed_mask.shape == (total, h)
+    assert allowed_prob.is_contiguous() and allowed_prob.shape == (total, h)
+    assert root_index.is_contiguous() and root_index.shape == (total,)
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    assert prev_actor.is_contiguous() and prev_actor.shape == (total,)
+    assert to_act.is_contiguous() and to_act.shape == (total,)
+    assert new.dim() == 0
+    if h > block_h:
+        raise ValueError(f"hand dim {h} exceeds block_h {block_h}")
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    if mc_pow2 > 8:
+        raise ValueError(
+            "fused_average_policy_reach_beliefs_depth_preflop_multiway_ "
+            f"supports at most 8 children, got {max_children}"
+        )
+    block_p = 1
+    while block_p < players:
+        block_p *= 2
+    _average_policy_reach_beliefs_depth_preflop_multiway_kernel[
+        (child_offsets.shape[0],)
+    ](
+        policy_probs_avg,
+        average_policy_numerator,
+        average_policy_denominator,
+        policy_probs,
+        self_reach,
+        self_reach_avg,
+        beliefs_avg,
+        allowed_mask,
+        allowed_prob,
+        root_index,
+        child_offsets,
+        child_count,
+        prev_actor,
+        to_act,
+        new,
+        parent_base,
+        h,
+        NUM_PLAYERS=players,
+        EPS=eps,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_P=block_p,
+        BLOCK_H=block_h,
+        num_warps=8,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
     def _preflop_multiway_beliefs_from_reach_kernel(
         beliefs_ptr,  # [total, P, H] in/out; root rows are source beliefs
         reach_ptr,  # [total, P, H]

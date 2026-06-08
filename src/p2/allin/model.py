@@ -674,10 +674,12 @@ class PreflopAllIn169EquityModel(nn.Module):
             folded_mask,
         )
 
+        model_dtype = self.hand_encoder[0].weight.dtype
         hand_emb = self.hand_encoder(
-            self.hand_features.to(beliefs.device, beliefs.dtype)
+            self.hand_features.to(beliefs.device, model_dtype)
         )
         beliefs_f = beliefs_player.to(hand_emb.dtype)
+        player_features = player_features.to(hand_emb.dtype)
         bucket_features = self._range_mass_features(beliefs_f)
         range_summary = torch.cat(
             (
@@ -970,10 +972,12 @@ class PreflopAllIn169TransformerModel(PreflopAllIn169EquityModel):
             folded_mask,
         )
 
+        model_dtype = self.hand_encoder[0].weight.dtype
         hand_emb = self.hand_encoder(
-            self.hand_features.to(beliefs.device, beliefs.dtype)
+            self.hand_features.to(beliefs.device, model_dtype)
         )
         beliefs_f = beliefs_player.to(hand_emb.dtype)
+        player_features = player_features.to(hand_emb.dtype)
         bucket_features = self._range_mass_features(beliefs_f)
         range_summary = torch.cat(
             (
@@ -996,7 +1000,9 @@ class PreflopAllIn169TransformerModel(PreflopAllIn169EquityModel):
         if self.dense_belief_residual:
             context_token = context_token + self.dense_belief_proj(beliefs_f.flatten(1))
         tokens = torch.cat((context_token[:, None, :], player_tokens, pot_tokens), dim=1)
-        attn_mask = self._token_attention_mask(player_pot_eligible, folded_mask)
+        attn_mask = self._token_attention_mask(player_pot_eligible, folded_mask).to(
+            tokens.dtype
+        )
         encoded = tokens
         for block in self.encoder:
             encoded = block(encoded, attn_mask)
@@ -1277,7 +1283,9 @@ class PreflopAllInTransformerModel(PreflopAllInEquityModel):
         if self.dense_belief_residual:
             context_token = context_token + self.dense_belief_proj(beliefs_f.flatten(1))
         tokens = torch.cat((context_token[:, None, :], player_tokens, pot_tokens), dim=1)
-        attn_mask = self._token_attention_mask(player_pot_eligible, folded_mask)
+        attn_mask = self._token_attention_mask(player_pot_eligible, folded_mask).to(
+            tokens.dtype
+        )
         encoded = tokens
         for block in self.encoder:
             encoded = block(encoded, attn_mask)
