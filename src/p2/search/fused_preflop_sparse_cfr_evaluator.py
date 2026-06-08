@@ -16,7 +16,9 @@ from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_multiway_with_tensors_,
     fused_avg_values_multiway_,
     fused_model_values_writeback_multiway_,
+    fused_parent_sum_divide_,
     fused_policy_renorm_reach_depth_multiway_,
+    fused_preflop_multiway_beliefs_from_reach_,
 )
 from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 from p2.search.preflop_sparse_cfr_evaluator import PreflopSparseCFREvaluator
@@ -196,7 +198,23 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         target: torch.Tensor | None = None,
         reach_weights: torch.Tensor | None = None,
     ) -> None:
-        CFREvaluator._propagate_all_beliefs(self, target, reach_weights)
+        if target is None:
+            target = self.beliefs
+        if reach_weights is None:
+            reach_weights = self.self_reach
+        if target.device.type != "cuda":
+            CFREvaluator._propagate_all_beliefs(self, target, reach_weights)
+            return
+
+        self._prepare_tree_slices()
+        root_index = self._get_root_index()
+        fused_preflop_multiway_beliefs_from_reach_(
+            beliefs=target,
+            reach=reach_weights,
+            allowed_prob=self.allowed_hands_prob,
+            root_index=root_index,
+            start=self.root_nodes,
+        )
 
     def _refresh_fused_t_scalars(self, t: int) -> None:
         self._ensure_fused_attrs()
@@ -237,6 +255,71 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             values_expected=values_expected,
         )
 
+    def _renormalize_policy_reach(
+        self,
+        policy: torch.Tensor,
+        reach: torch.Tensor,
+    ) -> None:
+        self._prepare_tree_slices()
+        policy[: self.root_nodes] = 0.0
+        prev_actor = self.prev_actor.contiguous()
+        for depth in range(self.tree_depth):
+            fused_policy_renorm_reach_depth_multiway_(
+                policy=policy,
+                reach=reach,
+                allowed_mask=self.allowed_hands,
+                child_offsets=self._child_offsets_by_depth[depth],
+                child_count=self._child_count_by_depth[depth],
+                prev_actor=prev_actor,
+                parent_base=self.depth_offsets[depth],
+                max_children=self.num_actions,
+                update_reach=True,
+            )
+
+    def _regret_match_current_policy(self, t: int | None = None) -> None:
+        if self._try_apply_warm_start_ftrl_policy(t):
+            self._renormalize_policy_reach(self.policy_probs, self.self_reach)
+            self._propagate_all_beliefs(self.beliefs, self.self_reach)
+            return
+
+        self._prepare_tree_slices()
+        bottom = self._bottom
+        child_offsets_top = self._child_offsets_top
+        child_count_top = self._child_count_top
+        assert child_offsets_top is not None
+        assert child_count_top is not None
+
+        positive_regrets = self._ensure_positive_regrets_buf()
+        scale = self._predictive_policy_scale_for_t(t)
+        last_regrets = getattr(self, "_last_instantaneous_regrets", None)
+        if scale > 0.0 and last_regrets is not None:
+            torch.add(
+                self.cumulative_regrets,
+                last_regrets,
+                alpha=scale,
+                out=positive_regrets,
+            )
+            torch.clamp(positive_regrets, min=0.0, out=positive_regrets)
+        else:
+            torch.clamp(self.cumulative_regrets, min=0.0, out=positive_regrets)
+        self._fused_positive_regrets_valid = False
+
+        assert bottom is not None
+        fused_parent_sum_divide_(
+            values=positive_regrets,
+            fallback=self.uniform_policy[bottom:],
+            child_offsets=child_offsets_top,
+            child_count=child_count_top,
+            out=self.policy_probs[bottom:],
+            out_offset=bottom,
+            max_children=self.num_actions,
+            uniform_count_fallback=True,
+            block_h=256,
+        )
+        self._mask_invalid(self.policy_probs)
+        self._renormalize_policy_reach(self.policy_probs, self.self_reach)
+        self._propagate_all_beliefs(self.beliefs, self.self_reach)
+
     def update_policy(self, t: int) -> None:
         self._refresh_fused_t_scalars(t)
         self._regret_match_current_policy(t)
@@ -257,8 +340,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self.policy_probs_avg[:] = self.policy_probs
             self.average_policy_initialized = False
             if update_reach:
-                self._calculate_reach_weights(
-                    self.self_reach_avg, self.policy_probs_avg
+                self._renormalize_policy_reach(
+                    self.policy_probs_avg, self.self_reach_avg
                 )
             return
 
@@ -290,8 +373,12 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self._renormalize_average_policy(update_reach=update_reach)
 
     def _renormalize_average_policy(self, update_reach: bool) -> None:
-        root_count = self.root_nodes
-        self.policy_probs_avg[:root_count] = 0.0
+        if update_reach:
+            self._renormalize_policy_reach(
+                self.policy_probs_avg, self.self_reach_avg
+            )
+            return
+        self.policy_probs_avg[: self.root_nodes] = 0.0
         self._prepare_tree_slices()
         prev_actor = self.prev_actor.contiguous()
         for depth in range(self.tree_depth):
@@ -304,7 +391,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 prev_actor=prev_actor,
                 parent_base=self.depth_offsets[depth],
                 max_children=self.num_actions,
-                update_reach=update_reach,
+                update_reach=False,
             )
 
     def update_average_values(self, t: int) -> None:

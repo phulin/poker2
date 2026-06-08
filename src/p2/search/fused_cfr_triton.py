@@ -2777,6 +2777,99 @@ def fused_policy_renorm_reach_depth_multiway_(
     )
 
 
+if triton is not None:
+
+    @triton.jit
+    def _preflop_multiway_beliefs_from_reach_kernel(
+        beliefs_ptr,  # [total, P, H] in/out; root rows are source beliefs
+        reach_ptr,  # [total, P, H]
+        allowed_prob_ptr,  # [total, H]
+        root_index_ptr,  # [total]
+        start,
+        total,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        EPS,
+        BLOCK_H: tl.constexpr,
+    ):
+        c = tl.program_id(0) + start
+        p = tl.program_id(1)
+        if c >= total:
+            return
+
+        root = tl.load(root_index_ptr + c)
+        offs = tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        root_belief = tl.load(
+            beliefs_ptr + (root * NUM_PLAYERS + p) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        reach = tl.load(
+            reach_ptr + (c * NUM_PLAYERS + p) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        unnorm = root_belief * reach
+        denom = tl.sum(unnorm, axis=0)
+        fallback = tl.load(
+            allowed_prob_ptr + c * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        out = tl.where(denom > EPS, unnorm / tl.maximum(denom, EPS), fallback)
+        tl.store(
+            beliefs_ptr + (c * NUM_PLAYERS + p) * H + offs,
+            out,
+            mask=mask,
+        )
+
+
+def fused_preflop_multiway_beliefs_from_reach_(
+    beliefs: torch.Tensor,
+    reach: torch.Tensor,
+    allowed_prob: torch.Tensor,
+    root_index: torch.Tensor,
+    *,
+    start: int,
+    eps: float = 1e-5,
+    block_h: int = 256,
+) -> None:
+    """Compact preflop belief propagation from root beliefs and reach weights.
+
+    Root rows are treated as immutable source distributions. Callers should pass
+    ``start=root_nodes`` so the kernel only rewrites descendant rows.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert beliefs.is_contiguous() and beliefs.dim() == 3
+    assert reach.is_contiguous() and reach.shape == beliefs.shape
+    assert allowed_prob.is_contiguous() and allowed_prob.shape == beliefs.shape[:1] + (
+        beliefs.shape[2],
+    )
+    assert root_index.is_contiguous() and root_index.shape == (beliefs.shape[0],)
+    total, players, h = beliefs.shape
+    if total <= start:
+        return
+    if h > block_h:
+        raise ValueError(f"hand dim {h} exceeds block_h {block_h}")
+    grid = (total - start, players)
+    _preflop_multiway_beliefs_from_reach_kernel[grid](
+        beliefs,
+        reach,
+        allowed_prob,
+        root_index,
+        start,
+        total,
+        h,
+        NUM_PLAYERS=players,
+        EPS=eps,
+        BLOCK_H=block_h,
+        num_warps=8,
+    )
+
+
 def fused_sibling_sum(
     values: torch.Tensor,  # [total, H]
     child_offsets: torch.Tensor,  # [num_parents] — child_offsets[p] gives first child idx
