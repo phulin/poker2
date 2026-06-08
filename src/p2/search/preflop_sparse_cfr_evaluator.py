@@ -59,6 +59,8 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         self._preflop_unblocked_projection_key: tuple[torch.device, torch.dtype] | None = (
             None
         )
+        self._preflop_ev_action_weights_buf: torch.Tensor | None = None
+        self._preflop_ev_child_values_buf: torch.Tensor | None = None
 
     @property
     def _compact_preflop(self) -> bool:
@@ -95,6 +97,35 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             self._preflop_unblocked_projection = projection.contiguous()
             self._preflop_unblocked_projection_key = key
         return class_mass @ self._preflop_unblocked_projection
+
+    def _preflop_ev_buffers(
+        self,
+        rows: int,
+        *,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        shape = (rows, self.num_players, PREFLOP_HANDS)
+        action_buf = getattr(self, "_preflop_ev_action_weights_buf", None)
+        value_buf = getattr(self, "_preflop_ev_child_values_buf", None)
+        if (
+            action_buf is None
+            or action_buf.shape[0] < rows
+            or action_buf.shape[1:] != shape[1:]
+            or action_buf.dtype != dtype
+            or action_buf.device != self.device
+        ):
+            action_buf = torch.empty(shape, dtype=dtype, device=self.device)
+            self._preflop_ev_action_weights_buf = action_buf
+        if (
+            value_buf is None
+            or value_buf.shape[0] < rows
+            or value_buf.shape[1:] != shape[1:]
+            or value_buf.dtype != dtype
+            or value_buf.device != self.device
+        ):
+            value_buf = torch.empty(shape, dtype=dtype, device=self.device)
+            self._preflop_ev_child_values_buf = value_buf
+        return action_buf[:rows], value_buf[:rows]
 
     def initialize_subgame(
         self,
@@ -477,16 +508,15 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                 out=values,
             )
 
-        player_ids = torch.arange(self.num_players, device=self.device)
         for depth in range(self.tree_depth - 1, -1, -1):
             child_start = self.depth_offsets[depth + 1]
             child_end = self.depth_offsets[depth + 2]
             if child_end == child_start:
                 continue
+            child_rows = child_end - child_start
             parent = self.parent_index[child_start:child_end]
             prev_actor = self.prev_actor[child_start:child_end]
             child_policy = policy[child_start:child_end]
-            child_values = values[child_start:child_end].clone()
 
             actor_beliefs = beliefs[parent].gather(
                 1,
@@ -499,13 +529,21 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                 policy_blocked / matchup_mass.clamp(min=1e-8),
                 torch.zeros_like(policy_blocked),
             )
-            is_actor = player_ids[None, :, None] == prev_actor[:, None, None]
-            action_weights = torch.where(
-                is_actor,
-                child_policy[:, None, :],
-                opponent_conditioned_policy[:, None, :],
+            action_weights, child_values = self._preflop_ev_buffers(
+                child_rows,
+                dtype=values.dtype,
             )
-            child_values *= action_weights
+            action_weights.copy_(
+                opponent_conditioned_policy[:, None, :].expand(
+                    -1, self.num_players, -1
+                )
+            )
+            action_weights.scatter_(
+                1,
+                prev_actor[:, None, None].expand(-1, 1, PREFLOP_HANDS),
+                child_policy[:, None, :],
+            )
+            torch.mul(values[child_start:child_end], action_weights, out=child_values)
             self._pull_back_sum(child_values, values, level=depth)
 
     def compute_instantaneous_regrets(

@@ -68,6 +68,18 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def _preflop_unblocked_mass(self, class_mass: torch.Tensor) -> torch.Tensor:
         return PreflopSparseCFREvaluator._preflop_unblocked_mass(self, class_mass)
 
+    def _preflop_ev_buffers(
+        self,
+        rows: int,
+        *,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return PreflopSparseCFREvaluator._preflop_ev_buffers(
+            self,
+            rows,
+            dtype=dtype,
+        )
+
     def initialize_subgame(
         self,
         src_env: HUNLTensorEnv | PBSEnv,
