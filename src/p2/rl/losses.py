@@ -847,6 +847,21 @@ class RebelSupervisedLoss(nn.Module):
     def _base_weights(
         self, batch: RebelBatch
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        hand_dim = int(batch.features.hand_dim)
+        if hand_dim == PREFLOP_HANDS:
+            player_beliefs = batch.features.beliefs.view(
+                -1, self.num_players, PREFLOP_HANDS
+            )
+            allowed_hands_float = torch.ones(
+                player_beliefs.shape[0],
+                PREFLOP_HANDS,
+                dtype=player_beliefs.dtype,
+                device=player_beliefs.device,
+            )
+            unblocked_mass = preflop_class_unblocked_mass(player_beliefs)
+            return player_beliefs, allowed_hands_float, unblocked_mass
+        if hand_dim != NUM_HANDS:
+            raise ValueError(f"Unsupported hand_dim={hand_dim}")
         player_beliefs = batch.features.beliefs.view(-1, self.num_players, NUM_HANDS)
         allowed_hands = self._board_allowed_hands(batch.features.board)
         allowed_hands_float = allowed_hands.to(dtype=player_beliefs.dtype)
@@ -857,18 +872,24 @@ class RebelSupervisedLoss(nn.Module):
         self, batch: RebelBatch
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         actor = batch.features.to_act
+        valid_actor = (actor >= 0) & (actor < self.num_players)
+        actor_safe = actor.clamp(0, self.num_players - 1)
         player_beliefs, allowed_hands_float, unblocked_mass = self._base_weights(batch)
+        hand_dim = player_beliefs.shape[-1]
         actor_belief = player_beliefs.gather(
-            1, actor[:, None, None].expand(-1, 1, NUM_HANDS)
+            1, actor_safe[:, None, None].expand(-1, 1, hand_dim)
         ).squeeze(1)
         player_ids = torch.arange(self.num_players, device=actor.device)
-        non_actor = player_ids[None, :, None] != actor[:, None, None]
+        non_actor = player_ids[None, :, None] != actor_safe[:, None, None]
         other_matchup = torch.where(
             non_actor,
             unblocked_mass,
             torch.ones_like(unblocked_mass),
         ).prod(dim=1)
         other_matchup = other_matchup * allowed_hands_float
+        valid_actor_f = valid_actor[:, None].to(dtype=actor_belief.dtype)
+        actor_belief = actor_belief * valid_actor_f
+        other_matchup = other_matchup * valid_actor_f
         return (
             player_beliefs,
             allowed_hands_float,
@@ -976,11 +997,13 @@ class RebelSupervisedLoss(nn.Module):
     ) -> dict[str, torch.Tensor]:
         device = logits.device
         actor = batch.features.to_act
+        valid_actor = (actor >= 0) & (actor < self.num_players)
+        actor_safe = actor.clamp(0, self.num_players - 1)
         player_beliefs = batch.features.beliefs.view(
             -1, self.num_players, PREFLOP_HANDS
         )
         actor_belief = player_beliefs.gather(
-            1, actor[:, None, None].expand(-1, 1, PREFLOP_HANDS)
+            1, actor_safe[:, None, None].expand(-1, 1, PREFLOP_HANDS)
         ).squeeze(1)
         policy_targets = batch.policy_targets.to(dtype=logits.dtype)
         legal_masks = batch.legal_masks[:, None, :]
@@ -992,7 +1015,7 @@ class RebelSupervisedLoss(nn.Module):
             player_beliefs.to(dtype=logits.dtype)
         )
         player_ids = torch.arange(self.num_players, device=device)
-        non_actor = player_ids[None, :, None] != actor[:, None, None]
+        non_actor = player_ids[None, :, None] != actor_safe[:, None, None]
         other_matchup = torch.where(
             non_actor,
             unblocked_mass,
@@ -1011,6 +1034,11 @@ class RebelSupervisedLoss(nn.Module):
         )
         policy_loss_all = (policy_objective_per_hand * policy_weights).sum(dim=-1)
         node_weights = self._policy_node_weights(batch, policy_loss_all.dtype)
+        valid_actor_weight = valid_actor.to(dtype=policy_loss_all.dtype)
+        if node_weights is None:
+            node_weights = valid_actor_weight
+        else:
+            node_weights = node_weights * valid_actor_weight
         policy_loss = self._reduce_policy_node_metric(policy_loss_all, node_weights)
         target_entropy_per_sample = (target_entropy_per_hand * policy_weights).sum(
             dim=-1

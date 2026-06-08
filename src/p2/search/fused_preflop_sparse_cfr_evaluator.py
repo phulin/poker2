@@ -57,9 +57,6 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def _continuation_value_target_sampling_enabled(self) -> bool:
         return True
 
-    def _continuation_value_target_replace_roots(self) -> bool:
-        return True
-
     def _continuation_value_target_streets(self) -> tuple[int, ...]:
         return (0,)
 
@@ -398,7 +395,10 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 self._last_model_values_buf = self.latest_values.new_empty(empty_shape)
             self.last_model_values = self._last_model_values_buf
 
-        if self.showdown_indices.numel() > 0:
+        compact_public_preflop = (
+            beliefs.shape[-1] == PREFLOP_HANDS and isinstance(self.env, PBSEnv)
+        )
+        if self.showdown_indices.numel() > 0 and not compact_public_preflop:
             showdown_beliefs = beliefs[self.showdown_indices]
             if self.num_players == 2:
                 showdown_values = self._showdown_value_both(showdown_beliefs)
@@ -419,6 +419,28 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
 
     def cfr_iteration(self, t: int) -> None:
         CFREvaluator.cfr_iteration(self, t)
+
+    def _record_stats(self, t: int, old_policy_probs: torch.Tensor) -> None:
+        return None
+
+    def sample_leaves(self, training_mode: bool):
+        pbs = SparseCFREvaluator.sample_leaves(self, training_mode)
+        keep = pbs.env.street == 0
+        if bool(keep.all().item()):
+            return pbs
+        keep_indices = torch.where(keep)[0]
+        filtered = pbs.beliefs[keep_indices].clone()
+        out = type(pbs).from_proto(
+            env_proto=pbs.env,
+            beliefs=filtered,
+            num_envs=keep_indices.numel(),
+        )
+        out.env.copy_state_from(
+            pbs.env,
+            keep_indices,
+            torch.arange(keep_indices.numel(), device=self.device),
+        )
+        return out
 
     def evaluate_cfr(
         self, training_mode: bool = True, sample_continuation: bool = True

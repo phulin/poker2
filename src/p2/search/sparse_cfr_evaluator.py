@@ -609,17 +609,17 @@ class SparseCFREvaluator(CFREvaluator):
         assert (~self.allin_call_mask[continue_nodes]).all()
 
         if target_sampling:
-            continuation_value_target_indices = abort_nodes[abort_nodes >= 0]
-            if not self._continuation_value_target_replace_roots():
-                continuation_value_target_indices = continuation_value_target_indices[
-                    continuation_value_target_indices >= N
-                ]
-            self.continuation_value_target_indices = (
-                continuation_value_target_indices.contiguous()
+            self.continuation_value_target_indices = torch.empty(
+                0, dtype=torch.long, device=self.device
             )
 
         # Don't sample root nodes.
-        sampled_continue = continue_nodes[continue_nodes >= N]
+        if target_sampling:
+            abort_continue = abort_nodes[abort_nodes >= N]
+            leaf_continue = continue_nodes[continue_nodes >= N]
+            sampled_continue = torch.cat((abort_continue, leaf_continue), dim=0)
+        else:
+            sampled_continue = continue_nodes[continue_nodes >= N]
         pbs = PublicBeliefState.from_proto(
             env_proto=self.env,
             beliefs=self.beliefs_sample[sampled_continue],
@@ -713,6 +713,7 @@ class SparseCFREvaluator(CFREvaluator):
         child_indices = self.child_offsets[node_indices, None] + cols[None, :]
         safe_child_indices = torch.where(valid, child_indices, 0)
         actions = self.action_from_parent[safe_child_indices]
+        valid = valid & (actions >= 0) & (actions < self.num_actions)
         rows = torch.arange(node_indices.numel(), dtype=torch.long, device=self.device)[
             :, None
         ].expand_as(actions)

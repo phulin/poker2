@@ -619,7 +619,7 @@ def test_evaluate_pbs_multiway_cfr_smoke() -> None:
     cfg.search.allin_call_terminal_abstraction = False
     cfg.search.iterations = 1
     env = PBSEnv(
-        num_envs=1,
+        num_envs=2,
         num_players=num_players,
         starting_stack=1000,
         sb=5,
@@ -628,8 +628,12 @@ def test_evaluate_pbs_multiway_cfr_smoke() -> None:
         device=device,
     )
     env.reset(
-        force_button=torch.zeros(1, dtype=torch.long, device=device),
-        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+        force_button=torch.zeros(2, dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14], [15, 16, 17, 18, 19]],
+            dtype=torch.long,
+            device=device,
+        ),
     )
     model = MockModel(
         num_actions=len(cfg.env.bet_bins) + 3,
@@ -661,7 +665,7 @@ def test_preflop_sparse_evaluator_enforces_pbs_preflop_roots() -> None:
     cfg.env.num_players = num_players
     cfg.search.allin_call_terminal_abstraction = False
     env = PBSEnv(
-        num_envs=1,
+        num_envs=2,
         num_players=num_players,
         mean_stack=1000,
         sb=5,
@@ -670,8 +674,12 @@ def test_preflop_sparse_evaluator_enforces_pbs_preflop_roots() -> None:
         device=device,
     )
     env.reset(
-        force_button=torch.zeros(1, dtype=torch.long, device=device),
-        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+        force_button=torch.zeros(2, dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14], [15, 16, 17, 18, 19]],
+            dtype=torch.long,
+            device=device,
+        ),
     )
     model = CompactPreflopMockModel(
         num_actions=len(cfg.env.bet_bins) + 3,
@@ -689,7 +697,6 @@ def test_preflop_sparse_evaluator_enforces_pbs_preflop_roots() -> None:
     evaluator.initialize_subgame(env, torch.arange(1, device=device), beliefs)
 
     assert evaluator._continuation_value_target_sampling_enabled()
-    assert evaluator._continuation_value_target_replace_roots()
     assert evaluator._continuation_value_target_streets() == (0,)
 
     env.street[0] = 1
@@ -799,6 +806,62 @@ def test_preflop_sparse_evaluator_runs_compact_iteration_and_policy_batch() -> N
         evaluator.num_actions,
     )
     assert policy_batch.features.beliefs.shape[1] == num_players * PREFLOP_HANDS
+
+
+def test_preflop_sparse_continuation_sampling_returns_abort_root_not_value_target() -> None:
+    device = get_device()
+    num_players = 3
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.depth = 2
+    cfg.search.allin_call_terminal_abstraction = False
+    cfg.search.continuation_value_target_min_depth = 1
+    cfg.search.continuation_value_target_max_depth = 1
+    env = PBSEnv(
+        num_envs=1,
+        num_players=num_players,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(1, dtype=torch.long, device=device),
+        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+    )
+    model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = PreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+    evaluator.initialize_subgame(env, torch.arange(1, device=device))
+    evaluator.initialize_policy_and_beliefs()
+
+    evaluator.policy_probs_sample.zero_()
+    root_children = torch.arange(
+        evaluator.child_offsets[0],
+        evaluator.child_offsets[0] + evaluator.child_count[0],
+        device=device,
+    )
+    continue_children = root_children[evaluator.action_from_parent[root_children] != 0]
+    assert continue_children.numel() > 0
+    evaluator.policy_probs_sample[continue_children[0]] = 1.0
+    evaluator.beliefs_sample[:] = evaluator.beliefs
+
+    next_pbs = evaluator.sample_leaves(training_mode=True)
+    value_batch, _, _ = evaluator.training_data()
+
+    assert evaluator.continuation_value_target_indices.numel() == 0
+    assert next_pbs.env.N == 1
+    assert int(next_pbs.env.street[0].item()) == 0
+    assert int(next_pbs.env.actions_this_round[0].item()) > 0
+    assert len(value_batch) == 0
 
 
 def test_preflop_sparse_allin_call_mask_requires_no_other_betting_player() -> None:
@@ -934,12 +997,12 @@ def test_preflop_sparse_allin_call_leaf_marked_during_construction() -> None:
 
 def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
     device = get_device()
-    num_players = 4
+    num_players = 6
     cfg = make_config([0.5])
     cfg.env.num_players = num_players
     cfg.search.allin_call_terminal_abstraction = False
     env = PBSEnv(
-        num_envs=1,
+        num_envs=2,
         num_players=num_players,
         mean_stack=1000,
         sb=5,
@@ -948,8 +1011,12 @@ def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
         device=device,
     )
     env.reset(
-        force_button=torch.zeros(1, dtype=torch.long, device=device),
-        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+        force_button=torch.zeros(2, dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14], [15, 16, 17, 18, 19]],
+            dtype=torch.long,
+            device=device,
+        ),
     )
     model = CompactPreflopMockModel(
         num_actions=len(cfg.env.bet_bins) + 3,
@@ -961,8 +1028,8 @@ def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
         device=device,
         cfg=cfg,
     )
-    evaluator.initialize_subgame(env, torch.arange(1, device=device))
-    node_idx = torch.arange(3, device=device)
+    evaluator.initialize_subgame(env, torch.arange(2, device=device))
+    node_idx = torch.arange(5, device=device)
     evaluator.allin_call_indices = node_idx
     evaluator.allin_call_parent_indices = torch.zeros_like(node_idx)
     evaluator.allin_call_mask = torch.zeros(
@@ -971,9 +1038,11 @@ def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
     evaluator.allin_call_mask[node_idx] = True
     evaluator.env.has_folded[node_idx] = torch.tensor(
         [
-            [False, False, True, True],
-            [False, False, False, True],
-            [False, False, False, False],
+            [False, False, True, True, True, True],
+            [False, False, False, True, True, True],
+            [False, False, False, False, True, True],
+            [False, False, False, False, False, True],
+            [False, False, False, False, False, False],
         ],
         dtype=torch.bool,
         device=device,
@@ -990,11 +1059,35 @@ def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
     class FakeOracle:
         def __init__(self) -> None:
             self.live_counts: list[int] = []
+            self.batch_sizes: list[int] = []
+            self.live3_entries: list[tuple[list[int], list[int], list[int], list[int]]] = []
 
         def values(self, *, beliefs, live_players, **kwargs):
             del kwargs
             self.live_counts.append(live_players)
+            self.batch_sizes.append(int(beliefs.shape[0]))
             return torch.full_like(beliefs, float(live_players))
+
+        def values_for_live3_entries(
+            self,
+            *,
+            beliefs,
+            live_entry_rows,
+            hero_players,
+            opp0_players,
+            opp1_players,
+            **kwargs,
+        ):
+            del kwargs
+            self.live3_entries.append(
+                (
+                    live_entry_rows.tolist(),
+                    hero_players.tolist(),
+                    opp0_players.tolist(),
+                    opp1_players.tolist(),
+                )
+            )
+            return torch.full_like(beliefs, 3.0)
 
     fake = FakeOracle()
     evaluator.preflop_allin_169_oracle = fake
@@ -1004,13 +1097,19 @@ def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
         [0],
         [1],
         [2],
+        [3],
+        [4],
     ]
     assert evaluator.preflop_allin_exact_indices.tolist() == [0, 1]
-    assert evaluator.preflop_allin_model_indices.tolist() == [2]
-    assert fake.live_counts == [2, 3, 4]
+    assert evaluator.preflop_allin_model_indices.tolist() == [2, 3, 4]
+    assert fake.live_counts == [2, 6]
+    assert fake.batch_sizes == [1, 3]
+    assert fake.live3_entries == [([0, 0, 0], [0, 1, 2], [1, 0, 0], [2, 2, 1])]
     assert_close(evaluator.latest_values[0], torch.full((num_players, PREFLOP_HANDS), 2.0))
     assert_close(evaluator.latest_values[1], torch.full((num_players, PREFLOP_HANDS), 3.0))
-    assert_close(evaluator.latest_values[2], torch.full((num_players, PREFLOP_HANDS), 4.0))
+    assert_close(evaluator.latest_values[2], torch.full((num_players, PREFLOP_HANDS), 6.0))
+    assert_close(evaluator.latest_values[3], torch.full((num_players, PREFLOP_HANDS), 6.0))
+    assert_close(evaluator.latest_values[4], torch.full((num_players, PREFLOP_HANDS), 6.0))
 
 
 def test_preflop_sparse_evaluator_rejects_fused_config() -> None:
@@ -1471,7 +1570,7 @@ def test_sparse_sample_leaf_uses_acting_players_sampled_hand() -> None:
     )
 
 
-def test_sparse_continuation_value_targets_replace_roots_at_target_depth() -> None:
+def test_sparse_continuation_sampling_returns_abort_root_without_value_target() -> None:
     device = get_device()
     env = make_env(1, device=device)
     cfg = make_config(env.default_bet_bins)
@@ -1479,7 +1578,6 @@ def test_sparse_continuation_value_targets_replace_roots_at_target_depth() -> No
     cfg.search.continuation_value_target_sampling = True
     cfg.search.continuation_value_target_min_depth = 1
     cfg.search.continuation_value_target_max_depth = 1
-    cfg.search.continuation_value_targets_replace_roots = True
 
     evaluator, _, _ = make_sparse_evaluator(env=env, cfg=cfg, device=device)
     evaluator.initialize_subgame(env, torch.tensor([0], device=device))
@@ -1496,15 +1594,15 @@ def test_sparse_continuation_value_targets_replace_roots_at_target_depth() -> No
     evaluator.policy_probs_sample[call_children[0]] = 1.0
     evaluator.beliefs_sample[:] = evaluator.beliefs
 
-    evaluator.sample_leaves(training_mode=True)
-    value_batch, _, _ = evaluator.training_data()
+    next_pbs = evaluator.sample_leaves(training_mode=True)
+    value_batch, _, _ = evaluator.training_data(exclude_start=False)
 
-    assert evaluator.continuation_value_target_indices.tolist() == [
-        int(call_children[0].item())
-    ]
+    assert evaluator.continuation_value_target_indices.numel() == 0
+    assert next_pbs.env.N == 1
+    assert_close(next_pbs.beliefs[0], evaluator.beliefs_sample[call_children[0]])
     assert len(value_batch) == 1
-    assert value_batch.statistics["continuation_value_target"].tolist() == [True]
-    assert value_batch.statistics["node_depth"].tolist() == [1]
+    assert value_batch.statistics["continuation_value_target"].tolist() == [False]
+    assert value_batch.statistics["node_depth"].tolist() == [0]
 
 
 def test_sparse_allin_call_leaf_does_not_create_descendants() -> None:

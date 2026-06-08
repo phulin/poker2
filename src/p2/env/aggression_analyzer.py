@@ -13,6 +13,8 @@ from p2.env.card_utils import (
     HAND_EQUITY_ORDERING,
     IDX_TO_RANK,
     NUM_HANDS,
+    PREFLOP_HANDS,
+    RANK_TO_IDX,
     hand_combos_tensor,
 )
 from p2.rl.rebel_batch import RebelBatch
@@ -62,6 +64,30 @@ def build_hand_to_group_mapping(device: torch.device | None = None) -> torch.Ten
     return torch.chunk(combos_ranked_tensor, NUM_GROUPS)
 
 
+@lru_cache(maxsize=1)
+def build_preflop_class_to_group_mapping(
+    device: torch.device | None = None,
+) -> tuple[torch.Tensor, ...]:
+    """Build 169-class hand-strength groups using the same ordering."""
+
+    class_ids: list[int] = []
+    for hand_name in HAND_EQUITY_ORDERING:
+        hi = RANK_TO_IDX[hand_name[0]]
+        lo = RANK_TO_IDX[hand_name[1]]
+        if len(hand_name) == 2:
+            class_id = hi * 13 + hi
+        elif hand_name[2] == "s":
+            class_id = hi * 13 + lo
+        elif hand_name[2] == "o":
+            class_id = lo * 13 + hi
+        else:
+            raise ValueError(f"Unsupported preflop hand name {hand_name!r}")
+        class_ids.append(class_id)
+
+    ranked = torch.tensor(class_ids, dtype=torch.long, device=device)
+    return torch.chunk(ranked, NUM_GROUPS)
+
+
 class AggressionAnalyzer:
     """Singleton class for analyzing aggression metrics by hand equity groups."""
 
@@ -69,6 +95,14 @@ class AggressionAnalyzer:
         self._group_mapping = build_hand_to_group_mapping(device=device)
         self._group_states = torch.tensor(
             [len(chunk) for chunk in self._group_mapping],
+            dtype=torch.long,
+            device=device,
+        )
+        self._preflop_group_mapping = build_preflop_class_to_group_mapping(
+            device=device
+        )
+        self._preflop_group_states = torch.tensor(
+            [len(chunk) for chunk in self._preflop_group_mapping],
             dtype=torch.long,
             device=device,
         )
@@ -190,9 +224,6 @@ class AggressionAnalyzer:
 
         bet_amounts = batch.statistics["bet_amounts"]  # [N, num_bins]
 
-        chunk_tuples = tuple(chunk.to(bet_amounts.device) for chunk in self._group_mapping)
-        group_states = self._group_states.to(bet_amounts.device)
-
         # Get policy targets if available - shape [N, NUM_HANDS, num_actions]
         if batch.policy_targets is not None:
             policy_targets = batch.policy_targets  # [N, NUM_HANDS, num_actions]
@@ -200,6 +231,20 @@ class AggressionAnalyzer:
             # For each state and each hand, compute the expected bet amount
             # by averaging over actions weighted by policy
             num_states, num_hands, num_actions = policy_targets.shape
+            del num_actions
+            if num_hands == NUM_HANDS:
+                chunk_tuples = tuple(
+                    chunk.to(bet_amounts.device) for chunk in self._group_mapping
+                )
+                group_states = self._group_states.to(bet_amounts.device)
+            elif num_hands == PREFLOP_HANDS:
+                chunk_tuples = tuple(
+                    chunk.to(bet_amounts.device)
+                    for chunk in self._preflop_group_mapping
+                )
+                group_states = self._preflop_group_states.to(bet_amounts.device)
+            else:
+                raise ValueError(f"Unsupported policy target hand dim {num_hands}")
 
             # Compute expected bet amount per hand using the policy
             # policy_targets: [N, NUM_HANDS, num_actions]
@@ -240,6 +285,7 @@ class AggressionAnalyzer:
             }
 
         # Fallback: if no policy targets, just return overall statistics
+        group_states = self._group_states.to(bet_amounts.device)
         total_bet_amount = bet_amounts.sum(dim=1)
         overall_sum = total_bet_amount.sum()
         overall_sum_sq = (total_bet_amount**2).sum()

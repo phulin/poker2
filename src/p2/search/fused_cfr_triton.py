@@ -5207,8 +5207,9 @@ class TScalars:
         Always a host→device copy via ``.fill_(python_float)`` — call OUTSIDE
         any captured region (before ``graph.replay()``).
         """
-        t_alpha_num = float(t**dcfr_alpha)
-        t_beta_num = float(t**dcfr_beta)
+        t_discount = max(1, int(t))
+        t_alpha_num = float(t_discount**dcfr_alpha)
+        t_beta_num = float(t_discount**dcfr_beta)
         self.t_alpha_num.fill_(t_alpha_num)
         self.t_beta_num.fill_(t_beta_num)
         self.t_alpha_den.fill_(t_alpha_num + 1.0)

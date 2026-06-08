@@ -10,6 +10,7 @@ Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton ke
 - `bench_fused_cfr_triton.py`: Fused CFR Triton benchmark.
 - `bench_fused_sparse_speedups.py`: Fused sparse evaluator speedup benchmark.
 - `bench_indexed_add.py`: Indexed-add benchmark.
+- `bench_preflop_allin_3p_kernel.py`: Benchmarks the exact native-169 3-player all-in share calculation, comparing the current materialized opponent outer-product matmul path with combined-GEMM, structural-denominator, packed-symmetry, and fused Triton candidates.
 - `bench_reach_weights.py`: Reach-weight computation benchmark.
 - `bench_rules_triton.py`: Triton hand-rules benchmark.
 - `bench_triton_pbs_env.py`: PBSEnv versus TritonPBSEnv microbenchmarks for legal, step, reset, copy, gather, repeat, and persistent `*_into` materialization paths.

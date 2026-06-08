@@ -63,9 +63,6 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
     def _continuation_value_target_sampling_enabled(self) -> bool:
         return True
 
-    def _continuation_value_target_replace_roots(self) -> bool:
-        return True
-
     def _continuation_value_target_streets(self) -> tuple[int, ...]:
         return (0,)
 
@@ -168,6 +165,10 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         )
         self.preflop_allin_exact_indices = empty
         self.preflop_allin_model_indices = empty
+        self.preflop_allin_live3_entry_rows = empty
+        self.preflop_allin_live3_hero_players = empty
+        self.preflop_allin_live3_opp0_players = empty
+        self.preflop_allin_live3_opp1_players = empty
 
     def _cache_preflop_allin_live_partitions(self) -> None:
         empty = torch.empty(0, dtype=torch.long, device=self.device)
@@ -180,6 +181,10 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             )
             self.preflop_allin_exact_indices = empty
             self.preflop_allin_model_indices = empty
+            self.preflop_allin_live3_entry_rows = empty
+            self.preflop_allin_live3_hero_players = empty
+            self.preflop_allin_live3_opp0_players = empty
+            self.preflop_allin_live3_opp1_players = empty
             return
 
         live_counts = (~self.env.has_folded[self.allin_call_indices]).sum(dim=1)
@@ -203,6 +208,23 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             if self.num_players >= 4
             else empty
         )
+        live3_idx = indices_by_count[3] if self.num_players >= 3 else empty
+        if live3_idx.numel() > 0:
+            live3 = ~self.env.has_folded[live3_idx]
+            rows, hero_players = torch.nonzero(live3, as_tuple=True)
+            opp_mask = live3[rows].clone()
+            entry = torch.arange(rows.shape[0], device=self.device)
+            opp_mask[entry, hero_players] = False
+            opps = torch.nonzero(opp_mask, as_tuple=False)[:, 1].reshape(-1, 2)
+            self.preflop_allin_live3_entry_rows = rows.contiguous()
+            self.preflop_allin_live3_hero_players = hero_players.contiguous()
+            self.preflop_allin_live3_opp0_players = opps[:, 0].contiguous()
+            self.preflop_allin_live3_opp1_players = opps[:, 1].contiguous()
+        else:
+            self.preflop_allin_live3_entry_rows = empty
+            self.preflop_allin_live3_hero_players = empty
+            self.preflop_allin_live3_opp0_players = empty
+            self.preflop_allin_live3_opp1_players = empty
 
     def _cache_allin_call_street_partitions(
         self, parent_streets: torch.Tensor
@@ -329,21 +351,56 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         if not hasattr(self, "preflop_allin_indices_by_live_count"):
             self._cache_preflop_allin_live_partitions()
         oracle = self._ensure_preflop_allin_169_oracle()
-        for live_players in range(2, self.num_players + 1):
+        for live_players in range(2, min(3, self.num_players) + 1):
             node_idx = self.preflop_allin_indices_by_live_count[live_players]
             if node_idx.numel() == 0:
                 continue
-            values = oracle.values(
-                beliefs=beliefs[node_idx],
-                starting_stacks=self.env.starting_stacks[node_idx].to(torch.float32),
-                committed=self.env.chips_placed[node_idx].to(torch.float32),
-                stacks_after=self.env.stacks[node_idx].to(torch.float32),
-                allin_mask=self.env.is_allin[node_idx],
-                folded_mask=self.env.has_folded[node_idx],
-                scale=self.env.scale[node_idx].to(torch.float32),
-                live_players=live_players,
-            )
+            beliefs_at_nodes = beliefs[node_idx]
+            starting_stacks = self.env.starting_stacks[node_idx].to(torch.float32)
+            committed = self.env.chips_placed[node_idx].to(torch.float32)
+            stacks_after = self.env.stacks[node_idx].to(torch.float32)
+            folded_mask = self.env.has_folded[node_idx]
+            scale = self.env.scale[node_idx].to(torch.float32)
+            if live_players == 3 and hasattr(oracle, "values_for_live3_entries"):
+                values = oracle.values_for_live3_entries(
+                    beliefs=beliefs_at_nodes,
+                    starting_stacks=starting_stacks,
+                    committed=committed,
+                    stacks_after=stacks_after,
+                    folded_mask=folded_mask,
+                    scale=scale,
+                    live_entry_rows=self.preflop_allin_live3_entry_rows,
+                    hero_players=self.preflop_allin_live3_hero_players,
+                    opp0_players=self.preflop_allin_live3_opp0_players,
+                    opp1_players=self.preflop_allin_live3_opp1_players,
+                )
+            else:
+                values = oracle.values(
+                    beliefs=beliefs_at_nodes,
+                    starting_stacks=starting_stacks,
+                    committed=committed,
+                    stacks_after=stacks_after,
+                    allin_mask=self.env.is_allin[node_idx],
+                    folded_mask=folded_mask,
+                    scale=scale,
+                    live_players=live_players,
+                )
             self.latest_values[node_idx] = values.to(self.latest_values.dtype)
+
+        node_idx = self.preflop_allin_model_indices
+        if node_idx.numel() == 0:
+            return
+        values = oracle.values(
+            beliefs=beliefs[node_idx],
+            starting_stacks=self.env.starting_stacks[node_idx].to(torch.float32),
+            committed=self.env.chips_placed[node_idx].to(torch.float32),
+            stacks_after=self.env.stacks[node_idx].to(torch.float32),
+            allin_mask=self.env.is_allin[node_idx],
+            folded_mask=self.env.has_folded[node_idx],
+            scale=self.env.scale[node_idx].to(torch.float32),
+            live_players=self.num_players,
+        )
+        self.latest_values[node_idx] = values.to(self.latest_values.dtype)
 
     def _compute_policy_node_reach(self, top: int) -> torch.Tensor:
         allowed = self.allowed_hands[:top].to(dtype=self.float_dtype)

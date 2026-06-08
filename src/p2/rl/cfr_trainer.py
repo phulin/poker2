@@ -15,6 +15,7 @@ from p2.core.structured_config import Config, LrSchedule, ModelType
 from p2.env.aggression_analyzer import AggressionAnalyzer
 from p2.env.card_utils import (
     NUM_HANDS,
+    PREFLOP_HANDS,
     combo_suit_permutation_tensor,
     suit_permutations_tensor,
 )
@@ -295,6 +296,9 @@ class RebelCFRTrainer:
         policy_capacity = int(
             math.ceil(value_capacity * self.cfg.train.policy_capacity_factor)
         )
+        replay_hand_dim = int(
+            getattr(cfg.model, "preflop_hand_dim", NUM_HANDS) or NUM_HANDS
+        )
 
         if pregeneration_only:
             self.value_buffer = None
@@ -307,6 +311,7 @@ class RebelCFRTrainer:
                 num_players=self.num_players,
                 num_context_features=num_context_features,
                 device=self.buffer_device,
+                hand_dim=replay_hand_dim,
                 underfull_evict_fraction=cfg.train.replay_buffer_underfull_evict_fraction,
                 generator=self.buffer_rng,
             )
@@ -317,6 +322,7 @@ class RebelCFRTrainer:
                 num_players=self.num_players,
                 num_context_features=num_context_features,
                 device=self.buffer_device,
+                hand_dim=replay_hand_dim,
                 decimate=1.0 / policy_decimate,
                 underfull_evict_fraction=cfg.train.replay_buffer_underfull_evict_fraction,
                 generator=self.buffer_rng,
@@ -514,6 +520,7 @@ class RebelCFRTrainer:
                     num_players=self.num_players,
                     num_context_features=num_context_features,
                     device=self.buffer_device,
+                    hand_dim=replay_hand_dim,
                 )
                 holdout_policy_buffer = RebelPolicyBuffer(
                     capacity=policy_capacity,
@@ -521,6 +528,7 @@ class RebelCFRTrainer:
                     num_players=self.num_players,
                     num_context_features=num_context_features,
                     device=self.buffer_device,
+                    hand_dim=replay_hand_dim,
                 )
                 holdout_source = make_pregenerated_source(
                     holdout_value_buffer,
@@ -876,6 +884,14 @@ class RebelCFRTrainer:
             or value_output_permuted.hand_values is None
         ):
             raise ValueError("hand_values is None")
+        hand_dim = value_output.hand_values.shape[-1]
+        if hand_dim == PREFLOP_HANDS:
+            return F.mse_loss(
+                value_output.hand_values.float(),
+                value_output_permuted.hand_values.float(),
+            )
+        if hand_dim != NUM_HANDS:
+            raise ValueError(f"Unsupported permutation hand_dim={hand_dim}")
         hand_values_permuted_reversed = torch.gather(
             value_output_permuted.hand_values,
             2,
@@ -1594,11 +1610,12 @@ class RebelCFRTrainer:
             else {}
         )
         if has_replay_buffers and len(self.value_buffer) > 0:
+            value_buffer_hand_dim = self.value_buffer.features.hand_dim
             value_buffer_target_mean_abs_tensor = (
                 (
                     self.value_buffer.value_targets[: len(self.value_buffer)]
                     * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
-                        -1, self.num_players, NUM_HANDS
+                        -1, self.num_players, value_buffer_hand_dim
                     )
                 )
                 .abs()
@@ -1779,6 +1796,7 @@ class RebelCFRTrainer:
             fresh_value_batch is not None
             and fresh_value_batch.value_targets is not None
         ):
+            fresh_value_hand_dim = fresh_value_batch.features.hand_dim
             metrics["fresh_value_batch_street"] = street_count(
                 fresh_value_batch.features.street
             )
@@ -1786,7 +1804,7 @@ class RebelCFRTrainer:
                 (
                     fresh_value_batch.value_targets
                     * fresh_value_batch.features.beliefs.view(
-                        -1, self.num_players, NUM_HANDS
+                        -1, self.num_players, fresh_value_hand_dim
                     )
                 )
                 .abs()
@@ -1798,7 +1816,7 @@ class RebelCFRTrainer:
                 (
                     fresh_value_batch.value_targets
                     * fresh_value_batch.features.beliefs.view(
-                        -1, self.num_players, NUM_HANDS
+                        -1, self.num_players, fresh_value_hand_dim
                     )
                 )
                 .abs()

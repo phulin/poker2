@@ -2,7 +2,11 @@ from collections.abc import Callable
 
 import torch
 
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import (
+    NUM_HANDS,
+    PREFLOP_HANDS,
+    preflop_class_multiplicity_tensor,
+)
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
 from p2.rl.rebel_batch import RebelBatch
@@ -150,11 +154,23 @@ class RebelDataGenerator:
         }
 
     def _new_pbs(self, target_batch_size: int) -> PublicBeliefState:
-        beliefs = torch.full(
-            (target_batch_size, self.evaluator.num_players, NUM_HANDS),
-            1.0 / NUM_HANDS,
-            device=self.device,
-        )
+        hand_dim = int(getattr(self.evaluator, "hand_dim", NUM_HANDS))
+        if hand_dim == PREFLOP_HANDS:
+            prior = preflop_class_multiplicity_tensor(device=self.device).to(
+                dtype=getattr(self.evaluator, "float_dtype", torch.float32)
+            )
+            prior = prior / prior.sum().clamp(min=1.0)
+            beliefs = prior.expand(
+                target_batch_size,
+                self.evaluator.num_players,
+                PREFLOP_HANDS,
+            ).clone()
+        else:
+            beliefs = torch.full(
+                (target_batch_size, self.evaluator.num_players, hand_dim),
+                1.0 / hand_dim,
+                device=self.device,
+            )
         pbs = PublicBeliefState.from_proto(
             env_proto=self.env_proto,
             beliefs=beliefs,
@@ -308,6 +324,16 @@ class RebelDataGenerator:
                     include_policy_batch=need_policy_batch,
                 )
             )
+            if policy_batch is not None and policy_batch.policy_targets is not None:
+                valid_actor = (policy_batch.features.to_act >= 0) & (
+                    policy_batch.features.to_act < self.evaluator.num_players
+                )
+                valid_policy = (
+                    valid_actor
+                    & policy_batch.legal_masks.any(dim=-1)
+                    & (policy_batch.policy_targets.sum(dim=(1, 2)) > 0)
+                )
+                policy_batch = policy_batch[valid_policy]
             if self.store_replay:
                 if self.policy_buffer is None or self.value_buffer is None:
                     raise RuntimeError("store_replay=True requires replay buffers")

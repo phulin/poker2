@@ -22,6 +22,7 @@ class RebelReplayBuffer:
         policy_targets: bool = True,
         value_targets: bool = True,
         dtype: torch.dtype = torch.float32,
+        hand_dim: int = NUM_HANDS,
         decimate: float | None = None,
         underfull_evict_fraction: float = 0.0,
         generator: Optional[torch.Generator] = None,
@@ -33,6 +34,7 @@ class RebelReplayBuffer:
         self.capacity = capacity
         self.num_actions = num_actions
         self.num_players = num_players
+        self.hand_dim = int(hand_dim)
         self.device = device
         self.dtype = dtype
         self.decimate = decimate
@@ -57,15 +59,20 @@ class RebelReplayBuffer:
             board=torch.zeros(self.capacity, 5, dtype=torch.long, device=device),
             beliefs=torch.zeros(
                 self.capacity,
-                self.num_players * NUM_HANDS,
+                self.num_players * self.hand_dim,
                 dtype=dtype,
                 device=device,
             ),
+            hand_dim=self.hand_dim,
         )
 
         if policy_targets:
             self.policy_targets = torch.zeros(
-                self.capacity, NUM_HANDS, self.num_actions, dtype=dtype, device=device
+                self.capacity,
+                self.hand_dim,
+                self.num_actions,
+                dtype=dtype,
+                device=device,
             )
         else:
             self.policy_targets = None
@@ -74,7 +81,7 @@ class RebelReplayBuffer:
             self.value_targets = torch.zeros(
                 self.capacity,
                 self.num_players,
-                NUM_HANDS,
+                self.hand_dim,
                 dtype=dtype,
                 device=device,
             )
@@ -120,6 +127,7 @@ class RebelReplayBuffer:
             "capacity": self.capacity,
             "num_actions": self.num_actions,
             "num_players": self.num_players,
+            "hand_dim": self.hand_dim,
             "dtype": str(self.dtype),
             "policy_targets_enabled": self.policy_targets is not None,
             "value_targets_enabled": self.value_targets is not None,
@@ -157,12 +165,14 @@ class RebelReplayBuffer:
             "capacity": self.capacity,
             "num_actions": self.num_actions,
             "num_players": self.num_players,
+            "hand_dim": self.hand_dim,
         }
         for key, value in expected.items():
-            if int(state[key]) != value:
+            checkpoint_value = state.get(key, NUM_HANDS if key == "hand_dim" else None)
+            if int(checkpoint_value) != value:
                 raise ValueError(
                     f"Replay buffer {key} mismatch: checkpoint has "
-                    f"{state[key]}, current buffer has {value}"
+                    f"{checkpoint_value}, current buffer has {value}"
                 )
         if bool(state["policy_targets_enabled"]) != (self.policy_targets is not None):
             raise ValueError("Replay buffer policy target layout mismatch")
@@ -337,6 +347,19 @@ class RebelReplayBuffer:
         assert (self.policy_targets is None) == (batch.policy_targets is None)
         assert (self.value_targets is None) == (batch.value_targets is None)
 
+        if self.policy_targets is not None:
+            valid_actor = (batch.features.to_act >= 0) & (
+                batch.features.to_act < self.num_players
+            )
+            if batch.policy_targets is None:
+                raise RuntimeError("policy replay buffer received no policy targets")
+            valid_target = batch.policy_targets.sum(dim=(1, 2)) > 0
+            valid_policy = valid_actor & batch.legal_masks.any(dim=-1) & valid_target
+            batch = batch[valid_policy]
+            batch_size = len(batch)
+            if batch_size == 0:
+                return
+
         decimating = (
             self.decimate is not None and self.size == self.capacity and batch_size > 0
         )
@@ -487,6 +510,7 @@ class RebelReplayBuffer:
                 to_act=torch.index_select(self.features.to_act, 0, idxs),
                 board=torch.index_select(self.features.board, 0, idxs),
                 beliefs=torch.index_select(self.features.beliefs, 0, idxs),
+                hand_dim=self.hand_dim,
             ),
             policy_targets=(
                 torch.index_select(self.policy_targets, 0, idxs)
@@ -523,6 +547,7 @@ class RebelPolicyBuffer(RebelReplayBuffer):
         num_context_features: int,
         device: torch.device,
         dtype: torch.dtype = torch.float32,
+        hand_dim: int = NUM_HANDS,
         decimate: float | None = None,
         underfull_evict_fraction: float = 0.0,
         generator: Optional[torch.Generator] = None,
@@ -540,6 +565,7 @@ class RebelPolicyBuffer(RebelReplayBuffer):
             policy_targets=True,
             value_targets=False,
             dtype=dtype,
+            hand_dim=hand_dim,
             decimate=decimate,
             underfull_evict_fraction=underfull_evict_fraction,
             generator=generator,
@@ -562,6 +588,7 @@ class RebelValueBuffer(RebelReplayBuffer):
         num_context_features: int,
         device: torch.device,
         dtype: torch.dtype = torch.float32,
+        hand_dim: int = NUM_HANDS,
         decimate: float | None = None,
         underfull_evict_fraction: float = 0.0,
         generator: Optional[torch.Generator] = None,
@@ -575,6 +602,7 @@ class RebelValueBuffer(RebelReplayBuffer):
             policy_targets=False,
             value_targets=True,
             dtype=dtype,
+            hand_dim=hand_dim,
             decimate=decimate,
             underfull_evict_fraction=underfull_evict_fraction,
             generator=generator,

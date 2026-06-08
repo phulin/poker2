@@ -352,7 +352,7 @@ class SearchConfig:
     preflop_allin_table_path: str | None = None
     preflop_allin_169_cache_path: str | None = None
     preflop_allin_169_model_checkpoint: str | None = None
-    preflop_allin_169_compile_model: bool = False
+    preflop_allin_169_compile_model: bool = True
     closing_leaf_checkpoint: str | None = None
     model_scope: ModelScope = ModelScope.mixed_street
     street_model_checkpoints: dict[str, str] = field(default_factory=dict)
@@ -360,9 +360,8 @@ class SearchConfig:
     allin_by_depth: list[bool] | None = None
     continuation_value_target_sampling: bool = False
     continuation_value_target_streets: list[int] = field(default_factory=lambda: [0])
-    continuation_value_target_min_depth: int = 0
+    continuation_value_target_min_depth: int = 1
     continuation_value_target_max_depth: int | None = None
-    continuation_value_targets_replace_roots: bool = False
 
 
 @dataclass
