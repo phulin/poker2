@@ -3,6 +3,7 @@
 from .data import PreflopAllInBatch, make_random_preflop_allin_batch
 from .model import (
     PreflopAllIn169EquityModel,
+    PreflopAllIn169TransformerModel,
     PreflopAllInEquityModel,
     PreflopAllInTransformerModel,
 )
@@ -19,6 +20,7 @@ from .sampler import estimate_preflop_allin_values, estimate_preflop_allin_value
 
 __all__ = [
     "PreflopAllIn169EquityModel",
+    "PreflopAllIn169TransformerModel",
     "PreflopAllIn169Tensors",
     "PreflopAllInBatch",
     "PreflopAllInEquityModel",

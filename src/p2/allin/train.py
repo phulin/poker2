@@ -20,6 +20,7 @@ from omegaconf import DictConfig, OmegaConf
 from p2.allin.data import PreflopAllInBatch
 from p2.allin.model import (
     PreflopAllIn169EquityModel,
+    PreflopAllIn169TransformerModel,
     PreflopAllInEquityModel,
     PreflopAllInTransformerModel,
 )
@@ -42,6 +43,7 @@ class AllInTrainConfig:
     batch_size: int = 64
     batch_size_schedule: str = ""
     players: int = 4
+    min_allin_players: int = 2
     optimizer: str = "muon"
     learning_rate: float = 2.5e-3
     adamw_learning_rate: float = 4.0e-3
@@ -165,19 +167,31 @@ def _build_model(cfg: TrainConfig) -> torch.nn.Module:
             f"got {cfg.range_hand_dim}"
         )
     if cfg.range_hand_dim == PREFLOP_HANDS:
-        if model_type not in {"compact_169", "native_169", "mlp_169"}:
-            raise ValueError(
-                "range_hand_dim=169 requires model_type=compact_169, "
-                "native_169, or mlp_169"
+        if model_type in {"compact_169", "native_169", "mlp_169"}:
+            return PreflopAllIn169EquityModel(
+                players=cfg.players,
+                hidden_dim=cfg.hidden_dim,
+                hand_dim=cfg.hand_dim,
+                num_layers=cfg.layers,
+                film_rank=cfg.film_rank,
+                dense_belief_residual=cfg.dense_belief_residual,
+                dense_output_residual=cfg.dense_output_residual,
             )
-        return PreflopAllIn169EquityModel(
-            players=cfg.players,
-            hidden_dim=cfg.hidden_dim,
-            hand_dim=cfg.hand_dim,
-            num_layers=cfg.layers,
-            film_rank=cfg.film_rank,
-            dense_belief_residual=cfg.dense_belief_residual,
-            dense_output_residual=cfg.dense_output_residual,
+        if model_type in {"transformer_169", "player_transformer_169", "tokens_169"}:
+            return PreflopAllIn169TransformerModel(
+                players=cfg.players,
+                hidden_dim=cfg.hidden_dim,
+                hand_dim=cfg.hand_dim,
+                num_layers=cfg.layers,
+                film_rank=cfg.film_rank,
+                transformer_heads=cfg.transformer_heads,
+                dense_belief_residual=cfg.dense_belief_residual,
+                dense_output_residual=cfg.dense_output_residual,
+                mask_folded_player_tokens=cfg.mask_folded_player_tokens,
+            )
+        raise ValueError(
+            "range_hand_dim=169 requires model_type=compact_169, native_169, "
+            "mlp_169, transformer_169, player_transformer_169, or tokens_169"
         )
     if model_type in {"mlp", "ffn"}:
         return PreflopAllInEquityModel(
@@ -202,7 +216,8 @@ def _build_model(cfg: TrainConfig) -> torch.nn.Module:
             mask_folded_player_tokens=cfg.mask_folded_player_tokens,
         )
     raise ValueError(
-        "model_type must be one of: mlp, player_transformer, compact_169; "
+        "model_type must be one of: mlp, player_transformer, compact_169, "
+        "transformer_169; "
         f"got {cfg.model_type!r}"
     )
 
@@ -283,6 +298,7 @@ def _required_examples(
 def _data_config_from_train(cfg: TrainConfig) -> AllInDataGenConfig:
     return AllInDataGenConfig(
         players=cfg.players,
+        min_allin_players=cfg.min_allin_players,
         sample_count=cfg.sample_count,
         board_samples=cfg.board_samples,
         tuple_samples=cfg.tuple_samples,
@@ -532,9 +548,12 @@ def _evaluate_pregenerated_dataset(
     batch_size: int,
     device: torch.device,
     target_mode: str = "net_value",
+    min_live_players: int = 0,
 ) -> dict[str, float]:
     if batch_size <= 0:
         raise ValueError("validation batch size must be positive")
+    if min_live_players < 0:
+        raise ValueError("min_live_players must be non-negative")
     model_was_training = model.training
     model.eval()
     start = time.perf_counter()
@@ -561,6 +580,13 @@ def _evaluate_pregenerated_dataset(
         )
         err = (pred_values - targets).detach()
         live_counts = (~batch.folded_mask).sum(dim=1).long()
+        if min_live_players > 0:
+            row_mask = live_counts >= min_live_players
+            if not bool(row_mask.any()):
+                row_start += cur
+                continue
+            err = err[row_mask]
+            live_counts = live_counts[row_mask]
         squared_by_live += torch.bincount(
             live_counts,
             weights=err.square().sum(dim=(1, 2)).to(torch.float64),
@@ -576,7 +602,8 @@ def _evaluate_pregenerated_dataset(
             live_counts,
             minlength=players + 1,
         ).to(torch.float64)
-        max_abs = torch.maximum(max_abs, abs_err.amax())
+        if abs_err.numel() > 0:
+            max_abs = torch.maximum(max_abs, abs_err.amax())
         abs_err_chunks.append(abs_err.reshape(-1).to(torch.float32))
         row_start += cur
     if model_was_training:
@@ -587,6 +614,7 @@ def _evaluate_pregenerated_dataset(
     abs_by_live_cpu = abs_by_live.cpu()
     examples_by_live_cpu = examples_by_live.cpu()
     value_count_by_live_cpu = value_count_by_live.cpu()
+    filtered_examples = float(examples_by_live_cpu.sum().item())
     total_value_count = max(float(value_count_by_live_cpu.sum().item()), 1.0)
     all_abs_err = torch.cat(abs_err_chunks) if abs_err_chunks else torch.empty(0)
     if all_abs_err.numel() > 0:
@@ -604,7 +632,10 @@ def _evaluate_pregenerated_dataset(
         "eval/mae_p95": mae_p95,
         "eval/mae_p99": mae_p99,
         "eval/max_abs": float(max_abs.cpu().item()),
-        "eval/examples": float(len(dataset)),
+        "eval/examples": filtered_examples,
+        "eval/raw_examples": float(len(dataset)),
+        "eval/skipped_examples": float(len(dataset)) - filtered_examples,
+        "eval/min_live_players": float(min_live_players),
         "eval/seconds": time.perf_counter() - start,
     }
     for live_count in range(players + 1):
@@ -1168,6 +1199,7 @@ def train(cfg: TrainConfig) -> None:
                         batch_size=eval_batch_size,
                         device=device,
                         target_mode=target_mode,
+                        min_live_players=cfg.min_allin_players,
                     )
                     print(
                         f"[eval {step:06d}/{cfg.steps}] "

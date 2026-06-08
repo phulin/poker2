@@ -9,6 +9,7 @@ steps: 8000
 batch_size: 512
 batch_size_schedule: ""
 players: 6
+min_allin_players: 2
 
 optimizer: muon
 learning_rate: 0.015

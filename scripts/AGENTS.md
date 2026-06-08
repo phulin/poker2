@@ -17,6 +17,8 @@ Reusable profiling and benchmark scripts that are broader than a single repro bu
 - `bench_turn_allin_values.py`: Microbenchmarks random-turn fused sparse CFR all-in-call leaf value writeback, comparing legacy per-node turn payoff dot kernels with grouped turn-board fused kernels across block-size candidates.
 - `run_rebel_hp_bandit.py`: Runs bounded pregenerated ReBeL hyperparameter trials with a simple UCB multi-armed-bandit allocation over architecture, LR, and schedule candidates.
 - `precompute_preflop_allin_table.py`: Streams preflop five-card boards to build a zstd-compressed int16 `[1326, 1326]` all-in matchup payoff table for preflop all-in-call terminal abstraction.
+- `precompute_board_ranks.py`: Streams suit-canonical five-card board representatives, ranks all 1326 private hands per board, converts comparable scores to dense per-board `uint16` rank ids, and writes a raw memmap plus JSON metadata for all-in sampler rank-cache experiments.
+- `convert_allin_dataset_to_169.py`: Converts pregenerated all-in datasets from 1326-combo beliefs/targets to native 169-class tensors, preserving shard boundaries and writing updated manifest metadata.
 - `probe_cfr_fp_precision.py`: Probes fp32 precision loss in fused sparse CFR average-policy/value updates from saved spots and checkpoints.
 - `river_cfr_exploitability_trajectory.py`: Samples random river roots, runs sparse/fused CFR, and logs per-spot exploitability trajectories for convergence diagnostics with warm-start, CFR-type, and delayed DCFR-hybrid PCFR/SAPCFR override flags.
 - `diagnose_river_convergence.py`: Compares train-path and eager river CFR evaluation details, including leaf composition and value-source diagnostics.

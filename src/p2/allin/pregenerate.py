@@ -7,7 +7,11 @@ from typing import Any
 
 import torch
 
-from p2.allin.sampler import NUM_FULL_BOARDS
+from p2.allin.sampler import (
+    DEFAULT_CANONICAL_BOARD_RANKS,
+    NUM_CANONICAL_FULL_BOARDS,
+    NUM_FULL_BOARDS,
+)
 from p2.allin.training_data import AllInDataGenConfig, save_allin_training_dataset
 from p2.env.card_utils import NUM_HANDS
 
@@ -21,6 +25,7 @@ class PregenerateConfig:
     seed: int = 0
     device: str = "cuda"
     players: int = 4
+    min_allin_players: int = 2
     range_hand_dim: int = NUM_HANDS
     sample_count: int = 50_000
     board_samples: int = 256
@@ -38,6 +43,7 @@ class PregenerateConfig:
     concentration: float = 1.0
     folded_commit_max_frac: float = 0.35
     preflop_table_path: str = ""
+    board_ranks_path: str = str(DEFAULT_CANONICAL_BOARD_RANKS)
     no_exact_two_player: bool = False
 
 
@@ -63,10 +69,13 @@ def _data_config(cfg: PregenerateConfig) -> AllInDataGenConfig:
                 "--tuple-samples value"
             )
         sample_count = None
-        board_samples = NUM_FULL_BOARDS
+        board_samples = (
+            NUM_CANONICAL_FULL_BOARDS if cfg.board_ranks_path else NUM_FULL_BOARDS
+        )
 
     kwargs: dict[str, Any] = {
         "players": cfg.players,
+        "min_allin_players": cfg.min_allin_players,
         "range_hand_dim": cfg.range_hand_dim,
         "sample_count": sample_count,
         "board_samples": board_samples,
@@ -82,6 +91,7 @@ def _data_config(cfg: PregenerateConfig) -> AllInDataGenConfig:
         "high_stack_mass_ratio": cfg.high_stack_mass_ratio,
         "concentration": cfg.concentration,
         "folded_commit_max_frac": cfg.folded_commit_max_frac,
+        "board_ranks_path": cfg.board_ranks_path,
         "use_exact_two_player": not cfg.no_exact_two_player,
     }
     if cfg.preflop_table_path:

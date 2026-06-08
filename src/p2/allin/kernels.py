@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import NUM_HANDS, PREFLOP_HANDS
 
 try:
     import triton
@@ -85,6 +85,43 @@ if triton is not None:
             other=0.0,
         )
         masked = tl.where(allowed, belief, 0.0)
+        total = tl.sum(masked, axis=0)
+        cdf = tl.cumsum(masked, 0) / tl.maximum(total, 1.0e-30)
+        cdf = tl.where(active, cdf, 1.0)
+        cdf = tl.where(offs == hands - 1, 1.0, cdf)
+        tl.store(cdf_ptr + flat_row * hands + offs, cdf, mask=active)
+
+    @triton.jit
+    def _allin_build_169_belief_board_mask_cdf_kernel(
+        beliefs_ptr,
+        board_masks_ptr,
+        hand_masks_ptr,
+        combo_class_ptr,
+        class_multiplicity_ptr,
+        cdf_ptr,
+        rows: tl.constexpr,
+        players: tl.constexpr,
+        hands: tl.constexpr,
+        boards_per_root: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        flat_row = tl.program_id(0)
+        row = flat_row // players
+        player = flat_row - row * players
+        root = row // boards_per_root
+        offs = tl.arange(0, BLOCK_H)
+        active = offs < hands
+        board_mask = tl.load(board_masks_ptr + row)
+        hand_mask = tl.load(hand_masks_ptr + offs, mask=active, other=0)
+        class_id = tl.load(combo_class_ptr + offs, mask=active, other=0)
+        class_mass = tl.load(
+            beliefs_ptr + (root * players + player) * 169 + class_id,
+            mask=active,
+            other=0.0,
+        )
+        multiplicity = tl.load(class_multiplicity_ptr + class_id, mask=active, other=1.0)
+        combo_mass = class_mass / tl.maximum(multiplicity, 1.0)
+        masked = tl.where((hand_mask & board_mask) == 0, combo_mass, 0.0)
         total = tl.sum(masked, axis=0)
         cdf = tl.cumsum(masked, 0) / tl.maximum(total, 1.0e-30)
         cdf = tl.where(active, cdf, 1.0)
@@ -240,6 +277,318 @@ if triton is not None:
             tl.store(ranks_out_ptr + rank_base + 4 * sample_count, r4, mask=s_mask)
         if PLAYERS > 5:
             tl.store(ranks_out_ptr + rank_base + 5 * sample_count, r5, mask=s_mask)
+
+    @triton.jit
+    def _allin_select_hero_samples_row_hands_kernel(
+        candidates_ptr,
+        row_hand_masks_ptr,
+        row_hand_ranks_ptr,
+        live_ptr,
+        used_out_ptr,
+        ranks_out_ptr,
+        alive_out_ptr,
+        sample_count: tl.constexpr,
+        active_hands: tl.constexpr,
+        PLAYERS: tl.constexpr,
+        TUPLE_TRIES: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hero = tl.program_id(1)
+        s_block = tl.program_id(2)
+        sample = s_block * BLOCK_S + tl.arange(0, BLOCK_S)
+        s_mask = sample < sample_count
+        hero_live = tl.load(live_ptr + row * PLAYERS + hero) != 0
+
+        alive = tl.full((BLOCK_S,), False, tl.int1)
+        final_used = tl.full((BLOCK_S,), 0, tl.int64)
+        r0 = tl.full((BLOCK_S,), -1, tl.int32)
+        r1 = tl.full((BLOCK_S,), -1, tl.int32)
+        r2 = tl.full((BLOCK_S,), -1, tl.int32)
+        r3 = tl.full((BLOCK_S,), -1, tl.int32)
+        r4 = tl.full((BLOCK_S,), -1, tl.int32)
+        r5 = tl.full((BLOCK_S,), -1, tl.int32)
+
+        for attempt in tl.static_range(0, TUPLE_TRIES):
+            active = s_mask & ~alive & hero_live
+            valid = active
+            used = tl.full((BLOCK_S,), 0, tl.int64)
+            ar0 = tl.full((BLOCK_S,), -1, tl.int32)
+            ar1 = tl.full((BLOCK_S,), -1, tl.int32)
+            ar2 = tl.full((BLOCK_S,), -1, tl.int32)
+            ar3 = tl.full((BLOCK_S,), -1, tl.int32)
+            ar4 = tl.full((BLOCK_S,), -1, tl.int32)
+            ar5 = tl.full((BLOCK_S,), -1, tl.int32)
+
+            for player in tl.static_range(0, 6):
+                if player < PLAYERS:
+                    is_opp = player != hero
+                    player_live = tl.load(live_ptr + row * PLAYERS + player) != 0
+                    sampling = active & valid & is_opp & player_live
+                    candidate = tl.load(
+                        candidates_ptr
+                        + ((row * PLAYERS + player) * TUPLE_TRIES + attempt)
+                        * sample_count
+                        + sample,
+                        mask=sampling,
+                        other=0,
+                    ).to(tl.int32)
+                    candidate_mask = tl.load(
+                        row_hand_masks_ptr + row * active_hands + candidate,
+                        mask=sampling,
+                        other=0,
+                    )
+                    compatible = (candidate_mask & used) == 0
+                    valid = valid & (~(is_opp & player_live) | compatible)
+                    used = tl.where(sampling, used | candidate_mask, used)
+                    candidate_rank = tl.load(
+                        row_hand_ranks_ptr + row * active_hands + candidate,
+                        mask=sampling,
+                        other=-1,
+                    )
+                    if player == 0:
+                        ar0 = tl.where(sampling, candidate_rank, ar0)
+                    if player == 1:
+                        ar1 = tl.where(sampling, candidate_rank, ar1)
+                    if player == 2:
+                        ar2 = tl.where(sampling, candidate_rank, ar2)
+                    if player == 3:
+                        ar3 = tl.where(sampling, candidate_rank, ar3)
+                    if player == 4:
+                        ar4 = tl.where(sampling, candidate_rank, ar4)
+                    if player == 5:
+                        ar5 = tl.where(sampling, candidate_rank, ar5)
+
+            take = active & valid
+            alive = alive | take
+            final_used = tl.where(take, used, final_used)
+            r0 = tl.where(take, ar0, r0)
+            r1 = tl.where(take, ar1, r1)
+            r2 = tl.where(take, ar2, r2)
+            r3 = tl.where(take, ar3, r3)
+            r4 = tl.where(take, ar4, r4)
+            r5 = tl.where(take, ar5, r5)
+
+        sample_base = (row * PLAYERS + hero) * sample_count + sample
+        tl.store(used_out_ptr + sample_base, final_used, mask=s_mask)
+        tl.store(alive_out_ptr + sample_base, alive.to(tl.int8), mask=s_mask)
+        rank_base = ((row * PLAYERS + hero) * PLAYERS) * sample_count + sample
+        tl.store(ranks_out_ptr + rank_base, r0, mask=s_mask)
+        if PLAYERS > 1:
+            tl.store(ranks_out_ptr + rank_base + sample_count, r1, mask=s_mask)
+        if PLAYERS > 2:
+            tl.store(ranks_out_ptr + rank_base + 2 * sample_count, r2, mask=s_mask)
+        if PLAYERS > 3:
+            tl.store(ranks_out_ptr + rank_base + 3 * sample_count, r3, mask=s_mask)
+        if PLAYERS > 4:
+            tl.store(ranks_out_ptr + rank_base + 4 * sample_count, r4, mask=s_mask)
+        if PLAYERS > 5:
+            tl.store(ranks_out_ptr + rank_base + 5 * sample_count, r5, mask=s_mask)
+
+    @triton.jit
+    def _allin_select_hero_samples_169_members_kernel(
+        candidates_ptr,
+        board_masks_ptr,
+        class_members_ptr,
+        hand_masks_ptr,
+        hand_ranks_ptr,
+        live_ptr,
+        seed_ptr,
+        used_out_ptr,
+        ranks_out_ptr,
+        alive_out_ptr,
+        sample_count: tl.constexpr,
+        active_hands: tl.constexpr,
+        PLAYERS: tl.constexpr,
+        TUPLE_TRIES: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hero = tl.program_id(1)
+        s_block = tl.program_id(2)
+        sample = s_block * BLOCK_S + tl.arange(0, BLOCK_S)
+        s_mask = sample < sample_count
+        hero_live = tl.load(live_ptr + row * PLAYERS + hero) != 0
+        board_mask = tl.load(board_masks_ptr + row)
+        seed_value = tl.load(seed_ptr).to(tl.uint32)
+        seed_mix = seed_value * tl.full((), 0x9E3779B9, tl.uint32)
+
+        alive = tl.full((BLOCK_S,), False, tl.int1)
+        final_used = tl.full((BLOCK_S,), 0, tl.int64)
+        r0 = tl.full((BLOCK_S,), -1, tl.int32)
+        r1 = tl.full((BLOCK_S,), -1, tl.int32)
+        r2 = tl.full((BLOCK_S,), -1, tl.int32)
+        r3 = tl.full((BLOCK_S,), -1, tl.int32)
+        r4 = tl.full((BLOCK_S,), -1, tl.int32)
+        r5 = tl.full((BLOCK_S,), -1, tl.int32)
+
+        for attempt in tl.static_range(0, TUPLE_TRIES):
+            active = s_mask & ~alive & hero_live
+            valid = active
+            used = tl.full((BLOCK_S,), 0, tl.int64)
+            ar0 = tl.full((BLOCK_S,), -1, tl.int32)
+            ar1 = tl.full((BLOCK_S,), -1, tl.int32)
+            ar2 = tl.full((BLOCK_S,), -1, tl.int32)
+            ar3 = tl.full((BLOCK_S,), -1, tl.int32)
+            ar4 = tl.full((BLOCK_S,), -1, tl.int32)
+            ar5 = tl.full((BLOCK_S,), -1, tl.int32)
+
+            for player in tl.static_range(0, 6):
+                if player < PLAYERS:
+                    is_opp = player != hero
+                    player_live = tl.load(live_ptr + row * PLAYERS + player) != 0
+                    sampling = active & valid & is_opp & player_live
+                    candidate = tl.load(
+                        candidates_ptr
+                        + ((row * PLAYERS + player) * TUPLE_TRIES + attempt)
+                        * sample_count
+                        + sample,
+                        mask=sampling,
+                        other=0,
+                    ).to(tl.int32)
+                    best_score = tl.full((BLOCK_S,), -1.0, tl.float32)
+                    selected_mask = tl.full((BLOCK_S,), 0, tl.int64)
+                    selected_rank = tl.full((BLOCK_S,), -1, tl.int32)
+                    has_member = tl.full((BLOCK_S,), False, tl.int1)
+                    for slot in tl.range(0, 12):
+                        combo = tl.load(
+                            class_members_ptr + candidate * 12 + slot,
+                            mask=sampling,
+                            other=-1,
+                        ).to(tl.int32)
+                        combo_ok = combo >= 0
+                        combo_safe = tl.maximum(combo, 0)
+                        combo_mask = tl.load(
+                            hand_masks_ptr + combo_safe,
+                            mask=sampling & combo_ok,
+                            other=0,
+                        )
+                        member_live = sampling & combo_ok & ((combo_mask & board_mask) == 0)
+                        random_offset = (
+                            (((row * PLAYERS + player) * TUPLE_TRIES + attempt)
+                            * sample_count + sample)
+                            * 16
+                            + slot
+                        )
+                        x = _pcg_hash_u32(random_offset.to(tl.uint32) + seed_mix)
+                        score = (x.to(tl.float32) + 0.5) * 2.3283064365386963e-10
+                        choose = member_live & (score > best_score)
+                        combo_rank = tl.load(
+                            hand_ranks_ptr + row * 1326 + combo_safe,
+                            mask=choose,
+                            other=-1,
+                        )
+                        best_score = tl.where(choose, score, best_score)
+                        selected_mask = tl.where(choose, combo_mask, selected_mask)
+                        selected_rank = tl.where(choose, combo_rank, selected_rank)
+                        has_member = has_member | member_live
+
+                    compatible = has_member & ((selected_mask & used) == 0)
+                    valid = valid & (~(is_opp & player_live) | compatible)
+                    used = tl.where(sampling & has_member, used | selected_mask, used)
+                    if player == 0:
+                        ar0 = tl.where(sampling & has_member, selected_rank, ar0)
+                    if player == 1:
+                        ar1 = tl.where(sampling & has_member, selected_rank, ar1)
+                    if player == 2:
+                        ar2 = tl.where(sampling & has_member, selected_rank, ar2)
+                    if player == 3:
+                        ar3 = tl.where(sampling & has_member, selected_rank, ar3)
+                    if player == 4:
+                        ar4 = tl.where(sampling & has_member, selected_rank, ar4)
+                    if player == 5:
+                        ar5 = tl.where(sampling & has_member, selected_rank, ar5)
+
+            take = active & valid
+            alive = alive | take
+            final_used = tl.where(take, used, final_used)
+            r0 = tl.where(take, ar0, r0)
+            r1 = tl.where(take, ar1, r1)
+            r2 = tl.where(take, ar2, r2)
+            r3 = tl.where(take, ar3, r3)
+            r4 = tl.where(take, ar4, r4)
+            r5 = tl.where(take, ar5, r5)
+
+        sample_base = (row * PLAYERS + hero) * sample_count + sample
+        tl.store(used_out_ptr + sample_base, final_used, mask=s_mask)
+        tl.store(alive_out_ptr + sample_base, alive.to(tl.int8), mask=s_mask)
+        rank_base = ((row * PLAYERS + hero) * PLAYERS) * sample_count + sample
+        tl.store(ranks_out_ptr + rank_base, r0, mask=s_mask)
+        if PLAYERS > 1:
+            tl.store(ranks_out_ptr + rank_base + sample_count, r1, mask=s_mask)
+        if PLAYERS > 2:
+            tl.store(ranks_out_ptr + rank_base + 2 * sample_count, r2, mask=s_mask)
+        if PLAYERS > 3:
+            tl.store(ranks_out_ptr + rank_base + 3 * sample_count, r3, mask=s_mask)
+        if PLAYERS > 4:
+            tl.store(ranks_out_ptr + rank_base + 4 * sample_count, r4, mask=s_mask)
+        if PLAYERS > 5:
+            tl.store(ranks_out_ptr + rank_base + 5 * sample_count, r5, mask=s_mask)
+
+    @triton.jit
+    def _allin_sample_169_hero_member_block_kernel(
+        board_masks_ptr,
+        class_members_ptr,
+        hand_masks_ptr,
+        hand_ranks_ptr,
+        seed_ptr,
+        hero_masks_out_ptr,
+        hero_ranks_out_ptr,
+        sample_count: tl.constexpr,
+        active_hands: tl.constexpr,
+        HAND_START: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        s_block = tl.program_id(1)
+        hand = HAND_START + tl.arange(0, BLOCK_H)
+        sample = s_block * BLOCK_S + tl.arange(0, BLOCK_S)
+        h_mask = hand < active_hands
+        s_mask = sample < sample_count
+        board_mask = tl.load(board_masks_ptr + row)
+        seed_value = tl.load(seed_ptr).to(tl.uint32)
+        seed_mix = seed_value * tl.full((), 0x85EBCA6B, tl.uint32)
+
+        best_score = tl.full((BLOCK_H, BLOCK_S), -1.0, tl.float32)
+        selected_mask = tl.zeros((BLOCK_H, BLOCK_S), dtype=tl.int64)
+        selected_rank = tl.full((BLOCK_H, BLOCK_S), -1, tl.int32)
+
+        for slot in tl.range(0, 12):
+            combo = tl.load(
+                class_members_ptr + hand * 12 + slot,
+                mask=h_mask,
+                other=-1,
+            ).to(tl.int32)
+            combo_ok = combo >= 0
+            combo_safe = tl.maximum(combo, 0)
+            combo_mask = tl.load(
+                hand_masks_ptr + combo_safe,
+                mask=h_mask & combo_ok,
+                other=0,
+            )
+            member_live = h_mask & combo_ok & ((combo_mask & board_mask) == 0)
+            random_offset = (
+                ((((row * active_hands + hand[:, None]) * sample_count)
+                + sample[None, :])
+                * 16)
+                + slot
+            )
+            x = _pcg_hash_u32(random_offset.to(tl.uint32) + seed_mix)
+            score = (x.to(tl.float32) + 0.5) * 2.3283064365386963e-10
+            choose = member_live[:, None] & s_mask[None, :] & (score > best_score)
+            combo_rank = tl.load(
+                hand_ranks_ptr + row * 1326 + combo_safe,
+                mask=h_mask & combo_ok,
+                other=-1,
+            )
+            best_score = tl.where(choose, score, best_score)
+            selected_mask = tl.where(choose, combo_mask[:, None], selected_mask)
+            selected_rank = tl.where(choose, combo_rank[:, None], selected_rank)
+
+        out = (row * BLOCK_H + tl.arange(0, BLOCK_H)[:, None]) * sample_count + sample[None, :]
+        tl.store(hero_masks_out_ptr + out, selected_mask, mask=h_mask[:, None] & s_mask[None, :])
+        tl.store(hero_ranks_out_ptr + out, selected_rank, mask=h_mask[:, None] & s_mask[None, :])
 
     @triton.jit
     def _allin_precompute_layer_results_kernel(
@@ -483,6 +832,120 @@ if triton is not None:
         hand_masks_ptr,
         hand_ranks_ptr,
         board_masks_ptr,
+        board_weights_ptr,
+        used_samples_ptr,
+        alive_samples_ptr,
+        best_rank_samples_ptr,
+        best_count_samples_ptr,
+        live_ptr,
+        layer_amount_ptr,
+        eligible_ptr,
+        payout_sum_ptr,
+        denom_sum_ptr,
+        sample_count: tl.constexpr,
+        active_hands: tl.constexpr,
+        PLAYERS: tl.constexpr,
+        BOARDS_PER_ROOT: tl.constexpr,
+        HAS_BOARD_WEIGHTS: tl.constexpr,
+        SKIP_FOLDED: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hero = tl.program_id(1)
+        h_block = tl.program_id(2)
+        if SKIP_FOLDED:
+            hero_live = tl.load(live_ptr + row * PLAYERS + hero) != 0
+            if not hero_live:
+                return
+
+        hand = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+        h_mask = hand < active_hands
+        hero_mask = tl.load(hand_masks_ptr + hand, mask=h_mask, other=0)
+        hero_rank = tl.load(
+            hand_ranks_ptr + row * active_hands + hand,
+            mask=h_mask,
+            other=-1,
+        )
+        board_mask = tl.load(board_masks_ptr + row)
+        board_weight = 1.0
+        if HAS_BOARD_WEIGHTS:
+            board_weight = tl.load(board_weights_ptr + row)
+        board_ok = (hero_mask & board_mask) == 0
+        numerator = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        denominator = tl.zeros((BLOCK_H,), dtype=tl.float32)
+
+        for sample_start in tl.range(0, sample_count, BLOCK_S):
+            sample = sample_start + tl.arange(0, BLOCK_S)
+            s_mask = sample < sample_count
+            sample_base = (row * PLAYERS + hero) * sample_count + sample
+            used = tl.load(used_samples_ptr + sample_base, mask=s_mask, other=0)
+            alive = tl.load(alive_samples_ptr + sample_base, mask=s_mask, other=0) != 0
+            compatible = (
+                h_mask[:, None]
+                & s_mask[None, :]
+                & alive[None, :]
+                & board_ok[:, None]
+                & ((hero_mask[:, None] & used[None, :]) == 0)
+            )
+            payout = tl.zeros((BLOCK_H, BLOCK_S), dtype=tl.float32)
+
+            for layer in tl.static_range(0, 6):
+                if layer < PLAYERS:
+                    hero_eligible = tl.load(
+                        eligible_ptr + (row * PLAYERS + layer) * PLAYERS + hero
+                    ) != 0
+                    layer_amount = tl.load(layer_amount_ptr + row * PLAYERS + layer)
+                    if hero_eligible & (layer_amount != 0.0):
+                        best_base = (
+                            ((row * PLAYERS + hero) * PLAYERS + layer)
+                            * sample_count
+                            + sample
+                        )
+                        best_opp = tl.load(
+                            best_rank_samples_ptr + best_base,
+                            mask=s_mask,
+                            other=-1,
+                        )
+                        best_count = tl.load(
+                            best_count_samples_ptr + best_base,
+                            mask=s_mask,
+                            other=0,
+                        ).to(tl.float32)
+                        wins = hero_rank[:, None] > best_opp[None, :]
+                        ties = hero_rank[:, None] == best_opp[None, :]
+                        share = tl.where(
+                            wins,
+                            1.0,
+                            tl.where(ties, 1.0 / (1.0 + best_count[None, :]), 0.0),
+                        )
+                        payout += layer_amount * share
+
+            comp_f = compatible.to(tl.float32)
+            numerator += tl.sum(comp_f * payout, axis=1)
+            denominator += tl.sum(comp_f, axis=1)
+
+        root = row // BOARDS_PER_ROOT
+        out_base = (root * PLAYERS + hero) * active_hands + hand
+        tl.atomic_add(
+            payout_sum_ptr + out_base,
+            numerator * board_weight,
+            sem="relaxed",
+            mask=h_mask,
+        )
+        tl.atomic_add(
+            denom_sum_ptr + out_base,
+            denominator * board_weight,
+            sem="relaxed",
+            mask=h_mask,
+        )
+
+    @triton.jit
+    def _allin_score_hero_hands_mask_accumulate_169_kernel(
+        hand_masks_ptr,
+        hand_ranks_ptr,
+        board_masks_ptr,
+        combo_class_ptr,
         used_samples_ptr,
         alive_samples_ptr,
         best_rank_samples_ptr,
@@ -560,6 +1023,319 @@ if triton is not None:
                         ).to(tl.float32)
                         wins = hero_rank[:, None] > best_opp[None, :]
                         ties = hero_rank[:, None] == best_opp[None, :]
+                        share = tl.where(
+                            wins,
+                            1.0,
+                            tl.where(ties, 1.0 / (1.0 + best_count[None, :]), 0.0),
+                        )
+                        payout += layer_amount * share
+
+            comp_f = compatible.to(tl.float32)
+            numerator += tl.sum(comp_f * payout, axis=1)
+            denominator += tl.sum(comp_f, axis=1)
+
+        root = row // BOARDS_PER_ROOT
+        class_id = tl.load(combo_class_ptr + hand, mask=h_mask, other=0)
+        out_base = (root * PLAYERS + hero) * 169 + class_id
+        tl.atomic_add(payout_sum_ptr + out_base, numerator, sem="relaxed", mask=h_mask)
+        tl.atomic_add(denom_sum_ptr + out_base, denominator, sem="relaxed", mask=h_mask)
+
+    @triton.jit
+    def _allin_score_169_classes_mask_accumulate_kernel(
+        class_members_ptr,
+        hand_masks_ptr,
+        hand_ranks_ptr,
+        board_masks_ptr,
+        used_samples_ptr,
+        alive_samples_ptr,
+        best_rank_samples_ptr,
+        best_count_samples_ptr,
+        live_ptr,
+        layer_amount_ptr,
+        eligible_ptr,
+        payout_sum_ptr,
+        denom_sum_ptr,
+        sample_count: tl.constexpr,
+        active_classes: tl.constexpr,
+        PLAYERS: tl.constexpr,
+        BOARDS_PER_ROOT: tl.constexpr,
+        SKIP_FOLDED: tl.constexpr,
+        BLOCK_C: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hero = tl.program_id(1)
+        c_block = tl.program_id(2)
+        if SKIP_FOLDED:
+            hero_live = tl.load(live_ptr + row * PLAYERS + hero) != 0
+            if not hero_live:
+                return
+
+        cls = c_block * BLOCK_C + tl.arange(0, BLOCK_C)
+        c_mask = cls < active_classes
+        board_mask = tl.load(board_masks_ptr + row)
+        numerator = tl.zeros((BLOCK_C,), dtype=tl.float32)
+        denominator = tl.zeros((BLOCK_C,), dtype=tl.float32)
+
+        for sample_start in tl.range(0, sample_count, BLOCK_S):
+            sample = sample_start + tl.arange(0, BLOCK_S)
+            s_mask = sample < sample_count
+            sample_base = (row * PLAYERS + hero) * sample_count + sample
+            used = tl.load(used_samples_ptr + sample_base, mask=s_mask, other=0)
+            alive = tl.load(alive_samples_ptr + sample_base, mask=s_mask, other=0) != 0
+
+            for slot in tl.range(0, 12):
+                combo = tl.load(
+                    class_members_ptr + cls * 12 + slot,
+                    mask=c_mask,
+                    other=-1,
+                ).to(tl.int32)
+                combo_ok = combo >= 0
+                combo_safe = tl.maximum(combo, 0)
+                hero_mask = tl.load(
+                    hand_masks_ptr + combo_safe,
+                    mask=c_mask & combo_ok,
+                    other=0,
+                )
+                hero_rank = tl.load(
+                    hand_ranks_ptr + row * 1326 + combo_safe,
+                    mask=c_mask & combo_ok,
+                    other=-1,
+                )
+                combo_live = c_mask & combo_ok & ((hero_mask & board_mask) == 0)
+                compatible = (
+                    combo_live[:, None]
+                    & s_mask[None, :]
+                    & alive[None, :]
+                    & ((hero_mask[:, None] & used[None, :]) == 0)
+                )
+                payout = tl.zeros((BLOCK_C, BLOCK_S), dtype=tl.float32)
+
+                for layer in tl.static_range(0, 6):
+                    if layer < PLAYERS:
+                        hero_eligible = tl.load(
+                            eligible_ptr + (row * PLAYERS + layer) * PLAYERS + hero
+                        ) != 0
+                        layer_amount = tl.load(layer_amount_ptr + row * PLAYERS + layer)
+                        if hero_eligible & (layer_amount != 0.0):
+                            best_base = (
+                                ((row * PLAYERS + hero) * PLAYERS + layer)
+                                * sample_count
+                                + sample
+                            )
+                            best_opp = tl.load(
+                                best_rank_samples_ptr + best_base,
+                                mask=s_mask,
+                                other=-1,
+                            )
+                            best_count = tl.load(
+                                best_count_samples_ptr + best_base,
+                                mask=s_mask,
+                                other=0,
+                            ).to(tl.float32)
+                            wins = hero_rank[:, None] > best_opp[None, :]
+                            ties = hero_rank[:, None] == best_opp[None, :]
+                            share = tl.where(
+                                wins,
+                                1.0,
+                                tl.where(
+                                    ties,
+                                    1.0 / (1.0 + best_count[None, :]),
+                                    0.0,
+                                ),
+                            )
+                            payout += layer_amount * share
+
+                comp_f = compatible.to(tl.float32)
+                numerator += tl.sum(comp_f * payout, axis=1)
+                denominator += tl.sum(comp_f, axis=1)
+
+        root = row // BOARDS_PER_ROOT
+        out_base = (root * PLAYERS + hero) * active_classes + cls
+        tl.atomic_add(payout_sum_ptr + out_base, numerator, sem="relaxed", mask=c_mask)
+        tl.atomic_add(denom_sum_ptr + out_base, denominator, sem="relaxed", mask=c_mask)
+
+    @triton.jit
+    def _allin_score_row_hands_accumulate_kernel(
+        row_hand_masks_ptr,
+        row_hand_ranks_ptr,
+        used_samples_ptr,
+        alive_samples_ptr,
+        best_rank_samples_ptr,
+        best_count_samples_ptr,
+        live_ptr,
+        layer_amount_ptr,
+        eligible_ptr,
+        payout_sum_ptr,
+        denom_sum_ptr,
+        sample_count: tl.constexpr,
+        active_hands: tl.constexpr,
+        PLAYERS: tl.constexpr,
+        BOARDS_PER_ROOT: tl.constexpr,
+        SKIP_FOLDED: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hero = tl.program_id(1)
+        h_block = tl.program_id(2)
+        if SKIP_FOLDED:
+            hero_live = tl.load(live_ptr + row * PLAYERS + hero) != 0
+            if not hero_live:
+                return
+
+        hand = h_block * BLOCK_H + tl.arange(0, BLOCK_H)
+        h_mask = hand < active_hands
+        hero_mask = tl.load(row_hand_masks_ptr + row * active_hands + hand, mask=h_mask, other=0)
+        hero_rank = tl.load(
+            row_hand_ranks_ptr + row * active_hands + hand,
+            mask=h_mask,
+            other=-1,
+        )
+        hand_live = hero_mask != 0
+        numerator = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        denominator = tl.zeros((BLOCK_H,), dtype=tl.float32)
+
+        for sample_start in tl.range(0, sample_count, BLOCK_S):
+            sample = sample_start + tl.arange(0, BLOCK_S)
+            s_mask = sample < sample_count
+            sample_base = (row * PLAYERS + hero) * sample_count + sample
+            used = tl.load(used_samples_ptr + sample_base, mask=s_mask, other=0)
+            alive = tl.load(alive_samples_ptr + sample_base, mask=s_mask, other=0) != 0
+            compatible = (
+                h_mask[:, None]
+                & hand_live[:, None]
+                & s_mask[None, :]
+                & alive[None, :]
+                & ((hero_mask[:, None] & used[None, :]) == 0)
+            )
+            payout = tl.zeros((BLOCK_H, BLOCK_S), dtype=tl.float32)
+
+            for layer in tl.static_range(0, 6):
+                if layer < PLAYERS:
+                    hero_eligible = tl.load(
+                        eligible_ptr + (row * PLAYERS + layer) * PLAYERS + hero
+                    ) != 0
+                    layer_amount = tl.load(layer_amount_ptr + row * PLAYERS + layer)
+                    if hero_eligible & (layer_amount != 0.0):
+                        best_base = (
+                            ((row * PLAYERS + hero) * PLAYERS + layer)
+                            * sample_count
+                            + sample
+                        )
+                        best_opp = tl.load(
+                            best_rank_samples_ptr + best_base,
+                            mask=s_mask,
+                            other=-1,
+                        )
+                        best_count = tl.load(
+                            best_count_samples_ptr + best_base,
+                            mask=s_mask,
+                            other=0,
+                        ).to(tl.float32)
+                        wins = hero_rank[:, None] > best_opp[None, :]
+                        ties = hero_rank[:, None] == best_opp[None, :]
+                        share = tl.where(
+                            wins,
+                            1.0,
+                            tl.where(ties, 1.0 / (1.0 + best_count[None, :]), 0.0),
+                        )
+                        payout += layer_amount * share
+
+            comp_f = compatible.to(tl.float32)
+            numerator += tl.sum(comp_f * payout, axis=1)
+            denominator += tl.sum(comp_f, axis=1)
+
+        root = row // BOARDS_PER_ROOT
+        out_base = (root * PLAYERS + hero) * active_hands + hand
+        tl.atomic_add(payout_sum_ptr + out_base, numerator, sem="relaxed", mask=h_mask)
+        tl.atomic_add(denom_sum_ptr + out_base, denominator, sem="relaxed", mask=h_mask)
+
+    @triton.jit
+    def _allin_score_169_sampled_hero_block_accumulate_kernel(
+        hero_masks_ptr,
+        hero_ranks_ptr,
+        used_samples_ptr,
+        alive_samples_ptr,
+        best_rank_samples_ptr,
+        best_count_samples_ptr,
+        live_ptr,
+        layer_amount_ptr,
+        eligible_ptr,
+        payout_sum_ptr,
+        denom_sum_ptr,
+        sample_count: tl.constexpr,
+        active_hands: tl.constexpr,
+        PLAYERS: tl.constexpr,
+        BOARDS_PER_ROOT: tl.constexpr,
+        HAND_START: tl.constexpr,
+        SKIP_FOLDED: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+        ):
+        row = tl.program_id(0)
+        hero = tl.program_id(1)
+        if SKIP_FOLDED:
+            hero_live = tl.load(live_ptr + row * PLAYERS + hero) != 0
+            if not hero_live:
+                return
+
+        hand = HAND_START + tl.arange(0, BLOCK_H)
+        h_mask = hand < active_hands
+        numerator = tl.zeros((BLOCK_H,), dtype=tl.float32)
+        denominator = tl.zeros((BLOCK_H,), dtype=tl.float32)
+
+        for sample_start in tl.range(0, sample_count, BLOCK_S):
+            sample = sample_start + tl.arange(0, BLOCK_S)
+            s_mask = sample < sample_count
+            sample_base = (row * PLAYERS + hero) * sample_count + sample
+            used = tl.load(used_samples_ptr + sample_base, mask=s_mask, other=0)
+            alive = tl.load(alive_samples_ptr + sample_base, mask=s_mask, other=0) != 0
+            hero_base = (row * BLOCK_H + tl.arange(0, BLOCK_H)[:, None]) * sample_count
+            hero_mask = tl.load(
+                hero_masks_ptr + hero_base + sample[None, :],
+                mask=h_mask[:, None] & s_mask[None, :],
+                other=0,
+            )
+            hero_rank = tl.load(
+                hero_ranks_ptr + hero_base + sample[None, :],
+                mask=h_mask[:, None] & s_mask[None, :],
+                other=-1,
+            )
+
+            compatible = (
+                h_mask[:, None]
+                & s_mask[None, :]
+                & alive[None, :]
+                & (hero_mask != 0)
+                & ((hero_mask & used[None, :]) == 0)
+            )
+            payout = tl.zeros((BLOCK_H, BLOCK_S), dtype=tl.float32)
+
+            for layer in tl.static_range(0, 6):
+                if layer < PLAYERS:
+                    hero_eligible = tl.load(
+                        eligible_ptr + (row * PLAYERS + layer) * PLAYERS + hero
+                    ) != 0
+                    layer_amount = tl.load(layer_amount_ptr + row * PLAYERS + layer)
+                    if hero_eligible & (layer_amount != 0.0):
+                        best_base = (
+                            ((row * PLAYERS + hero) * PLAYERS + layer)
+                            * sample_count
+                            + sample
+                        )
+                        best_opp = tl.load(
+                            best_rank_samples_ptr + best_base,
+                            mask=s_mask,
+                            other=-1,
+                        )
+                        best_count = tl.load(
+                            best_count_samples_ptr + best_base,
+                            mask=s_mask,
+                            other=0,
+                        ).to(tl.float32)
+                        wins = hero_rank > best_opp[None, :]
+                        ties = hero_rank == best_opp[None, :]
                         share = tl.where(
                             wins,
                             1.0,
@@ -721,6 +1497,39 @@ def _build_board_mask_cdf_tables_into(
     return cdf
 
 
+def _build_169_belief_board_mask_cdf_tables_into(
+    workspace: AllinCdfWorkspace,
+    beliefs: torch.Tensor,
+    board_masks: torch.Tensor,
+    hand_masks: torch.Tensor,
+    combo_class: torch.Tensor,
+    class_multiplicity: torch.Tensor,
+    *,
+    rows: int,
+    players: int,
+    hands: int,
+    boards_per_root: int,
+) -> torch.Tensor:
+    rows_flat = rows * players
+    cdf = workspace.cdf[:rows_flat]
+    block_h = triton.next_power_of_2(hands)
+    _allin_build_169_belief_board_mask_cdf_kernel[(rows_flat,)](
+        beliefs,
+        board_masks,
+        hand_masks,
+        combo_class,
+        class_multiplicity,
+        cdf,
+        rows=rows,
+        players=players,
+        hands=hands,
+        boards_per_root=boards_per_root,
+        BLOCK_H=block_h,
+        num_warps=2,
+    )
+    return cdf
+
+
 def allin_cdf_tuple_score_cuda_into(
     workspace: AllinCdfWorkspace,
     *,
@@ -855,7 +1664,7 @@ def allin_cdf_tuple_score_from_roots_cuda_into(
     eligible: torch.Tensor,
     seed: int,
     block_s: int | None = None,
-    block_h: int = 64,
+    block_h: int = 32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Score one board chunk while building board-conditioned CDFs in Triton.
 
@@ -1094,6 +1903,7 @@ def allin_cdf_tuple_score_from_roots_masks_accumulate_cuda_(
     *,
     beliefs: torch.Tensor,
     board_masks: torch.Tensor,
+    board_weights: torch.Tensor | None = None,
     boards_per_root: int,
     hand_masks: torch.Tensor,
     hand_ranks: torch.Tensor,
@@ -1115,6 +1925,8 @@ def allin_cdf_tuple_score_from_roots_masks_accumulate_cuda_(
     if board_masks.dim() != 1:
         raise ValueError("board_masks must be a 1D tensor")
     rows = board_masks.shape[0]
+    if board_weights is not None and board_weights.shape != (rows,):
+        raise ValueError("board_weights must have shape [rows]")
     root_count, players, hands = beliefs.shape
     if hands != workspace.hands or players != workspace.players:
         raise ValueError("workspace/belief shape mismatch")
@@ -1198,6 +2010,551 @@ def allin_cdf_tuple_score_from_roots_masks_accumulate_cuda_(
         hand_masks,
         hand_ranks,
         board_masks,
+        board_masks if board_weights is None else board_weights,
+        used_samples,
+        alive_samples,
+        best_rank_samples,
+        best_count_samples,
+        live_mask,
+        layer_amount,
+        eligible,
+        payout_sum,
+        denom_sum,
+        sample_count,
+        active_hands=hands,
+        PLAYERS=players,
+        BOARDS_PER_ROOT=boards_per_root,
+        HAS_BOARD_WEIGHTS=board_weights is not None,
+        SKIP_FOLDED=skip_folded_heroes,
+        BLOCK_H=block_h,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+
+
+def allin_169_belief_combo_score_from_roots_masks_accumulate_cuda_(
+    workspace: AllinCdfWorkspace,
+    *,
+    beliefs_169: torch.Tensor,
+    board_masks: torch.Tensor,
+    boards_per_root: int,
+    hand_masks: torch.Tensor,
+    hand_ranks: torch.Tensor,
+    combo_class: torch.Tensor,
+    class_multiplicity: torch.Tensor,
+    live_mask: torch.Tensor,
+    layer_amount: torch.Tensor,
+    eligible: torch.Tensor,
+    payout_sum: torch.Tensor,
+    denom_sum: torch.Tensor,
+    seed: int,
+    block_s: int | None = None,
+    block_h: int = 64,
+    skip_folded_heroes: bool = True,
+) -> None:
+    """Sample combo-level tuples from compact beliefs and accumulate 169 sums."""
+    if triton is None:
+        raise RuntimeError("triton is not available")
+    if beliefs_169.device.type != "cuda":
+        raise ValueError("all-in tuple scorer requires CUDA tensors")
+    if board_masks.dim() != 1:
+        raise ValueError("board_masks must be a 1D tensor")
+    rows = board_masks.shape[0]
+    root_count, players, belief_hands = beliefs_169.shape
+    if belief_hands != PREFLOP_HANDS:
+        raise ValueError("beliefs_169 must have 169 hands")
+    if workspace.hands != NUM_HANDS or players != workspace.players:
+        raise ValueError("workspace must be sized for 1326 combo sampling")
+    if boards_per_root <= 0 or rows != root_count * boards_per_root:
+        raise ValueError("rows must equal roots * boards_per_root")
+    if payout_sum.shape != (root_count, players, PREFLOP_HANDS):
+        raise ValueError("payout_sum shape mismatch")
+    if denom_sum.shape != (root_count, players, PREFLOP_HANDS):
+        raise ValueError("denom_sum shape mismatch")
+    if combo_class.shape != (NUM_HANDS,):
+        raise ValueError("combo_class shape mismatch")
+    if class_multiplicity.shape != (PREFLOP_HANDS,):
+        raise ValueError("class_multiplicity shape mismatch")
+    if rows > workspace.max_rows:
+        raise ValueError("chunk has more rows than the workspace was sized for")
+    sample_count = workspace.sample_count
+    tuple_tries = workspace.tuple_tries
+    if block_s is None:
+        block_s = min(32, triton.next_power_of_2(sample_count))
+
+    cdf = _build_169_belief_board_mask_cdf_tables_into(
+        workspace,
+        beliefs_169,
+        board_masks,
+        hand_masks,
+        combo_class,
+        class_multiplicity,
+        rows=rows,
+        players=players,
+        hands=NUM_HANDS,
+        boards_per_root=boards_per_root,
+    )
+
+    candidates = workspace.candidates[:rows]
+    used_samples = workspace.used_samples[:rows]
+    rank_samples = workspace.rank_samples[:rows]
+    alive_samples = workspace.alive_samples[:rows]
+    best_rank_samples = workspace.best_rank_samples[:rows]
+    best_count_samples = workspace.best_count_samples[:rows]
+    workspace.seed.fill_(int(seed))
+
+    sample_grid = (rows, triton.cdiv(sample_count, block_s))
+    _allin_cdf_sample_candidates_kernel[sample_grid](
+        cdf,
+        candidates,
+        workspace.seed,
+        sample_count,
+        active_hands=NUM_HANDS,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        SEARCH_STEPS=(NUM_HANDS - 1).bit_length(),
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    num_h_blocks = triton.cdiv(NUM_HANDS, block_h)
+    num_s_blocks = triton.cdiv(sample_count, block_s)
+    select_grid = (rows, players, num_s_blocks)
+    _allin_select_hero_samples_kernel[select_grid](
+        candidates,
+        hand_masks,
+        hand_ranks,
+        live_mask,
+        used_samples,
+        rank_samples,
+        alive_samples,
+        sample_count,
+        active_hands=NUM_HANDS,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    precompute_grid = (rows, players * players, num_s_blocks)
+    _allin_precompute_layer_results_kernel[precompute_grid](
+        rank_samples,
+        eligible,
+        layer_amount,
+        best_rank_samples,
+        best_count_samples,
+        sample_count,
+        PLAYERS=players,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    score_grid = (rows, players, num_h_blocks)
+    _allin_score_hero_hands_mask_accumulate_169_kernel[score_grid](
+        hand_masks,
+        hand_ranks,
+        board_masks,
+        combo_class,
+        used_samples,
+        alive_samples,
+        best_rank_samples,
+        best_count_samples,
+        live_mask,
+        layer_amount,
+        eligible,
+        payout_sum,
+        denom_sum,
+        sample_count,
+        active_hands=NUM_HANDS,
+        PLAYERS=players,
+        BOARDS_PER_ROOT=boards_per_root,
+        SKIP_FOLDED=skip_folded_heroes,
+        BLOCK_H=block_h,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+
+
+def allin_169_belief_combo_score1326_from_roots_masks_accumulate_cuda_(
+    workspace: AllinCdfWorkspace,
+    *,
+    beliefs_169: torch.Tensor,
+    board_masks: torch.Tensor,
+    board_weights: torch.Tensor | None = None,
+    boards_per_root: int,
+    hand_masks: torch.Tensor,
+    hand_ranks: torch.Tensor,
+    combo_class: torch.Tensor,
+    class_multiplicity: torch.Tensor,
+    live_mask: torch.Tensor,
+    layer_amount: torch.Tensor,
+    eligible: torch.Tensor,
+    payout_sum: torch.Tensor,
+    denom_sum: torch.Tensor,
+    seed: int,
+    block_s: int | None = None,
+    block_h: int = 64,
+    skip_folded_heroes: bool = True,
+) -> None:
+    """Sample combo-level tuples from compact beliefs and keep 1326 sums."""
+    if triton is None:
+        raise RuntimeError("triton is not available")
+    if beliefs_169.device.type != "cuda":
+        raise ValueError("all-in tuple scorer requires CUDA tensors")
+    if board_masks.dim() != 1:
+        raise ValueError("board_masks must be a 1D tensor")
+    rows = board_masks.shape[0]
+    if board_weights is not None and board_weights.shape != (rows,):
+        raise ValueError("board_weights must have shape [rows]")
+    root_count, players, belief_hands = beliefs_169.shape
+    if belief_hands != PREFLOP_HANDS:
+        raise ValueError("beliefs_169 must have 169 hands")
+    if workspace.hands != NUM_HANDS or players != workspace.players:
+        raise ValueError("workspace must be sized for 1326 combo sampling")
+    if boards_per_root <= 0 or rows != root_count * boards_per_root:
+        raise ValueError("rows must equal roots * boards_per_root")
+    if payout_sum.shape != (root_count, players, NUM_HANDS):
+        raise ValueError("payout_sum shape mismatch")
+    if denom_sum.shape != (root_count, players, NUM_HANDS):
+        raise ValueError("denom_sum shape mismatch")
+    if combo_class.shape != (NUM_HANDS,):
+        raise ValueError("combo_class shape mismatch")
+    if class_multiplicity.shape != (PREFLOP_HANDS,):
+        raise ValueError("class_multiplicity shape mismatch")
+    if rows > workspace.max_rows:
+        raise ValueError("chunk has more rows than the workspace was sized for")
+    sample_count = workspace.sample_count
+    tuple_tries = workspace.tuple_tries
+    if block_s is None:
+        block_s = min(32, triton.next_power_of_2(sample_count))
+
+    cdf = _build_169_belief_board_mask_cdf_tables_into(
+        workspace,
+        beliefs_169,
+        board_masks,
+        hand_masks,
+        combo_class,
+        class_multiplicity,
+        rows=rows,
+        players=players,
+        hands=NUM_HANDS,
+        boards_per_root=boards_per_root,
+    )
+
+    candidates = workspace.candidates[:rows]
+    used_samples = workspace.used_samples[:rows]
+    rank_samples = workspace.rank_samples[:rows]
+    alive_samples = workspace.alive_samples[:rows]
+    best_rank_samples = workspace.best_rank_samples[:rows]
+    best_count_samples = workspace.best_count_samples[:rows]
+    workspace.seed.fill_(int(seed))
+
+    sample_grid = (rows, triton.cdiv(sample_count, block_s))
+    _allin_cdf_sample_candidates_kernel[sample_grid](
+        cdf,
+        candidates,
+        workspace.seed,
+        sample_count,
+        active_hands=NUM_HANDS,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        SEARCH_STEPS=(NUM_HANDS - 1).bit_length(),
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    num_h_blocks = triton.cdiv(NUM_HANDS, block_h)
+    num_s_blocks = triton.cdiv(sample_count, block_s)
+    select_grid = (rows, players, num_s_blocks)
+    _allin_select_hero_samples_kernel[select_grid](
+        candidates,
+        hand_masks,
+        hand_ranks,
+        live_mask,
+        used_samples,
+        rank_samples,
+        alive_samples,
+        sample_count,
+        active_hands=NUM_HANDS,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    precompute_grid = (rows, players * players, num_s_blocks)
+    _allin_precompute_layer_results_kernel[precompute_grid](
+        rank_samples,
+        eligible,
+        layer_amount,
+        best_rank_samples,
+        best_count_samples,
+        sample_count,
+        PLAYERS=players,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    score_grid = (rows, players, num_h_blocks)
+    _allin_score_hero_hands_mask_accumulate_kernel[score_grid](
+        hand_masks,
+        hand_ranks,
+        board_masks,
+        board_masks if board_weights is None else board_weights,
+        used_samples,
+        alive_samples,
+        best_rank_samples,
+        best_count_samples,
+        live_mask,
+        layer_amount,
+        eligible,
+        payout_sum,
+        denom_sum,
+        sample_count,
+        active_hands=NUM_HANDS,
+        PLAYERS=players,
+        BOARDS_PER_ROOT=boards_per_root,
+        HAS_BOARD_WEIGHTS=board_weights is not None,
+        SKIP_FOLDED=skip_folded_heroes,
+        BLOCK_H=block_h,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+
+
+def allin_169_belief_class_score_from_roots_masks_accumulate_cuda_(
+    workspace: AllinCdfWorkspace,
+    *,
+    beliefs_169: torch.Tensor,
+    board_masks: torch.Tensor,
+    boards_per_root: int,
+    class_members: torch.Tensor,
+    hand_masks: torch.Tensor,
+    hand_ranks: torch.Tensor,
+    combo_class: torch.Tensor,
+    class_multiplicity: torch.Tensor,
+    live_mask: torch.Tensor,
+    layer_amount: torch.Tensor,
+    eligible: torch.Tensor,
+    payout_sum: torch.Tensor,
+    denom_sum: torch.Tensor,
+    seed: int,
+    block_s: int | None = None,
+    block_c: int = 16,
+    skip_folded_heroes: bool = True,
+) -> None:
+    """Sample combo-level tuples, then score exact 169 classes directly."""
+    if triton is None:
+        raise RuntimeError("triton is not available")
+    if beliefs_169.device.type != "cuda":
+        raise ValueError("all-in tuple scorer requires CUDA tensors")
+    if board_masks.dim() != 1:
+        raise ValueError("board_masks must be a 1D tensor")
+    rows = board_masks.shape[0]
+    root_count, players, belief_hands = beliefs_169.shape
+    if belief_hands != PREFLOP_HANDS:
+        raise ValueError("beliefs_169 must have 169 hands")
+    if workspace.hands != NUM_HANDS or players != workspace.players:
+        raise ValueError("workspace must be sized for 1326 combo sampling")
+    if boards_per_root <= 0 or rows != root_count * boards_per_root:
+        raise ValueError("rows must equal roots * boards_per_root")
+    if class_members.shape != (PREFLOP_HANDS, 12):
+        raise ValueError("class_members shape mismatch")
+    if payout_sum.shape != (root_count, players, PREFLOP_HANDS):
+        raise ValueError("payout_sum shape mismatch")
+    if denom_sum.shape != (root_count, players, PREFLOP_HANDS):
+        raise ValueError("denom_sum shape mismatch")
+    if rows > workspace.max_rows:
+        raise ValueError("chunk has more rows than the workspace was sized for")
+    sample_count = workspace.sample_count
+    tuple_tries = workspace.tuple_tries
+    if block_s is None:
+        block_s = min(32, triton.next_power_of_2(sample_count))
+
+    cdf = _build_169_belief_board_mask_cdf_tables_into(
+        workspace,
+        beliefs_169,
+        board_masks,
+        hand_masks,
+        combo_class,
+        class_multiplicity,
+        rows=rows,
+        players=players,
+        hands=NUM_HANDS,
+        boards_per_root=boards_per_root,
+    )
+
+    candidates = workspace.candidates[:rows]
+    used_samples = workspace.used_samples[:rows]
+    rank_samples = workspace.rank_samples[:rows]
+    alive_samples = workspace.alive_samples[:rows]
+    best_rank_samples = workspace.best_rank_samples[:rows]
+    best_count_samples = workspace.best_count_samples[:rows]
+    workspace.seed.fill_(int(seed))
+
+    sample_grid = (rows, triton.cdiv(sample_count, block_s))
+    _allin_cdf_sample_candidates_kernel[sample_grid](
+        cdf,
+        candidates,
+        workspace.seed,
+        sample_count,
+        active_hands=NUM_HANDS,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        SEARCH_STEPS=(NUM_HANDS - 1).bit_length(),
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    num_s_blocks = triton.cdiv(sample_count, block_s)
+    select_grid = (rows, players, num_s_blocks)
+    _allin_select_hero_samples_kernel[select_grid](
+        candidates,
+        hand_masks,
+        hand_ranks,
+        live_mask,
+        used_samples,
+        rank_samples,
+        alive_samples,
+        sample_count,
+        active_hands=NUM_HANDS,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    precompute_grid = (rows, players * players, num_s_blocks)
+    _allin_precompute_layer_results_kernel[precompute_grid](
+        rank_samples,
+        eligible,
+        layer_amount,
+        best_rank_samples,
+        best_count_samples,
+        sample_count,
+        PLAYERS=players,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    num_c_blocks = triton.cdiv(PREFLOP_HANDS, block_c)
+    score_grid = (rows, players, num_c_blocks)
+    _allin_score_169_classes_mask_accumulate_kernel[score_grid](
+        class_members,
+        hand_masks,
+        hand_ranks,
+        board_masks,
+        used_samples,
+        alive_samples,
+        best_rank_samples,
+        best_count_samples,
+        live_mask,
+        layer_amount,
+        eligible,
+        payout_sum,
+        denom_sum,
+        sample_count,
+        active_classes=PREFLOP_HANDS,
+        PLAYERS=players,
+        BOARDS_PER_ROOT=boards_per_root,
+        SKIP_FOLDED=skip_folded_heroes,
+        BLOCK_C=block_c,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+
+
+def allin_row_hands_cdf_tuple_score_accumulate_cuda_(
+    workspace: AllinCdfWorkspace,
+    *,
+    board_beliefs: torch.Tensor,
+    row_hand_masks: torch.Tensor,
+    row_hand_ranks: torch.Tensor,
+    boards_per_root: int,
+    live_mask: torch.Tensor,
+    layer_amount: torch.Tensor,
+    eligible: torch.Tensor,
+    payout_sum: torch.Tensor,
+    denom_sum: torch.Tensor,
+    seed: int,
+    block_s: int | None = None,
+    block_h: int = 64,
+    skip_folded_heroes: bool = True,
+) -> None:
+    """Score row-local compact hands and atomically accumulate to roots."""
+    if triton is None:
+        raise RuntimeError("triton is not available")
+    if board_beliefs.device.type != "cuda":
+        raise ValueError("row-local all-in tuple scorer requires CUDA tensors")
+    rows, players, hands = board_beliefs.shape
+    root_count = payout_sum.shape[0]
+    if players != workspace.players or hands != workspace.hands:
+        raise ValueError("workspace players/hands mismatch")
+    if boards_per_root <= 0 or rows != root_count * boards_per_root:
+        raise ValueError("rows must equal roots * boards_per_root")
+    if row_hand_masks.shape != (rows, hands):
+        raise ValueError("row_hand_masks shape mismatch")
+    if row_hand_ranks.shape != (rows, hands):
+        raise ValueError("row_hand_ranks shape mismatch")
+    if payout_sum.shape != (root_count, players, hands):
+        raise ValueError("payout_sum shape mismatch")
+    if denom_sum.shape != (root_count, players, hands):
+        raise ValueError("denom_sum shape mismatch")
+    if rows > workspace.max_rows:
+        raise ValueError("chunk has more rows than the workspace was sized for")
+    sample_count = workspace.sample_count
+    tuple_tries = workspace.tuple_tries
+    if block_s is None:
+        block_s = min(32, triton.next_power_of_2(sample_count))
+
+    flat_beliefs = board_beliefs.reshape(rows * players, hands).contiguous()
+    cdf = _build_cdf_tables_into(workspace, flat_beliefs)
+    candidates = workspace.candidates[:rows]
+    used_samples = workspace.used_samples[:rows]
+    rank_samples = workspace.rank_samples[:rows]
+    alive_samples = workspace.alive_samples[:rows]
+    best_rank_samples = workspace.best_rank_samples[:rows]
+    best_count_samples = workspace.best_count_samples[:rows]
+    workspace.seed.fill_(int(seed))
+
+    sample_grid = (rows, triton.cdiv(sample_count, block_s))
+    _allin_cdf_sample_candidates_kernel[sample_grid](
+        cdf,
+        candidates,
+        workspace.seed,
+        sample_count,
+        active_hands=hands,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        SEARCH_STEPS=(hands - 1).bit_length(),
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    num_h_blocks = triton.cdiv(hands, block_h)
+    num_s_blocks = triton.cdiv(sample_count, block_s)
+    select_grid = (rows, players, num_s_blocks)
+    _allin_select_hero_samples_row_hands_kernel[select_grid](
+        candidates,
+        row_hand_masks,
+        row_hand_ranks,
+        live_mask,
+        used_samples,
+        rank_samples,
+        alive_samples,
+        sample_count,
+        active_hands=hands,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    precompute_grid = (rows, players * players, num_s_blocks)
+    _allin_precompute_layer_results_kernel[precompute_grid](
+        rank_samples,
+        eligible,
+        layer_amount,
+        best_rank_samples,
+        best_count_samples,
+        sample_count,
+        PLAYERS=players,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    score_grid = (rows, players, num_h_blocks)
+    _allin_score_row_hands_accumulate_kernel[score_grid](
+        row_hand_masks,
+        row_hand_ranks,
         used_samples,
         alive_samples,
         best_rank_samples,
@@ -1216,6 +2573,168 @@ def allin_cdf_tuple_score_from_roots_masks_accumulate_cuda_(
         BLOCK_S=block_s,
         num_warps=4,
     )
+
+
+def allin_169_class_cdf_tuple_score_accumulate_cuda_(
+    workspace: AllinCdfWorkspace,
+    *,
+    board_beliefs: torch.Tensor,
+    board_masks: torch.Tensor,
+    class_members: torch.Tensor,
+    hand_masks: torch.Tensor,
+    hand_ranks: torch.Tensor,
+    boards_per_root: int,
+    live_mask: torch.Tensor,
+    layer_amount: torch.Tensor,
+    eligible: torch.Tensor,
+    payout_sum: torch.Tensor,
+    denom_sum: torch.Tensor,
+    seed: int,
+    block_s: int | None = None,
+    block_h: int = 64,
+    skip_folded_heroes: bool = True,
+) -> None:
+    """Score native 169 classes with independently sampled combo members."""
+    if triton is None:
+        raise RuntimeError("triton is not available")
+    if board_beliefs.device.type != "cuda":
+        raise ValueError("native 169 all-in tuple scorer requires CUDA tensors")
+    rows, players, hands = board_beliefs.shape
+    root_count = payout_sum.shape[0]
+    if players != workspace.players or hands != workspace.hands:
+        raise ValueError("workspace players/hands mismatch")
+    if hands != 169:
+        raise ValueError("native 169 scorer requires 169 hands")
+    if boards_per_root <= 0 or rows != root_count * boards_per_root:
+        raise ValueError("rows must equal roots * boards_per_root")
+    if board_masks.shape != (rows,):
+        raise ValueError("board_masks shape mismatch")
+    if class_members.shape != (hands, 12):
+        raise ValueError("class_members shape mismatch")
+    if hand_masks.shape != (NUM_HANDS,):
+        raise ValueError("hand_masks shape mismatch")
+    if hand_ranks.shape != (rows, NUM_HANDS):
+        raise ValueError("hand_ranks shape mismatch")
+    if payout_sum.shape != (root_count, players, hands):
+        raise ValueError("payout_sum shape mismatch")
+    if denom_sum.shape != (root_count, players, hands):
+        raise ValueError("denom_sum shape mismatch")
+    if rows > workspace.max_rows:
+        raise ValueError("chunk has more rows than the workspace was sized for")
+    sample_count = workspace.sample_count
+    tuple_tries = workspace.tuple_tries
+    if block_s is None:
+        block_s = min(32, triton.next_power_of_2(sample_count))
+
+    flat_beliefs = board_beliefs.reshape(rows * players, hands).contiguous()
+    cdf = _build_cdf_tables_into(workspace, flat_beliefs)
+    candidates = workspace.candidates[:rows]
+    used_samples = workspace.used_samples[:rows]
+    rank_samples = workspace.rank_samples[:rows]
+    alive_samples = workspace.alive_samples[:rows]
+    best_rank_samples = workspace.best_rank_samples[:rows]
+    best_count_samples = workspace.best_count_samples[:rows]
+    workspace.seed.fill_(int(seed))
+
+    sample_grid = (rows, triton.cdiv(sample_count, block_s))
+    _allin_cdf_sample_candidates_kernel[sample_grid](
+        cdf,
+        candidates,
+        workspace.seed,
+        sample_count,
+        active_hands=hands,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        SEARCH_STEPS=(hands - 1).bit_length(),
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    num_s_blocks = triton.cdiv(sample_count, block_s)
+    select_grid = (rows, players, num_s_blocks)
+    _allin_select_hero_samples_169_members_kernel[select_grid](
+        candidates,
+        board_masks,
+        class_members,
+        hand_masks,
+        hand_ranks,
+        live_mask,
+        workspace.seed,
+        used_samples,
+        rank_samples,
+        alive_samples,
+        sample_count,
+        active_hands=hands,
+        PLAYERS=players,
+        TUPLE_TRIES=tuple_tries,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    precompute_grid = (rows, players * players, num_s_blocks)
+    _allin_precompute_layer_results_kernel[precompute_grid](
+        rank_samples,
+        eligible,
+        layer_amount,
+        best_rank_samples,
+        best_count_samples,
+        sample_count,
+        PLAYERS=players,
+        BLOCK_S=block_s,
+        num_warps=4,
+    )
+    hero_masks = torch.empty(
+        rows,
+        block_h,
+        sample_count,
+        dtype=torch.int64,
+        device=board_beliefs.device,
+    )
+    hero_ranks = torch.empty(
+        rows,
+        block_h,
+        sample_count,
+        dtype=torch.int32,
+        device=board_beliefs.device,
+    )
+    hero_sample_grid = (rows, num_s_blocks)
+    score_grid = (rows, players)
+    for hand_start in range(0, hands, block_h):
+        _allin_sample_169_hero_member_block_kernel[hero_sample_grid](
+            board_masks,
+            class_members,
+            hand_masks,
+            hand_ranks,
+            workspace.seed,
+            hero_masks,
+            hero_ranks,
+            sample_count,
+            active_hands=hands,
+            HAND_START=hand_start,
+            BLOCK_H=block_h,
+            BLOCK_S=block_s,
+            num_warps=4,
+        )
+        _allin_score_169_sampled_hero_block_accumulate_kernel[score_grid](
+            hero_masks,
+            hero_ranks,
+            used_samples,
+            alive_samples,
+            best_rank_samples,
+            best_count_samples,
+            live_mask,
+            layer_amount,
+            eligible,
+            payout_sum,
+            denom_sum,
+            sample_count,
+            active_hands=hands,
+            PLAYERS=players,
+            BOARDS_PER_ROOT=boards_per_root,
+            HAND_START=hand_start,
+            SKIP_FOLDED=skip_folded_heroes,
+            BLOCK_H=block_h,
+            BLOCK_S=block_s,
+            num_warps=4,
+        )
 
 
 def allin_cdf_tuple_score_cuda(

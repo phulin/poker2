@@ -1,10 +1,13 @@
+import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 import torch
 
 from p2.allin import (
     PreflopAllIn169EquityModel,
+    PreflopAllIn169TransformerModel,
     PreflopAllInBatch,
     PreflopAllInEquityModel,
     PreflopAllInTransformerModel,
@@ -20,10 +23,11 @@ from p2.allin.model import (
     POT_LAYER_SCALAR_FEATURE_DIM,
     _LeakyRMSBlock,
 )
-from p2.allin.sampler import NUM_FULL_BOARDS
+from p2.allin.sampler import NUM_CANONICAL_FULL_BOARDS
 from p2.allin.train import (
     AllInTrainConfig,
     _build_model,
+    _data_config_from_train,
     _eligible_pot_share_to_values,
     _evaluate_pregenerated_dataset,
     _predict_allin_values,
@@ -33,6 +37,7 @@ from p2.allin.train import (
 )
 from p2.allin.training_data import (
     AllInDataGenConfig,
+    FEATURE_KEYS,
     MANIFEST_NAME,
     TARGET_KEY,
     PregeneratedAllInDataset,
@@ -48,6 +53,22 @@ from p2.env.card_utils import (
     combo_index,
     combo_suit_permutation_inverse_tensor,
 )
+from p2.env.rules import rank_hands
+
+
+def _load_allin_169_converter():
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / (
+        "convert_allin_dataset_to_169.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "convert_allin_dataset_to_169",
+        script_path,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.convert_allin_dataset_to_169
 
 
 def test_random_preflop_allin_batch_shapes_and_stack_distribution() -> None:
@@ -101,6 +122,19 @@ def test_random_preflop_allin_batch_supports_native_169_mode() -> None:
 
     with pytest.raises(ValueError, match="hand_dim"):
         make_random_preflop_allin_batch(1, hand_dim=170)
+
+
+def test_random_preflop_allin_batch_respects_min_allin_players() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(125)
+    batch = make_random_preflop_allin_batch(
+        64,
+        players=6,
+        min_allin_players=4,
+        device="cpu",
+        generator=generator,
+    )
+
+    assert torch.all((~batch.folded_mask).sum(dim=1) >= 4)
 
 
 def test_allin_suit_permutation_remaps_beliefs_and_targets() -> None:
@@ -364,6 +398,28 @@ def test_allin_eval_logs_mse_mae_by_live_player_count(tmp_path) -> None:
     assert metrics["eval/live_players/4/examples"] == 1.0
     assert metrics["eval/live_players/4/mse"] == 16.0
     assert metrics["eval/live_players/4/mae"] == 4.0
+
+    dataset = PregeneratedAllInDataset(tmp_path)
+    try:
+        filtered = _evaluate_pregenerated_dataset(
+            ZeroModel(),
+            dataset,
+            batch_size=2,
+            device=torch.device("cpu"),
+            min_live_players=3,
+        )
+    finally:
+        dataset.close()
+
+    assert filtered["eval/examples"] == 2.0
+    assert filtered["eval/raw_examples"] == 4.0
+    assert filtered["eval/skipped_examples"] == 2.0
+    assert filtered["eval/min_live_players"] == 3.0
+    assert filtered["eval/mse"] == 10.0
+    assert filtered["eval/mae"] == 3.0
+    assert "eval/live_players/2/examples" not in filtered
+    assert filtered["eval/live_players/3/examples"] == 1.0
+    assert filtered["eval/live_players/4/examples"] == 1.0
 
 
 def test_pregenerated_suit_permutation_changes_on_second_epoch() -> None:
@@ -837,6 +893,15 @@ def test_allin_train_config_builds_transformer_model() -> None:
     assert model.mask_folded_player_tokens is True
 
 
+def test_allin_train_config_passes_min_allin_players_to_data_config() -> None:
+    cfg = _data_config_from_train(
+        AllInTrainConfig(players=6, min_allin_players=4)
+    )
+
+    assert cfg.players == 6
+    assert cfg.min_allin_players == 4
+
+
 def test_eligible_pot_share_target_round_trips_live_values() -> None:
     batch = make_random_preflop_allin_batch(
         8,
@@ -1010,6 +1075,36 @@ def test_preflop_allin_sampler_native_169_small_smoke() -> None:
     assert diagnostics["target_board_samples"] == 3.0
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_preflop_allin_sampler_native_169_uses_cuda_kernel_path() -> None:
+    device = torch.device("cuda")
+    batch = make_random_preflop_allin_batch(
+        2,
+        players=4,
+        min_allin_players=3,
+        hand_dim=PREFLOP_HANDS,
+        device=device,
+        generator=torch.Generator(device=device).manual_seed(7901),
+    )
+
+    values, diagnostics = estimate_preflop_allin_values_169(
+        batch,
+        sample_count=None,
+        board_samples=2,
+        tuple_samples=1,
+        tuple_tries=1,
+        board_chunk=2,
+        generator=torch.Generator(device=device).manual_seed(7902),
+        compute_stats=True,
+        use_exact_two_player=False,
+    )
+
+    assert values.shape == (2, 4, PREFLOP_HANDS)
+    assert torch.isfinite(values).all()
+    assert diagnostics["target_hand_dim"] == float(PREFLOP_HANDS)
+    assert "target_kernel_launch_seconds" in diagnostics
+
+
 def test_preflop_allin_sampler_dispatches_native_169_exact_two_player() -> None:
     batch = make_random_preflop_allin_batch(
         2,
@@ -1072,6 +1167,50 @@ def test_preflop_allin_169_model_uses_hand_major_boundary() -> None:
         )
 
 
+def test_preflop_allin_169_transformer_model_shapes_and_tokens() -> None:
+    batch = make_random_preflop_allin_batch(
+        2,
+        players=3,
+        bb=100,
+        hand_dim=PREFLOP_HANDS,
+        device="cpu",
+        generator=torch.Generator(device="cpu").manual_seed(795),
+    )
+    model = PreflopAllIn169TransformerModel(
+        players=3,
+        hidden_dim=64,
+        hand_dim=32,
+        num_layers=2,
+        film_rank=7,
+        transformer_heads=4,
+        dense_belief_residual=True,
+        dense_output_residual=True,
+        mask_folded_player_tokens=True,
+    )
+    model.init_weights(torch.Generator(device="cpu").manual_seed(796))
+
+    out = model(
+        batch.beliefs.transpose(1, 2).contiguous(),
+        batch.starting_stacks,
+        batch.committed,
+        batch.stacks_after,
+        batch.allin_mask,
+        batch.folded_mask,
+    )
+
+    assert out.shape == (2, PREFLOP_HANDS, 3)
+    assert torch.isfinite(out).all()
+    assert model.context_proj[0].in_features == 3 * PLAYER_FEATURE_DIM
+    assert model.pot_layer_proj[0].in_features == POT_LAYER_SCALAR_FEATURE_DIM + 6
+    assert model.bucket_mass_proj[0].in_features == 16
+    assert model.dense_belief_proj[0].in_features == 3 * PREFLOP_HANDS
+    assert model.dense_output_proj.weight.shape == (PREFLOP_HANDS, 64)
+    assert len(model.encoder) == 2
+    assert model.encoder[0].num_heads == 4
+    assert model.mask_folded_player_tokens is True
+    assert not hasattr(model, "card_mass_proj")
+
+
 def test_allin_train_builds_native_169_model_and_predicts_player_major_loss_shape() -> None:
     batch = make_random_preflop_allin_batch(
         2,
@@ -1102,6 +1241,42 @@ def test_allin_train_builds_native_169_model_and_predicts_player_major_loss_shap
     assert torch.isfinite(pred).all()
     with pytest.raises(ValueError, match="range_hand_dim=169"):
         _build_model(AllInTrainConfig(range_hand_dim=PREFLOP_HANDS))
+
+
+def test_allin_train_builds_native_169_transformer_model() -> None:
+    batch = make_random_preflop_allin_batch(
+        2,
+        players=3,
+        hand_dim=PREFLOP_HANDS,
+        device="cpu",
+        generator=torch.Generator(device="cpu").manual_seed(797),
+    )
+    cfg = AllInTrainConfig(
+        model_type="transformer_169",
+        range_hand_dim=PREFLOP_HANDS,
+        players=3,
+        hidden_dim=64,
+        hand_dim=32,
+        layers=1,
+        film_rank=8,
+        transformer_heads=4,
+        dense_output_residual=True,
+        mask_folded_player_tokens=True,
+    )
+
+    model = _build_model(cfg)
+    assert isinstance(model, PreflopAllIn169TransformerModel)
+    assert isinstance(model, PreflopAllIn169EquityModel)
+    assert model.transformer_heads == 4
+    assert model.dense_output_residual is True
+    pred = _predict_allin_values(
+        model,
+        batch,
+        target_mode="net_value",
+    )
+
+    assert pred.shape == (2, 3, PREFLOP_HANDS)
+    assert torch.isfinite(pred).all()
 
 
 def test_generate_allin_training_chunk_can_emit_compact_169_targets() -> None:
@@ -1149,7 +1324,8 @@ def test_generate_allin_training_chunk_routes_169_batch_to_estimator(
 
     monkeypatch.setattr(training_data, "estimate_preflop_allin_values", fake_estimator)
     cfg = AllInDataGenConfig(
-        players=3,
+        players=6,
+        min_allin_players=4,
         range_hand_dim=PREFLOP_HANDS,
     )
 
@@ -1162,8 +1338,9 @@ def test_generate_allin_training_chunk_routes_169_batch_to_estimator(
     )
 
     assert seen_hand_dims == [PREFLOP_HANDS]
-    assert tensors["beliefs"].shape == (2, 3, PREFLOP_HANDS)
-    assert tensors[TARGET_KEY].shape == (2, 3, PREFLOP_HANDS)
+    assert tensors["beliefs"].shape == (2, 6, PREFLOP_HANDS)
+    assert tensors[TARGET_KEY].shape == (2, 6, PREFLOP_HANDS)
+    assert torch.all((~tensors["folded_mask"]).sum(dim=1) >= 4)
     assert diagnostics["target_hand_dim"] == float(PREFLOP_HANDS)
 
 
@@ -1233,6 +1410,65 @@ def test_pregenerated_dataset_can_load_1326_data_as_compact_169(tmp_path) -> Non
     )
 
 
+def test_convert_allin_dataset_to_169_writes_compact_shards(tmp_path) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "converted"
+    source.mkdir()
+    examples = 2
+    players = 3
+    beliefs = torch.rand(examples, players, NUM_HANDS)
+    beliefs = beliefs / beliefs.sum(dim=-1, keepdim=True)
+    targets = torch.randn(examples, players, NUM_HANDS)
+    tensors = {
+        "beliefs": beliefs,
+        "starting_stacks": torch.ones(examples, players),
+        "committed": torch.zeros(examples, players),
+        "stacks_after": torch.ones(examples, players),
+        "allin_mask": torch.ones(examples, players, dtype=torch.bool),
+        "folded_mask": torch.zeros(examples, players, dtype=torch.bool),
+        "scale": torch.ones(examples),
+        TARGET_KEY: targets,
+    }
+    torch.save(tensors, source / "shard_000000.pt")
+    manifest = {
+        "format": "p2.allin.training_data.v1",
+        "examples": examples,
+        "players": players,
+        "hands": NUM_HANDS,
+        "feature_keys": list(FEATURE_KEYS),
+        "target_key": TARGET_KEY,
+        "config": {"range_hand_dim": NUM_HANDS},
+        "shards": [
+            {
+                "file": "shard_000000.pt",
+                "examples": examples,
+                "start": 0,
+                "end": examples,
+            }
+        ],
+    }
+    (source / MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    convert_allin_dataset_to_169 = _load_allin_169_converter()
+    converted_manifest = convert_allin_dataset_to_169(source, output)
+    converted = torch.load(output / "shard_000000.pt", map_location="cpu")
+
+    assert converted_manifest["hands"] == PREFLOP_HANDS
+    assert converted_manifest["config"]["range_hand_dim"] == PREFLOP_HANDS
+    assert converted_manifest["conversion"]["source_hands"] == NUM_HANDS
+    assert converted_manifest["conversion"]["target_hands"] == PREFLOP_HANDS
+    assert converted["beliefs"].shape == (examples, players, PREFLOP_HANDS)
+    assert converted[TARGET_KEY].shape == (examples, players, PREFLOP_HANDS)
+    torch.testing.assert_close(
+        converted["beliefs"],
+        collapse_1326_to_169(beliefs, reduction="sum"),
+    )
+    torch.testing.assert_close(
+        converted[TARGET_KEY],
+        collapse_1326_to_169(targets, reduction="mean"),
+    )
+
+
 def test_pregenerate_all_boards_config_uses_samples_per_board() -> None:
     cfg = _data_config(
         PregenerateConfig(
@@ -1246,13 +1482,22 @@ def test_pregenerate_all_boards_config_uses_samples_per_board() -> None:
 
     assert cfg.all_boards is True
     assert cfg.sample_count is None
-    assert cfg.board_samples == NUM_FULL_BOARDS
+    assert cfg.board_samples == NUM_CANONICAL_FULL_BOARDS
     assert cfg.tuple_samples == 3
+    assert cfg.board_ranks_path
 
 
 def test_pregenerate_config_passes_native_169_hand_dim() -> None:
-    cfg = _data_config(PregenerateConfig(range_hand_dim=PREFLOP_HANDS))
+    cfg = _data_config(
+        PregenerateConfig(
+            players=6,
+            min_allin_players=4,
+            range_hand_dim=PREFLOP_HANDS,
+        )
+    )
 
+    assert cfg.players == 6
+    assert cfg.min_allin_players == 4
     assert cfg.range_hand_dim == PREFLOP_HANDS
 
 
@@ -1310,6 +1555,73 @@ def test_preflop_allin_sampler_exhaustive_boards_uses_fixed_board_source(
     assert diagnostics["target_board_samples"] == float(boards.shape[0])
     assert diagnostics["target_tuple_samples"] == 1.0
     assert diagnostics["target_exhaustive_boards"] == 1.0
+
+
+def test_preflop_allin_sampler_exhaustive_boards_can_use_cached_ranks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import p2.allin.sampler as sampler
+
+    boards = torch.tensor(
+        [
+            [0, 1, 2, 3, 4],
+            [0, 1, 2, 3, 5],
+        ],
+        dtype=torch.long,
+    )
+    scores, _ = rank_hands(boards.int())
+    sorted_scores, sorted_idx = scores.sort(dim=1)
+    group_start = torch.ones_like(sorted_scores, dtype=torch.bool)
+    group_start[:, 1:] = sorted_scores[:, 1:] != sorted_scores[:, :-1]
+    sorted_dense = torch.cumsum(group_start.to(torch.int32), dim=1)
+    dense = torch.empty_like(sorted_dense)
+    dense.scatter_(1, sorted_idx, sorted_dense)
+    cache = sampler.CanonicalBoardRankCache(
+        path=Path("/tmp/fake-board-ranks.bin"),
+        ranks=dense.to(torch.uint16).numpy(),
+        boards=boards,
+        weights=torch.tensor([1.0, 3.0], dtype=torch.float32),
+        metadata={},
+    )
+
+    def fail_board_source(*args: object, **kwargs: object) -> torch.Tensor:
+        raise AssertionError("raw exhaustive board source should not run")
+
+    monkeypatch.setattr(
+        sampler,
+        "_load_canonical_board_rank_cache",
+        lambda path: cache,
+    )
+    monkeypatch.setattr(sampler, "_full_boards", fail_board_source)
+    monkeypatch.setattr(sampler, "_rank_hands", fail_board_source)
+
+    generator = torch.Generator(device="cpu").manual_seed(790)
+    batch = make_random_preflop_allin_batch(
+        1,
+        players=3,
+        bb=100,
+        hand_dim=PREFLOP_HANDS,
+        device="cpu",
+        generator=generator,
+    )
+    values, diagnostics = sampler.estimate_preflop_allin_values(
+        batch,
+        sample_count=None,
+        board_samples=boards.shape[0],
+        tuple_samples=2,
+        tuple_tries=2,
+        board_chunk=1,
+        hand_chunk=512,
+        generator=generator,
+        use_exact_two_player=False,
+        exhaustive_boards=True,
+        board_ranks_path="/tmp/fake-board-ranks.bin",
+    )
+
+    assert values.shape == (1, 3, PREFLOP_HANDS)
+    assert torch.isfinite(values).all()
+    assert diagnostics["target_board_samples"] == float(boards.shape[0])
+    assert diagnostics["target_cached_board_ranks"] == 1.0
 
 
 def test_preflop_allin_sampler_compute_stats_false_matches_values() -> None:

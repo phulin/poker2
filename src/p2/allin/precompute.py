@@ -67,6 +67,22 @@ class PreflopAllIn169Tensors:
         return out
 
 
+@dataclass(frozen=True)
+class _AllIn3PWorkTensorChunk:
+    concrete_triples: torch.Tensor
+    triple_masks: torch.Tensor
+    triple_weights: torch.Tensor
+    owners: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _AllIn3PWorkBatch:
+    start: int
+    ids: torch.Tensor
+    compatible_triples: torch.Tensor
+    chunks: tuple[_AllIn3PWorkTensorChunk, ...]
+
+
 def _rank_hands(board: torch.Tensor, *, use_triton: bool) -> torch.Tensor:
     if use_triton:
         from p2.env.rules_triton import rank_hand_scores_triton
@@ -436,6 +452,108 @@ def _class_tuple_combos(
     return combos.reshape(class_tuple.shape[0], -1, players), valid.reshape(
         class_tuple.shape[0], -1
     )
+
+
+def _iter_3p_work_batches(
+    *,
+    linear: torch.Tensor,
+    class_chunk: int,
+    tuple_chunk: int,
+    class_combo: torch.Tensor,
+    class_combo_mask: torch.Tensor,
+    combo_masks: torch.Tensor,
+    combo_card_masks: torch.Tensor,
+    tuple_orbits: bool,
+    combo_suit_permutation: torch.Tensor | None,
+    combo_class_ids: torch.Tensor | None,
+) -> Iterator[_AllIn3PWorkBatch]:
+    for start in range(0, linear.numel(), class_chunk):
+        ids = linear[start : start + class_chunk]
+        class_tuple = _decode_linear_classes(ids, 3)
+        tuple_grid, tuple_valid = _class_tuple_combos(
+            class_tuple,
+            class_combo=class_combo,
+            class_combo_mask=class_combo_mask,
+            combo_masks=combo_masks,
+        )
+        compatible_triples = tuple_valid.sum(dim=1, dtype=torch.int64)
+        valid_triples = tuple_valid.reshape(-1).nonzero(as_tuple=False).flatten()
+        if valid_triples.numel() == 0:
+            yield _AllIn3PWorkBatch(
+                start=start,
+                ids=ids,
+                compatible_triples=compatible_triples,
+                chunks=(),
+            )
+            continue
+
+        triples_per_class = tuple_valid.shape[1]
+        concrete_triples = tuple_grid.reshape(-1, 3).index_select(0, valid_triples)
+        owners = ids.repeat_interleave(triples_per_class).index_select(
+            0,
+            valid_triples,
+        )
+        if tuple_orbits:
+            concrete_triples = concrete_triples.contiguous()
+            owners = owners.contiguous()
+            if combo_suit_permutation is None:
+                raise RuntimeError("combo_suit_permutation missing")
+            if combo_class_ids is None:
+                raise RuntimeError("combo_class_ids missing")
+            concrete_triples, triple_weights, owners = _canonicalize_tuple_suit_orbits(
+                concrete_triples,
+                combo_suit_permutation=combo_suit_permutation,
+                combo_class_ids=combo_class_ids,
+            )
+        else:
+            class_rows = torch.arange(
+                ids.numel(),
+                dtype=torch.long,
+                device=linear.device,
+            ).repeat_interleave(triples_per_class)
+            class_rows = class_rows.index_select(0, valid_triples)
+            same_caller_class = (
+                class_tuple[:, 1]
+                .eq(class_tuple[:, 2])
+                .index_select(0, class_rows)
+            )
+            keep = ~same_caller_class | (
+                concrete_triples[:, 1] < concrete_triples[:, 2]
+            )
+            keep_indices = keep.nonzero(as_tuple=False).flatten()
+            concrete_triples = concrete_triples.index_select(0, keep_indices)
+            owners = owners.index_select(0, keep_indices)
+            triple_weights = torch.where(
+                same_caller_class.index_select(0, keep_indices),
+                torch.full((), 2.0, dtype=torch.float32, device=linear.device),
+                torch.ones((), dtype=torch.float32, device=linear.device),
+            )
+            concrete_triples = concrete_triples.contiguous()
+            owners = owners.contiguous()
+            triple_weights = triple_weights.contiguous()
+
+        chunks: list[_AllIn3PWorkTensorChunk] = []
+        for tuple_start in range(0, concrete_triples.shape[0], tuple_chunk):
+            triples = concrete_triples[tuple_start : tuple_start + tuple_chunk]
+            chunks.append(
+                _AllIn3PWorkTensorChunk(
+                    concrete_triples=triples,
+                    triple_masks=_tuple_card_masks26(
+                        triples,
+                        combo_card_masks=combo_card_masks,
+                    ),
+                    triple_weights=triple_weights[
+                        tuple_start : tuple_start + tuple_chunk
+                    ],
+                    owners=owners[tuple_start : tuple_start + tuple_chunk],
+                )
+            )
+        yield _AllIn3PWorkBatch(
+            start=start,
+            ids=ids,
+            compatible_triples=compatible_triples,
+            chunks=tuple(chunks),
+        )
 
 
 def _allin_3p_share0_accumulate_inner(
@@ -846,69 +964,37 @@ def precompute_allin_3p_share0(
     done_boards = 0.0
     done_board_representatives = 0
 
-    if use_analytic_count:
-        if count_exact is None:
-            raise RuntimeError("count_exact missing for analytic count mode")
-        for start in range(0, linear.numel(), class_chunk):
-            ids = linear[start : start + class_chunk]
-            class_tuple = _decode_linear_classes(ids, 3)
-            _tuple_grid, tuple_valid = _class_tuple_combos(
-                class_tuple,
-                class_combo=class_combo,
-                class_combo_mask=class_combo_mask,
-                combo_masks=combo_masks,
-            )
-            compatible_triples = tuple_valid.sum(dim=1, dtype=torch.int64)
-            count_exact.index_copy_(0, ids, compatible_triples * TOTAL_TRIPLE_BOARDS)
-
     def accumulate_board_batch(
         *,
         ranks: torch.Tensor,
         allowed: torch.Tensor | None,
         board_masks: torch.Tensor | None,
         board_weights: torch.Tensor,
+        initialize_counts: bool,
         progress_by_class: bool,
     ) -> None:
-        for start in range(0, linear.numel(), class_chunk):
-            ids = linear[start : start + class_chunk]
-            class_tuple = _decode_linear_classes(ids, 3)
-            tuple_grid, tuple_valid = _class_tuple_combos(
-                class_tuple,
-                class_combo=class_combo,
-                class_combo_mask=class_combo_mask,
-                combo_masks=combo_masks,
-            )
-            flat_valid = tuple_valid.reshape(-1)
-            if not bool(flat_valid.any()):
-                continue
-            flat_tuple = tuple_grid.reshape(-1, 3)[flat_valid].contiguous()
-            owners = ids.repeat_interleave(tuple_valid.shape[1])[flat_valid].contiguous()
-            mirror_owners = torch.empty(0, dtype=torch.long, device=device)
-            if tuple_orbits:
-                if combo_suit_permutation is None:
-                    raise RuntimeError("combo_suit_permutation missing")
-                if combo_class_ids is None:
-                    raise RuntimeError("combo_class_ids missing")
-                flat_tuple, tuple_weights, owners = _canonicalize_tuple_suit_orbits(
-                    flat_tuple,
-                    combo_suit_permutation=combo_suit_permutation,
-                    combo_class_ids=combo_class_ids,
+        if initialize_counts and count_exact is None:
+            raise RuntimeError("count_exact missing for analytic count mode")
+        mirror_owners = torch.empty(0, dtype=torch.long, device=device)
+        for work_batch in _iter_3p_work_batches(
+            linear=linear,
+            class_chunk=class_chunk,
+            tuple_chunk=tuple_chunk,
+            class_combo=class_combo,
+            class_combo_mask=class_combo_mask,
+            combo_masks=combo_masks,
+            combo_card_masks=combo_card_masks,
+            tuple_orbits=bool(tuple_orbits),
+            combo_suit_permutation=combo_suit_permutation,
+            combo_class_ids=combo_class_ids,
+        ):
+            if initialize_counts:
+                count_exact.index_copy_(
+                    0,
+                    work_batch.ids,
+                    work_batch.compatible_triples * TOTAL_TRIPLE_BOARDS,
                 )
-            else:
-                tuple_weights = torch.ones(
-                    flat_tuple.shape[0],
-                    dtype=torch.float32,
-                    device=device,
-                )
-
-            for tuple_start in range(0, flat_tuple.shape[0], tuple_chunk):
-                tuples = flat_tuple[tuple_start : tuple_start + tuple_chunk]
-                tuple_masks = _tuple_card_masks26(
-                    tuples,
-                    combo_card_masks=combo_card_masks,
-                )
-                tuple_weight = tuple_weights[tuple_start : tuple_start + tuple_chunk]
-                owner = owners[tuple_start : tuple_start + tuple_chunk]
+            for work in work_batch.chunks:
                 if use_accumulation_kernel:
                     if board_masks is None:
                         raise RuntimeError("board_masks missing for accumulation kernel")
@@ -916,10 +1002,10 @@ def precompute_allin_3p_share0(
                         ranks=ranks,
                         board_masks=board_masks,
                         board_weights=board_weights,
-                        tuples=tuples,
-                        tuple_masks=tuple_masks,
-                        tuple_weights=tuple_weight,
-                        owners=owner,
+                        tuples=work.concrete_triples,
+                        tuple_masks=work.triple_masks,
+                        tuple_weights=work.triple_weights,
+                        owners=work.owners,
                         mirror_owners=mirror_owners,
                         share6_sum=share6_sum,
                         count=count_accum,
@@ -935,13 +1021,13 @@ def precompute_allin_3p_share0(
                     chunk_share6, chunk_count = inner(
                         ranks,
                         allowed,
-                        tuples,
+                        work.concrete_triples,
                         board_weights,
-                        tuple_weight,
+                        work.triple_weights,
                     )
-                    share6_sum.scatter_add_(0, owner, chunk_share6)
+                    share6_sum.scatter_add_(0, work.owners, chunk_share6)
                     if not use_analytic_count:
-                        count_accum.scatter_add_(0, owner, chunk_count)
+                        count_accum.scatter_add_(0, work.owners, chunk_count)
 
             if progress is not None and progress_by_class:
                 elapsed = time.perf_counter() - started
@@ -954,7 +1040,9 @@ def precompute_allin_3p_share0(
                         "board_representatives_total": float(
                             board_representatives_total
                         ),
-                        "class_entries_done": float(start + ids.numel()),
+                        "class_entries_done": float(
+                            work_batch.start + work_batch.ids.numel()
+                        ),
                         "class_entries_total": float(linear.numel()),
                         "seconds": float(elapsed),
                         "boards_per_second": float(
@@ -986,9 +1074,11 @@ def precompute_allin_3p_share0(
             allowed=allowed,
             board_masks=board_masks,
             board_weights=board_weights,
+            initialize_counts=use_analytic_count,
             progress_by_class=True,
         )
     else:
+        counts_initialized = False
         for boards_cpu, weights_cpu in _weighted_board_chunks(
             sample_boards=sample_boards,
             seed=seed,
@@ -1009,8 +1099,11 @@ def precompute_allin_3p_share0(
                 allowed=allowed,
                 board_masks=board_masks,
                 board_weights=board_weights,
+                initialize_counts=use_analytic_count and not counts_initialized,
                 progress_by_class=False,
             )
+            if use_analytic_count:
+                counts_initialized = True
 
             if progress is not None:
                 elapsed = time.perf_counter() - started

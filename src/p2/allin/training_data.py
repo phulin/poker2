@@ -11,7 +11,9 @@ import torch
 
 from p2.allin.data import PreflopAllInBatch, make_random_preflop_allin_batch
 from p2.allin.sampler import (
+    DEFAULT_CANONICAL_BOARD_RANKS,
     DEFAULT_PREFLOP_ALLIN_TABLE,
+    NUM_CANONICAL_FULL_BOARDS,
     NUM_FULL_BOARDS,
     PreflopAllInEstimatorWorkspace,
     estimate_preflop_allin_values,
@@ -40,6 +42,7 @@ MANIFEST_NAME = "manifest.json"
 @dataclass
 class AllInDataGenConfig:
     players: int = 4
+    min_allin_players: int = 2
     sample_count: int | None = 50_000
     board_samples: int = 256
     tuple_samples: int = 0
@@ -56,6 +59,7 @@ class AllInDataGenConfig:
     folded_commit_max_frac: float = 0.35
     range_hand_dim: int = NUM_HANDS
     preflop_table_path: str = str(DEFAULT_PREFLOP_ALLIN_TABLE)
+    board_ranks_path: str = str(DEFAULT_CANONICAL_BOARD_RANKS)
     use_exact_two_player: bool = True
 
 
@@ -270,6 +274,7 @@ def generate_allin_training_chunk(
         high_stack_mass_ratio=cfg.high_stack_mass_ratio,
         concentration=cfg.concentration,
         folded_commit_max_frac=cfg.folded_commit_max_frac,
+        min_allin_players=cfg.min_allin_players,
         hand_dim=cfg.range_hand_dim,
         device=device,
         generator=generator,
@@ -277,7 +282,15 @@ def generate_allin_training_chunk(
     targets, diag = estimate_preflop_allin_values(
         batch,
         sample_count=cfg.sample_count,
-        board_samples=NUM_FULL_BOARDS if cfg.all_boards else cfg.board_samples,
+        board_samples=(
+            (
+                NUM_CANONICAL_FULL_BOARDS
+                if cfg.board_ranks_path
+                else NUM_FULL_BOARDS
+            )
+            if cfg.all_boards
+            else cfg.board_samples
+        ),
         tuple_samples=cfg.tuple_samples if cfg.tuple_samples > 0 else None,
         tuple_tries=cfg.tuple_tries,
         board_chunk=cfg.board_chunk,
@@ -288,6 +301,7 @@ def generate_allin_training_chunk(
         compute_stats=compute_stats,
         workspace=workspace,
         exhaustive_boards=cfg.all_boards,
+        board_ranks_path=cfg.board_ranks_path or None,
     )
     tensors = batch_to_tensors(batch, targets)
     tensors = _convert_allin_tensors_hand_dim(

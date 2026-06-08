@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import pytest
 
+from p2.allin.oracle import PreflopAllIn169Oracle
 from p2.allin.precompute import (
     _board_chunks,
     allin_2p_169_share0_from_combo_payoff,
@@ -14,8 +15,10 @@ from p2.allin.precompute import (
 from p2.env.card_utils import (
     PREFLOP_HANDS,
     board_allowed_hands,
+    combo_to_onehot_tensor,
     combo_to_preflop_class_tensor,
     hand_combos_tensor,
+    preflop_class_multiplicity_tensor,
 )
 from p2.env.rules import rank_hands
 
@@ -34,6 +37,44 @@ def test_allin_2p_169_share0_from_combo_payoff_collapses_by_compatible_pairs() -
     ).to(torch.float32)
     expected = 0.5 * (expected + 1.0)
     torch.testing.assert_close(collapsed, expected)
+
+
+def test_allin_169_oracle_two_player_weights_class_mass_by_multiplicity() -> None:
+    device = torch.device("cpu")
+    class_ids = combo_to_preflop_class_tensor(device=device)
+    combo_cards = combo_to_onehot_tensor(device=device).to(torch.float32)
+    compatible = (combo_cards @ combo_cards.T) < 0.5
+    multiplicity = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    share2 = (
+        torch.arange(PREFLOP_HANDS, device=device, dtype=torch.float32)[None, :]
+        / float(PREFLOP_HANDS - 1)
+    ).expand(PREFLOP_HANDS, -1)
+    opp_class_mass = multiplicity / multiplicity.sum()
+    opp_combo_mass = opp_class_mass[class_ids] / multiplicity[class_ids]
+
+    representative = torch.empty(PREFLOP_HANDS, dtype=torch.long, device=device)
+    for class_id in range(PREFLOP_HANDS):
+        representative[class_id] = torch.nonzero(
+            class_ids == class_id,
+            as_tuple=False,
+        )[0, 0]
+    expected = torch.empty(PREFLOP_HANDS, dtype=torch.float32, device=device)
+    for hero_class in range(PREFLOP_HANDS):
+        allowed = compatible[representative[hero_class]]
+        allowed_mass = opp_combo_mass[allowed]
+        expected[hero_class] = (
+            allowed_mass * share2[hero_class, class_ids[allowed]]
+        ).sum() / allowed_mass.sum().clamp_min(1.0e-8)
+
+    oracle = PreflopAllIn169Oracle(device=device)
+    oracle._exact_loaded = True
+    oracle._share2 = share2
+    out = oracle._share2_values(
+        torch.zeros(1, PREFLOP_HANDS, device=device),
+        opp_class_mass[None],
+    )
+
+    torch.testing.assert_close(out[0], expected)
 
 
 def _brute_class_shares(

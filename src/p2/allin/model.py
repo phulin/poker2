@@ -725,6 +725,285 @@ class PreflopAllIn169EquityModel(nn.Module):
             self.dense_output_proj.bias.data.zero_()
 
 
+class PreflopAllIn169TransformerModel(PreflopAllIn169EquityModel):
+    """Player-token preflop all-in transformer for native 169-class ranges."""
+
+    def __init__(
+        self,
+        players: int = 4,
+        hidden_dim: int = 512,
+        hand_dim: int = 128,
+        num_layers: int = 4,
+        film_rank: int = 64,
+        transformer_heads: int = 8,
+        dense_belief_residual: bool = False,
+        dense_output_residual: bool = False,
+        mask_folded_player_tokens: bool = False,
+        negative_slope: float = 0.01,
+    ) -> None:
+        nn.Module.__init__(self)
+        if players < 2:
+            raise ValueError("players must be at least 2")
+        if film_rank < 0:
+            raise ValueError("film_rank must be non-negative")
+        if transformer_heads <= 0:
+            raise ValueError("transformer_heads must be positive")
+        if hidden_dim % transformer_heads != 0:
+            raise ValueError("hidden_dim must be divisible by transformer_heads")
+        self.players = int(players)
+        self.hidden_dim = int(hidden_dim)
+        self.hand_dim = int(hand_dim)
+        self.num_layers = int(num_layers)
+        self.film_rank = int(film_rank)
+        self.transformer_heads = int(transformer_heads)
+        self.dense_belief_residual = bool(dense_belief_residual)
+        self.dense_output_residual = bool(dense_output_residual)
+        self.mask_folded_player_tokens = bool(mask_folded_player_tokens)
+        self.negative_slope = float(negative_slope)
+
+        class_ids = torch.arange(PREFLOP_HANDS)
+        row = torch.div(class_ids, 13, rounding_mode="floor")
+        col = class_ids.remainder(13)
+        hi = torch.maximum(row, col)
+        lo = torch.minimum(row, col)
+        pair = row == col
+        suited = row > col
+        self.register_buffer(
+            "hand_features",
+            self._preflop_class_features(hi, lo, pair, suited),
+        )
+        self.register_buffer("hand_hi_rank", hi.long(), persistent=False)
+        self.register_buffer("hand_lo_rank", lo.long(), persistent=False)
+        self.register_buffer("hand_pair", pair, persistent=False)
+        self.register_buffer("hand_suited", suited, persistent=False)
+
+        self.hand_encoder = nn.Sequential(
+            nn.Linear(HAND_FEATURE_DIM, hand_dim),
+            nn.RMSNorm(hand_dim),
+            nn.LeakyReLU(negative_slope=negative_slope),
+            nn.Linear(hand_dim, hand_dim),
+            nn.RMSNorm(hand_dim),
+            nn.LeakyReLU(negative_slope=negative_slope),
+        )
+        self.range_proj = nn.Linear(hand_dim * 2, hidden_dim, bias=False)
+        self.bucket_mass_proj = nn.Sequential(
+            nn.Linear(PREFLOP_169_BUCKET_FEATURE_DIM, hidden_dim, bias=False),
+            nn.RMSNorm(hidden_dim),
+            nn.LeakyReLU(negative_slope=negative_slope),
+        )
+        self.context_proj = nn.Sequential(
+            nn.Linear(players * PLAYER_FEATURE_DIM, hidden_dim),
+            nn.RMSNorm(hidden_dim),
+            nn.LeakyReLU(negative_slope=negative_slope),
+        )
+        self.pot_layer_proj = nn.Sequential(
+            nn.Linear(POT_LAYER_SCALAR_FEATURE_DIM + players * 2, hidden_dim),
+            nn.RMSNorm(hidden_dim),
+            nn.LeakyReLU(negative_slope=negative_slope),
+        )
+        if self.dense_belief_residual:
+            self.dense_belief_proj = nn.Sequential(
+                nn.Linear(players * PREFLOP_HANDS, hidden_dim, bias=False),
+                nn.RMSNorm(hidden_dim),
+                nn.LeakyReLU(negative_slope=negative_slope),
+                nn.Linear(hidden_dim, hidden_dim, bias=False),
+            )
+        self.encoder = nn.ModuleList(
+            [
+                _TokenEncoderBlock(
+                    hidden_dim,
+                    num_heads=transformer_heads,
+                    hidden_dim=hidden_dim * 2,
+                    negative_slope=negative_slope,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.player_state = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.RMSNorm(hidden_dim),
+            nn.LeakyReLU(negative_slope=negative_slope),
+        )
+        self.value_hand_proj = nn.Linear(hand_dim, hidden_dim, bias=False)
+        self.value_scale = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.blocker_proj = nn.Linear(players, hidden_dim, bias=False)
+        self.blocker_scale = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.value_bias = nn.Linear(hidden_dim, 1)
+        if self.dense_output_residual:
+            self.dense_output_proj = nn.Linear(hidden_dim, PREFLOP_HANDS)
+        if self.film_rank > 0:
+            self.value_film_hand_proj = nn.Linear(hand_dim, self.film_rank, bias=False)
+            self.value_film_state = nn.Linear(hidden_dim, self.film_rank, bias=False)
+
+    def _pot_layer_features(
+        self,
+        beliefs: torch.Tensor,
+        committed: torch.Tensor,
+        folded_mask: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        levels = committed.sort(dim=1).values
+        previous = torch.cat((torch.zeros_like(levels[:, :1]), levels[:, :-1]), dim=1)
+        widths = (levels - previous).clamp_min(0.0)
+        participants = committed[:, None, :] >= levels[:, :, None]
+        eligible = participants & (~folded_mask[:, None, :])
+        participant_count = participants.to(beliefs.dtype).sum(dim=2)
+        eligible_count = eligible.to(beliefs.dtype).sum(dim=2)
+        layer_amount = widths * participant_count
+        positive = widths > 1.0e-6
+        eligible_live = eligible_count >= 2.0
+        layer_scalars = torch.stack(
+            (
+                levels / scale,
+                widths / scale,
+                layer_amount / scale,
+                participant_count / float(self.players),
+                eligible_count / float(self.players),
+                positive.to(beliefs.dtype),
+                (positive & eligible_live).to(beliefs.dtype),
+            ),
+            dim=-1,
+        )
+        layer_features = torch.cat(
+            (
+                layer_scalars,
+                participants.to(beliefs.dtype),
+                eligible.to(beliefs.dtype),
+            ),
+            dim=-1,
+        )
+        return layer_features, eligible & positive[:, :, None]
+
+    def _token_attention_mask(
+        self,
+        player_pot_eligible: torch.Tensor,
+        folded_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        batch_size = player_pot_eligible.shape[0]
+        token_count = 1 + self.players + self.players
+        attn_mask = torch.zeros(
+            batch_size,
+            1,
+            token_count,
+            token_count,
+            device=player_pot_eligible.device,
+            dtype=torch.float32,
+        )
+        player_queries = slice(1, 1 + self.players)
+        pot_keys = slice(1 + self.players, token_count)
+        disallowed = ~player_pot_eligible.transpose(1, 2)
+        attn_mask[:, :, player_queries, pot_keys] = torch.where(
+            disallowed[:, None],
+            torch.full((), float("-inf"), device=attn_mask.device),
+            torch.zeros((), device=attn_mask.device),
+        )
+        if self.mask_folded_player_tokens and folded_mask is not None:
+            player_keys = slice(1, 1 + self.players)
+            folded_penalty = torch.where(
+                folded_mask[:, None, None, :],
+                torch.full((), float("-inf"), device=attn_mask.device),
+                torch.zeros((), device=attn_mask.device),
+            )
+            attn_mask[:, :, :, player_keys] = folded_penalty
+        return attn_mask
+
+    def forward(
+        self,
+        beliefs: torch.Tensor,
+        starting_stacks: torch.Tensor,
+        committed: torch.Tensor,
+        stacks_after: torch.Tensor,
+        allin_mask: torch.Tensor,
+        folded_mask: torch.Tensor,
+        *,
+        hardcode_folded_values: bool = True,
+    ) -> torch.Tensor:
+        if beliefs.shape[1:] != (PREFLOP_HANDS, self.players):
+            raise ValueError(
+                "compact all-in transformer expects beliefs shaped "
+                f"[batch, {PREFLOP_HANDS}, {self.players}], got {tuple(beliefs.shape)}"
+            )
+        beliefs_player = beliefs.transpose(1, 2).contiguous()
+        scale = starting_stacks.mean(dim=1, keepdim=True).clamp_min(1.0)
+        player_features = PreflopAllInEquityModel._player_scalar_features(
+            self,
+            beliefs_player,
+            starting_stacks,
+            committed,
+            stacks_after,
+            allin_mask,
+            folded_mask,
+        )
+
+        hand_emb = self.hand_encoder(
+            self.hand_features.to(beliefs.device, beliefs.dtype)
+        )
+        beliefs_f = beliefs_player.to(hand_emb.dtype)
+        bucket_features = self._range_mass_features(beliefs_f)
+        range_summary = torch.cat(
+            (
+                beliefs_f @ hand_emb,
+                beliefs_f @ hand_emb.square(),
+            ),
+            dim=-1,
+        )
+        player_tokens = self.range_proj(range_summary) + self.bucket_mass_proj(
+            bucket_features
+        )
+        pot_layer_features, player_pot_eligible = self._pot_layer_features(
+            beliefs_f,
+            committed,
+            folded_mask,
+            scale,
+        )
+        pot_tokens = self.pot_layer_proj(pot_layer_features)
+        context_token = self.context_proj(player_features.flatten(1))
+        if self.dense_belief_residual:
+            context_token = context_token + self.dense_belief_proj(beliefs_f.flatten(1))
+        tokens = torch.cat((context_token[:, None, :], player_tokens, pot_tokens), dim=1)
+        attn_mask = self._token_attention_mask(player_pot_eligible, folded_mask)
+        encoded = tokens
+        for block in self.encoder:
+            encoded = block(encoded, attn_mask)
+        context_state = encoded[:, 0]
+        player_state = encoded[:, 1 : 1 + self.players]
+        state = self.player_state(
+            torch.cat(
+                (
+                    player_state,
+                    context_state[:, None, :].expand(-1, self.players, -1),
+                ),
+                dim=-1,
+            )
+        )
+
+        hand_value = self.value_hand_proj(hand_emb)
+        state_value = self.value_scale(state)
+        values = torch.einsum("bpd,hd->bph", state_value, hand_value)
+        values = values / math.sqrt(float(self.hidden_dim))
+        blocker_features = self._blocker_features(beliefs_f, folded_mask)
+        blocker_state = self.blocker_proj(blocker_features)
+        blocker_scale = self.blocker_scale(state)
+        blocker_values = torch.einsum("bphd,bpd->bph", blocker_state, blocker_scale)
+        values = values + blocker_values / math.sqrt(float(self.hidden_dim))
+        if self.film_rank > 0:
+            film_hand = self.value_film_hand_proj(hand_emb)
+            film_state = self.value_film_state(state)
+            film_values = torch.einsum("bpr,hr->bph", film_state, film_hand)
+            values = values + film_values / math.sqrt(float(self.film_rank))
+        values = values + self.value_bias(state).expand(-1, -1, PREFLOP_HANDS)
+        if self.dense_output_residual:
+            values = values + self.dense_output_proj(state)
+        if hardcode_folded_values:
+            folded_value = (stacks_after - starting_stacks) / scale
+            values = torch.where(
+                folded_mask[:, :, None],
+                folded_value[:, :, None],
+                values,
+            )
+        return values.transpose(1, 2).contiguous().to(beliefs.dtype)
+
+
 class PreflopAllInTransformerModel(PreflopAllInEquityModel):
     """Player-token preflop all-in model.
 

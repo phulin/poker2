@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from p2.allin.data import PreflopAllInBatch
 from p2.allin.kernels import (
     AllinCdfWorkspace,
+    allin_169_belief_combo_score1326_from_roots_masks_accumulate_cuda_,
     allin_cdf_tuple_score_from_roots_accumulate_cuda_,
     allin_cdf_tuple_score_from_roots_masks_accumulate_cuda_,
     make_allin_cdf_workspace,
@@ -18,6 +21,7 @@ from p2.allin.kernels import (
 from p2.env.card_utils import (
     NUM_HANDS,
     PREFLOP_HANDS,
+    canonical_full_boards_with_weights,
     combo_to_preflop_class_tensor,
     hand_combos_tensor,
     preflop_class_multiplicity_tensor,
@@ -37,7 +41,24 @@ from p2.search.allin_payoff import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_PREFLOP_ALLIN_TABLE = _REPO_ROOT / "outputs" / "preflop_allin_table.pt.zst"
+DEFAULT_CANONICAL_BOARD_RANKS = (
+    _REPO_ROOT / "outputs" / "allin_canonical_board_ranks_u16.bin"
+)
 NUM_FULL_BOARDS = 2_598_960
+NUM_CANONICAL_FULL_BOARDS = 134_459
+
+
+@dataclass(frozen=True)
+class CanonicalBoardRankCache:
+    path: Path
+    ranks: np.ndarray
+    boards: torch.Tensor
+    weights: torch.Tensor
+    metadata: dict[str, object]
+
+    @property
+    def num_boards(self) -> int:
+        return int(self.ranks.shape[0])
 
 
 def _combo_masks(device: torch.device) -> torch.Tensor:
@@ -51,7 +72,7 @@ def _preflop_class_members_cached(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = torch.device(device_type, device_index)
     class_ids = combo_to_preflop_class_tensor(device=None)
-    members_cpu = torch.full((PREFLOP_HANDS, 12), -1, dtype=torch.long)
+    members_cpu = torch.full((PREFLOP_HANDS, 12), -1, dtype=torch.int32)
     counts = [0] * PREFLOP_HANDS
     for combo_idx, class_id in enumerate(class_ids.tolist()):
         slot = counts[class_id]
@@ -118,10 +139,73 @@ def _sample_full_boards(
     return torch.topk(scores, 5, dim=1).indices
 
 
+_BOARD_RANK_CACHE: dict[str, CanonicalBoardRankCache] = {}
+
+
+def _load_canonical_board_rank_cache(path: str | Path) -> CanonicalBoardRankCache:
+    resolved = Path(path).expanduser().resolve()
+    key = str(resolved)
+    cached = _BOARD_RANK_CACHE.get(key)
+    if cached is not None:
+        return cached
+    metadata_path = resolved.with_suffix(resolved.suffix + ".json")
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+    shape_raw = metadata.get("shape")
+    if shape_raw is None:
+        raise ValueError(f"{metadata_path} does not contain rank-cache shape metadata")
+    shape = tuple(int(dim) for dim in shape_raw)  # type: ignore[arg-type]
+    if len(shape) != 2 or shape[1] != NUM_HANDS:
+        raise ValueError(f"rank-cache shape must be [num_boards, {NUM_HANDS}], got {shape}")
+    if shape[0] > NUM_CANONICAL_FULL_BOARDS:
+        raise ValueError(
+            "rank-cache row count cannot exceed canonical full-board count "
+            f"{NUM_CANONICAL_FULL_BOARDS}"
+        )
+    if int(metadata.get("num_hands", NUM_HANDS)) != NUM_HANDS:
+        raise ValueError(f"rank-cache num_hands must be {NUM_HANDS}")
+    if int(metadata.get("canonical_board_count", NUM_CANONICAL_FULL_BOARDS)) != (
+        NUM_CANONICAL_FULL_BOARDS
+    ):
+        raise ValueError("rank-cache canonical board count metadata is incompatible")
+    ranks = np.memmap(resolved, mode="r", dtype=np.uint16, shape=shape)
+    boards, weights = canonical_full_boards_with_weights()
+    boards = boards[: shape[0]].contiguous()
+    weights = weights[: shape[0]].to(torch.float32).contiguous()
+    cache = CanonicalBoardRankCache(
+        path=resolved,
+        ranks=ranks,
+        boards=boards,
+        weights=weights,
+        metadata=metadata,
+    )
+    _BOARD_RANK_CACHE[key] = cache
+    return cache
+
+
 def _device_cache_key(device: torch.device) -> tuple[str, int | None]:
     if device.type == "cuda" and device.index is None:
         return device.type, torch.cuda.current_device()
     return device.type, device.index
+
+
+@lru_cache(maxsize=4)
+def _combo_to_preflop_class_matrix_cached(
+    device_type: str, device_index: int | None
+) -> torch.Tensor:
+    device = torch.device(device_type, device_index)
+    class_ids = combo_to_preflop_class_tensor(device=device)
+    matrix = torch.zeros(
+        NUM_HANDS,
+        PREFLOP_HANDS,
+        dtype=torch.float32,
+        device=device,
+    )
+    matrix.scatter_(1, class_ids[:, None], 1.0)
+    return matrix.contiguous()
+
+
+def _combo_to_preflop_class_matrix(device: torch.device) -> torch.Tensor:
+    return _combo_to_preflop_class_matrix_cached(*_device_cache_key(device))
 
 
 @lru_cache(maxsize=4)
@@ -146,6 +230,26 @@ def _rank_hands(board: torch.Tensor) -> torch.Tensor:
         return rank_hand_scores_triton(board).contiguous()
     ranks, _ = rank_hands_torch(board.int())
     return ranks.to(torch.int32).contiguous()
+
+
+def _cached_canonical_board_chunk(
+    cache: CanonicalBoardRankCache,
+    *,
+    start: int,
+    count: int,
+    roots: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    end = start + count
+    board_rows = cache.boards[start:end].to(device=device, non_blocking=True)
+    rank_rows_cpu = torch.from_numpy(cache.ranks[start:end].copy())
+    rank_rows = rank_rows_cpu.to(device=device, dtype=torch.int32, non_blocking=True)
+    weight_rows = cache.weights[start:end].to(device=device, non_blocking=True)
+    boards = board_rows.repeat(roots, 1)
+    ranks = rank_rows.repeat(roots, 1)
+    board_weights = weight_rows.repeat(roots).contiguous()
+    board_masks = _board_masks(boards).contiguous()
+    return boards, ranks, board_masks, board_weights
 
 
 def _side_pot_layers(
@@ -354,6 +458,7 @@ def _resolve_sample_split(
     tuple_samples: int | None,
     *,
     exhaustive_boards: bool = False,
+    exhaustive_board_count: int = NUM_FULL_BOARDS,
 ) -> tuple[int, int]:
     if sample_count is not None and sample_count <= 0:
         raise ValueError("sample_count must be positive")
@@ -362,16 +467,17 @@ def _resolve_sample_split(
     if tuple_samples is not None and tuple_samples <= 0:
         raise ValueError("tuple_samples must be positive")
     if exhaustive_boards:
-        if board_samples is not None and board_samples != NUM_FULL_BOARDS:
+        if board_samples is not None and board_samples != exhaustive_board_count:
             raise ValueError(
-                f"exhaustive board mode requires board_samples={NUM_FULL_BOARDS}"
+                "exhaustive board mode requires "
+                f"board_samples={exhaustive_board_count}"
             )
         if tuple_samples is None:
             raise ValueError(
                 "tuple_samples is required in exhaustive board mode; it is the "
                 "number of opponent tuple samples per full board"
             )
-        return NUM_FULL_BOARDS, tuple_samples
+        return exhaustive_board_count, tuple_samples
     if sample_count is None:
         if board_samples is None or tuple_samples is None:
             raise ValueError(
@@ -399,6 +505,7 @@ class PreflopAllInEstimatorWorkspace:
     max_roots: int = 0
     players: int = 0
     hands: int = 0
+    output_hands: int = 0
     board_chunk: int = 0
     tuple_samples: int = 0
     tuple_tries: int = 0
@@ -410,12 +517,15 @@ class PreflopAllInEstimatorWorkspace:
         roots: int,
         players: int,
         hands: int,
+        output_hands: int | None = None,
         board_chunk: int,
         tuple_samples: int,
         tuple_tries: int,
         board_samples: int,
         device: torch.device,
     ) -> tuple[AllinCdfWorkspace, torch.Tensor, torch.Tensor]:
+        if output_hands is None:
+            output_hands = hands
         max_roots = max(int(roots), self.max_roots)
         full_chunk = min(int(board_chunk), int(board_samples))
         needs_new = (
@@ -425,6 +535,7 @@ class PreflopAllInEstimatorWorkspace:
             or self.max_roots < roots
             or self.players != players
             or self.hands != hands
+            or self.output_hands != output_hands
             or self.board_chunk != full_chunk
             or self.tuple_samples != tuple_samples
             or self.tuple_tries != tuple_tries
@@ -442,7 +553,7 @@ class PreflopAllInEstimatorWorkspace:
             self.payout_sum = torch.empty(
                 max_roots,
                 players,
-                hands,
+                output_hands,
                 dtype=torch.float32,
                 device=device,
             )
@@ -450,6 +561,7 @@ class PreflopAllInEstimatorWorkspace:
             self.max_roots = max_roots
             self.players = players
             self.hands = hands
+            self.output_hands = output_hands
             self.board_chunk = full_chunk
             self.tuple_samples = tuple_samples
             self.tuple_tries = tuple_tries
@@ -478,6 +590,7 @@ def _estimate_preflop_allin_values_triton(
     use_board_masks: bool = True,
     skip_folded_heroes: bool = True,
     exhaustive_boards: bool = False,
+    board_rank_cache: CanonicalBoardRankCache | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     start = time.perf_counter()
     device = batch.beliefs.device
@@ -527,7 +640,16 @@ def _estimate_preflop_allin_values_triton(
             live_rep = live_mask_i8.index_select(0, root_ids)
             layer_amount_rep = layer_amount_f32.index_select(0, root_ids)
             eligible_rep = eligible_i8.index_select(0, root_ids)
-        if exhaustive_boards:
+        board_weights = None
+        if board_rank_cache is not None:
+            boards, ranks, board_masks, board_weights = _cached_canonical_board_chunk(
+                board_rank_cache,
+                start=done_boards,
+                count=cur_boards,
+                roots=B,
+                device=device,
+            )
+        elif exhaustive_boards:
             board_chunk_rows = _full_boards(device)[
                 done_boards : done_boards + cur_boards
             ]
@@ -538,11 +660,13 @@ def _estimate_preflop_allin_values_triton(
             ranks = _rank_hands(boards)
         launch_start = time.perf_counter()
         if use_board_masks:
-            board_masks = _board_masks(boards).contiguous()
+            if board_rank_cache is None:
+                board_masks = _board_masks(boards).contiguous()
             allin_cdf_tuple_score_from_roots_masks_accumulate_cuda_(
                 cdf_workspace,
                 beliefs=beliefs,
                 board_masks=board_masks,
+                board_weights=board_weights,
                 boards_per_root=cur_boards,
                 hand_masks=combo_masks,
                 hand_ranks=ranks,
@@ -605,6 +729,7 @@ def _estimate_preflop_allin_values_triton(
         "target_board_samples": float(board_samples),
         "target_tuple_samples": float(tuple_samples),
         "target_exhaustive_boards": float(exhaustive_boards),
+        "target_cached_board_ranks": float(board_rank_cache is not None),
     }
     return values, diagnostics
 
@@ -619,8 +744,13 @@ def _estimate_preflop_allin_values_169_mc(
     board_chunk: int,
     generator: torch.Generator | None,
     compute_stats: bool = True,
+    workspace: PreflopAllInEstimatorWorkspace | None = None,
+    skip_folded_heroes: bool = True,
     exhaustive_boards: bool = False,
+    board_rank_cache: CanonicalBoardRankCache | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
+    del workspace
+    del skip_folded_heroes
     start = time.perf_counter()
     device = batch.beliefs.device
     beliefs = batch.beliefs.to(torch.float32)
@@ -643,7 +773,6 @@ def _estimate_preflop_allin_values_169_mc(
     full_live_rep = live_mask.index_select(0, full_root_ids)
     full_layer_amount_rep = layer_amount.index_select(0, full_root_ids)
     full_eligible_rep = eligible.index_select(0, full_root_ids)
-    class_ids = combo_to_preflop_class_tensor(device=device)
     player_ids = torch.arange(P, device=device)
 
     done_boards = 0
@@ -660,7 +789,18 @@ def _estimate_preflop_allin_values_169_mc(
             live_rep = live_mask.index_select(0, root_ids)
             layer_amount_rep = layer_amount.index_select(0, root_ids)
             eligible_rep = eligible.index_select(0, root_ids)
-        if exhaustive_boards:
+        board_weights = None
+        if board_rank_cache is not None:
+            boards, ranks, _board_masks_unused, board_weights = (
+                _cached_canonical_board_chunk(
+                    board_rank_cache,
+                    start=done_boards,
+                    count=cur_boards,
+                    roots=B,
+                    device=device,
+                )
+            )
+        elif exhaustive_boards:
             board_chunk_rows = _full_boards(device)[
                 done_boards : done_boards + cur_boards
             ]
@@ -800,27 +940,44 @@ def _estimate_preflop_allin_values_169_mc(
                     eligible_rep[:, :, hero].to(torch.float32) * layer_amount_rep
                 )
 
-                hero_masks = class_combo_masks
-                compatible = (
+                hero_member_compatible = (
                     alive[:, None, None, :]
                     & hero_allowed_members[:, :, :, None]
-                    & ((used_mask[:, None, None, :] & hero_masks[None, :, :, None]) == 0)
+                    & (
+                        (used_mask[:, None, None, :] & class_combo_masks[None, :, :, None])
+                        == 0
+                    )
+                )
+                hero_member_scores = torch.rand(
+                    row_count,
+                    H,
+                    12,
+                    cur_samples,
+                    device=device,
+                    generator=generator,
+                )
+                hero_member_scores = hero_member_scores.masked_fill(
+                    ~hero_member_compatible,
+                    -1.0,
+                )
+                hero_member_slots = hero_member_scores.argmax(dim=2)
+                compatible = hero_member_compatible.gather(
+                    2,
+                    hero_member_slots[:, :, None, :],
+                ).squeeze(2)
+                sampled_hero_ranks = hero_member_ranks.gather(
+                    2,
+                    hero_member_slots,
                 )
                 layer_tie_count = 1.0 + (
-                    opp_eligible[:, :, None, None, :, None]
+                    opp_eligible[:, :, None, :, None]
                     & (
-                        selected_ranks[:, None, None, None, :, :]
-                        == hero_member_ranks[:, None, :, :, None, None]
+                        selected_ranks[:, None, None, :, :]
+                        == sampled_hero_ranks[:, None, :, None, :]
                     )
-                ).to(torch.float32).sum(dim=4)
-                wins = (
-                    hero_member_ranks[:, None, :, :, None]
-                    > layer_best_opp[:, :, None, None, :]
-                )
-                ties = (
-                    hero_member_ranks[:, None, :, :, None]
-                    == layer_best_opp[:, :, None, None, :]
-                )
+                ).to(torch.float32).sum(dim=3)
+                wins = sampled_hero_ranks[:, None, :, :] > layer_best_opp[:, :, None, :]
+                ties = sampled_hero_ranks[:, None, :, :] == layer_best_opp[:, :, None, :]
                 share = torch.where(
                     wins,
                     torch.ones_like(layer_tie_count),
@@ -830,10 +987,14 @@ def _estimate_preflop_allin_values_169_mc(
                         torch.zeros_like(layer_tie_count),
                     ),
                 )
-                payout = (hero_layer_weight[:, :, None, None, None] * share).sum(dim=1)
+                payout = (hero_layer_weight[:, :, None, None] * share).sum(dim=1)
                 comp_f = compatible.to(torch.float32)
-                payout_part = (comp_f * payout).sum(dim=(2, 3))
-                denom_part = comp_f.sum(dim=(2, 3))
+                payout_part = (comp_f * payout).sum(dim=2)
+                denom_part = comp_f.sum(dim=2)
+                if board_weights is not None:
+                    weight_view = board_weights[:, None]
+                    payout_part = payout_part * weight_view
+                    denom_part = denom_part * weight_view
                 payout_sum[:, hero] += payout_part.reshape(B, cur_boards, H).sum(dim=1)
                 denom_sum[:, hero] += denom_part.reshape(B, cur_boards, H).sum(dim=1)
 
@@ -870,6 +1031,167 @@ def _estimate_preflop_allin_values_169_mc(
         "target_board_samples": float(board_samples),
         "target_tuple_samples": float(tuple_samples),
         "target_exhaustive_boards": float(exhaustive_boards),
+        "target_cached_board_ranks": float(board_rank_cache is not None),
+        "target_hand_dim": float(PREFLOP_HANDS),
+    }
+    return values.to(batch.beliefs.dtype), diagnostics
+
+
+@torch.no_grad()
+def _estimate_preflop_allin_values_169_triton(
+    batch: PreflopAllInBatch,
+    *,
+    board_samples: int,
+    tuple_samples: int,
+    tuple_tries: int,
+    board_chunk: int,
+    generator: torch.Generator | None,
+    compute_stats: bool = True,
+    workspace: PreflopAllInEstimatorWorkspace | None = None,
+    skip_folded_heroes: bool = True,
+    exhaustive_boards: bool = False,
+    board_rank_cache: CanonicalBoardRankCache | None = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    start = time.perf_counter()
+    device = batch.beliefs.device
+    beliefs = batch.beliefs.to(torch.float32)
+    B, P, H = beliefs.shape
+    if H != PREFLOP_HANDS:
+        raise ValueError(f"expected {PREFLOP_HANDS} hands, got {H}")
+    if device.type != "cuda" or not triton_available():
+        raise ValueError("native 169 Triton all-in estimator requires CUDA and Triton")
+
+    combo_masks = _combo_masks(device).contiguous()
+    combo_class = combo_to_preflop_class_tensor(device=device).to(torch.int32).contiguous()
+    multiplicity = preflop_class_multiplicity_tensor(device=device).to(
+        torch.float32
+    ).contiguous()
+    class_matrix = _combo_to_preflop_class_matrix(device)
+    live_mask = ~batch.folded_mask
+    layer_amount, eligible = _side_pot_layers(batch)
+    live_mask_i8 = live_mask.to(torch.int8)
+    layer_amount_f32 = layer_amount.to(torch.float32)
+    eligible_i8 = eligible.to(torch.int8)
+    if workspace is None:
+        workspace = PreflopAllInEstimatorWorkspace()
+    cdf_workspace, payout_sum, denom_sum = workspace.ensure(
+        roots=B,
+        players=P,
+        hands=NUM_HANDS,
+        output_hands=NUM_HANDS,
+        board_chunk=board_chunk,
+        tuple_samples=tuple_samples,
+        tuple_tries=tuple_tries,
+        board_samples=board_samples,
+        device=device,
+    )
+    full_chunk = min(board_chunk, board_samples)
+    full_root_ids = torch.arange(B, device=device).repeat_interleave(full_chunk)
+    full_live_rep = live_mask_i8.index_select(0, full_root_ids)
+    full_layer_amount_rep = layer_amount_f32.index_select(0, full_root_ids)
+    full_eligible_rep = eligible_i8.index_select(0, full_root_ids)
+    kernel_launch_seconds = 0.0
+
+    done_boards = 0
+    while done_boards < board_samples:
+        cur_boards = min(board_chunk, board_samples - done_boards)
+        row_count = B * cur_boards
+        if cur_boards == full_chunk:
+            root_ids = full_root_ids
+            live_rep = full_live_rep
+            layer_amount_rep = full_layer_amount_rep
+            eligible_rep = full_eligible_rep
+        else:
+            root_ids = torch.arange(B, device=device).repeat_interleave(cur_boards)
+            live_rep = live_mask_i8.index_select(0, root_ids)
+            layer_amount_rep = layer_amount_f32.index_select(0, root_ids)
+            eligible_rep = eligible_i8.index_select(0, root_ids)
+        board_weights = None
+        if board_rank_cache is not None:
+            boards, ranks, board_masks, board_weights = _cached_canonical_board_chunk(
+                board_rank_cache,
+                start=done_boards,
+                count=cur_boards,
+                roots=B,
+                device=device,
+            )
+        elif exhaustive_boards:
+            board_chunk_rows = _full_boards(device)[
+                done_boards : done_boards + cur_boards
+            ]
+            boards = board_chunk_rows.repeat(B, 1)
+            ranks = _rank_hands(board_chunk_rows).repeat(B, 1)
+        else:
+            boards = _sample_full_boards(row_count, device=device, generator=generator)
+            ranks = _rank_hands(boards)
+        if board_rank_cache is None:
+            board_masks = _board_masks(boards).contiguous()
+
+        launch_start = time.perf_counter()
+        allin_169_belief_combo_score1326_from_roots_masks_accumulate_cuda_(
+            cdf_workspace,
+            beliefs_169=beliefs,
+            board_masks=board_masks,
+            board_weights=board_weights,
+            boards_per_root=cur_boards,
+            hand_masks=combo_masks,
+            hand_ranks=ranks,
+            combo_class=combo_class,
+            class_multiplicity=multiplicity,
+            live_mask=live_rep,
+            layer_amount=layer_amount_rep,
+            eligible=eligible_rep,
+            payout_sum=payout_sum,
+            denom_sum=denom_sum,
+            seed=(done_boards + 1) * 104_729,
+            skip_folded_heroes=skip_folded_heroes,
+        )
+        kernel_launch_seconds += time.perf_counter() - launch_start
+        done_boards += cur_boards
+
+    payout_169 = (
+        payout_sum.reshape(B * P, NUM_HANDS)
+        .matmul(class_matrix)
+        .reshape(B, P, H)
+    )
+    denom_169 = (
+        denom_sum.reshape(B * P, NUM_HANDS)
+        .matmul(class_matrix)
+        .reshape(B, P, H)
+    )
+    expected_payout = torch.where(
+        denom_169 > 0.0,
+        payout_169 / denom_169.clamp_min(1.0e-30),
+        torch.zeros_like(payout_169),
+    )
+    values = (
+        batch.stacks_after[:, :, None].to(torch.float32)
+        + expected_payout
+        - batch.starting_stacks[:, :, None].to(torch.float32)
+    ) / batch.scale[:, None, None].to(torch.float32).clamp_min(1.0)
+    folded_value = (batch.stacks_after - batch.starting_stacks) / batch.scale[
+        :, None
+    ].clamp_min(1.0)
+    values = torch.where(
+        batch.folded_mask[:, :, None], folded_value[:, :, None], values
+    )
+    if not compute_stats:
+        return values.to(batch.beliefs.dtype), {}
+    torch.cuda.synchronize(device)
+    elapsed = time.perf_counter() - start
+    total_samples = B * board_samples * tuple_samples
+    diagnostics = {
+        "target_seconds": elapsed,
+        "target_kernel_launch_seconds": kernel_launch_seconds,
+        "target_boards_per_second": float(B * board_samples / max(elapsed, 1.0e-9)),
+        "target_samples_per_second": float(total_samples / max(elapsed, 1.0e-9)),
+        "target_zero_denom_frac": float((denom_169 == 0).float().mean().item()),
+        "target_value_mean": float(values.mean().item()),
+        "target_value_std": float(values.std().item()),
+        "target_board_samples": float(board_samples),
+        "target_tuple_samples": float(tuple_samples),
+        "target_exhaustive_boards": float(exhaustive_boards),
+        "target_cached_board_ranks": float(board_rank_cache is not None),
         "target_hand_dim": float(PREFLOP_HANDS),
     }
     return values.to(batch.beliefs.dtype), diagnostics
@@ -888,14 +1210,25 @@ def estimate_preflop_allin_values_169(
     preflop_table_path: str | Path = DEFAULT_PREFLOP_ALLIN_TABLE,
     use_exact_two_player: bool = True,
     compute_stats: bool = True,
+    workspace: PreflopAllInEstimatorWorkspace | None = None,
+    skip_folded_heroes: bool = True,
     exhaustive_boards: bool = False,
+    board_ranks_path: str | Path | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Estimate preflop all-in targets natively in 169 rank classes."""
+    board_rank_cache = (
+        _load_canonical_board_rank_cache(board_ranks_path)
+        if exhaustive_boards and board_ranks_path
+        else None
+    )
     board_samples, tuple_samples = _resolve_sample_split(
         sample_count,
         board_samples,
         tuple_samples,
         exhaustive_boards=exhaustive_boards,
+        exhaustive_board_count=(
+            board_rank_cache.num_boards if board_rank_cache is not None else NUM_FULL_BOARDS
+        ),
     )
     if tuple_tries <= 0:
         raise ValueError("tuple_tries must be positive")
@@ -922,15 +1255,21 @@ def estimate_preflop_allin_values_169(
         values.index_copy_(0, exact_rows, exact_values)
         mc_diag: dict[str, float] = {}
         if mc_rows.numel() > 0:
-            mc_values, mc_diag = _estimate_preflop_allin_values_169_mc(
+            mc_values, mc_diag = estimate_preflop_allin_values_169(
                 _slice_batch(batch, mc_rows),
+                sample_count=None,
                 board_samples=board_samples,
                 tuple_samples=tuple_samples,
                 tuple_tries=tuple_tries,
                 board_chunk=board_chunk,
                 generator=generator,
+                preflop_table_path=preflop_table_path,
+                use_exact_two_player=False,
                 compute_stats=compute_stats,
+                workspace=workspace,
+                skip_folded_heroes=skip_folded_heroes,
                 exhaustive_boards=exhaustive_boards,
+                board_ranks_path=board_ranks_path,
             )
             values.index_copy_(0, mc_rows, mc_values)
         if not compute_stats:
@@ -946,13 +1285,26 @@ def estimate_preflop_allin_values_169(
             "target_board_samples": float(board_samples),
             "target_tuple_samples": float(tuple_samples),
             "target_exhaustive_boards": float(exhaustive_boards),
+            "target_cached_board_ranks": float(board_rank_cache is not None),
             "target_exact_two_player_rows": float(exact_rows.numel()),
             "target_mc_rows": float(mc_rows.numel()),
             "target_hand_dim": float(PREFLOP_HANDS),
         }
+        if "target_kernel_launch_seconds" in mc_diag:
+            diagnostics["target_kernel_launch_seconds"] = mc_diag[
+                "target_kernel_launch_seconds"
+            ]
         return values, diagnostics
 
-    return _estimate_preflop_allin_values_169_mc(
+    estimator = (
+        _estimate_preflop_allin_values_169_triton
+        if batch.beliefs.device.type == "cuda" and triton_available()
+        else _estimate_preflop_allin_values_169_mc
+    )
+    estimator_workspace = (
+        workspace if estimator is _estimate_preflop_allin_values_169_triton else None
+    )
+    return estimator(
         batch,
         board_samples=board_samples,
         tuple_samples=tuple_samples,
@@ -960,7 +1312,10 @@ def estimate_preflop_allin_values_169(
         board_chunk=board_chunk,
         generator=generator,
         compute_stats=compute_stats,
+        workspace=estimator_workspace,
+        skip_folded_heroes=skip_folded_heroes,
         exhaustive_boards=exhaustive_boards,
+        board_rank_cache=board_rank_cache,
     )
 
 
@@ -982,6 +1337,7 @@ def estimate_preflop_allin_values(
     use_board_masks: bool = True,
     skip_folded_heroes: bool = True,
     exhaustive_boards: bool = False,
+    board_ranks_path: str | Path | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Estimate preflop all-in chip-normalized values by sampling full boards.
 
@@ -1012,14 +1368,27 @@ def estimate_preflop_allin_values(
             preflop_table_path=preflop_table_path,
             use_exact_two_player=use_exact_two_player,
             compute_stats=compute_stats,
+            workspace=workspace,
+            skip_folded_heroes=skip_folded_heroes,
             exhaustive_boards=exhaustive_boards,
+            board_ranks_path=board_ranks_path,
         )
 
+    board_rank_cache = (
+        _load_canonical_board_rank_cache(board_ranks_path)
+        if exhaustive_boards and board_ranks_path
+        else None
+    )
+    if board_rank_cache is not None and not use_board_masks:
+        raise ValueError("cached board ranks require use_board_masks=True")
     board_samples, tuple_samples = _resolve_sample_split(
         sample_count,
         board_samples,
         tuple_samples,
         exhaustive_boards=exhaustive_boards,
+        exhaustive_board_count=(
+            board_rank_cache.num_boards if board_rank_cache is not None else NUM_FULL_BOARDS
+        ),
     )
     if tuple_tries <= 0:
         raise ValueError("tuple_tries must be positive")
@@ -1061,6 +1430,7 @@ def estimate_preflop_allin_values(
                 use_board_masks=use_board_masks,
                 skip_folded_heroes=skip_folded_heroes,
                 exhaustive_boards=exhaustive_boards,
+                board_ranks_path=board_ranks_path,
             )
             values.index_copy_(0, mc_rows, mc_values)
         if not compute_stats:
@@ -1076,6 +1446,7 @@ def estimate_preflop_allin_values(
             "target_board_samples": float(board_samples),
             "target_tuple_samples": float(tuple_samples),
             "target_exhaustive_boards": float(exhaustive_boards),
+            "target_cached_board_ranks": float(board_rank_cache is not None),
             "target_exact_two_player_rows": float(exact_rows.numel()),
             "target_mc_rows": float(mc_rows.numel()),
         }
@@ -1098,6 +1469,7 @@ def estimate_preflop_allin_values(
             use_board_masks=use_board_masks,
             skip_folded_heroes=skip_folded_heroes,
             exhaustive_boards=exhaustive_boards,
+            board_rank_cache=board_rank_cache,
         )
 
     beliefs = batch.beliefs.to(torch.float32)
@@ -1130,7 +1502,18 @@ def estimate_preflop_allin_values(
             live_rep = live_mask.index_select(0, root_ids)
             layer_amount_rep = layer_amount.index_select(0, root_ids)
             eligible_rep = eligible.index_select(0, root_ids)
-        if exhaustive_boards:
+        board_weights = None
+        if board_rank_cache is not None:
+            boards, ranks, _board_masks_unused, board_weights = (
+                _cached_canonical_board_chunk(
+                    board_rank_cache,
+                    start=done_boards,
+                    count=cur_boards,
+                    roots=B,
+                    device=device,
+                )
+            )
+        elif exhaustive_boards:
             board_chunk_rows = _full_boards(device)[
                 done_boards : done_boards + cur_boards
             ]
@@ -1272,6 +1655,10 @@ def estimate_preflop_allin_values(
                     comp_f = compatible.to(torch.float32)
                     payout_part = (comp_f * payout).sum(dim=2)
                     denom_part = comp_f.sum(dim=2)
+                    if board_weights is not None:
+                        weight_view = board_weights[:, None]
+                        payout_part = payout_part * weight_view
+                        denom_part = denom_part * weight_view
                     # root_ids == arange(B).repeat_interleave(cur_boards), so a
                     # segmented sum replaces the per-root atomic scatter-add.
                     payout_sum[:, hero, hand_start:hand_end] += payout_part.reshape(
@@ -1316,6 +1703,7 @@ def estimate_preflop_allin_values(
         "target_board_samples": float(board_samples),
         "target_tuple_samples": float(tuple_samples),
         "target_exhaustive_boards": float(exhaustive_boards),
+        "target_cached_board_ranks": float(board_rank_cache is not None),
     }
     if device.type == "cuda":
         torch.cuda.synchronize(device)
