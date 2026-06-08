@@ -23,6 +23,7 @@ from p2.allin.model import (
     POT_LAYER_SCALAR_FEATURE_DIM,
     _LeakyRMSBlock,
 )
+from p2.allin.oracle import PreflopAllIn169Oracle
 from p2.allin.sampler import NUM_CANONICAL_FULL_BOARDS
 from p2.allin.train import (
     AllInTrainConfig,
@@ -1022,6 +1023,59 @@ def test_preflop_allin_model_hard_codes_folded_values() -> None:
     ) / batch.starting_stacks.mean(dim=1, keepdim=True).clamp_min(1.0)
     expected = folded_value[:, :, None].expand_as(out)
     torch.testing.assert_close(out[batch.folded_mask], expected[batch.folded_mask])
+
+
+def test_preflop_allin_oracle_net_model_uses_evaluator_scale_for_folded_values() -> None:
+    class ZeroNetValueModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(()))
+
+        def forward(
+            self,
+            beliefs: torch.Tensor,
+            starting_stacks: torch.Tensor,
+            committed: torch.Tensor,
+            stacks_after: torch.Tensor,
+            allin_mask: torch.Tensor,
+            folded_mask: torch.Tensor,
+            *,
+            hardcode_folded_values: bool = True,
+        ) -> torch.Tensor:
+            assert hardcode_folded_values is False
+            return torch.zeros_like(beliefs) + self.weight
+
+    oracle = PreflopAllIn169Oracle(device=torch.device("cpu"))
+    oracle._model = ZeroNetValueModel()
+    oracle._model_target_mode = "net_value"
+    beliefs = torch.full((1, 4, PREFLOP_HANDS), 1.0 / PREFLOP_HANDS)
+    starting_stacks = torch.tensor([[100.0, 200.0, 300.0, 400.0]])
+    committed = torch.tensor([[100.0, 200.0, 300.0, 25.0]])
+    stacks_after = torch.tensor([[0.0, 0.0, 0.0, 375.0]])
+    allin_mask = torch.tensor([[True, True, True, False]])
+    folded_mask = torch.tensor([[False, False, False, True]])
+    scale = torch.tensor([50.0])
+
+    out = oracle.values(
+        beliefs=beliefs,
+        starting_stacks=starting_stacks,
+        committed=committed,
+        stacks_after=stacks_after,
+        allin_mask=allin_mask,
+        folded_mask=folded_mask,
+        scale=scale,
+        live_players=4,
+    )
+
+    expected_folded = (stacks_after - starting_stacks) / scale[:, None].clamp_min(1.0)
+    torch.testing.assert_close(
+        out[folded_mask],
+        expected_folded[:, :, None].expand_as(out)[folded_mask],
+    )
+    torch.testing.assert_close(
+        out[~folded_mask],
+        torch.zeros_like(out[~folded_mask]),
+    )
 
 
 def test_preflop_allin_sampler_small_smoke() -> None:

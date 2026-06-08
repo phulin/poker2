@@ -831,11 +831,18 @@ class PreflopAllIn169Oracle:
             stacks_after.to(model_dtype),
             allin_mask,
             folded_mask,
-            hardcode_folded_values=self._model_target_mode == "net_value",
+            hardcode_folded_values=False,
         )
         pred = pred_hand_major.transpose(1, 2).contiguous()
         if self._model_target_mode == "net_value":
-            return pred.to(beliefs.dtype)
+            folded_value = (
+                stacks_after - starting_stacks
+            )[:, :, None].to(pred.dtype) / scale[:, None, None].to(pred.dtype).clamp_min(
+                1.0
+            )
+            return torch.where(folded_mask[:, :, None], folded_value, pred).to(
+                beliefs.dtype
+            )
         if self._model_target_mode != "eligible_pot_share":
             raise ValueError(f"unsupported all-in model target_mode {self._model_target_mode!r}")
         return eligible_pot_share_to_net_values_169(
