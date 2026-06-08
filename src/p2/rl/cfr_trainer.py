@@ -695,6 +695,12 @@ class RebelCFRTrainer:
                 enforce_zero_sum=cfg.model.enforce_zero_sum,
             )
         twin.to(self.device)
+        if (
+            self.device.type == "cuda"
+            and self.num_players != 2
+            and cfg.data.live_root_source == "self_play"
+        ):
+            twin.to(dtype=torch.bfloat16)
         twin.eval()
         for p in twin.parameters():
             p.requires_grad = False

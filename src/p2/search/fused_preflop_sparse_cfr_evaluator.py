@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 
+from p2.core.structured_config import CFRType
 from p2.env.card_utils import PREFLOP_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
@@ -15,9 +16,11 @@ from p2.search.cfr_evaluator import CFREvaluator, ExploitabilityStats
 from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_multiway_with_tensors_,
     fused_avg_values_multiway_,
+    fused_compact_regret_dcfr_update_multiway_with_tensors_,
     fused_model_values_writeback_multiway_,
     fused_parent_sum_divide_,
     fused_preflop169_parent_sum_opp_,
+    fused_policy_reach_beliefs_depth_preflop_multiway_,
     fused_policy_renorm_reach_depth_multiway_,
     fused_preflop_multiway_beliefs_from_reach_,
     fused_regret_tail_multiway_,
@@ -464,10 +467,38 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 update_reach=True,
             )
 
+    def _renormalize_policy_reach_beliefs(
+        self,
+        policy: torch.Tensor,
+        reach: torch.Tensor,
+        beliefs: torch.Tensor,
+    ) -> None:
+        self._prepare_tree_slices()
+        policy[: self.root_nodes] = 0.0
+        root_index = self._get_root_index()
+        prev_actor = self.prev_actor.contiguous()
+        for depth in range(self.tree_depth):
+            fused_policy_reach_beliefs_depth_preflop_multiway_(
+                policy=policy,
+                reach=reach,
+                beliefs=beliefs,
+                allowed_mask=self.allowed_hands,
+                allowed_prob=self.allowed_hands_prob,
+                root_index=root_index,
+                child_offsets=self._child_offsets_by_depth[depth],
+                child_count=self._child_count_by_depth[depth],
+                prev_actor=prev_actor,
+                parent_base=self.depth_offsets[depth],
+                max_children=self.num_actions,
+            )
+
     def _regret_match_current_policy(self, t: int | None = None) -> None:
         if self._try_apply_warm_start_ftrl_policy(t):
-            self._renormalize_policy_reach(self.policy_probs, self.self_reach)
-            self._propagate_all_beliefs(self.beliefs, self.self_reach)
+            self._renormalize_policy_reach_beliefs(
+                self.policy_probs,
+                self.self_reach,
+                self.beliefs,
+            )
             return
 
         self._prepare_tree_slices()
@@ -478,18 +509,19 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         assert child_count_top is not None
 
         positive_regrets = self._ensure_positive_regrets_buf()
-        scale = self._predictive_policy_scale_for_t(t)
-        last_regrets = getattr(self, "_last_instantaneous_regrets", None)
-        if scale > 0.0 and last_regrets is not None:
-            torch.add(
-                self.cumulative_regrets,
-                last_regrets,
-                alpha=scale,
-                out=positive_regrets,
-            )
-            torch.clamp(positive_regrets, min=0.0, out=positive_regrets)
-        else:
-            torch.clamp(self.cumulative_regrets, min=0.0, out=positive_regrets)
+        if not self._fused_positive_regrets_valid:
+            scale = self._predictive_policy_scale_for_t(t)
+            last_regrets = getattr(self, "_last_instantaneous_regrets", None)
+            if scale > 0.0 and last_regrets is not None:
+                torch.add(
+                    self.cumulative_regrets,
+                    last_regrets,
+                    alpha=scale,
+                    out=positive_regrets,
+                )
+                torch.clamp(positive_regrets, min=0.0, out=positive_regrets)
+            else:
+                torch.clamp(self.cumulative_regrets, min=0.0, out=positive_regrets)
         self._fused_positive_regrets_valid = False
 
         assert bottom is not None
@@ -505,33 +537,50 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             block_h=256,
         )
         self._mask_invalid(self.policy_probs)
-        self._renormalize_policy_reach(self.policy_probs, self.self_reach)
-        self._propagate_all_beliefs(self.beliefs, self.self_reach)
+        self._renormalize_policy_reach_beliefs(
+            self.policy_probs,
+            self.self_reach,
+            self.beliefs,
+        )
 
     def update_policy(self, t: int) -> None:
         self._refresh_fused_t_scalars(t)
         self._regret_match_current_policy(t)
-        self.update_average_policy(t, update_reach=True)
-        self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
+        avg_beliefs_updated = self.update_average_policy(
+            t,
+            update_reach=True,
+            update_beliefs=True,
+        )
+        if not avg_beliefs_updated:
+            self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
 
     def update_average_policy(
         self,
         t: int,
         update_reach: bool = False,
+        update_beliefs: bool = False,
         weight_override: float | None = None,
-    ) -> None:
+    ) -> bool:
         defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
         if self._uses_dcfr_backbone() and self._average_accumulation_delayed(t):
             if defer_avg_policy:
                 self.average_policy_initialized = False
-                return
+                return False
             self.policy_probs_avg[:] = self.policy_probs
             self.average_policy_initialized = False
             if update_reach:
+                if update_beliefs:
+                    self._renormalize_policy_reach_beliefs(
+                        self.policy_probs_avg,
+                        self.self_reach_avg,
+                        self.beliefs_avg,
+                    )
+                    return True
                 self._renormalize_policy_reach(
-                    self.policy_probs_avg, self.self_reach_avg
+                    self.policy_probs_avg,
+                    self.self_reach_avg,
                 )
-            return
+            return False
 
         self._prepare_tree_slices()
         root_count = self.root_nodes
@@ -558,10 +607,26 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         )
         self.average_policy_initialized = True
         if not defer_avg_policy:
-            self._renormalize_average_policy(update_reach=update_reach)
+            self._renormalize_average_policy(
+                update_reach=update_reach,
+                update_beliefs=update_beliefs,
+            )
+            return bool(update_reach and update_beliefs)
+        return False
 
-    def _renormalize_average_policy(self, update_reach: bool) -> None:
+    def _renormalize_average_policy(
+        self,
+        update_reach: bool,
+        update_beliefs: bool = False,
+    ) -> None:
         if update_reach:
+            if update_beliefs:
+                self._renormalize_policy_reach_beliefs(
+                    self.policy_probs_avg,
+                    self.self_reach_avg,
+                    self.beliefs_avg,
+                )
+                return
             self._renormalize_policy_reach(
                 self.policy_probs_avg, self.self_reach_avg
             )
@@ -693,7 +758,92 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             set_allin(beliefs)
 
     def cfr_iteration(self, t: int) -> None:
-        CFREvaluator.cfr_iteration(self, t)
+        if self.cfr_type == CFRType.linear or (
+            self.cfr_type in (CFRType.pcfr, CFRType.sapcfr)
+            and not self._predictive_cfr_uses_dcfr()
+        ):
+            CFREvaluator.cfr_iteration(self, t)
+            return
+
+        self.apply_schedules(t)
+        self._refresh_fused_t_scalars(t)
+
+        sample_mask = self.t_sample == t
+        torch.where(
+            sample_mask[:, None],
+            self.policy_probs,
+            self.policy_probs_sample,
+            out=self.policy_probs_sample,
+        )
+        torch.where(
+            sample_mask[:, None, None],
+            self.beliefs,
+            self.beliefs_sample,
+            out=self.beliefs_sample,
+        )
+
+        self._prepare_tree_slices()
+        top = self._top
+        child_offsets_top = self._child_offsets_top
+        child_count_top = self._child_count_top
+        to_act_top = self._to_act_top
+        assert top is not None
+        assert child_offsets_top is not None
+        assert child_count_top is not None
+        assert to_act_top is not None
+
+        beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
+        unblocked_reach = self._preflop_unblocked_mass(beliefs[:top])
+        player_ids = torch.arange(self.num_players, device=self.device)
+        other_live = player_ids[None, :, None] != to_act_top[:, None, None]
+        if hasattr(self.env, "has_folded"):
+            other_live &= ~self.env.has_folded[:top, :, None]
+        src_weights = torch.where(
+            other_live,
+            unblocked_reach.clamp_min(1e-12),
+            torch.ones_like(unblocked_reach),
+        ).prod(dim=1)
+        src_weights *= self.allowed_hands[:top].to(dtype=self.float_dtype)
+
+        positive_regrets_out = self._ensure_positive_regrets_buf()
+        last_regrets = (
+            self._ensure_last_instantaneous_regrets_buf()
+            if getattr(self, "_predictive_cfr_enabled", False)
+            else None
+        )
+        fused_compact_regret_dcfr_update_multiway_with_tensors_(
+            src_weights=src_weights.contiguous(),
+            values_achieved=self.latest_values.contiguous(),
+            values_expected=self.latest_values[:top].contiguous(),
+            to_act=to_act_top,
+            child_offsets=child_offsets_top,
+            child_count=child_count_top,
+            prev_actor=self.prev_actor.contiguous(),
+            cumulative_regrets=self.cumulative_regrets,
+            t_alpha_num=self._t_scalars.t_alpha_num,
+            t_beta_num=self._t_scalars.t_beta_num,
+            t_alpha_den=self._t_scalars.t_alpha_den,
+            t_beta_den=self._t_scalars.t_beta_den,
+            apply_dcfr=self._uses_dcfr_backbone(),
+            cfr_plus=self.cfr_plus,
+            max_children=self.num_actions,
+            positive_regrets_out=positive_regrets_out,
+            last_instantaneous_regrets=last_regrets,
+            prediction_scale=self._t_scalars.predictive_scale,
+            current_player=self._t_scalars.current_player,
+            block_h=256,
+        )
+        self._fused_positive_regrets_valid = True
+
+        if t in self._record_stats_percentile_ts():
+            old_policy_probs = self.policy_probs.clone()
+            self.update_policy(t)
+            self._record_stats(t, old_policy_probs)
+        else:
+            self.update_policy(t)
+
+        self.set_leaf_values(t)
+        self.compute_expected_values()
 
     def _record_stats(self, t: int, old_policy_probs: torch.Tensor) -> None:
         return None

@@ -1469,6 +1469,7 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
     def static_feature_prefix(
         self, context: torch.Tensor, street: torch.Tensor
     ) -> torch.Tensor:
+        context = context.to(dtype=self.street_embedding.weight.dtype)
         return self.street_embedding(street) + self.context_encoder(context)
 
     def static_feature_base_from_prefix(
@@ -1493,6 +1494,8 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
             -1, self.num_players, PREFLOP_HANDS
         )
         hand_emb = self._hand_embedding()
+        player_beliefs = player_beliefs.to(dtype=hand_emb.dtype)
+        static_base_features = static_base_features.to(dtype=hand_emb.dtype)
         per_player_belief = player_beliefs @ hand_emb
         flat_features = static_base_features + self.belief_proj(
             per_player_belief.flatten(1)

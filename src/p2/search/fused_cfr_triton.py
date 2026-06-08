@@ -1195,6 +1195,204 @@ def fused_unblocked_regret_dcfr_update_with_tensors_(
 
 
 # ---------------------------------------------------------------------------
+# Kernel 6c: compact multiway source-weight regret/DCFR update.
+# ---------------------------------------------------------------------------
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_compact_regret_dcfr_update_multiway_kernel(
+        src_weights_ptr,  # [top, H]
+        values_achieved_ptr,  # [total, P, H]
+        values_expected_ptr,  # [top, P, H]
+        to_act_ptr,  # [top]
+        child_offsets_ptr,  # [top]
+        child_count_ptr,  # [top]
+        prev_actor_ptr,  # [total]
+        cumul_ptr,  # [total, H]
+        pos_out_ptr,  # [total, H]
+        last_regrets_ptr,  # optional [total, H]
+        prediction_scale_ptr,
+        current_player_ptr,
+        t_alpha_num_ptr,
+        t_beta_num_ptr,
+        t_alpha_den_ptr,
+        t_beta_den_ptr,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        APPLY_DCFR: tl.constexpr,
+        CFR_PLUS: tl.constexpr,
+        WRITE_POS: tl.constexpr,
+        HAS_PREDICTIVE: tl.constexpr,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        hb = tl.program_id(1)
+
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        if count == 0:
+            return
+
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        actor = tl.load(to_act_ptr + p)
+        expected = tl.load(
+            values_expected_ptr + (p * NUM_PLAYERS + actor) * H + offs,
+            mask=mask,
+            other=0.0,
+        )
+        w = tl.load(src_weights_ptr + p * H + offs, mask=mask, other=0.0)
+
+        if APPLY_DCFR:
+            t_alpha_num = tl.load(t_alpha_num_ptr)
+            t_beta_num = tl.load(t_beta_num_ptr)
+            t_alpha_den = tl.load(t_alpha_den_ptr)
+            t_beta_den = tl.load(t_beta_den_ptr)
+        if HAS_PREDICTIVE:
+            prediction_scale = tl.load(prediction_scale_ptr)
+            current_player = tl.load(current_player_ptr)
+
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                prev_actor = tl.load(prev_actor_ptr + child)
+                achieved = tl.load(
+                    values_achieved_ptr
+                    + (child * NUM_PLAYERS + prev_actor) * H
+                    + offs,
+                    mask=mask,
+                    other=0.0,
+                )
+                r = w * (achieved - expected)
+
+                cumul_offs = child * H + offs
+                c = tl.load(cumul_ptr + cumul_offs, mask=mask, other=0.0)
+                if APPLY_DCFR:
+                    positive = c > 0.0
+                    num = tl.where(positive, t_alpha_num, t_beta_num)
+                    den = tl.where(positive, t_alpha_den, t_beta_den)
+                    c = c * num
+                    c = c / den
+
+                c = c + r
+                if CFR_PLUS:
+                    c = tl.maximum(c, 0.0)
+
+                tl.store(cumul_ptr + cumul_offs, c, mask=mask)
+                if WRITE_POS:
+                    policy_c = c
+                    if HAS_PREDICTIVE:
+                        last = tl.load(
+                            last_regrets_ptr + cumul_offs,
+                            mask=mask,
+                            other=0.0,
+                        )
+                        observed = prev_actor != current_player
+                        last = tl.where(observed, r, last)
+                        tl.store(last_regrets_ptr + cumul_offs, last, mask=mask)
+                        policy_c = c + prediction_scale * last
+                    tl.store(
+                        pos_out_ptr + cumul_offs,
+                        tl.maximum(policy_c, 0.0),
+                        mask=mask,
+                    )
+
+
+def fused_compact_regret_dcfr_update_multiway_with_tensors_(
+    src_weights: torch.Tensor,
+    values_achieved: torch.Tensor,
+    values_expected: torch.Tensor,
+    to_act: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    prev_actor: torch.Tensor,
+    cumulative_regrets: torch.Tensor,
+    t_alpha_num: torch.Tensor,
+    t_beta_num: torch.Tensor,
+    t_alpha_den: torch.Tensor,
+    t_beta_den: torch.Tensor,
+    apply_dcfr: bool,
+    cfr_plus: bool,
+    max_children: int,
+    positive_regrets_out: torch.Tensor | None = None,
+    last_instantaneous_regrets: torch.Tensor | None = None,
+    prediction_scale: torch.Tensor | None = None,
+    current_player: torch.Tensor | None = None,
+    block_h: int = 256,
+) -> None:
+    """Update compact multiway cumulative regrets from parent source weights."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert src_weights.is_contiguous() and src_weights.dim() == 2
+    assert values_achieved.is_contiguous() and values_achieved.dim() == 3
+    assert values_expected.is_contiguous() and values_expected.dim() == 3
+    assert to_act.is_contiguous() and to_act.dim() == 1
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    assert prev_actor.is_contiguous() and prev_actor.dim() == 1
+    assert cumulative_regrets.is_contiguous() and cumulative_regrets.dim() == 2
+    total, h = cumulative_regrets.shape
+    top, p, h_expected = values_expected.shape
+    assert h_expected == h
+    assert src_weights.shape == (top, h)
+    assert values_achieved.shape == (total, p, h)
+    assert to_act.shape == (top,)
+    assert child_offsets.shape == (top,)
+    assert child_count.shape == (top,)
+    assert prev_actor.shape == (total,)
+    write_pos = positive_regrets_out is not None
+    pos_ptr = positive_regrets_out if write_pos else cumulative_regrets
+    has_predictive = last_instantaneous_regrets is not None
+    if has_predictive:
+        assert last_instantaneous_regrets is not None
+        assert last_instantaneous_regrets.is_contiguous()
+        assert last_instantaneous_regrets.shape == cumulative_regrets.shape
+        assert prediction_scale is not None and prediction_scale.dim() == 0
+        assert current_player is not None and current_player.dim() == 0
+        last_ptr = last_instantaneous_regrets
+        pred_scale_ptr = prediction_scale
+        current_player_ptr = current_player
+    else:
+        last_ptr = cumulative_regrets
+        pred_scale_ptr = t_alpha_num
+        current_player_ptr = t_alpha_num
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    grid = (top, triton.cdiv(h, block_h))
+    _fused_compact_regret_dcfr_update_multiway_kernel[grid](
+        src_weights,
+        values_achieved,
+        values_expected,
+        to_act,
+        child_offsets,
+        child_count,
+        prev_actor,
+        cumulative_regrets,
+        pos_ptr,
+        last_ptr,
+        pred_scale_ptr,
+        current_player_ptr,
+        t_alpha_num,
+        t_beta_num,
+        t_alpha_den,
+        t_beta_den,
+        h,
+        NUM_PLAYERS=p,
+        APPLY_DCFR=apply_dcfr,
+        CFR_PLUS=cfr_plus,
+        WRITE_POS=write_pos,
+        HAS_PREDICTIVE=has_predictive,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Kernel 7: update_average_policy mixing (pre-renormalization).
 # ---------------------------------------------------------------------------
 
@@ -2774,6 +2972,176 @@ def fused_policy_renorm_reach_depth_multiway_(
         BLOCK_P=block_p,
         BLOCK_H=block_h,
         num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _policy_reach_beliefs_depth_preflop_multiway_kernel(
+        policy_ptr,  # [total, H] in/out
+        reach_ptr,  # [total, P, H] in/out
+        beliefs_ptr,  # [total, P, H] in/out
+        allowed_mask_ptr,  # [total, H] bool
+        allowed_prob_ptr,  # [total, H]
+        root_index_ptr,  # [total]
+        child_offsets_ptr,  # [num_parents]
+        child_count_ptr,  # [num_parents]
+        prev_actor_ptr,  # [total]
+        parent_base,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        EPS,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        parent = parent_base + p
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        if count == 0:
+            return
+
+        hands = tl.arange(0, BLOCK_H)
+        hand_mask = hands < H
+        players = tl.arange(0, BLOCK_P)
+        player_mask = players < NUM_PLAYERS
+        value_mask = player_mask[:, None] & hand_mask[None, :]
+
+        denom = tl.zeros([BLOCK_H], dtype=tl.float32)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                denom += tl.load(
+                    policy_ptr + child * H + hands,
+                    mask=hand_mask,
+                    other=0.0,
+                )
+        use_div = denom > EPS
+        denom_safe = tl.maximum(denom, EPS)
+
+        parent_reach = tl.load(
+            reach_ptr + (parent * NUM_PLAYERS + players[:, None]) * H + hands[None, :],
+            mask=value_mask,
+            other=0.0,
+        )
+
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                raw = tl.load(
+                    policy_ptr + child * H + hands,
+                    mask=hand_mask,
+                    other=0.0,
+                )
+                pol = tl.where(use_div, raw / denom_safe, raw)
+                tl.store(policy_ptr + child * H + hands, pol, mask=hand_mask)
+
+                prev_actor = tl.load(prev_actor_ptr + child)
+                allowed = tl.load(
+                    allowed_mask_ptr + child * H + hands,
+                    mask=hand_mask,
+                    other=0,
+                ).to(tl.int1)
+                child_reach = tl.where(
+                    players[:, None] == prev_actor,
+                    parent_reach * pol[None, :],
+                    parent_reach,
+                )
+                child_reach = tl.where(allowed[None, :], child_reach, 0.0)
+                tl.store(
+                    reach_ptr
+                    + (child * NUM_PLAYERS + players[:, None]) * H
+                    + hands[None, :],
+                    child_reach,
+                    mask=value_mask,
+                )
+
+                root = tl.load(root_index_ptr + child)
+                root_belief = tl.load(
+                    beliefs_ptr
+                    + (root * NUM_PLAYERS + players[:, None]) * H
+                    + hands[None, :],
+                    mask=value_mask,
+                    other=0.0,
+                )
+                unnorm = root_belief * child_reach
+                belief_denom = tl.sum(unnorm, axis=1)
+                fallback = tl.load(
+                    allowed_prob_ptr + child * H + hands,
+                    mask=hand_mask,
+                    other=0.0,
+                )
+                out = tl.where(
+                    belief_denom[:, None] > EPS,
+                    unnorm / tl.maximum(belief_denom[:, None], EPS),
+                    fallback[None, :],
+                )
+                tl.store(
+                    beliefs_ptr
+                    + (child * NUM_PLAYERS + players[:, None]) * H
+                    + hands[None, :],
+                    out,
+                    mask=value_mask,
+                )
+
+
+def fused_policy_reach_beliefs_depth_preflop_multiway_(
+    policy: torch.Tensor,
+    reach: torch.Tensor,
+    beliefs: torch.Tensor,
+    allowed_mask: torch.Tensor,
+    allowed_prob: torch.Tensor,
+    root_index: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    prev_actor: torch.Tensor,
+    parent_base: int,
+    max_children: int,
+    eps: float = 1e-5,
+    block_h: int = 256,
+) -> None:
+    """Sibling renorm + reach + compact belief propagation for one depth."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert reach.is_contiguous() and beliefs.is_contiguous()
+    assert reach.shape == beliefs.shape
+    total, h = policy.shape
+    players = reach.shape[1]
+    assert reach.shape == (total, players, h)
+    assert allowed_mask.is_contiguous() and allowed_mask.shape == policy.shape
+    assert allowed_prob.is_contiguous() and allowed_prob.shape == policy.shape
+    assert root_index.is_contiguous() and root_index.shape == (total,)
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    assert prev_actor.is_contiguous()
+    if h > block_h:
+        raise ValueError(f"hand dim {h} exceeds block_h {block_h}")
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    block_p = 1
+    while block_p < players:
+        block_p *= 2
+    _policy_reach_beliefs_depth_preflop_multiway_kernel[(child_offsets.shape[0],)](
+        policy,
+        reach,
+        beliefs,
+        allowed_mask,
+        allowed_prob,
+        root_index,
+        child_offsets,
+        child_count,
+        prev_actor,
+        parent_base,
+        h,
+        NUM_PLAYERS=players,
+        EPS=eps,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_P=block_p,
+        BLOCK_H=block_h,
+        num_warps=8,
     )
 
 
