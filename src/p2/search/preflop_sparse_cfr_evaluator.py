@@ -540,11 +540,27 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                 child_rows,
                 dtype=values.dtype,
             )
-            action_weights.copy_(
-                opponent_conditioned_policy[:, None, :].expand(
-                    -1, self.num_players, -1
+            if hasattr(self.env, "has_folded"):
+                player_ids = torch.arange(self.num_players, device=self.device)
+                live_non_actor = (
+                    ~self.env.has_folded[parent, :, None]
+                    & (player_ids[None, :, None] != prev_actor[:, None, None])
                 )
-            )
+                marginal_action_policy = (
+                    actor_beliefs * child_policy
+                ).sum(dim=-1).view(-1, 1, 1)
+                torch.where(
+                    live_non_actor,
+                    opponent_conditioned_policy[:, None, :],
+                    marginal_action_policy,
+                    out=action_weights,
+                )
+            else:
+                action_weights.copy_(
+                    opponent_conditioned_policy[:, None, :].expand(
+                        -1, self.num_players, -1
+                    )
+                )
             action_weights.scatter_(
                 1,
                 prev_actor[:, None, None].expand(-1, 1, PREFLOP_HANDS),

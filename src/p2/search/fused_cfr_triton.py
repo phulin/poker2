@@ -3501,7 +3501,9 @@ if triton is not None:
         leaf_values_ptr,  # optional [total, P, H]
         leaf_mask_ptr,  # optional [total]
         prev_actor_ptr,  # [total]
+        has_folded_ptr,  # optional [total, P]
         policy_ptr,  # [total, H]
+        marginal_action_ptr,  # [num_children]
         numer_unblocked_ptr,  # [num_children, H]
         denom_unblocked_ptr,  # [top, H]
         child_offsets_ptr,  # [num_parents] absolute first child
@@ -3511,6 +3513,7 @@ if triton is not None:
         H,
         NUM_PLAYERS: tl.constexpr,
         EPS,
+        HAS_FOLDED: tl.constexpr,
         HAS_LEAF_SOURCE: tl.constexpr,
         MAX_CHILDREN: tl.constexpr,
         BLOCK_P: tl.constexpr,
@@ -3569,11 +3572,20 @@ if triton is not None:
                     mask=mask_h,
                     other=0.0,
                 )
+                marginal_action = tl.load(marginal_action_ptr + child_rel)
                 opp_pol = tl.where(denom > EPS, numer / denom_safe, 0.0)
+                folded = tl.zeros([BLOCK_P], dtype=tl.int1)
+                if HAS_FOLDED:
+                    folded = tl.load(
+                        has_folded_ptr + row * NUM_PLAYERS + players,
+                        mask=player_mask,
+                        other=0,
+                    ).to(tl.int1)
+                live_non_actor = (players[:, None] != prev_actor) & (~folded[:, None])
                 pol = tl.where(
                     players[:, None] == prev_actor,
                     hero_pol[None, :],
-                    opp_pol[None, :],
+                    tl.where(live_non_actor, opp_pol[None, :], marginal_action),
                 )
                 vals = tl.load(
                     values_ptr
@@ -3612,6 +3624,7 @@ def fused_preflop169_parent_sum_opp_(
     values: torch.Tensor,
     prev_actor: torch.Tensor,
     policy: torch.Tensor,
+    marginal_action_policy: torch.Tensor,
     numer_unblocked: torch.Tensor,
     denom_unblocked: torch.Tensor,
     child_offsets: torch.Tensor,
@@ -3623,6 +3636,7 @@ def fused_preflop169_parent_sum_opp_(
     eps: float = 1.0e-8,
     leaf_values: torch.Tensor | None = None,
     leaf_mask: torch.Tensor | None = None,
+    has_folded: torch.Tensor | None = None,
     block_h: int = 256,
 ) -> None:
     """Preflop-169 analogue of fused sparse inline-opponent EV backup."""
@@ -3630,12 +3644,14 @@ def fused_preflop169_parent_sum_opp_(
         raise RuntimeError("Triton is not installed.")
     assert values.is_contiguous() and values.dim() == 3
     assert policy.is_contiguous() and policy.dim() == 2
+    assert marginal_action_policy.is_contiguous() and marginal_action_policy.dim() == 1
     assert numer_unblocked.is_contiguous() and numer_unblocked.dim() == 2
     assert denom_unblocked.is_contiguous() and denom_unblocked.dim() == 2
     assert child_offsets.is_contiguous() and child_count.is_contiguous()
     assert prev_actor.is_contiguous()
     total, players, h = values.shape
     assert policy.shape == (total, h)
+    assert marginal_action_policy.shape == (numer_unblocked.shape[0],)
     assert numer_unblocked.shape[1] == h
     assert denom_unblocked.shape[1] == h
     has_leaf_source = leaf_values is not None
@@ -3648,6 +3664,13 @@ def fused_preflop169_parent_sum_opp_(
     else:
         leaf_values_ptr = values
         leaf_mask_ptr = child_count
+    has_folds = has_folded is not None
+    if has_folds:
+        assert has_folded is not None
+        assert has_folded.is_contiguous() and has_folded.shape == (total, players)
+        has_folded_ptr = has_folded
+    else:
+        has_folded_ptr = child_count
     if max_children_pow2 is None:
         mc_pow2 = 1
         while mc_pow2 < max_children:
@@ -3666,7 +3689,9 @@ def fused_preflop169_parent_sum_opp_(
         leaf_values_ptr,
         leaf_mask_ptr,
         prev_actor,
+        has_folded_ptr,
         policy,
+        marginal_action_policy,
         numer_unblocked,
         denom_unblocked,
         child_offsets,
@@ -3676,6 +3701,7 @@ def fused_preflop169_parent_sum_opp_(
         h,
         NUM_PLAYERS=players,
         EPS=eps,
+        HAS_FOLDED=has_folds,
         HAS_LEAF_SOURCE=has_leaf_source,
         MAX_CHILDREN=mc_pow2,
         BLOCK_P=block_p,

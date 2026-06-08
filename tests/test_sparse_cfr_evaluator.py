@@ -806,6 +806,72 @@ def test_preflop_sparse_evaluator_runs_compact_iteration_and_policy_batch() -> N
         evaluator.num_actions,
     )
     assert policy_batch.features.beliefs.shape[1] == num_players * PREFLOP_HANDS
+    assert "has_folded" in value_batch.statistics
+    assert "has_folded" in policy_batch.statistics
+
+
+def test_preflop_sparse_ev_uses_marginal_action_policy_for_folded_players() -> None:
+    device = get_device()
+    num_players = 3
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.depth = 1
+    cfg.search.allin_call_terminal_abstraction = False
+    env = PBSEnv(
+        num_envs=1,
+        num_players=num_players,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(1, dtype=torch.long, device=device),
+        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+    )
+    env.to_act[0] = 0
+    env.has_folded[0, 2] = True
+    model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = PreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+    prior = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    prior = prior / prior.sum()
+    beliefs = prior.expand(1, num_players, PREFLOP_HANDS).clone()
+    evaluator.initialize_subgame(env, torch.arange(1, device=device), beliefs)
+    evaluator.env.has_folded[:, 2] = True
+
+    children = torch.arange(1, evaluator.total_nodes, device=device)
+    policy = torch.zeros_like(evaluator.policy_probs)
+    hand_axis = torch.linspace(0.0, 1.0, PREFLOP_HANDS, device=device)
+    policy[children[0]] = 0.10 + 0.10 * hand_axis
+    policy[children[1]] = 0.35 - 0.05 * hand_axis
+    policy[children[2]] = 1.0 - policy[children[0]] - policy[children[1]]
+    torch.testing.assert_close(policy[children].sum(dim=0), torch.ones(PREFLOP_HANDS))
+
+    leaf_values = torch.zeros_like(evaluator.latest_values)
+    action_values = torch.tensor([1.0, -0.5, 3.0], device=device)
+    for child, value in zip(children, action_values, strict=True):
+        leaf_values[child, 2] = value
+    values = torch.empty_like(evaluator.latest_values)
+    evaluator.compute_expected_values(policy=policy, leaf_values=leaf_values, values=values)
+
+    actor_belief = evaluator.beliefs[0, 0]
+    marginal_policy = (actor_belief[None, :] * policy[children]).sum(dim=-1)
+    expected = (marginal_policy * action_values).sum()
+    torch.testing.assert_close(
+        values[0, 2],
+        expected.expand(PREFLOP_HANDS),
+        rtol=1e-6,
+        atol=1e-6,
+    )
 
 
 def test_preflop_sparse_continuation_sampling_returns_abort_root_not_value_target() -> None:

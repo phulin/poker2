@@ -377,12 +377,14 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         projection = self._preflop_unblocked_projection_for(beliefs_c).contiguous()
         torch.mm(actor_beliefs, projection, out=denom_unblocked)
         torch.mm(marginal_policy, projection, out=numer_unblocked)
+        marginal_action_policy = marginal_policy.sum(dim=-1).contiguous()
 
         for depth in range(self.tree_depth - 1, -1, -1):
             fused_preflop169_parent_sum_opp_(
                 values=values,
                 prev_actor=prev_actor_c,
                 policy=policy_c,
+                marginal_action_policy=marginal_action_policy,
                 numer_unblocked=numer_unblocked,
                 denom_unblocked=denom_unblocked,
                 child_offsets=self._child_offsets_by_depth[depth],
@@ -393,6 +395,11 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 max_children_pow2=self._child_count_pow2_by_depth[depth],
                 leaf_values=leaf_values if use_leaf_source else None,
                 leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
+                has_folded=(
+                    self.env.has_folded.contiguous()
+                    if hasattr(self.env, "has_folded")
+                    else None
+                ),
             )
 
     def compute_instantaneous_regrets(
