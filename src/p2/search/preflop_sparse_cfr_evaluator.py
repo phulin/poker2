@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 
+from p2.allin.oracle import PreflopAllIn169Oracle
 from p2.core.structured_config import Config
 from p2.env.card_utils import (
     NUM_HANDS,
@@ -144,13 +145,205 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
     def _init_hand_rank_data(self) -> None:
         self.hand_rank_data = None
 
-    def _set_allin_call_values(self, beliefs: torch.Tensor) -> None:
-        del beliefs
-        if self.allin_call_indices.numel() > 0:
-            raise NotImplementedError(
-                "compact preflop all-in terminal values require a 169-class "
-                "all-in resolver; disable allin_call_terminal_abstraction for now"
+    def _empty_allin_call_partitions(self) -> None:
+        empty = torch.empty(0, dtype=torch.long, device=self.device)
+        empty_boards = torch.empty(0, 5, dtype=torch.long, device=self.device)
+        self.allin_call_indices = empty
+        self.allin_call_parent_indices = empty
+        self.allin_call_mask = torch.zeros(
+            self.total_nodes, dtype=torch.bool, device=self.device
+        )
+        self.allin_call_indices_by_street = (empty, empty, empty)
+        self.allin_call_parent_indices_by_street = (empty, empty, empty)
+        self.allin_call_boards_by_street = (
+            empty_boards,
+            empty_boards,
+            empty_boards,
+        )
+        self.preflop_allin_indices_by_live_count = tuple(
+            empty for _ in range(self.num_players + 1)
+        )
+        self.preflop_allin_parent_indices_by_live_count = tuple(
+            empty for _ in range(self.num_players + 1)
+        )
+        self.preflop_allin_exact_indices = empty
+        self.preflop_allin_model_indices = empty
+
+    def _cache_preflop_allin_live_partitions(self) -> None:
+        empty = torch.empty(0, dtype=torch.long, device=self.device)
+        if getattr(self, "allin_call_indices", empty).numel() == 0:
+            self.preflop_allin_indices_by_live_count = tuple(
+                empty for _ in range(self.num_players + 1)
             )
+            self.preflop_allin_parent_indices_by_live_count = tuple(
+                empty for _ in range(self.num_players + 1)
+            )
+            self.preflop_allin_exact_indices = empty
+            self.preflop_allin_model_indices = empty
+            return
+
+        live_counts = (~self.env.has_folded[self.allin_call_indices]).sum(dim=1)
+        indices_by_count = []
+        parents_by_count = []
+        for live_count in range(self.num_players + 1):
+            mask = live_counts == live_count
+            indices_by_count.append(self.allin_call_indices[mask].contiguous())
+            parents_by_count.append(
+                self.allin_call_parent_indices[mask].contiguous()
+            )
+        self.preflop_allin_indices_by_live_count = tuple(indices_by_count)
+        self.preflop_allin_parent_indices_by_live_count = tuple(parents_by_count)
+        self.preflop_allin_exact_indices = (
+            torch.cat(indices_by_count[2:4]).contiguous()
+            if self.num_players >= 3
+            else indices_by_count[2]
+        )
+        self.preflop_allin_model_indices = (
+            torch.cat(indices_by_count[4:]).contiguous()
+            if self.num_players >= 4
+            else empty
+        )
+
+    def _cache_allin_call_street_partitions(
+        self, parent_streets: torch.Tensor
+    ) -> None:
+        empty = torch.empty(0, dtype=torch.long, device=self.device)
+        empty_boards = torch.empty(0, 5, dtype=torch.long, device=self.device)
+        if self.allin_call_indices.numel() == 0:
+            self.allin_call_indices_by_street = (empty, empty, empty)
+            self.allin_call_parent_indices_by_street = (empty, empty, empty)
+            self.allin_call_boards_by_street = (
+                empty_boards,
+                empty_boards,
+                empty_boards,
+            )
+            self._cache_preflop_allin_live_partitions()
+            return
+
+        street0 = parent_streets == 0
+        self.allin_call_indices_by_street = (
+            self.allin_call_indices[street0].contiguous(),
+            empty,
+            empty,
+        )
+        self.allin_call_parent_indices_by_street = (
+            self.allin_call_parent_indices[street0].contiguous(),
+            empty,
+            empty,
+        )
+        boards = self.env.board_indices[self.allin_call_parent_indices].long()
+        self.allin_call_boards_by_street = (
+            boards[street0].contiguous(),
+            empty_boards,
+            empty_boards,
+        )
+        self._cache_preflop_allin_live_partitions()
+
+    def _allin_call_child_mask(
+        self,
+        parent_env: HUNLTensorEnv | PBSEnv,
+        parent_local_indices: torch.Tensor,
+        action_bins: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self._allin_abstraction_enabled() or action_bins.numel() == 0:
+            return torch.zeros_like(action_bins, dtype=torch.bool)
+        actor = parent_env.to_act[parent_local_indices]
+        rows = torch.arange(parent_local_indices.numel(), device=self.device)
+        live = ~parent_env.has_folded[parent_local_indices]
+        actor_onehot = torch.zeros_like(live)
+        actor_onehot[rows, actor] = True
+        other_live = live & ~actor_onehot
+        other_allin = other_live & parent_env.is_allin[parent_local_indices]
+        other_betting_eligible = (
+            other_live
+            & ~parent_env.is_allin[parent_local_indices]
+            & (parent_env.stacks[parent_local_indices] > 0)
+        )
+        max_committed = parent_env.committed[parent_local_indices].amax(dim=1)
+        actor_committed = parent_env.committed[parent_local_indices, actor]
+        parent_to_call = max_committed - actor_committed
+        parent_street = parent_env.street[parent_local_indices]
+        return (
+            (action_bins == 1)
+            & actor_onehot.any(dim=1)
+            & other_allin.any(dim=1)
+            & ~other_betting_eligible.any(dim=1)
+            & (parent_to_call > 0)
+            & (parent_street == 0)
+        )
+
+    def _mark_allin_call_leaves(self) -> None:
+        self._empty_allin_call_partitions()
+        if not self._allin_abstraction_enabled() or self.total_nodes <= self.root_nodes:
+            return
+
+        child_indices = torch.arange(
+            self.root_nodes, self.total_nodes, device=self.device
+        )
+        parent, action = self._parent_action_for_nodes(child_indices)
+        mask = self._allin_call_child_mask(self.env, parent, action)
+        indices = child_indices[mask]
+        if indices.numel() == 0:
+            self._cache_preflop_allin_live_partitions()
+            return
+
+        self.allin_call_indices = indices.contiguous()
+        self.allin_call_parent_indices = parent[mask].contiguous()
+        self.allin_call_mask[self.allin_call_indices] = True
+        self.leaf_mask[self.allin_call_indices] = True
+        self.new_street_mask[self.allin_call_indices] = False
+        parent_street = self.env.street[self.allin_call_parent_indices].contiguous()
+        self._cache_allin_call_street_partitions(parent_street)
+        self._prune_allin_call_descendants()
+
+    def _ensure_preflop_allin_169_oracle(self) -> PreflopAllIn169Oracle:
+        oracle = getattr(self, "preflop_allin_169_oracle", None)
+        if oracle is not None:
+            return oracle
+        search_cfg = getattr(getattr(self, "cfg", None), "search", None)
+        oracle = PreflopAllIn169Oracle(
+            device=self.device,
+            exact_cache_path=getattr(
+                search_cfg,
+                "preflop_allin_169_cache_path",
+                None,
+            ),
+            model_checkpoint_path=getattr(
+                search_cfg,
+                "preflop_allin_169_model_checkpoint",
+                None,
+            ),
+            compile_model=getattr(
+                search_cfg,
+                "preflop_allin_169_compile_model",
+                False,
+            ),
+        )
+        self.preflop_allin_169_oracle = oracle
+        return oracle
+
+    def _set_allin_call_values(self, beliefs: torch.Tensor) -> None:
+        indices = getattr(self, "allin_call_indices", None)
+        if indices is None or indices.numel() == 0:
+            return
+        if not hasattr(self, "preflop_allin_indices_by_live_count"):
+            self._cache_preflop_allin_live_partitions()
+        oracle = self._ensure_preflop_allin_169_oracle()
+        for live_players in range(2, self.num_players + 1):
+            node_idx = self.preflop_allin_indices_by_live_count[live_players]
+            if node_idx.numel() == 0:
+                continue
+            values = oracle.values(
+                beliefs=beliefs[node_idx],
+                starting_stacks=self.env.starting_stacks[node_idx].to(torch.float32),
+                committed=self.env.chips_placed[node_idx].to(torch.float32),
+                stacks_after=self.env.stacks[node_idx].to(torch.float32),
+                allin_mask=self.env.is_allin[node_idx],
+                folded_mask=self.env.has_folded[node_idx],
+                scale=self.env.scale[node_idx].to(torch.float32),
+                live_players=live_players,
+            )
+            self.latest_values[node_idx] = values.to(self.latest_values.dtype)
 
     def _compute_policy_node_reach(self, top: int) -> torch.Tensor:
         allowed = self.allowed_hands[:top].to(dtype=self.float_dtype)

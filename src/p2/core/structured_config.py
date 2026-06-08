@@ -350,6 +350,9 @@ class SearchConfig:
     value_targets_from_final_policy: bool = False
     allin_call_terminal_abstraction: bool = True
     preflop_allin_table_path: str | None = None
+    preflop_allin_169_cache_path: str | None = None
+    preflop_allin_169_model_checkpoint: str | None = None
+    preflop_allin_169_compile_model: bool = False
     closing_leaf_checkpoint: str | None = None
     model_scope: ModelScope = ModelScope.mixed_street
     street_model_checkpoints: dict[str, str] = field(default_factory=dict)

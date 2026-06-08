@@ -119,6 +119,9 @@ search:
     - []
   allin_by_depth: [true, true, true, true, false]
   preflop_allin_table_path: outputs/preflop_allin_table.pt.zst
+  preflop_allin_169_cache_path: outputs/precompute/preflop_allin_169_u16.pt.zst
+  preflop_allin_169_model_checkpoint: outputs/checkpoints_allin_169_transformer/allin_256k_xf4_h192_hd128_mainlr00025_adamw0004_bs1024_maskfold_s16384_b1024_min4/latest.pt
+  preflop_allin_169_compile_model: false
   sparse: true
   sparse_fused: true
   value_targets_from_final_policy: false

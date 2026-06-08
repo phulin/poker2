@@ -150,13 +150,41 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def _init_hand_rank_data(self) -> None:
         PreflopSparseCFREvaluator._init_hand_rank_data(self)
 
+    def _empty_allin_call_partitions(self) -> None:
+        PreflopSparseCFREvaluator._empty_allin_call_partitions(self)
+
+    def _cache_preflop_allin_live_partitions(self) -> None:
+        PreflopSparseCFREvaluator._cache_preflop_allin_live_partitions(self)
+
+    def _cache_allin_call_street_partitions(
+        self, parent_streets: torch.Tensor
+    ) -> None:
+        PreflopSparseCFREvaluator._cache_allin_call_street_partitions(
+            self,
+            parent_streets,
+        )
+
+    def _allin_call_child_mask(
+        self,
+        parent_env: HUNLTensorEnv | PBSEnv,
+        parent_local_indices: torch.Tensor,
+        action_bins: torch.Tensor,
+    ) -> torch.Tensor:
+        return PreflopSparseCFREvaluator._allin_call_child_mask(
+            self,
+            parent_env,
+            parent_local_indices,
+            action_bins,
+        )
+
+    def _mark_allin_call_leaves(self) -> None:
+        PreflopSparseCFREvaluator._mark_allin_call_leaves(self)
+
+    def _ensure_preflop_allin_169_oracle(self):
+        return PreflopSparseCFREvaluator._ensure_preflop_allin_169_oracle(self)
+
     def _set_allin_call_values(self, beliefs: torch.Tensor) -> None:
-        del beliefs
-        if self.allin_call_indices.numel() > 0:
-            raise NotImplementedError(
-                "compact preflop all-in terminal values require a 169-class "
-                "all-in resolver; disable allin_call_terminal_abstraction for now"
-            )
+        PreflopSparseCFREvaluator._set_allin_call_values(self, beliefs)
 
     def _compute_policy_node_reach(self, top: int) -> torch.Tensor:
         return PreflopSparseCFREvaluator._compute_policy_node_reach(self, top)

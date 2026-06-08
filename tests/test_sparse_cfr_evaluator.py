@@ -801,6 +801,218 @@ def test_preflop_sparse_evaluator_runs_compact_iteration_and_policy_batch() -> N
     assert policy_batch.features.beliefs.shape[1] == num_players * PREFLOP_HANDS
 
 
+def test_preflop_sparse_allin_call_mask_requires_no_other_betting_player() -> None:
+    device = get_device()
+    num_players = 4
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.allin_call_terminal_abstraction = True
+    env = PBSEnv(
+        num_envs=2,
+        num_players=num_players,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(2, dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14], [10, 11, 12, 13, 14]],
+            dtype=torch.long,
+            device=device,
+        ),
+    )
+    env.street[:] = 0
+    env.to_act[:] = 0
+    env.committed[:] = torch.tensor(
+        [[0, 100, 100, 0], [0, 100, 100, 100]],
+        dtype=torch.long,
+        device=device,
+    )
+    env.stacks[:] = torch.tensor(
+        [[200, 0, 0, 1000], [200, 0, 0, 900]],
+        dtype=torch.long,
+        device=device,
+    )
+    env.is_allin[:] = torch.tensor(
+        [[False, True, True, False], [False, True, True, False]],
+        dtype=torch.bool,
+        device=device,
+    )
+    env.has_folded[:] = torch.tensor(
+        [[False, False, False, True], [False, False, False, False]],
+        dtype=torch.bool,
+        device=device,
+    )
+    model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = PreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+
+    mask = evaluator._allin_call_child_mask(
+        env,
+        torch.arange(2, device=device),
+        torch.ones(2, dtype=torch.long, device=device),
+    )
+
+    assert mask.tolist() == [True, False]
+
+
+def test_preflop_sparse_allin_call_leaf_marked_during_construction() -> None:
+    device = get_device()
+    num_players = 4
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.depth = 1
+    cfg.search.allin_call_terminal_abstraction = True
+    env = PBSEnv(
+        num_envs=1,
+        num_players=num_players,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(1, dtype=torch.long, device=device),
+        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+    )
+    env.street[0] = 0
+    env.to_act[0] = 0
+    env.actions_this_round[0] = 1
+    env.acted_this_round[0] = torch.tensor(
+        [False, True, True, True],
+        dtype=torch.bool,
+        device=device,
+    )
+    env.committed[0] = torch.tensor([0, 100, 100, 0], dtype=torch.long, device=device)
+    env.chips_placed[0] = env.committed[0]
+    env.pot[0] = 200
+    env.stacks[0] = torch.tensor([200, 0, 0, 1000], dtype=torch.long, device=device)
+    env.starting_stacks[0] = torch.tensor(
+        [200, 100, 100, 1000],
+        dtype=torch.long,
+        device=device,
+    )
+    env.is_allin[0] = torch.tensor(
+        [False, True, True, False],
+        dtype=torch.bool,
+        device=device,
+    )
+    env.has_folded[0] = torch.tensor(
+        [False, False, False, True],
+        dtype=torch.bool,
+        device=device,
+    )
+    model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = PreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+
+    evaluator.initialize_subgame(env, torch.arange(1, device=device))
+
+    assert evaluator.allin_call_indices.tolist() == [2]
+    assert evaluator.preflop_allin_indices_by_live_count[3].tolist() == [2]
+    assert evaluator.leaf_mask[2]
+    assert not evaluator.new_street_mask[2]
+
+
+def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
+    device = get_device()
+    num_players = 4
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.allin_call_terminal_abstraction = False
+    env = PBSEnv(
+        num_envs=1,
+        num_players=num_players,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(1, dtype=torch.long, device=device),
+        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+    )
+    model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = PreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+    evaluator.initialize_subgame(env, torch.arange(1, device=device))
+    node_idx = torch.arange(3, device=device)
+    evaluator.allin_call_indices = node_idx
+    evaluator.allin_call_parent_indices = torch.zeros_like(node_idx)
+    evaluator.allin_call_mask = torch.zeros(
+        evaluator.total_nodes, dtype=torch.bool, device=device
+    )
+    evaluator.allin_call_mask[node_idx] = True
+    evaluator.env.has_folded[node_idx] = torch.tensor(
+        [
+            [False, False, True, True],
+            [False, False, False, True],
+            [False, False, False, False],
+        ],
+        dtype=torch.bool,
+        device=device,
+    )
+    evaluator.env.is_allin[node_idx] = ~evaluator.env.has_folded[node_idx]
+    evaluator.env.chips_placed[node_idx] = 100
+    evaluator.env.stacks[node_idx] = 0
+    evaluator.env.starting_stacks[node_idx] = 100
+    evaluator.env.scale[node_idx] = 100
+    evaluator._cache_allin_call_street_partitions(
+        evaluator.env.street[evaluator.allin_call_parent_indices]
+    )
+
+    class FakeOracle:
+        def __init__(self) -> None:
+            self.live_counts: list[int] = []
+
+        def values(self, *, beliefs, live_players, **kwargs):
+            del kwargs
+            self.live_counts.append(live_players)
+            return torch.full_like(beliefs, float(live_players))
+
+    fake = FakeOracle()
+    evaluator.preflop_allin_169_oracle = fake
+    evaluator._set_allin_call_values(evaluator.beliefs)
+
+    assert [x.tolist() for x in evaluator.preflop_allin_indices_by_live_count[2:]] == [
+        [0],
+        [1],
+        [2],
+    ]
+    assert evaluator.preflop_allin_exact_indices.tolist() == [0, 1]
+    assert evaluator.preflop_allin_model_indices.tolist() == [2]
+    assert fake.live_counts == [2, 3, 4]
+    assert_close(evaluator.latest_values[0], torch.full((num_players, PREFLOP_HANDS), 2.0))
+    assert_close(evaluator.latest_values[1], torch.full((num_players, PREFLOP_HANDS), 3.0))
+    assert_close(evaluator.latest_values[2], torch.full((num_players, PREFLOP_HANDS), 4.0))
+
+
 def test_preflop_sparse_evaluator_rejects_fused_config() -> None:
     device = get_device()
     cfg = make_config([0.5])
