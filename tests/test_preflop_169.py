@@ -127,28 +127,155 @@ def test_preflop_class_compatibility_counts_are_class_symmetric() -> None:
     )
 
 
-def test_multiplicity_weighted_169_value_loss_matches_expanded_loss() -> None:
+def test_compact_169_value_loss_matches_expanded_weighted_loss() -> None:
     batch_size = 4
     num_players = 2
-    features = _compact_features(batch_size, num_players)
+    generator = torch.Generator(device="cpu").manual_seed(127)
+    beliefs_169 = torch.rand(
+        batch_size, num_players, PREFLOP_HANDS, generator=generator
+    )
+    beliefs_169 = beliefs_169 / beliefs_169.sum(dim=-1, keepdim=True)
+    beliefs_1326 = expand_169_to_1326(
+        beliefs_169,
+        divide_by_multiplicity=True,
+    )
     pred_169 = torch.randn(batch_size, num_players, PREFLOP_HANDS)
     target_169 = torch.randn_like(pred_169)
-    batch = RebelBatch(
-        features=features,
+    compact_batch = RebelBatch(
+        features=MLPFeatures(
+            context=torch.zeros(batch_size, context_length(num_players)),
+            street=torch.zeros(batch_size, dtype=torch.long),
+            to_act=torch.zeros(batch_size, dtype=torch.long),
+            board=torch.full((batch_size, 5), -1, dtype=torch.long),
+            beliefs=beliefs_169.reshape(batch_size, -1),
+            hand_dim=PREFLOP_HANDS,
+        ),
         legal_masks=torch.ones(batch_size, 4, dtype=torch.bool),
         value_targets=target_169,
     )
+    expanded_batch = RebelBatch(
+        features=MLPFeatures(
+            context=torch.zeros(batch_size, context_length(num_players)),
+            street=torch.zeros(batch_size, dtype=torch.long),
+            to_act=torch.zeros(batch_size, dtype=torch.long),
+            board=torch.full((batch_size, 5), -1, dtype=torch.long),
+            beliefs=beliefs_1326.reshape(batch_size, -1),
+        ),
+        legal_masks=torch.ones(batch_size, 4, dtype=torch.bool),
+        value_targets=expand_169_to_1326(target_169),
+    )
     loss_fn = RebelSupervisedLoss(num_players=num_players)
 
-    loss = loss_fn.forward_value(ModelOutput(hand_values=pred_169), batch)[
-        "value_loss"
-    ]
-    expected = F.mse_loss(
-        expand_169_to_1326(pred_169),
-        expand_169_to_1326(target_169),
+    compact_loss = loss_fn.forward_value(
+        ModelOutput(hand_values=pred_169),
+        compact_batch,
+    )["value_loss"]
+    expanded_loss = loss_fn.forward_value(
+        ModelOutput(hand_values=expand_169_to_1326(pred_169)),
+        expanded_batch,
+    )["value_loss"]
+
+    torch.testing.assert_close(compact_loss, expanded_loss, rtol=1e-5, atol=1e-6)
+
+
+def test_compact_policy_loss_ignores_folded_opponent_belief() -> None:
+    batch_size = 2
+    num_players = 3
+    num_actions = 4
+    generator = torch.Generator(device="cpu").manual_seed(128)
+    beliefs = torch.rand(batch_size, num_players, PREFLOP_HANDS, generator=generator)
+    beliefs = beliefs / beliefs.sum(dim=-1, keepdim=True)
+    beliefs_changed = beliefs.clone()
+    beliefs_changed[:, 2] = torch.flip(beliefs_changed[:, 2], dims=(-1,))
+    logits = torch.randn(batch_size, PREFLOP_HANDS, num_actions, generator=generator)
+    targets = F.softmax(
+        torch.randn(batch_size, PREFLOP_HANDS, num_actions, generator=generator),
+        dim=-1,
+    )
+    folded = torch.tensor(
+        [[False, False, True], [False, False, True]],
+        dtype=torch.bool,
     )
 
-    torch.testing.assert_close(loss, expected)
+    def make_batch(beliefs_in: torch.Tensor) -> RebelBatch:
+        return RebelBatch(
+            features=MLPFeatures(
+                context=torch.zeros(batch_size, context_length(num_players)),
+                street=torch.zeros(batch_size, dtype=torch.long),
+                to_act=torch.zeros(batch_size, dtype=torch.long),
+                board=torch.full((batch_size, 5), -1, dtype=torch.long),
+                beliefs=beliefs_in.reshape(batch_size, -1),
+                hand_dim=PREFLOP_HANDS,
+            ),
+            legal_masks=torch.ones(batch_size, num_actions, dtype=torch.bool),
+            policy_targets=targets,
+            statistics={"has_folded": folded},
+        )
+
+    loss_fn = RebelSupervisedLoss(num_players=num_players)
+    base = loss_fn.forward_policy(ModelOutput(policy_logits=logits), make_batch(beliefs))
+    changed = loss_fn.forward_policy(
+        ModelOutput(policy_logits=logits),
+        make_batch(beliefs_changed),
+    )
+
+    torch.testing.assert_close(base["policy_weights"], changed["policy_weights"])
+    torch.testing.assert_close(base["policy_loss"], changed["policy_loss"])
+
+
+def test_compact_value_loss_excludes_folded_focal_players() -> None:
+    batch_size = 2
+    num_players = 3
+    generator = torch.Generator(device="cpu").manual_seed(129)
+    beliefs = torch.rand(batch_size, num_players, PREFLOP_HANDS, generator=generator)
+    beliefs = beliefs / beliefs.sum(dim=-1, keepdim=True)
+    pred = torch.randn(batch_size, num_players, PREFLOP_HANDS, generator=generator)
+    target = torch.randn_like(pred)
+    pred_changed = pred.clone()
+    target_changed = target.clone()
+    pred_changed[:, 2] = torch.randn(
+        batch_size,
+        PREFLOP_HANDS,
+        generator=generator,
+    ) * 100.0
+    target_changed[:, 2] = torch.randn(
+        batch_size,
+        PREFLOP_HANDS,
+        generator=generator,
+    ) * -100.0
+    folded = torch.tensor(
+        [[False, False, True], [False, False, True]],
+        dtype=torch.bool,
+    )
+    batch = RebelBatch(
+        features=MLPFeatures(
+            context=torch.zeros(batch_size, context_length(num_players)),
+            street=torch.zeros(batch_size, dtype=torch.long),
+            to_act=torch.zeros(batch_size, dtype=torch.long),
+            board=torch.full((batch_size, 5), -1, dtype=torch.long),
+            beliefs=beliefs.reshape(batch_size, -1),
+            hand_dim=PREFLOP_HANDS,
+        ),
+        legal_masks=torch.ones(batch_size, 4, dtype=torch.bool),
+        value_targets=target,
+        statistics={"has_folded": folded},
+    )
+    changed_batch = RebelBatch(
+        features=batch.features,
+        legal_masks=batch.legal_masks,
+        value_targets=target_changed,
+        statistics=batch.statistics,
+    )
+    loss_fn = RebelSupervisedLoss(num_players=num_players)
+
+    base = loss_fn.forward_value(ModelOutput(hand_values=pred), batch)
+    changed = loss_fn.forward_value(
+        ModelOutput(hand_values=pred_changed),
+        changed_batch,
+    )
+
+    torch.testing.assert_close(base["value_loss"], changed["value_loss"])
+    assert torch.all(base["value_weights"][:, 2] == 0)
 
 
 def test_compact_policy_weights_match_expanded_combo_weights() -> None:

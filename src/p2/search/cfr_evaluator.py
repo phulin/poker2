@@ -2450,6 +2450,10 @@ class CFREvaluator(ABC):
             "node_depth": node_depth,
             "actions_this_round": self.env.actions_this_round,
         }
+        if hasattr(self.env, "has_folded"):
+            statistics["has_folded"] = self.env.has_folded
+        if hasattr(self.env, "is_allin"):
+            statistics["is_allin"] = self.env.is_allin
 
         exploit_stats = self._compute_exploitability()
         exploit_mbbg = self._local_exploitability_mbbg(

@@ -868,6 +868,17 @@ class RebelSupervisedLoss(nn.Module):
         unblocked_mass = self._calculate_unblocked_mass(player_beliefs)
         return player_beliefs, allowed_hands_float, unblocked_mass
 
+    def _live_player_mask(self, batch: RebelBatch) -> torch.Tensor | None:
+        folded = batch.statistics.get("has_folded")
+        if folded is None:
+            return None
+        if folded.dim() != 2 or folded.shape[1] != self.num_players:
+            raise ValueError(
+                "has_folded statistics must have shape "
+                f"[batch, {self.num_players}], got {tuple(folded.shape)}"
+            )
+        return ~folded.to(device=batch.features.beliefs.device, dtype=torch.bool)
+
     def _policy_weights(
         self, batch: RebelBatch
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -881,6 +892,11 @@ class RebelSupervisedLoss(nn.Module):
         ).squeeze(1)
         player_ids = torch.arange(self.num_players, device=actor.device)
         non_actor = player_ids[None, :, None] != actor_safe[:, None, None]
+        live_mask = self._live_player_mask(batch)
+        if live_mask is not None:
+            actor_live = live_mask.gather(1, actor_safe[:, None]).squeeze(1)
+            valid_actor = valid_actor & actor_live
+            non_actor = non_actor & live_mask[:, :, None]
         other_matchup = torch.where(
             non_actor,
             unblocked_mass,
@@ -902,15 +918,47 @@ class RebelSupervisedLoss(nn.Module):
         self,
         unblocked_mass: torch.Tensor,
         allowed_hands_float: torch.Tensor,
+        live_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         player_ids = torch.arange(self.num_players, device=unblocked_mass.device)
         non_focal = player_ids[None, :, None, None] != player_ids[None, None, :, None]
+        if live_mask is not None:
+            live_mask = live_mask.to(device=unblocked_mass.device, dtype=torch.bool)
+            non_focal = non_focal & live_mask[:, None, :, None]
         weights = torch.where(
             non_focal,
             unblocked_mass[:, None],
             torch.ones_like(unblocked_mass[:, None]),
         ).prod(dim=2)
-        return weights * allowed_hands_float[:, None]
+        weights = weights * allowed_hands_float[:, None]
+        if live_mask is not None:
+            weights = weights * live_mask[:, :, None].to(dtype=weights.dtype)
+        return weights
+
+    def _compact_value_weights(
+        self,
+        batch: RebelBatch,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        player_beliefs = batch.features.beliefs.view(
+            -1, self.num_players, PREFLOP_HANDS
+        )
+        unblocked_mass = preflop_class_unblocked_mass(player_beliefs.to(dtype=dtype))
+        allowed_hands_float = torch.ones(
+            player_beliefs.shape[0],
+            PREFLOP_HANDS,
+            dtype=dtype,
+            device=player_beliefs.device,
+        )
+        value_weights = self._value_weights(
+            unblocked_mass,
+            allowed_hands_float,
+            live_mask=self._live_player_mask(batch),
+        )
+        multiplicity = preflop_class_multiplicity_tensor(device=player_beliefs.device).to(
+            dtype=dtype
+        )
+        return value_weights * multiplicity.view(1, 1, PREFLOP_HANDS)
 
     def _zero(self, device: torch.device) -> torch.Tensor:
         return torch.zeros((), device=device)
@@ -1016,6 +1064,11 @@ class RebelSupervisedLoss(nn.Module):
         )
         player_ids = torch.arange(self.num_players, device=device)
         non_actor = player_ids[None, :, None] != actor_safe[:, None, None]
+        live_mask = self._live_player_mask(batch)
+        if live_mask is not None:
+            actor_live = live_mask.gather(1, actor_safe[:, None]).squeeze(1)
+            valid_actor = valid_actor & actor_live
+            non_actor = non_actor & live_mask[:, :, None]
         other_matchup = torch.where(
             non_actor,
             unblocked_mass,
@@ -1108,12 +1161,10 @@ class RebelSupervisedLoss(nn.Module):
         self,
         hand_values: torch.Tensor,
         value_targets: torch.Tensor,
+        batch: RebelBatch,
     ) -> dict[str, torch.Tensor]:
         device = hand_values.device
-        multiplicity = preflop_class_multiplicity_tensor(device=device).to(
-            dtype=hand_values.dtype
-        )
-        value_weights = multiplicity.view(1, 1, PREFLOP_HANDS).expand_as(hand_values)
+        value_weights = self._compact_value_weights(batch, hand_values.dtype)
         sq_error = F.mse_loss(hand_values, value_targets, reduction="none")
         value_loss_all = sq_error.detach() * value_weights
         value_loss = (sq_error * value_weights).sum() / value_weights.sum().clamp(
@@ -1251,10 +1302,14 @@ class RebelSupervisedLoss(nn.Module):
         device = hand_values.device
         value_targets = batch.value_targets.to(dtype=hand_values.dtype)
         if hand_values.shape[-1] == PREFLOP_HANDS:
-            return self._forward_compact_value(hand_values, value_targets)
+            return self._forward_compact_value(hand_values, value_targets, batch)
         _, allowed_hands_float, unblocked_mass = self._base_weights(batch)
 
-        value_weights = self._value_weights(unblocked_mass, allowed_hands_float)
+        value_weights = self._value_weights(
+            unblocked_mass,
+            allowed_hands_float,
+            live_mask=self._live_player_mask(batch),
+        )
         value_loss = F.mse_loss(hand_values, value_targets, weight=value_weights)
         value_loss_all = F.mse_loss(
             hand_values.detach(),
@@ -1353,7 +1408,14 @@ class RebelSupervisedLoss(nn.Module):
             policy_logit_l2_all = None
         entropy = -(probs * log_probs).sum(dim=-1).mean()
 
-        value_weights = self._value_weights(unblocked_mass, allowed_hands_float)
+        if hand_values.shape[-1] == PREFLOP_HANDS:
+            value_weights = self._compact_value_weights(batch, hand_values.dtype)
+        else:
+            value_weights = self._value_weights(
+                unblocked_mass,
+                allowed_hands_float,
+                live_mask=self._live_player_mask(batch),
+            )
         value_loss = F.mse_loss(hand_values, value_targets, weight=value_weights)
         value_loss_all = F.mse_loss(
             hand_values.detach(),

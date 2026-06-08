@@ -2,7 +2,7 @@
 CFR/DCFR search, public-belief state handling, ReBeL data generation, evaluator orchestration, chance-node logic, and fused Triton kernels.
 
 ### Source files
-- `cfr_evaluator.py`: PublicBeliefState, exploitability stats, hand-rank data, evaluator interface, shared split policy/value model dispatch, optional closing-leaf value model routing, hand-dimension-aware sparse helpers, sparse warm-start prior/regret extraction helpers, sparse-only delayed DCFR-hybrid PCFR/SAPCFR predictive regret extraction, and per-root leaf target-source provenance.
+- `cfr_evaluator.py`: PublicBeliefState, exploitability stats, hand-rank data, evaluator interface, shared split policy/value model dispatch, optional closing-leaf value model routing, hand-dimension-aware sparse helpers, folded/all-in statistics export for supervised batches, sparse warm-start prior/regret extraction helpers, sparse-only delayed DCFR-hybrid PCFR/SAPCFR predictive regret extraction, and per-root leaf target-source provenance.
 - `allin_payoff.py`: Preflop/flop/turn all-in call payoff table generation, lookup, eager references, and fused Triton writeback kernels, including grouped turn-board payoff dot writeback.
 - `dcfr.py`: Standalone DCFR utilities and regret matching.
 - `end_of_street_distillation.py`: Builds value-only end-of-street distillation batches by evaluating frozen next-street value nets through chance-node target helpers, with compact 169-hand `E_preflop` target collapse/expansion at the `S_flop` boundary.
