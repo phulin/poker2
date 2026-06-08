@@ -276,7 +276,12 @@ class BetterPreflopPolicyFeatureEncoder(BetterPolicyFeatureEncoder):
     belief_dim = PREFLOP_HANDS
 
 
-class BetterPreflopValueFeatureEncoder(BetterStreetValueFeatureEncoder):
-    """Construct compact preflop value features with 169 rank classes."""
+class BetterPreflopValueFeatureEncoder(BetterPolicyFeatureEncoder):
+    """Construct compact preflop value features with betting context.
+
+    Preflop value targets are same-street continuation roots, not postflop
+    street-boundary chance phases. Keep the policy-context scalar layout so the
+    compact value model sees actions_this_round instead of a constant phase bit.
+    """
 
     belief_dim = PREFLOP_HANDS

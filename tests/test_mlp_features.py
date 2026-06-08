@@ -5,12 +5,14 @@ from p2.env.card_utils import (
     HAND_EQUITY_ORDERING,
     IDX_TO_RANK,
     NUM_HANDS,
+    PREFLOP_HANDS,
     combo_lookup_tensor,
     hand_combos_tensor,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.better_feature_encoder import (
     BetterFeatureEncoder,
+    BetterPreflopValueFeatureEncoder,
     BetterPolicyFeatureEncoder,
     BetterStreetValueFeatureEncoder,
 )
@@ -249,6 +251,41 @@ def test_better_policy_and_value_feature_context_slots():
         beliefs, pre_chance_node=False
     )
     torch.testing.assert_close(value_features.context, value_features_changed_actions.context)
+
+
+def test_better_preflop_value_feature_context_includes_actions_round():
+    env = make_env(2)
+    env.actions_this_round[:] = torch.tensor([4, 7], device=env.device)
+    env.pot[:] = torch.tensor([150, 2500], device=env.device)
+    encoder = BetterPreflopValueFeatureEncoder(
+        env, device=env.device, dtype=torch.float32
+    )
+    beliefs = torch.full(
+        (2, 2, PREFLOP_HANDS),
+        1.0 / PREFLOP_HANDS,
+        dtype=torch.float32,
+        device=env.device,
+    )
+
+    features = encoder.encode(beliefs, pre_chance_node=False)
+
+    assert features.hand_dim == PREFLOP_HANDS
+    torch.testing.assert_close(
+        features.context[:, ScalarContext.ACTIONS_ROUND.value],
+        env.actions_this_round.to(torch.float32),
+    )
+    torch.testing.assert_close(
+        features.context[:, ScalarContext.POT.value],
+        env.pot.to(torch.float32) / env.scale.to(torch.float32),
+    )
+
+    env.actions_this_round[:] = torch.tensor([1, 2], device=env.device)
+    changed = encoder.encode(beliefs, pre_chance_node=False)
+    assert not torch.equal(features.context, changed.context)
+    torch.testing.assert_close(
+        changed.context[:, ScalarContext.ACTIONS_ROUND.value],
+        env.actions_this_round.to(torch.float32),
+    )
 
 
 def test_better_feature_encoder_normalizes_chip_context_by_effective_stack():
