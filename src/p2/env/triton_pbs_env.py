@@ -1451,12 +1451,21 @@ if triton is not None:
             force_hu = (
                 round_closed & (old_street == 0) & (live_count > 2) & (~allin_call_leaf)
             )
-            other_live = live & (~actor_lane)
+            actor_live = tl.max(tl.where(actor_lane & live, 1, 0), axis=0) == 1
+            keep_actor = actor_lane & actor_live
+            other_live = live & (~keep_actor)
             other_score = chips_placed * (P + 1) + (P - p_offsets)
             other_score = tl.where(other_live, other_score, -1)
             keep_other_score = tl.max(other_score, axis=0)
             keep_other = other_live & (other_score == keep_other_score)
-            force_fold = force_hu & live & (~actor_lane) & (~keep_other)
+            second_score = tl.where(keep_other, -1, other_score)
+            keep_second_score = tl.max(second_score, axis=0)
+            keep_second = (
+                (~actor_live) & other_live & (second_score == keep_second_score)
+            )
+            force_fold = (
+                force_hu & live & (~keep_actor) & (~keep_other) & (~keep_second)
+            )
             folded = folded | force_fold
             allin = allin & (~force_fold)
             tl.store(has_folded_ptr + row_p + p_offsets, folded, mask=force_hu & p_mask)

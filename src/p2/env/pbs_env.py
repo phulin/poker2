@@ -564,8 +564,9 @@ class PBSEnv:
         force_rows = (
             round_closed & (self.street == 0) & (live.sum(dim=1) > 2) & ~allin_call_leaf
         )
+        actor_live = live[self.arange_n, actor]
         actor_keep = torch.zeros_like(live)
-        actor_keep[self.arange_n, actor] = force_rows
+        actor_keep[self.arange_n, actor] = force_rows & actor_live
 
         live_other = live & ~actor_keep
         tie_break = self.num_players - self.players
@@ -575,9 +576,10 @@ class PBSEnv:
             keep_score,
             torch.full_like(keep_score, -1),
         )
-        other = keep_score.argmax(dim=1)
+        other = keep_score.topk(k=2, dim=1).indices
         other_keep = torch.zeros_like(live)
-        other_keep[self.arange_n, other] = force_rows
+        other_keep[self.arange_n, other[:, 0]] = force_rows
+        other_keep[self.arange_n, other[:, 1]] |= force_rows & ~actor_live
 
         force_fold = force_rows[:, None] & live & ~(actor_keep | other_keep)
         self.has_folded |= force_fold

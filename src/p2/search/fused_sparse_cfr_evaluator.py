@@ -1266,18 +1266,31 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     )
                 )
                 if closing_players != self.num_players:
-                    raise ValueError(
-                        "closing leaf value model num_players="
-                        f"{closing_players} is incompatible with evaluator "
-                        f"num_players={self.num_players}"
+                    if not self._can_project_heads_up_closing_model():
+                        raise ValueError(
+                            "closing leaf value model num_players="
+                            f"{closing_players} is incompatible with evaluator "
+                            f"num_players={self.num_players}"
+                        )
+                    self.closing_leaf_value_encoder = (
+                        self.closing_leaf_value_model.create_feature_encoder(
+                            env=self.env,
+                            device=self.device,
+                            dtype=self.float_dtype,
+                        )
+                        if hasattr(
+                            self.closing_leaf_value_model, "create_feature_encoder"
+                        )
+                        else None
                     )
-                self.closing_leaf_value_encoder = (
-                    self.closing_leaf_value_model.create_feature_encoder(
-                        env=self.env,
-                        device=self.device,
-                        dtype=self.float_dtype,
+                else:
+                    self.closing_leaf_value_encoder = (
+                        self.closing_leaf_value_model.create_feature_encoder(
+                            env=self.env,
+                            device=self.device,
+                            dtype=self.float_dtype,
+                        )
                     )
-                )
             self.feature_encoder = self.policy_feature_encoder
         return True
 
@@ -1471,9 +1484,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def _ensure_last_instantaneous_regrets_buf(self) -> torch.Tensor:
         last = getattr(self, "_last_instantaneous_regrets", None)
         if last is None or last.shape != self.cumulative_regrets.shape:
-            self._last_instantaneous_regrets = torch.zeros_like(
-                self.cumulative_regrets
-            )
+            self._last_instantaneous_regrets = torch.zeros_like(self.cumulative_regrets)
         assert self._last_instantaneous_regrets is not None
         return self._last_instantaneous_regrets
 
@@ -1848,8 +1859,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
         if defer_avg_reach and defer_avg_policy:
             skip_avg_update = (
-                self._uses_dcfr_backbone()
-                and self._average_accumulation_delayed(t)
+                self._uses_dcfr_backbone() and self._average_accumulation_delayed(t)
             )
             write_average_policy = not skip_avg_update
             avg_num, avg_den = self._ensure_average_policy_buffers()
@@ -2240,9 +2250,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         weight_override: float | None = None,
     ) -> None:
         defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
-        if self._uses_dcfr_backbone() and self._average_accumulation_delayed(
-            t
-        ):
+        if self._uses_dcfr_backbone() and self._average_accumulation_delayed(t):
             if defer_avg_policy:
                 self.average_policy_initialized = False
                 return
@@ -2446,6 +2454,58 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 evaluated_any = True
             if self.new_street_model_positions.numel() > 0:
                 closing_encoder = getattr(self, "closing_leaf_value_encoder", None)
+                if self._can_project_heads_up_closing_model():
+                    node_indices = self.model_indices[self.new_street_model_positions]
+                    live_counts = self._live_counts_for_nodes(node_indices)
+                    baseline_local = torch.where(live_counts < 2)[0]
+                    if baseline_local.numel() > 0:
+                        baseline_positions = self.new_street_model_positions[
+                            baseline_local
+                        ]
+                        baseline_values = self._stack_value_baseline(
+                            node_indices[baseline_local],
+                            int(getattr(self, "hand_dim", NUM_HANDS)),
+                        )
+                        hand_values.index_copy_(
+                            0,
+                            baseline_positions,
+                            baseline_values.to(dtype=hand_values.dtype),
+                        )
+                        evaluated_any = True
+                    hu_local = torch.where(live_counts >= 2)[0]
+                    if hu_local.numel() == 0:
+                        return hand_values, bool(
+                            evaluated_any and model_applied_zero_sum
+                        )
+                    hu_positions = self.new_street_model_positions[hu_local]
+                    closing_features, live_players = (
+                        self._heads_up_projected_closing_features(
+                            features,
+                            hu_positions,
+                            closing_encoder,
+                        )
+                    )
+                    closing_values, closing_zero_sum = (
+                        self._eval_model_for_fused_writeback(
+                            closing_value_model,
+                            closing_features,
+                            use_pre_head=False,
+                        )
+                    )
+                    closing_values = self._scatter_heads_up_closing_values(
+                        closing_values,
+                        live_players,
+                        target_hand_dim=int(getattr(self, "hand_dim", NUM_HANDS)),
+                        node_indices=self.model_indices[hu_positions],
+                    )
+                    hand_values.index_copy_(
+                        0,
+                        hu_positions,
+                        closing_values.to(dtype=hand_values.dtype),
+                    )
+                    model_applied_zero_sum = model_applied_zero_sum and closing_zero_sum
+                    evaluated_any = True
+                    return hand_values, bool(evaluated_any and model_applied_zero_sum)
                 closing_values, closing_zero_sum = self._eval_model_for_fused_writeback(
                     closing_value_model,
                     self._features_for_model_positions(
@@ -2474,10 +2534,58 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if scope != "end_of_street":
             raise ValueError(f"Unknown search.model_scope: {scope!r}")
         if closing_value_model is not None:
+            positions = torch.arange(
+                len(features), dtype=torch.long, device=features.context.device
+            )
+            closing_encoder = getattr(self, "closing_leaf_value_encoder", None)
+            if self._can_project_heads_up_closing_model():
+                node_indices = self.model_indices[positions]
+                live_counts = self._live_counts_for_nodes(node_indices)
+                projected_values = self.latest_values.new_empty(
+                    (
+                        len(features),
+                        self.num_players,
+                        int(getattr(self, "hand_dim", NUM_HANDS)),
+                    )
+                )
+                baseline_local = torch.where(live_counts < 2)[0]
+                if baseline_local.numel() > 0:
+                    projected_values.index_copy_(
+                        0,
+                        baseline_local,
+                        self._stack_value_baseline(
+                            node_indices[baseline_local],
+                            int(getattr(self, "hand_dim", NUM_HANDS)),
+                        ),
+                    )
+                hu_local = torch.where(live_counts >= 2)[0]
+                if hu_local.numel() == 0:
+                    return projected_values, False
+                hu_positions = positions[hu_local]
+                closing_features, live_players = (
+                    self._heads_up_projected_closing_features(
+                        features,
+                        hu_positions,
+                        closing_encoder,
+                    )
+                )
+                closing_values, model_zero_sum = self._eval_model_for_fused_writeback(
+                    closing_value_model,
+                    closing_features,
+                    use_pre_head=False,
+                )
+                closing_values = self._scatter_heads_up_closing_values(
+                    closing_values,
+                    live_players,
+                    target_hand_dim=int(getattr(self, "hand_dim", NUM_HANDS)),
+                    node_indices=self.model_indices[hu_positions],
+                )
+                projected_values.index_copy_(0, hu_local, closing_values)
+                return projected_values, model_zero_sum
             features = self._features_for_model_positions(
                 features,
-                torch.arange(len(features), dtype=torch.long, device=features.context.device),
-                getattr(self, "closing_leaf_value_encoder", None),
+                positions,
+                closing_encoder,
             )
         return self._eval_model_for_fused_writeback(
             closing_value_model or value_model,

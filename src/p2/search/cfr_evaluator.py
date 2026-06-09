@@ -14,8 +14,11 @@ import torch.nn.functional as F
 from p2.core.structured_config import CFRType, WarmStartType
 from p2.env.card_utils import (
     NUM_HANDS,
+    PREFLOP_HANDS,
     calculate_unblocked_mass,
     combo_to_onehot_tensor,
+    collapse_1326_to_169,
+    expand_169_to_1326,
     hand_combos_tensor,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
@@ -378,7 +381,9 @@ class CFREvaluator(ABC):
         self.new_street_indices = self.model_indices[
             self.new_street_model_positions
         ].contiguous()
-        self.cutoff_indices = self.model_indices[self.cutoff_model_positions].contiguous()
+        self.cutoff_indices = self.model_indices[
+            self.cutoff_model_positions
+        ].contiguous()
 
     def _refresh_model_indices(self) -> None:
         self.model_indices = self._compute_model_indices()
@@ -412,6 +417,231 @@ class CFREvaluator(ABC):
         )
         encoded.beliefs = features.beliefs[positions]
         return encoded
+
+    def _closing_model_num_players(self) -> int:
+        model = getattr(self, "closing_leaf_value_model", None)
+        return int(getattr(model, "num_players", self.num_players))
+
+    def _closing_model_hand_dim(self) -> int:
+        model = getattr(self, "closing_leaf_value_model", None)
+        return int(getattr(model, "hand_dim", NUM_HANDS))
+
+    def _can_project_heads_up_closing_model(self) -> bool:
+        return (
+            self._closing_model_num_players() == 2
+            and self.num_players > 2
+            and isinstance(getattr(self, "env", None), PBSEnv)
+        )
+
+    def _hand_dim_convert(
+        self,
+        tensor: torch.Tensor,
+        *,
+        source_hand_dim: int,
+        target_hand_dim: int,
+        is_belief: bool,
+    ) -> torch.Tensor:
+        if source_hand_dim == target_hand_dim:
+            return tensor
+        if source_hand_dim == PREFLOP_HANDS and target_hand_dim == NUM_HANDS:
+            return expand_169_to_1326(
+                tensor,
+                divide_by_multiplicity=is_belief,
+            )
+        if source_hand_dim == NUM_HANDS and target_hand_dim == PREFLOP_HANDS:
+            return collapse_1326_to_169(
+                tensor,
+                reduction="sum" if is_belief else "mean",
+            )
+        raise ValueError(
+            "unsupported closing model hand-dimension conversion: "
+            f"{source_hand_dim} -> {target_hand_dim}"
+        )
+
+    def _heads_up_live_players_for_nodes(
+        self, node_indices: torch.Tensor
+    ) -> torch.Tensor:
+        if not isinstance(self.env, PBSEnv):
+            raise TypeError("heads-up closing projection requires PBSEnv nodes")
+        live = ~self.env.has_folded[node_indices]
+        live_count = live.sum(dim=1)
+        if not (live_count >= 2).all():
+            raise RuntimeError(
+                "2-player closing model projection requires at least two live players"
+            )
+        players = torch.arange(
+            self.num_players, dtype=torch.long, device=node_indices.device
+        )
+        tie_break = self.num_players - players
+        score = self.env.chips_placed[node_indices] * (self.num_players + 1) + tie_break
+        score = torch.where(live, score, torch.full_like(score, -1))
+        return score.topk(k=2, dim=1).indices.contiguous()
+
+    def _live_counts_for_nodes(self, node_indices: torch.Tensor) -> torch.Tensor:
+        if not isinstance(self.env, PBSEnv):
+            raise TypeError("live-count query requires PBSEnv nodes")
+        return (~self.env.has_folded[node_indices]).sum(dim=1)
+
+    def _project_heads_up_pbs_env(
+        self,
+        node_indices: torch.Tensor,
+        live_players: torch.Tensor,
+    ) -> PBSEnv:
+        if not isinstance(self.env, PBSEnv):
+            raise TypeError("heads-up closing projection requires PBSEnv nodes")
+        env = self.env
+        projected = PBSEnv(
+            num_envs=node_indices.numel(),
+            num_players=2,
+            mean_stack=env.mean_stack,
+            sb=env.sb,
+            bb=env.bb,
+            default_bet_bins=env.default_bet_bins,
+            device=env.device,
+            rng=env.rng,
+            float_dtype=env.float_dtype,
+            stack_mode=env.stack_mode,
+            min_stack_bb=env.min_stack_bb,
+            mid_stack_bb=env.mid_stack_bb,
+            max_stack_bb=env.max_stack_bb,
+            high_stack_mass_ratio=env.high_stack_mass_ratio,
+            force_heads_up_preflop_flop=env.force_heads_up_preflop_flop,
+        )
+        for field in (
+            "street",
+            "last_to_act",
+            "pot",
+            "min_raise",
+            "last_aggressive_amount",
+            "actions_this_round",
+            "actions_last_round",
+            "scale",
+            "done",
+            "winner",
+            "board_indices",
+            "last_board_indices",
+            "board_onehot",
+            "deck",
+            "deck_pos",
+        ):
+            getattr(projected, field)[:] = getattr(env, field)[node_indices]
+
+        for field in (
+            "stacks",
+            "starting_stacks",
+            "committed",
+            "chips_placed",
+            "has_folded",
+            "is_allin",
+            "acted_this_round",
+            "winners",
+        ):
+            src = getattr(env, field)[node_indices]
+            getattr(projected, field)[:] = src.gather(
+                1,
+                live_players,
+            )
+
+        to_act_orig = env.to_act[node_indices]
+        to_act_proj = (
+            (live_players == to_act_orig[:, None]).to(torch.long).argmax(dim=1)
+        )
+        projected.to_act[:] = to_act_proj
+        projected.button[:] = 1 - to_act_proj
+        return projected
+
+    def _heads_up_projected_closing_features(
+        self,
+        features: MLPFeatures,
+        positions: torch.Tensor,
+        encoder: RebelFeatureEncoder | BetterFeatureEncoder | None,
+    ) -> tuple[MLPFeatures, torch.Tensor]:
+        node_indices = self.model_indices[positions]
+        live_players = self._heads_up_live_players_for_nodes(node_indices)
+        source_hand_dim = features.hand_dim
+        target_hand_dim = self._closing_model_hand_dim()
+        selected_beliefs = features.beliefs[positions].view(
+            -1, self.num_players, source_hand_dim
+        )
+        selected_beliefs = selected_beliefs.gather(
+            1,
+            live_players[:, :, None].expand(-1, 2, source_hand_dim),
+        )
+        selected_beliefs = self._hand_dim_convert(
+            selected_beliefs,
+            source_hand_dim=source_hand_dim,
+            target_hand_dim=target_hand_dim,
+            is_belief=True,
+        )
+        if encoder is None:
+            base = features[positions]
+            return (
+                MLPFeatures(
+                    context=base.context,
+                    street=base.street,
+                    to_act=base.to_act,
+                    board=base.board,
+                    beliefs=selected_beliefs.reshape(
+                        positions.numel(), 2 * target_hand_dim
+                    ),
+                    hand_dim=target_hand_dim,
+                ),
+                live_players,
+            )
+
+        projected_env = self._project_heads_up_pbs_env(node_indices, live_players)
+        projected_encoder = type(encoder)(
+            env=projected_env,
+            device=self.device,
+            dtype=getattr(encoder, "dtype", self.float_dtype),
+        )
+        projected_features = projected_encoder.encode(
+            selected_beliefs,
+            pre_chance_node=torch.ones(
+                positions.numel(), dtype=torch.bool, device=self.device
+            ),
+        )
+        return projected_features, live_players
+
+    def _scatter_heads_up_closing_values(
+        self,
+        values: torch.Tensor,
+        live_players: torch.Tensor,
+        *,
+        target_hand_dim: int,
+        node_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        values = self._hand_dim_convert(
+            values,
+            source_hand_dim=values.shape[-1],
+            target_hand_dim=target_hand_dim,
+            is_belief=False,
+        )
+        out = self._stack_value_baseline(node_indices, target_hand_dim)
+        out.scatter_(
+            1,
+            live_players[:, :, None].expand(-1, 2, target_hand_dim),
+            values.to(dtype=out.dtype),
+        )
+        return out
+
+    def _stack_value_baseline(
+        self, node_indices: torch.Tensor, hand_dim: int
+    ) -> torch.Tensor:
+        if not isinstance(self.env, PBSEnv):
+            return self.latest_values.new_zeros(
+                node_indices.numel(), self.num_players, hand_dim
+            )
+        denom = self.env.scale[node_indices].to(torch.float32).clamp_min(1.0)
+        stack_value = (
+            self.env.stacks[node_indices].to(torch.float32)
+            - self.env.starting_stacks[node_indices].to(torch.float32)
+        ) / denom[:, None]
+        return (
+            stack_value.to(dtype=self.latest_values.dtype)[:, :, None]
+            .expand(-1, -1, hand_dim)
+            .clone()
+        )
 
     def _uses_street_cutoff_schedule(self) -> bool:
         schedule = getattr(self, "action_schedule", None)
@@ -1031,9 +1261,7 @@ class CFREvaluator(ABC):
             target_dest[:] = self._fan_out(target, level=depth)
 
             prev_actor_dest = self.prev_actor[offset_next:offset_next_next]
-            prev_actor_indices = prev_actor_dest[:, None, None].expand(
-                -1, -1, hand_dim
-            )
+            prev_actor_indices = prev_actor_dest[:, None, None].expand(-1, -1, hand_dim)
             policy_dest = policy[offset_next:offset_next_next]
             target_dest.scatter_reduce_(
                 dim=1,
@@ -1549,9 +1777,7 @@ class CFREvaluator(ABC):
             )
             root_allowed = (self.combo_onehot_float @ board_mask_root.T).T < 0.5
         else:
-            root_allowed = torch.ones(
-                N, hand_dim, dtype=torch.bool, device=self.device
-            )
+            root_allowed = torch.ones(N, hand_dim, dtype=torch.bool, device=self.device)
         root_allowed_prob = root_allowed.to(dtype=self.float_dtype)
         root_allowed_prob /= root_allowed_prob.sum(dim=-1, keepdim=True).clamp(min=1.0)
 
@@ -1873,9 +2099,7 @@ class CFREvaluator(ABC):
             return regrets
         return regrets + scale * last_regrets
 
-    def _update_predictive_cfr_observation(
-        self, regrets: torch.Tensor, t: int
-    ) -> None:
+    def _update_predictive_cfr_observation(self, regrets: torch.Tensor, t: int) -> None:
         if not getattr(self, "_predictive_cfr_enabled", False):
             return
 
@@ -1998,11 +2222,46 @@ class CFREvaluator(ABC):
                     ),
                     use_pre_head=False,
                 )
-                hand_values.index_copy_(
-                    0, self.cutoff_model_positions, cutoff_values
-                )
+                hand_values.index_copy_(0, self.cutoff_model_positions, cutoff_values)
             if self.new_street_model_positions.numel() > 0:
                 closing_encoder = getattr(self, "closing_leaf_value_encoder", None)
+                if self._can_project_heads_up_closing_model():
+                    node_indices = self.model_indices[self.new_street_model_positions]
+                    live_counts = self._live_counts_for_nodes(node_indices)
+                    baseline_local = torch.where(live_counts < 2)[0]
+                    if baseline_local.numel() > 0:
+                        baseline_positions = self.new_street_model_positions[
+                            baseline_local
+                        ]
+                        baseline_values = self._stack_value_baseline(
+                            node_indices[baseline_local],
+                            int(getattr(self, "hand_dim", NUM_HANDS)),
+                        )
+                        hand_values.index_copy_(0, baseline_positions, baseline_values)
+                    hu_local = torch.where(live_counts >= 2)[0]
+                    if hu_local.numel() == 0:
+                        return hand_values
+                    hu_positions = self.new_street_model_positions[hu_local]
+                    closing_features, live_players = (
+                        self._heads_up_projected_closing_features(
+                            features,
+                            hu_positions,
+                            closing_encoder,
+                        )
+                    )
+                    closing_values = self._eval_value_model(
+                        closing_value_model,
+                        closing_features,
+                        use_pre_head=False,
+                    )
+                    closing_values = self._scatter_heads_up_closing_values(
+                        closing_values,
+                        live_players,
+                        target_hand_dim=int(getattr(self, "hand_dim", NUM_HANDS)),
+                        node_indices=self.model_indices[hu_positions],
+                    )
+                    hand_values.index_copy_(0, hu_positions, closing_values)
+                    return hand_values
                 closing_values = self._eval_value_model(
                     closing_value_model,
                     self._features_for_model_positions(
@@ -2025,10 +2284,58 @@ class CFREvaluator(ABC):
         if scope != "end_of_street":
             raise ValueError(f"Unknown search.model_scope: {scope!r}")
         if closing_value_model is not None:
+            positions = torch.arange(
+                len(features), dtype=torch.long, device=features.context.device
+            )
+            closing_encoder = getattr(self, "closing_leaf_value_encoder", None)
+            if self._can_project_heads_up_closing_model():
+                node_indices = self.model_indices[positions]
+                live_counts = self._live_counts_for_nodes(node_indices)
+                projected_values = self.latest_values.new_empty(
+                    (
+                        len(features),
+                        self.num_players,
+                        int(getattr(self, "hand_dim", NUM_HANDS)),
+                    )
+                )
+                baseline_local = torch.where(live_counts < 2)[0]
+                if baseline_local.numel() > 0:
+                    projected_values.index_copy_(
+                        0,
+                        baseline_local,
+                        self._stack_value_baseline(
+                            node_indices[baseline_local],
+                            int(getattr(self, "hand_dim", NUM_HANDS)),
+                        ),
+                    )
+                hu_local = torch.where(live_counts >= 2)[0]
+                if hu_local.numel() == 0:
+                    return projected_values
+                hu_positions = positions[hu_local]
+                closing_features, live_players = (
+                    self._heads_up_projected_closing_features(
+                        features,
+                        hu_positions,
+                        closing_encoder,
+                    )
+                )
+                closing_values = self._eval_value_model(
+                    closing_value_model,
+                    closing_features,
+                    use_pre_head=False,
+                )
+                closing_values = self._scatter_heads_up_closing_values(
+                    closing_values,
+                    live_players,
+                    target_hand_dim=int(getattr(self, "hand_dim", NUM_HANDS)),
+                    node_indices=self.model_indices[hu_positions],
+                )
+                projected_values.index_copy_(0, hu_local, closing_values)
+                return projected_values
             features = self._features_for_model_positions(
                 features,
-                torch.arange(len(features), dtype=torch.long, device=features.context.device),
-                getattr(self, "closing_leaf_value_encoder", None),
+                positions,
+                closing_encoder,
             )
         return self._eval_value_model(
             closing_value_model or value_model,

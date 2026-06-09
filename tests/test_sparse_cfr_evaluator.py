@@ -492,6 +492,57 @@ def test_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() -> Non
     assert len(closing_model.forward_pre_contexts) == 0
 
 
+def test_model_leaf_values_project_multiway_heads_up_closing_leaf() -> None:
+    evaluator = object.__new__(SparseCFREvaluator)
+    current_model = ConstantValueModel(1.0, num_players=4)
+    closing_model = ConstantValueModel(2.0, num_players=2)
+    evaluator.model = current_model
+    evaluator.value_model = current_model
+    evaluator.closing_leaf_value_model = closing_model
+    evaluator.closing_leaf_value_encoder = None
+    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="mixed_street"))
+    evaluator.float_dtype = torch.float32
+    evaluator.num_players = 4
+    evaluator.hand_dim = PREFLOP_HANDS
+    evaluator.cfr_avg = False
+    evaluator.latest_values = torch.zeros(1, 4, PREFLOP_HANDS)
+    evaluator.model_indices = torch.tensor([0], dtype=torch.long)
+    evaluator.new_street_mask = torch.tensor([True])
+    evaluator.action_schedule = None
+    evaluator.last_model_values = None
+    evaluator.env = PBSEnv(
+        num_envs=1,
+        num_players=4,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        device="cpu",
+    )
+    evaluator.env.reset(force_button=torch.zeros(1, dtype=torch.long))
+    evaluator.env.has_folded[0] = torch.tensor([True, False, True, False])
+    evaluator.env.stacks[0] = torch.tensor([900, 1000, 800, 1000])
+    evaluator.env.starting_stacks[0] = torch.tensor([1000, 1000, 1000, 1000])
+    evaluator.env.scale[0] = 1000
+
+    features = MLPFeatures(
+        context=torch.zeros(1, 1),
+        street=torch.zeros(1, dtype=torch.long),
+        to_act=torch.zeros(1, dtype=torch.long),
+        board=torch.full((1, 5), -1, dtype=torch.long),
+        beliefs=torch.full((1, 4 * PREFLOP_HANDS), 1.0 / PREFLOP_HANDS),
+        hand_dim=PREFLOP_HANDS,
+    )
+    beliefs = features.beliefs.view(1, 4, PREFLOP_HANDS)
+
+    new_values, _ = evaluator._set_model_values_impl(0, beliefs, features)
+
+    torch.testing.assert_close(new_values[0, 0], torch.full((PREFLOP_HANDS,), -0.1))
+    torch.testing.assert_close(new_values[0, 1], torch.full((PREFLOP_HANDS,), 2.0))
+    torch.testing.assert_close(new_values[0, 2], torch.full((PREFLOP_HANDS,), -0.2))
+    torch.testing.assert_close(new_values[0, 3], torch.full((PREFLOP_HANDS,), 2.0))
+    assert closing_model.call_contexts
+
+
 def test_fused_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() -> None:
     from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
@@ -536,6 +587,56 @@ def test_fused_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() 
         closing_model.call_contexts[0],
         torch.tensor([[101.0]]),
     )
+
+
+def test_fused_model_leaf_values_project_multiway_heads_up_closing_leaf() -> None:
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    evaluator = object.__new__(FusedSparseCFREvaluator)
+    current_model = ConstantValueModel(1.0, num_players=4)
+    closing_model = ConstantValueModel(2.0, num_players=2)
+    evaluator.model = current_model
+    evaluator.value_model = current_model
+    evaluator.closing_leaf_value_model = closing_model
+    evaluator.closing_leaf_value_encoder = None
+    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="mixed_street"))
+    evaluator.float_dtype = torch.float32
+    evaluator.num_players = 4
+    evaluator.hand_dim = PREFLOP_HANDS
+    evaluator.latest_values = torch.zeros(1, 4, PREFLOP_HANDS)
+    evaluator.model_indices = torch.tensor([0], dtype=torch.long)
+    evaluator.new_street_mask = torch.tensor([True])
+    evaluator.action_schedule = None
+    evaluator.env = PBSEnv(
+        num_envs=1,
+        num_players=4,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        device="cpu",
+    )
+    evaluator.env.reset(force_button=torch.zeros(1, dtype=torch.long))
+    evaluator.env.has_folded[0] = torch.tensor([True, False, True, False])
+    evaluator.env.stacks[0] = torch.tensor([900, 1000, 800, 1000])
+    evaluator.env.starting_stacks[0] = torch.tensor([1000, 1000, 1000, 1000])
+    evaluator.env.scale[0] = 1000
+
+    features = MLPFeatures(
+        context=torch.zeros(1, 1),
+        street=torch.zeros(1, dtype=torch.long),
+        to_act=torch.zeros(1, dtype=torch.long),
+        board=torch.full((1, 5), -1, dtype=torch.long),
+        beliefs=torch.full((1, 4 * PREFLOP_HANDS), 1.0 / PREFLOP_HANDS),
+        hand_dim=PREFLOP_HANDS,
+    )
+
+    hand_values, _ = evaluator._model_leaf_values_for_fused_writeback(features)
+
+    torch.testing.assert_close(hand_values[0, 0], torch.full((PREFLOP_HANDS,), -0.1))
+    torch.testing.assert_close(hand_values[0, 1], torch.full((PREFLOP_HANDS,), 2.0))
+    torch.testing.assert_close(hand_values[0, 2], torch.full((PREFLOP_HANDS,), -0.2))
+    torch.testing.assert_close(hand_values[0, 3], torch.full((PREFLOP_HANDS,), 2.0))
+    assert closing_model.call_contexts
 
 
 def test_fused_model_leaf_values_use_closing_model_when_model_leaves_close_street() -> (

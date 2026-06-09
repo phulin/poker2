@@ -85,7 +85,9 @@ class SparseCFREvaluator(CFREvaluator):
         self._warm_start_regret_decay = (
             cfg.search.warm_start_regret_decay if exact_sparse else "none"
         )
-        self._warm_start_regret_decay_horizon = cfg.search.warm_start_regret_decay_horizon
+        self._warm_start_regret_decay_horizon = (
+            cfg.search.warm_start_regret_decay_horizon
+        )
         self._warm_start_regret_decay_floor = cfg.search.warm_start_regret_decay_floor
         self._warm_start_regret_start_t = 0
         self._warm_start_ftrl_enabled = exact_sparse
@@ -441,17 +443,28 @@ class SparseCFREvaluator(CFREvaluator):
                 getattr(self.closing_leaf_value_model, "num_players", self.num_players)
             )
             if closing_players != self.num_players:
-                raise ValueError(
-                    "closing leaf value model num_players="
-                    f"{closing_players} is incompatible with evaluator "
-                    f"num_players={self.num_players}"
+                if not self._can_project_heads_up_closing_model():
+                    raise ValueError(
+                        "closing leaf value model num_players="
+                        f"{closing_players} is incompatible with evaluator "
+                        f"num_players={self.num_players}"
+                    )
+                self.closing_leaf_value_encoder = (
+                    self.closing_leaf_value_model.create_feature_encoder(
+                        env=self.env,
+                        device=self.device,
+                        dtype=self.float_dtype,
+                    )
+                    if hasattr(self.closing_leaf_value_model, "create_feature_encoder")
+                    else None
                 )
-            self.closing_leaf_value_encoder = (
-                self.closing_leaf_value_model.create_feature_encoder(
-                    env=self.env, device=self.device, dtype=self.float_dtype
+            else:
+                self.closing_leaf_value_encoder = (
+                    self.closing_leaf_value_model.create_feature_encoder(
+                        env=self.env, device=self.device, dtype=self.float_dtype
+                    )
                 )
-            )
-        self.feature_encoder = self.policy_feature_encoder
+            self.feature_encoder = self.policy_feature_encoder
 
     def _action_mask_for_depth(self, depth: int) -> torch.Tensor:
         if self.action_masks_by_depth.shape[0] == 1:
