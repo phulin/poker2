@@ -415,7 +415,7 @@ def test_model_leaf_values_use_closing_model_when_model_leaves_close_street() ->
     assert len(closing_model.forward_pre_contexts) == 0
 
 
-def test_model_leaf_values_mixed_scope_uses_current_model_for_all_leaves() -> None:
+def test_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() -> None:
     evaluator = object.__new__(SparseCFREvaluator)
     current_model = ConstantValueModel(1.0)
     closing_model = ConstantValueModel(2.0)
@@ -446,16 +446,61 @@ def test_model_leaf_values_mixed_scope_uses_current_model_for_all_leaves() -> No
     )
 
     torch.testing.assert_close(new_values[0], torch.ones(2, NUM_HANDS))
-    torch.testing.assert_close(new_values[1], torch.ones(2, NUM_HANDS))
+    torch.testing.assert_close(new_values[1], torch.full((2, NUM_HANDS), 2.0))
     torch.testing.assert_close(new_values[2], torch.ones(2, NUM_HANDS))
     torch.testing.assert_close(
-        last_model_values[:, 0, 0], torch.tensor([1.0, 1.0, 1.0])
+        last_model_values[:, 0, 0], torch.tensor([1.0, 2.0, 1.0])
     )
     torch.testing.assert_close(
-        current_model.call_contexts[0].flatten(), torch.tensor([0.0, 1.0, 2.0])
+        current_model.call_contexts[0].flatten(), torch.tensor([0.0, 2.0])
     )
-    assert len(closing_model.call_contexts) == 0
+    torch.testing.assert_close(
+        closing_model.call_contexts[0].flatten(), torch.tensor([1.0])
+    )
     assert len(closing_model.forward_pre_contexts) == 0
+
+
+def test_fused_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() -> None:
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    evaluator = object.__new__(FusedSparseCFREvaluator)
+    current_model = ConstantValueModel(1.0)
+    closing_model = ConstantValueModel(2.0)
+    evaluator.model = current_model
+    evaluator.value_model = current_model
+    evaluator.closing_leaf_value_model = closing_model
+    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="mixed_street"))
+    evaluator.float_dtype = torch.float32
+    evaluator.num_players = 2
+    evaluator.latest_values = torch.zeros(3, 2, NUM_HANDS)
+    evaluator.model_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+    evaluator.new_street_mask = torch.tensor([False, True, False])
+    evaluator.action_schedule = None
+
+    features = MLPFeatures(
+        context=torch.arange(3, dtype=torch.float32).view(3, 1),
+        street=torch.zeros(3, dtype=torch.long),
+        to_act=torch.zeros(3, dtype=torch.long),
+        board=torch.full((3, 5), -1, dtype=torch.long),
+        beliefs=torch.zeros(3, 2 * NUM_HANDS),
+    )
+
+    hand_values, model_applied_zero_sum = (
+        evaluator._model_leaf_values_for_fused_writeback(features)
+    )
+
+    torch.testing.assert_close(hand_values[0], torch.ones(2, NUM_HANDS))
+    torch.testing.assert_close(hand_values[1], torch.full((2, NUM_HANDS), 2.0))
+    torch.testing.assert_close(hand_values[2], torch.ones(2, NUM_HANDS))
+    assert not model_applied_zero_sum
+    torch.testing.assert_close(
+        current_model.call_contexts[0],
+        torch.tensor([[0.0], [2.0]]),
+    )
+    torch.testing.assert_close(
+        closing_model.call_contexts[0],
+        torch.tensor([[1.0]]),
+    )
 
 
 def test_fused_model_leaf_values_use_closing_model_when_model_leaves_close_street() -> None:
@@ -499,6 +544,24 @@ def test_fused_model_leaf_values_use_closing_model_when_model_leaves_close_stree
         closing_model.call_contexts[0],
         torch.tensor([[0.0], [1.0], [2.0]]),
     )
+
+
+def test_mid_street_value_roots_expected_only_in_mixed_continuation_mode() -> None:
+    evaluator = object.__new__(SparseCFREvaluator)
+    evaluator.cfg = SimpleNamespace(
+        search=SimpleNamespace(
+            model_scope="mixed_street",
+            continuation_value_target_sampling=True,
+        )
+    )
+    assert evaluator._mid_street_value_roots_are_expected()
+
+    evaluator.cfg.search.model_scope = "single_street"
+    assert not evaluator._mid_street_value_roots_are_expected()
+
+    evaluator.cfg.search.model_scope = "mixed_street"
+    evaluator.cfg.search.continuation_value_target_sampling = False
+    assert not evaluator._mid_street_value_roots_are_expected()
 
 
 def test_root_leaf_target_source_counts_split_terminal_and_closing_leaves() -> None:
@@ -1246,6 +1309,16 @@ def test_fused_preflop_sparse_evaluator_is_compact_only(monkeypatch) -> None:
     assert evaluator.latest_values.shape[-1] == PREFLOP_HANDS
     assert features.hand_dim == PREFLOP_HANDS
     assert features.beliefs.shape[1] == num_players * PREFLOP_HANDS
+    partition_positions = torch.cat(
+        (evaluator.new_street_model_positions, evaluator.cutoff_model_positions)
+    ).sort().values
+    torch.testing.assert_close(
+        partition_positions,
+        torch.arange(evaluator.model_indices.numel(), device=device),
+    )
+    assert evaluator.new_street_indices.numel() + evaluator.cutoff_indices.numel() == (
+        evaluator.model_indices.numel()
+    )
 
     bad_model = MockModel(
         num_actions=len(cfg.env.bet_bins) + 3,

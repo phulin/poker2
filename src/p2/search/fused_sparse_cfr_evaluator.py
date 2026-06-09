@@ -1170,7 +1170,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 num_actions=self.num_actions,
             )
         self._mark_constructed_allin_call_leaves(allin_leaf_tensor)
-        self.model_indices = self._compute_model_indices()
+        self._refresh_model_indices()
         self._validate_model_leaf_phases()
         bottom = self.depth_offsets[1]
         with _init_profile_region("cfr_init_attempt_child_offsets"):
@@ -1305,7 +1305,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self.self_reach[:n] = 1.0
         self.self_reach_avg[:n] = 1.0
 
-        self.model_indices = self._compute_model_indices()
+        self._refresh_model_indices()
         self._validate_model_leaf_phases()
         self.latent = None
 
@@ -2397,6 +2397,41 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         value_model = getattr(self, "value_model", self.model)
         closing_value_model = getattr(self, "closing_leaf_value_model", None)
         scope = self._model_scope()
+        if scope == "mixed_street" and closing_value_model is not None:
+            self._ensure_model_index_partitions()
+            hand_values = self.latest_values.new_empty(
+                (
+                    len(features),
+                    self.num_players,
+                    int(getattr(self, "hand_dim", NUM_HANDS)),
+                )
+            )
+            model_applied_zero_sum = True
+            evaluated_any = False
+            if self.cutoff_model_positions.numel() > 0:
+                cutoff_values, cutoff_zero_sum = self._eval_model_for_fused_writeback(
+                    value_model,
+                    features[self.cutoff_model_positions],
+                    use_pre_head=False,
+                )
+                hand_values.index_copy_(
+                    0, self.cutoff_model_positions, cutoff_values
+                )
+                model_applied_zero_sum = model_applied_zero_sum and cutoff_zero_sum
+                evaluated_any = True
+            if self.new_street_model_positions.numel() > 0:
+                closing_values, closing_zero_sum = self._eval_model_for_fused_writeback(
+                    closing_value_model,
+                    features[self.new_street_model_positions],
+                    use_pre_head=False,
+                )
+                hand_values.index_copy_(
+                    0, self.new_street_model_positions, closing_values
+                )
+                model_applied_zero_sum = model_applied_zero_sum and closing_zero_sum
+                evaluated_any = True
+            return hand_values, bool(evaluated_any and model_applied_zero_sum)
+
         if scope in ("mixed_street", "single_street"):
             return self._eval_model_for_fused_writeback(
                 value_model,

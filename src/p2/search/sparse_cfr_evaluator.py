@@ -146,6 +146,14 @@ class SparseCFREvaluator(CFREvaluator):
         self.new_street_mask = torch.empty(0, dtype=torch.bool, device=self.device)
         self.valid_mask = torch.empty(0, dtype=torch.bool, device=self.device)
         self.model_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        self.new_street_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        self.cutoff_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        self.new_street_model_positions = torch.empty(
+            0, dtype=torch.long, device=self.device
+        )
+        self.cutoff_model_positions = torch.empty(
+            0, dtype=torch.long, device=self.device
+        )
 
         self.legal_mask = torch.empty(
             0, self.num_actions, dtype=torch.bool, device=self.device
@@ -336,7 +344,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.leaf_mask |= allin_leaf_tensor
         self.new_street_mask.masked_fill_(allin_leaf_tensor, False)
         self._mark_allin_call_leaves()
-        self.model_indices = self._compute_model_indices()
+        self._refresh_model_indices()
         self._validate_model_leaf_phases()
         self.child_mask = (
             self.legal_mask & self.valid_mask[:, None] & (~self.leaf_mask)[:, None]

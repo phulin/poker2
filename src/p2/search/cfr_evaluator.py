@@ -170,6 +170,10 @@ class CFREvaluator(ABC):
     child_count: torch.Tensor
     new_street_mask: torch.Tensor
     model_indices: torch.Tensor
+    new_street_indices: torch.Tensor
+    cutoff_indices: torch.Tensor
+    new_street_model_positions: torch.Tensor
+    cutoff_model_positions: torch.Tensor
     allowed_hands: torch.Tensor
     allowed_hands_prob: torch.Tensor
     policy_probs: torch.Tensor
@@ -347,6 +351,51 @@ class CFREvaluator(ABC):
             model_mask = model_mask & ~allin_mask
         return padded_indices(model_mask, self.root_nodes)
 
+    def _update_model_index_partitions(self) -> None:
+        """Partition model leaves into street-closing and same-street cutoffs.
+
+        ``model_indices`` stays as the union batch used by existing feature and
+        writeback kernels. The partition tensors expose both node indices and
+        positions within that union, so mixed model dispatch can evaluate each
+        model on only the rows it owns while still writing back through the
+        existing aligned union path.
+        """
+        device = self.model_indices.device
+        if self.model_indices.numel() == 0:
+            empty = torch.empty(0, dtype=torch.long, device=device)
+            self.new_street_indices = empty
+            self.cutoff_indices = empty
+            self.new_street_model_positions = empty
+            self.cutoff_model_positions = empty
+            return
+
+        new_street_at_model = self.new_street_mask[self.model_indices]
+        positions = torch.arange(
+            self.model_indices.numel(), dtype=torch.long, device=device
+        )
+        self.new_street_model_positions = positions[new_street_at_model].contiguous()
+        self.cutoff_model_positions = positions[~new_street_at_model].contiguous()
+        self.new_street_indices = self.model_indices[
+            self.new_street_model_positions
+        ].contiguous()
+        self.cutoff_indices = self.model_indices[self.cutoff_model_positions].contiguous()
+
+    def _refresh_model_indices(self) -> None:
+        self.model_indices = self._compute_model_indices()
+        self._update_model_index_partitions()
+
+    def _ensure_model_index_partitions(self) -> None:
+        if (
+            not hasattr(self, "new_street_indices")
+            or not hasattr(self, "cutoff_indices")
+            or not hasattr(self, "new_street_model_positions")
+            or not hasattr(self, "cutoff_model_positions")
+            or self.new_street_model_positions.numel()
+            + self.cutoff_model_positions.numel()
+            != self.model_indices.numel()
+        ):
+            self._update_model_index_partitions()
+
     def _uses_street_cutoff_schedule(self) -> bool:
         schedule = getattr(self, "action_schedule", None)
         return bool(
@@ -413,6 +462,12 @@ class CFREvaluator(ABC):
         if max_depth < min_depth:
             return None
         return min_depth, max_depth
+
+    def _mid_street_value_roots_are_expected(self) -> bool:
+        return (
+            self._model_scope() == "mixed_street"
+            and self._continuation_value_target_sampling_enabled()
+        )
 
     def _ensure_allin_payoff_resolver(self) -> AllInPayoffResolver:
         resolver = getattr(self, "allin_payoff_resolver", None)
@@ -1464,7 +1519,7 @@ class CFREvaluator(ABC):
         self.self_reach_avg[:N] = 1.0
 
         # latent always have shape [model_indices.numel(), model.hidden_dim]
-        self.model_indices = self._compute_model_indices()
+        self._refresh_model_indices()
         self._validate_model_leaf_phases()
         self.latent = None
 
@@ -1909,6 +1964,34 @@ class CFREvaluator(ABC):
         value_model = getattr(self, "value_model", self.model)
         closing_value_model = getattr(self, "closing_leaf_value_model", None)
         scope = self._model_scope()
+        if scope == "mixed_street" and closing_value_model is not None:
+            self._ensure_model_index_partitions()
+            hand_values = self.latest_values.new_empty(
+                (
+                    len(features),
+                    self.num_players,
+                    int(getattr(self, "hand_dim", NUM_HANDS)),
+                )
+            )
+            if self.cutoff_model_positions.numel() > 0:
+                cutoff_values = self._eval_value_model(
+                    value_model,
+                    features[self.cutoff_model_positions],
+                    use_pre_head=False,
+                )
+                hand_values.index_copy_(
+                    0, self.cutoff_model_positions, cutoff_values
+                )
+            if self.new_street_model_positions.numel() > 0:
+                closing_values = self._eval_value_model(
+                    closing_value_model,
+                    features[self.new_street_model_positions],
+                    use_pre_head=False,
+                )
+                hand_values.index_copy_(
+                    0, self.new_street_model_positions, closing_values
+                )
+            return hand_values
         if scope in ("mixed_street", "single_street"):
             return self._eval_value_model(
                 value_model,
@@ -2498,13 +2581,14 @@ class CFREvaluator(ABC):
         if mid_street_value_roots.any():
             count = int(mid_street_value_roots.sum().item())
             self.stats["mid_street_value_root_count"] = float(count)
-            warnings.warn(
-                "training_data() received mid-street roots for value targets; "
-                "value supervision is intended for street-boundary roots only. "
-                f"count={count}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            if not self._mid_street_value_roots_are_expected():
+                warnings.warn(
+                    "training_data() received mid-street roots for value targets; "
+                    "value supervision is intended for street-boundary roots only. "
+                    f"count={count}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         if exclude_start:
             value_start_nodes = (
                 (self.env.street[value_node_indices] == 0)
