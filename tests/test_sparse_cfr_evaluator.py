@@ -895,7 +895,7 @@ def test_preflop_sparse_new_street_leaves_are_heads_up() -> None:
 
     evaluator.initialize_subgame(env, torch.arange(1, device=device))
 
-    assert env.force_heads_up_preflop_flop is False
+    assert env.force_heads_up_preflop_flop is True
     assert evaluator.new_street_mask.any()
     live_counts = (~evaluator.env.has_folded[evaluator.new_street_mask]).sum(dim=1)
     assert int(live_counts.max()) <= 2
@@ -1488,7 +1488,7 @@ def test_fused_preflop_sparse_new_street_leaves_are_heads_up(monkeypatch) -> Non
 
     evaluator.initialize_subgame(env, torch.arange(1, device=device))
 
-    assert env.force_heads_up_preflop_flop is False
+    assert env.force_heads_up_preflop_flop is True
     assert evaluator.new_street_mask.any()
     live_counts = (~evaluator.env.has_folded[evaluator.new_street_mask]).sum(dim=1)
     assert int(live_counts.max()) <= 2

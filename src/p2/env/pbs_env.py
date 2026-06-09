@@ -40,7 +40,7 @@ class PBSEnv:
         mid_stack_bb: int = 200,
         max_stack_bb: int = 400,
         high_stack_mass_ratio: float = 1.0 / 3.0,
-        force_heads_up_preflop_flop: bool = False,
+        force_heads_up_preflop_flop: bool = True,
         init_state: bool = True,
     ) -> None:
         if num_envs < 0:

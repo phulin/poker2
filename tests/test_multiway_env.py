@@ -20,6 +20,7 @@ def _make_pbs(
     num_envs: int = 1,
     num_players: int = 3,
     starting_stack: int = 1000,
+    force_heads_up_preflop_flop: bool = False,
 ) -> PBSEnv:
     env = PBSEnv(
         num_envs=num_envs,
@@ -28,6 +29,7 @@ def _make_pbs(
         sb=5,
         bb=10,
         device="cpu",
+        force_heads_up_preflop_flop=force_heads_up_preflop_flop,
     )
     force_button = torch.zeros(num_envs, dtype=torch.long)
     force_deck = torch.tensor(
@@ -251,8 +253,8 @@ def test_pbs_env_matches_nl_env_raise_call_close_round():
 
 
 def test_pbs_env_can_force_heads_up_preflop_flop_transition():
-    pbs = _make_pbs(num_players=4)
-    pbs.force_heads_up_preflop_flop = True
+    pbs = _make_pbs(num_players=4, force_heads_up_preflop_flop=True)
+    assert pbs.force_heads_up_preflop_flop is True
 
     for action_bin in [1, 1, 1, 1]:
         _, new_streets, _ = pbs.step_bins(torch.tensor([action_bin], dtype=torch.long))
