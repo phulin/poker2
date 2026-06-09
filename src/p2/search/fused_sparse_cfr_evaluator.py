@@ -1257,6 +1257,27 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self.value_feature_encoder = self.value_model.create_feature_encoder(
                 env=self.env, device=self.device, dtype=self.float_dtype
             )
+            if self.closing_leaf_value_model is not None:
+                closing_players = int(
+                    getattr(
+                        self.closing_leaf_value_model,
+                        "num_players",
+                        self.num_players,
+                    )
+                )
+                if closing_players != self.num_players:
+                    raise ValueError(
+                        "closing leaf value model num_players="
+                        f"{closing_players} is incompatible with evaluator "
+                        f"num_players={self.num_players}"
+                    )
+                self.closing_leaf_value_encoder = (
+                    self.closing_leaf_value_model.create_feature_encoder(
+                        env=self.env,
+                        device=self.device,
+                        dtype=self.float_dtype,
+                    )
+                )
             self.feature_encoder = self.policy_feature_encoder
         return True
 
@@ -2411,7 +2432,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             if self.cutoff_model_positions.numel() > 0:
                 cutoff_values, cutoff_zero_sum = self._eval_model_for_fused_writeback(
                     value_model,
-                    features[self.cutoff_model_positions],
+                    self._features_for_model_positions(
+                        features, self.cutoff_model_positions
+                    ),
                     use_pre_head=False,
                 )
                 hand_values.index_copy_(
@@ -2422,9 +2445,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 model_applied_zero_sum = model_applied_zero_sum and cutoff_zero_sum
                 evaluated_any = True
             if self.new_street_model_positions.numel() > 0:
+                closing_encoder = getattr(self, "closing_leaf_value_encoder", None)
                 closing_values, closing_zero_sum = self._eval_model_for_fused_writeback(
                     closing_value_model,
-                    features[self.new_street_model_positions],
+                    self._features_for_model_positions(
+                        features,
+                        self.new_street_model_positions,
+                        closing_encoder,
+                    ),
                     use_pre_head=False,
                 )
                 hand_values.index_copy_(
@@ -2445,6 +2473,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         if scope != "end_of_street":
             raise ValueError(f"Unknown search.model_scope: {scope!r}")
+        if closing_value_model is not None:
+            features = self._features_for_model_positions(
+                features,
+                torch.arange(len(features), dtype=torch.long, device=features.context.device),
+                getattr(self, "closing_leaf_value_encoder", None),
+            )
         return self._eval_model_for_fused_writeback(
             closing_value_model or value_model,
             features,

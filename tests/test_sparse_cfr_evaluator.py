@@ -242,6 +242,29 @@ class ConstantValueModel:
         )
 
 
+class OffsetFeatureEncoder:
+    def __init__(self, offset: float) -> None:
+        self.offset = float(offset)
+
+    def encode(
+        self,
+        beliefs: torch.Tensor,
+        pre_chance_node: torch.Tensor | bool | None = None,
+        indices: torch.Tensor | None = None,
+    ) -> MLPFeatures:
+        assert indices is not None
+        selected = beliefs[indices]
+        batch = indices.numel()
+        return MLPFeatures(
+            context=indices.to(torch.float32).view(batch, 1) + self.offset,
+            street=torch.zeros(batch, dtype=torch.long, device=indices.device),
+            to_act=torch.zeros(batch, dtype=torch.long, device=indices.device),
+            board=torch.full((batch, 5), -1, dtype=torch.long, device=indices.device),
+            beliefs=selected.reshape(batch, -1),
+            hand_dim=selected.shape[-1],
+        )
+
+
 class DeterministicModel:
     """Deterministic policy/value head used for sparse vs rebel parity tests."""
 
@@ -429,11 +452,13 @@ def test_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() -> Non
     evaluator.model = current_model
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
+    evaluator.closing_leaf_value_encoder = OffsetFeatureEncoder(100.0)
     evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="mixed_street"))
     evaluator.float_dtype = torch.float32
     evaluator.num_players = 2
     evaluator.cfr_avg = False
     evaluator.latest_values = torch.zeros(3, 2, NUM_HANDS)
+    evaluator.beliefs = torch.zeros(3, 2, NUM_HANDS)
     evaluator.model_indices = torch.tensor([0, 1, 2], dtype=torch.long)
     evaluator.new_street_mask = torch.tensor([False, True, False])
     evaluator.action_schedule = None
@@ -462,7 +487,7 @@ def test_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() -> Non
         current_model.call_contexts[0].flatten(), torch.tensor([0.0, 2.0])
     )
     torch.testing.assert_close(
-        closing_model.call_contexts[0].flatten(), torch.tensor([1.0])
+        closing_model.call_contexts[0].flatten(), torch.tensor([101.0])
     )
     assert len(closing_model.forward_pre_contexts) == 0
 
@@ -476,10 +501,12 @@ def test_fused_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() 
     evaluator.model = current_model
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
+    evaluator.closing_leaf_value_encoder = OffsetFeatureEncoder(100.0)
     evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="mixed_street"))
     evaluator.float_dtype = torch.float32
     evaluator.num_players = 2
     evaluator.latest_values = torch.zeros(3, 2, NUM_HANDS)
+    evaluator.beliefs = torch.zeros(3, 2, NUM_HANDS)
     evaluator.model_indices = torch.tensor([0, 1, 2], dtype=torch.long)
     evaluator.new_street_mask = torch.tensor([False, True, False])
     evaluator.action_schedule = None
@@ -507,7 +534,7 @@ def test_fused_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() 
     )
     torch.testing.assert_close(
         closing_model.call_contexts[0],
-        torch.tensor([[1.0]]),
+        torch.tensor([[101.0]]),
     )
 
 

@@ -41,6 +41,7 @@ class SparseCFREvaluator(CFREvaluator):
             if closing_leaf_model is not None
             else None
         )
+        self.closing_leaf_value_encoder = None
         self.device = device
         self.cfg = cfg
 
@@ -435,6 +436,21 @@ class SparseCFREvaluator(CFREvaluator):
         self.value_feature_encoder = self.value_model.create_feature_encoder(
             env=self.env, device=self.device, dtype=self.float_dtype
         )
+        if self.closing_leaf_value_model is not None:
+            closing_players = int(
+                getattr(self.closing_leaf_value_model, "num_players", self.num_players)
+            )
+            if closing_players != self.num_players:
+                raise ValueError(
+                    "closing leaf value model num_players="
+                    f"{closing_players} is incompatible with evaluator "
+                    f"num_players={self.num_players}"
+                )
+            self.closing_leaf_value_encoder = (
+                self.closing_leaf_value_model.create_feature_encoder(
+                    env=self.env, device=self.device, dtype=self.float_dtype
+                )
+            )
         self.feature_encoder = self.policy_feature_encoder
 
     def _action_mask_for_depth(self, depth: int) -> torch.Tensor:

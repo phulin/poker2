@@ -396,6 +396,23 @@ class CFREvaluator(ABC):
         ):
             self._update_model_index_partitions()
 
+    def _features_for_model_positions(
+        self,
+        features: MLPFeatures,
+        positions: torch.Tensor,
+        encoder: RebelFeatureEncoder | BetterFeatureEncoder | None = None,
+    ) -> MLPFeatures:
+        if encoder is None:
+            return features[positions]
+        node_indices = self.model_indices[positions]
+        encoded = encoder.encode(
+            self.beliefs,
+            pre_chance_node=self.new_street_mask,
+            indices=node_indices,
+        )
+        encoded.beliefs = features.beliefs[positions]
+        return encoded
+
     def _uses_street_cutoff_schedule(self) -> bool:
         schedule = getattr(self, "action_schedule", None)
         return bool(
@@ -1976,16 +1993,23 @@ class CFREvaluator(ABC):
             if self.cutoff_model_positions.numel() > 0:
                 cutoff_values = self._eval_value_model(
                     value_model,
-                    features[self.cutoff_model_positions],
+                    self._features_for_model_positions(
+                        features, self.cutoff_model_positions
+                    ),
                     use_pre_head=False,
                 )
                 hand_values.index_copy_(
                     0, self.cutoff_model_positions, cutoff_values
                 )
             if self.new_street_model_positions.numel() > 0:
+                closing_encoder = getattr(self, "closing_leaf_value_encoder", None)
                 closing_values = self._eval_value_model(
                     closing_value_model,
-                    features[self.new_street_model_positions],
+                    self._features_for_model_positions(
+                        features,
+                        self.new_street_model_positions,
+                        closing_encoder,
+                    ),
                     use_pre_head=False,
                 )
                 hand_values.index_copy_(
@@ -2000,6 +2024,12 @@ class CFREvaluator(ABC):
             )
         if scope != "end_of_street":
             raise ValueError(f"Unknown search.model_scope: {scope!r}")
+        if closing_value_model is not None:
+            features = self._features_for_model_positions(
+                features,
+                torch.arange(len(features), dtype=torch.long, device=features.context.device),
+                getattr(self, "closing_leaf_value_encoder", None),
+            )
         return self._eval_value_model(
             closing_value_model or value_model,
             features,
