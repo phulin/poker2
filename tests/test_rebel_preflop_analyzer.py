@@ -3,7 +3,7 @@ from torch.testing import assert_close
 
 from p2.core.structured_config import Config
 from p2.env.analyze_tensor_env import RebelPreflopAnalyzer
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import NUM_HANDS, PREFLOP_HANDS
 from p2.models.mlp.rebel_ffn import RebelFFN
 
 
@@ -81,3 +81,50 @@ def test_rebel_preflop_analyzer_maps_sparse_actions_correctly():
         torch.tensor([True, True, False, True, True]),
     )
     assert_close(values[0], torch.tensor(0.123))
+
+
+class _FakeCompactCFREvaluator(_FakeCFREvaluator):
+    """Minimal compact evaluator exposing native 169-wide CFR tensors."""
+
+    def __init__(self, device: torch.device):
+        super().__init__(device)
+        self.hand_dim = PREFLOP_HANDS
+        self.policy_probs_avg = torch.zeros(
+            5, PREFLOP_HANDS, device=device, dtype=torch.float32
+        )
+        for idx, value in zip(range(1, 5), [0.1, 0.2, 0.3, 0.4]):
+            self.policy_probs_avg[idx].fill_(value)
+        self.values_avg = torch.zeros(
+            5, 2, PREFLOP_HANDS, device=device, dtype=torch.float32
+        )
+        self.values_avg[0].fill_(0.456)
+
+
+def test_rebel_preflop_analyzer_maps_compact_169_cfr_tensors():
+    cfg = _make_small_config()
+    device = torch.device("cpu")
+    model = RebelFFN(
+        input_dim=cfg.model.input_dim,
+        num_actions=cfg.model.num_actions,
+        hidden_dim=cfg.model.hidden_dim,
+        num_hidden_layers=cfg.model.num_hidden_layers,
+        detach_value_head=cfg.model.detach_value_head,
+    )
+
+    analyzer = RebelPreflopAnalyzer(
+        model=model,
+        cfg=cfg,
+        device=device,
+        rng=torch.Generator(device=device),
+    )
+    analyzer.cfr_evaluator = _FakeCompactCFREvaluator(device)
+
+    probs, values, legal_masks = analyzer.get_probabilities_from_cfr(seat=0)
+
+    assert probs.shape == (PREFLOP_HANDS, cfg.model.num_actions)
+    assert values.shape == (PREFLOP_HANDS,)
+    assert legal_masks.shape == (PREFLOP_HANDS, cfg.model.num_actions)
+    assert_close(probs[0], torch.tensor([0.1, 0.2, 0.0, 0.3, 0.4]))
+    assert_close(values[0], torch.tensor(0.456))
+    grid = analyzer.make_range_grid(probs[:, 1], "probability")
+    assert len(grid.splitlines()) >= 13

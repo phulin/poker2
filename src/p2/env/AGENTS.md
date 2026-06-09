@@ -14,7 +14,7 @@ Heads-up no-limit Texas Hold 'Em environment logic, tensorized simulation, hand 
 - `rules_triton.py`: Triton-accelerated hand-ranking wrappers, including fused board+combo score generation, and fallbacks.
 - `card_utils.py`: 1326-combo lookup, 169-class preflop mapping/expand/collapse helpers, exact preflop class compatibility and unblocked-mass projection, board masks, suit permutations, canonical flop/full-board representatives with orbit weights, blockers, and unblocked-mass helpers.
 - `aggression_analyzer.py`: Preflop hand-group mapping and aggression analysis.
-- `analyze_tensor_env.py`: Preflop and ReBeL analyzers for tensor environments and model-backed policies.
+- `analyze_tensor_env.py`: Preflop and ReBeL analyzers for tensor environments and model-backed policies, including native 169-hand S_preflop CFR analysis.
 
 ### Subdirectories
 There are no child source directories.

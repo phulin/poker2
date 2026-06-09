@@ -12,10 +12,13 @@ import torch
 from p2.core.action_schedule import apply_action_schedule_to_config
 from p2.env.card_utils import (
     NUM_HANDS,
+    PREFLOP_HANDS,
     combo_lookup_tensor,
     hand_combos_tensor,
+    preflop_class_multiplicity_tensor,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.env.pbs_env import PBSEnv
 from p2.models.cnn.siamese_convnet import SiameseConvNetV1
 from p2.models.cnn.state_encoder import CNNStateEncoder
 from p2.models.mlp.better_ffn import BetterFFN
@@ -29,6 +32,11 @@ from p2.core.structured_config import Config
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
 
 GRID_RANKS = "AKQJT98765432"
+
+
+def _model_hand_dim(model) -> int:
+    policy_model = getattr(model, "policy_model", model)
+    return int(getattr(policy_model, "hand_dim", NUM_HANDS))
 
 
 class DummyStateEncoder:
@@ -137,6 +145,7 @@ class PreflopAnalyzer:
 
         self.model = model
         self.device = device
+        self.hand_dim = _model_hand_dim(model)
         self.popart_normalizer = popart_normalizer
         self.combo_lookup = combo_lookup_tensor(device=self.device)
 
@@ -218,19 +227,27 @@ class PreflopAnalyzer:
 
     def make_range_grid(
         self,
-        values_1326: torch.Tensor,
+        values: torch.Tensor,
         value_type: str = "probability",
     ) -> str:
-        """Convert 1326-hand values to a 169-hand-bucket grid table.
+        """Convert hand values to a 169-hand-bucket grid table.
 
         Args:
-            values_1326: Tensor of 1326 values for each hand
+            values: Tensor of 1326 combo values or 169 preflop class values
             value_type: Type of values - "probability", "value", or "raw"
 
         Returns:
             String representation of the 13x13 grid
         """
-        values_169 = self.convert_1326_to_169_tensor(values_1326)
+        if values.shape[-1] == PREFLOP_HANDS:
+            values_169 = values.reshape(13, 13)
+        elif values.shape[-1] == NUM_HANDS:
+            values_169 = self.convert_1326_to_169_tensor(values)
+        else:
+            raise ValueError(
+                f"expected {NUM_HANDS} combos or {PREFLOP_HANDS} preflop classes, "
+                f"got final axis {values.shape[-1]}"
+            )
         return _create_169_grid(values_169, value_type)
 
     def get_probabilities(
@@ -320,7 +337,15 @@ class PreflopAnalyzer:
 
     def calculate_suited_vs_offsuit(self, probs: torch.Tensor) -> torch.Tensor:
         """Calculate the suited vs offsuit probability for the given action for each hand."""
-        values_169 = self.convert_1326_to_169_tensor(probs)
+        if probs.shape[-1] == PREFLOP_HANDS:
+            values_169 = probs.reshape(13, 13)
+        elif probs.shape[-1] == NUM_HANDS:
+            values_169 = self.convert_1326_to_169_tensor(probs)
+        else:
+            raise ValueError(
+                f"expected {NUM_HANDS} combos or {PREFLOP_HANDS} preflop classes, "
+                f"got final axis {probs.shape[-1]}"
+            )
         # since 13x13 is "reversed" from how we print, upper/lower are reversed too.
         suited_rows, suited_cols = torch.tril_indices(13, 13, offset=1)
         offsuit_rows, offsuit_cols = torch.triu_indices(13, 13, offset=-1)
@@ -468,6 +493,7 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         flop_showdown = getattr(cfg.env, "flop_showdown", False)
         cfr_iterations = cfg.search.iterations
         max_depth = cfg.search.depth
+        self.compact_preflop = _model_hand_dim(model) == PREFLOP_HANDS
 
         if device is None:
             device = torch.device("cpu")
@@ -499,21 +525,57 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         self.combo_lookup = combo_lookup_tensor(device=self.device)
 
         # Create single environment for CFR search
-        self.cfr_env = HUNLTensorEnv(
-            num_envs=1,  # Single environment for analysis
-            starting_stack=starting_stack,
-            sb=sb,
-            bb=bb,
-            default_bet_bins=bet_bins,
-            device=device,
-            rng=rng,
-            flop_showdown=flop_showdown,
-        )
+        if self.compact_preflop:
+            self.cfr_env = PBSEnv(
+                num_envs=1,
+                num_players=cfg.env.num_players,
+                mean_stack=starting_stack,
+                sb=sb,
+                bb=bb,
+                default_bet_bins=bet_bins,
+                device=device,
+                rng=rng,
+                float_dtype=getattr(cfg, "float_dtype", torch.float32),
+                stack_mode=getattr(cfg.env, "stack_mode", "fixed"),
+                min_stack_bb=getattr(cfg.env, "min_stack_bb", 10),
+                mid_stack_bb=getattr(cfg.env, "mid_stack_bb", 200),
+                max_stack_bb=getattr(cfg.env, "max_stack_bb", 400),
+                high_stack_mass_ratio=getattr(
+                    cfg.env, "high_stack_mass_ratio", 1.0 / 3.0
+                ),
+                force_heads_up_preflop_flop=getattr(
+                    cfg.env, "force_heads_up_preflop_flop", True
+                ),
+            )
+        else:
+            self.cfr_env = HUNLTensorEnv(
+                num_envs=1,  # Single environment for analysis
+                starting_stack=starting_stack,
+                sb=sb,
+                bb=bb,
+                default_bet_bins=bet_bins,
+                device=device,
+                rng=rng,
+                flop_showdown=flop_showdown,
+            )
 
         cfg_copy = copy.deepcopy(cfg)
         cfg_copy.num_envs = 1
         evaluator_cls: type[SparseCFREvaluator] = SparseCFREvaluator
-        if cfg.search.sparse_fused:
+        if self.compact_preflop:
+            if cfg.search.sparse_fused:
+                from p2.search.fused_preflop_sparse_cfr_evaluator import (
+                    FusedPreflopSparseCFREvaluator,
+                )
+
+                evaluator_cls = FusedPreflopSparseCFREvaluator
+            else:
+                from p2.search.preflop_sparse_cfr_evaluator import (
+                    PreflopSparseCFREvaluator,
+                )
+
+                evaluator_cls = PreflopSparseCFREvaluator
+        elif cfg.search.sparse_fused:
             from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
             evaluator_cls = FusedSparseCFREvaluator
@@ -530,18 +592,30 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
 
     def reset(self, button: int):
         """Reset cached environments for both direct model inference and CFR search."""
-        super().reset(button)
+        if not self.compact_preflop:
+            super().reset(button)
 
         self.cfr_env.reset(
             force_button=torch.tensor([button], dtype=torch.long, device=self.device),
         )
 
-        uniform_beliefs = torch.full(
-            (1, 2, NUM_HANDS),
-            1.0 / NUM_HANDS,
-            device=self.device,
-            dtype=torch.float32,
-        )
+        if self.compact_preflop:
+            prior = preflop_class_multiplicity_tensor(device=self.device).to(
+                dtype=torch.float32
+            )
+            prior = prior / prior.sum().clamp(min=1.0)
+            uniform_beliefs = prior.expand(
+                1,
+                self.cfr_env.num_players,
+                PREFLOP_HANDS,
+            ).clone()
+        else:
+            uniform_beliefs = torch.full(
+                (1, 2, NUM_HANDS),
+                1.0 / NUM_HANDS,
+                device=self.device,
+                dtype=torch.float32,
+            )
 
         self.pbs = PublicBeliefState.from_proto(
             env_proto=self.cfr_env,
@@ -564,7 +638,7 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             seat: Seat position (0 for SB, 1 for BB)
 
         Returns:
-            Tuple of (probabilities [1326, num_bet_bins], values [1326], legal_masks [1326, num_bet_bins])
+            Tuple of (probabilities [hand_dim, num_bet_bins], values [hand_dim], legal_masks [hand_dim, num_bet_bins])
         """
         assert (
             self.cfr_evaluator is not None and self.cfr_env is not None
@@ -588,8 +662,15 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
 
         num_actions = self.cfr_evaluator.num_actions
         policy_dtype = self.cfr_evaluator.policy_probs_avg.dtype
+        hand_dim = int(
+            getattr(
+                self.cfr_evaluator,
+                "hand_dim",
+                self.cfr_evaluator.policy_probs_avg.shape[-1],
+            )
+        )
         root_policy = torch.zeros(
-            num_actions, NUM_HANDS, device=self.device, dtype=policy_dtype
+            num_actions, hand_dim, device=self.device, dtype=policy_dtype
         )
         legal_masks = torch.zeros(num_actions, device=self.device, dtype=torch.bool)
 
@@ -609,7 +690,7 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
                 legal_masks[action_id_int] = True
 
         root_policy /= root_policy.sum(dim=0, keepdim=True).clamp_min(1e-12)
-        legal_masks = legal_masks[None, :].expand(NUM_HANDS, -1)
+        legal_masks = legal_masks[None, :].expand(hand_dim, -1)
 
         # Get values from CFR (already aggregated at the root)
         root_values = self.cfr_evaluator.values_avg[0, seat].clone()
@@ -628,7 +709,8 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
 
     def step_sb_action(self, sb_action: str = "allin") -> None:
         """Override to apply the SB action inside the CFR root environment."""
-        super().step_sb_action(sb_action)
+        if not self.compact_preflop:
+            super().step_sb_action(sb_action)
 
         bin_map = {
             "fold": 0,

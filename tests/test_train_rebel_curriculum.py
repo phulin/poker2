@@ -59,7 +59,7 @@ def test_curriculum_distill_substep_uses_pre_only_value_head() -> None:
 def test_curriculum_train_substeps_do_not_run_preflop_analyzer() -> None:
     assert curriculum_cli._should_print_preflop_analyzer("E_preflop") is False
     assert curriculum_cli._should_print_preflop_analyzer("S_0") is False
-    assert curriculum_cli._should_print_preflop_analyzer("S_preflop") is False
+    assert curriculum_cli._should_print_preflop_analyzer("S_preflop") is True
     assert curriculum_cli._should_print_preflop_analyzer("S_river") is False
     assert curriculum_cli._should_print_preflop_analyzer("S_turn") is False
     assert curriculum_cli._should_print_preflop_analyzer("S_flop") is False

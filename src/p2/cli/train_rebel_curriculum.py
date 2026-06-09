@@ -95,8 +95,7 @@ def _stage_wandb_name(cfg: Config, substep_name: str) -> str | None:
 
 
 def _should_print_preflop_analyzer(net: str) -> bool:
-    del net
-    return False
+    return net == "S_preflop"
 
 
 def _apply_overrides(target: object, overrides: dict[str, Any], *, label: str) -> None:
