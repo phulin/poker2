@@ -10,6 +10,7 @@ from p2.env.card_utils import (
     hand_combos_tensor,
 )
 from p2.env.hunl_tensor_env import HUNLTensorEnv
+from p2.env.pbs_env import PBSEnv
 from p2.models.mlp.better_feature_encoder import (
     BetterFeatureEncoder,
     BetterPreflopValueFeatureEncoder,
@@ -21,6 +22,7 @@ from p2.models.mlp.better_features import (
     PlayerContext,
     ScalarContext,
     ValueScalarContext,
+    legacy_context_length,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
@@ -216,6 +218,27 @@ def test_better_feature_encoder_empty_indices():
     assert features.beliefs.shape == (0, 2 * NUM_HANDS)
 
 
+def test_better_feature_encoder_legacy_context_switch():
+    env = make_env(2)
+    beliefs = torch.full(
+        (2, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32, device=env.device
+    )
+
+    encoder = BetterPolicyFeatureEncoder(
+        env,
+        device=env.device,
+        dtype=torch.float32,
+        legacy_context_features=True,
+    )
+    features = encoder.encode(beliefs)
+
+    assert features.context.shape == (2, legacy_context_length(2))
+    torch.testing.assert_close(
+        features.context[:, ScalarContext.ACTIONS_ROUND.value],
+        env.actions_this_round.to(torch.float32),
+    )
+
+
 def test_better_policy_and_value_feature_context_slots():
     env = make_env(2)
     env.actions_this_round[:] = torch.tensor([3, 5], device=env.device)
@@ -251,6 +274,169 @@ def test_better_policy_and_value_feature_context_slots():
         beliefs, pre_chance_node=False
     )
     torch.testing.assert_close(value_features.context, value_features_changed_actions.context)
+
+
+def test_better_feature_encoder_includes_multiway_betting_and_status_context():
+    env = PBSEnv(
+        num_envs=2,
+        num_players=4,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=torch.device("cpu"),
+        float_dtype=torch.float32,
+    )
+    env.button[:] = torch.tensor([3, 1], device=env.device)
+    env.to_act[:] = torch.tensor([1, 2], device=env.device)
+    env.pot[:] = torch.tensor([220, 550], device=env.device)
+    env.min_raise[:] = torch.tensor([40, 100], device=env.device)
+    env.last_aggressive_amount[:] = torch.tensor([100, 200], device=env.device)
+    env.actions_this_round[:] = torch.tensor([2, 4], device=env.device)
+    env.scale[:] = torch.tensor([1000.0, 500.0], device=env.device)
+    env.done.zero_()
+    env.stacks[:] = torch.tensor(
+        [[900, 850, 700, 1000], [500, 600, 150, 700]], device=env.device
+    )
+    env.committed[:] = torch.tensor(
+        [[20, 100, 100, 0], [200, 200, 100, 50]], device=env.device
+    )
+    env.has_folded[:] = torch.tensor(
+        [[False, False, False, True], [False, False, False, False]],
+        device=env.device,
+    )
+    env.is_allin[:] = torch.tensor(
+        [[False, False, True, False], [False, False, False, False]],
+        device=env.device,
+    )
+    env.acted_this_round[:] = torch.tensor(
+        [[True, False, True, False], [True, True, False, False]],
+        device=env.device,
+    )
+
+    encoder = BetterPolicyFeatureEncoder(env, device=env.device, dtype=torch.float32)
+    beliefs = torch.full(
+        (2, 4, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32, device=env.device
+    )
+
+    context = encoder.encode(beliefs).context
+    value_context = BetterStreetValueFeatureEncoder(
+        env, device=env.device, dtype=torch.float32
+    ).encode(beliefs, pre_chance_node=False).context
+    legal = env.legal_bins_mask()
+    scale = env.scale.to(torch.float32)
+    max_committed = env.committed.amax(dim=1).to(torch.float32)
+    actor_committed = env.committed.gather(1, env.to_act[:, None]).squeeze(1).to(
+        torch.float32
+    )
+    actor_to_call = (max_committed - actor_committed).clamp_min(0.0)
+
+    torch.testing.assert_close(
+        context[:, ScalarContext.MAX_COMMITTED.value], max_committed / scale
+    )
+    torch.testing.assert_close(
+        context[:, ScalarContext.LAST_AGGRESSIVE_AMOUNT.value],
+        env.last_aggressive_amount.to(torch.float32) / scale,
+    )
+    torch.testing.assert_close(
+        context[:, ScalarContext.UNOPENED_OR_CHECKED_TO_ACTOR.value],
+        (actor_to_call <= 0).to(torch.float32),
+    )
+    torch.testing.assert_close(
+        context[:, ScalarContext.NUM_LEGAL_ACTIONS.value],
+        legal.to(torch.float32).sum(dim=1) / legal.shape[1],
+    )
+    torch.testing.assert_close(
+        context[:, ScalarContext.CAN_FOLD.value], legal[:, 0].to(torch.float32)
+    )
+    torch.testing.assert_close(
+        context[:, ScalarContext.CAN_CALL.value], legal[:, 1].to(torch.float32)
+    )
+    torch.testing.assert_close(
+        context[:, ScalarContext.CAN_RAISE.value],
+        legal[:, 2:-1].any(dim=1).to(torch.float32),
+    )
+    torch.testing.assert_close(
+        context[:, ScalarContext.CAN_ALLIN.value], legal[:, -1].to(torch.float32)
+    )
+    for policy_field, value_field in (
+        (ScalarContext.MAX_COMMITTED, ValueScalarContext.MAX_COMMITTED),
+        (
+            ScalarContext.LAST_AGGRESSIVE_AMOUNT,
+            ValueScalarContext.LAST_AGGRESSIVE_AMOUNT,
+        ),
+        (
+            ScalarContext.UNOPENED_OR_CHECKED_TO_ACTOR,
+            ValueScalarContext.UNOPENED_OR_CHECKED_TO_ACTOR,
+        ),
+        (ScalarContext.NUM_LEGAL_ACTIONS, ValueScalarContext.NUM_LEGAL_ACTIONS),
+        (ScalarContext.CAN_FOLD, ValueScalarContext.CAN_FOLD),
+        (ScalarContext.CAN_CALL, ValueScalarContext.CAN_CALL),
+        (ScalarContext.CAN_RAISE, ValueScalarContext.CAN_RAISE),
+        (ScalarContext.CAN_ALLIN, ValueScalarContext.CAN_ALLIN),
+    ):
+        torch.testing.assert_close(
+            value_context[:, value_field.value],
+            context[:, policy_field.value],
+        )
+
+    scalar_count = ScalarContext.NUM_SCALAR_CONTEXT.value
+    num_players = env.num_players
+    torch.testing.assert_close(
+        value_context[:, ValueScalarContext.NUM_SCALAR_CONTEXT.value :],
+        context[:, scalar_count:],
+    )
+
+    def player_ctx(field: PlayerContext) -> torch.Tensor:
+        start = scalar_count + field.value * num_players
+        return context[:, start : start + num_players]
+
+    expected_rel_actor = torch.tensor(
+        [[1.0, 0.0, 1.0 / 3.0, 2.0 / 3.0], [2.0 / 3.0, 1.0, 0.0, 1.0 / 3.0]],
+        device=env.device,
+    )
+    expected_rel_button = torch.tensor(
+        [[1.0 / 3.0, 2.0 / 3.0, 1.0, 0.0], [1.0, 0.0, 1.0 / 3.0, 2.0 / 3.0]],
+        device=env.device,
+    )
+    expected_to_call = torch.tensor(
+        [[80.0, 0.0, 0.0, 100.0], [0.0, 0.0, 100.0, 150.0]],
+        device=env.device,
+    )
+
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.FOLDED), env.has_folded.to(torch.float32)
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.ALL_IN), env.is_allin.to(torch.float32)
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.ACTED_THIS_ROUND),
+        env.acted_this_round.to(torch.float32),
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.IS_ACTOR),
+        torch.tensor(
+            [[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], device=env.device
+        ),
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.REL_POS_TO_ACTOR), expected_rel_actor
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.REL_POS_TO_BUTTON), expected_rel_button
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.TO_CALL_SCALE), expected_to_call / scale[:, None]
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.TO_CALL_POT),
+        expected_to_call / env.pot.to(torch.float32)[:, None],
+    )
+    torch.testing.assert_close(
+        player_ctx(PlayerContext.STACK_AFTER_CALL_SCALE),
+        (env.stacks.to(torch.float32) - expected_to_call).clamp_min(0.0)
+        / scale[:, None],
+    )
 
 
 def test_better_preflop_value_feature_context_includes_actions_round():

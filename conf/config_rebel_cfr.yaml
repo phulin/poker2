@@ -83,6 +83,7 @@ model:
   policy_rank: 96
   policy_hand_bias_rank: 24
   street_value_heads: both
+  legacy_context_features: false
 
   shared_trunk: true # Keep policy gradients through shared input encoders.
   num_hidden_layers: 0

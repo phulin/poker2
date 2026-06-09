@@ -15,7 +15,7 @@ from p2.env.card_utils import (
     preflop_class_multiplicity_tensor,
     preflop_class_unblocked_mass,
 )
-from p2.models.mlp.better_features import context_length
+from p2.models.mlp.better_features import context_length, legacy_context_length
 from p2.models.mlp.better_ffn import BetterPreflopPolicyFFN, BetterPreflopValueFFN
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
@@ -420,3 +420,46 @@ def test_compact_preflop_model_shapes_and_policy_loss() -> None:
         batch,
     )
     assert torch.isfinite(loss["policy_loss"])
+
+
+def test_compact_preflop_legacy_context_features_load_old_width_state() -> None:
+    batch_size = 2
+    num_players = 2
+    common = dict(
+        num_actions=1,
+        hidden_dim=32,
+        range_hidden_dim=8,
+        ffn_dim=64,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        legacy_context_features=True,
+    )
+    source = BetterPreflopValueFFN(**common)
+    source.init_weights(torch.Generator(device="cpu").manual_seed(3))
+    restored = BetterPreflopValueFFN(**common)
+    restored.load_state_dict(source.state_dict(), strict=True)
+
+    assert source.context_encoder.norm.weight.shape == (
+        legacy_context_length(num_players),
+    )
+
+    beliefs = torch.full(
+        (batch_size, num_players, PREFLOP_HANDS),
+        1.0 / PREFLOP_HANDS,
+        dtype=torch.float32,
+    )
+    features = MLPFeatures(
+        context=torch.zeros(batch_size, legacy_context_length(num_players)),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.reshape(batch_size, -1),
+        hand_dim=PREFLOP_HANDS,
+    )
+
+    output = restored(features, include_policy=False)
+    assert output.hand_values.shape == (batch_size, num_players, PREFLOP_HANDS)

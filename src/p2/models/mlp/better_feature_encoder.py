@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import torch
 
-from p2.env.card_utils import NUM_HANDS, PREFLOP_HANDS
+from p2.env.card_utils import PREFLOP_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.better_features import (
     ChancePhase,
+    LEGACY_NUM_PLAYER_CONTEXT,
+    LEGACY_NUM_SCALAR_CONTEXT,
     PlayerContext,
     ScalarContext,
     ValueScalarContext,
@@ -23,10 +25,12 @@ class _BetterFeatureEncoderBase:
         env: HUNLTensorEnv,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        legacy_context_features: bool = False,
     ) -> None:
         self.env = env
         self.device = device or env.device
         self.dtype = dtype or torch.float32
+        self.legacy_context_features = bool(legacy_context_features)
 
     def _pre_chance_mask(
         self, N: int, pre_chance_node: torch.Tensor | bool | None
@@ -42,6 +46,23 @@ class _BetterFeatureEncoderBase:
     def _env_tensor(self, attr_name: str, indices: torch.Tensor | None) -> torch.Tensor:
         val = getattr(self.env, attr_name)
         return val[indices] if indices is not None else val
+
+    def _optional_env_tensor(
+        self,
+        attr_name: str,
+        indices: torch.Tensor | None,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if not hasattr(self.env, attr_name):
+            return torch.zeros(shape, dtype=dtype, device=self.device)
+        val = getattr(self.env, attr_name)
+        out = val[indices] if indices is not None else val
+        return out.to(device=self.device)
+
+    def _legal_bins_mask(self, indices: torch.Tensor | None) -> torch.Tensor:
+        legal = self.env.legal_bins_mask()
+        return legal[indices] if indices is not None else legal
 
     def _street_for_phase(
         self,
@@ -63,12 +84,19 @@ class _BetterFeatureEncoderBase:
         pot_float: torch.Tensor,
         bb: torch.Tensor,
         indices: torch.Tensor | None,
+        to_act: torch.Tensor,
+        button: torch.Tensor,
     ) -> torch.Tensor:
         stacks = self._env_tensor("stacks", indices).to(self.dtype)
         committed = self._env_tensor("committed", indices).to(self.dtype)
+        player_context_count = (
+            LEGACY_NUM_PLAYER_CONTEXT
+            if self.legacy_context_features
+            else PlayerContext.NUM_PLAYER_CONTEXT.value
+        )
         player_context = torch.zeros(
             N,
-            PlayerContext.NUM_PLAYER_CONTEXT.value,
+            player_context_count,
             num_players,
             device=self.device,
             dtype=self.dtype,
@@ -81,7 +109,121 @@ class _BetterFeatureEncoderBase:
         player_context[:, PlayerContext.LOG_COMMITTED_BB.value] = torch.log1p(
             committed / bb
         )
+        if self.legacy_context_features:
+            return player_context.flatten(1)
+
+        max_committed = committed.amax(dim=1)
+        to_call = (max_committed[:, None] - committed).clamp_min(0.0)
+        call_amount = torch.minimum(to_call, stacks)
+        players = torch.arange(num_players, device=self.device)
+        denom = float(max(num_players - 1, 1))
+        folded = self._optional_env_tensor(
+            "has_folded", indices, (N, num_players), torch.bool
+        ).to(torch.bool)
+        all_in = self._optional_env_tensor(
+            "is_allin", indices, (N, num_players), torch.bool
+        ).to(torch.bool)
+        acted = self._optional_env_tensor(
+            "acted_this_round", indices, (N, num_players), torch.bool
+        ).to(torch.bool)
+        is_actor = players[None, :] == to_act[:, None]
+        rel_pos_to_actor = ((players[None, :] - to_act[:, None]) % num_players).to(
+            self.dtype
+        ) / denom
+        rel_pos_to_button = ((players[None, :] - button[:, None]) % num_players).to(
+            self.dtype
+        ) / denom
+
+        player_context[:, PlayerContext.FOLDED.value] = folded.to(self.dtype)
+        player_context[:, PlayerContext.ALL_IN.value] = all_in.to(self.dtype)
+        player_context[:, PlayerContext.ACTED_THIS_ROUND.value] = acted.to(self.dtype)
+        player_context[:, PlayerContext.IS_ACTOR.value] = is_actor.to(self.dtype)
+        player_context[:, PlayerContext.REL_POS_TO_ACTOR.value] = rel_pos_to_actor
+        player_context[:, PlayerContext.REL_POS_TO_BUTTON.value] = rel_pos_to_button
+        player_context[:, PlayerContext.TO_CALL_SCALE.value] = to_call / scale[:, None]
+        player_context[:, PlayerContext.TO_CALL_POT.value] = (
+            to_call / pot_float.clamp_min(1.0)[:, None]
+        )
+        player_context[:, PlayerContext.STACK_AFTER_CALL_SCALE.value] = (
+            (stacks - call_amount).clamp_min(0.0) / scale[:, None]
+        )
         return player_context.flatten(1)
+
+    def _fill_policy_betting_context(
+        self,
+        scalar_context: torch.Tensor,
+        to_act: torch.Tensor,
+        pot_float: torch.Tensor,
+        scale: torch.Tensor,
+        indices: torch.Tensor | None,
+    ) -> None:
+        committed = self._env_tensor("committed", indices).to(self.dtype)
+        actor_committed = committed.gather(1, to_act[:, None]).squeeze(1)
+        max_committed = committed.amax(dim=1)
+        actor_to_call = (max_committed - actor_committed).clamp_min(0.0)
+        last_aggressive = self._optional_env_tensor(
+            "last_aggressive_amount", indices, (to_act.shape[0],), torch.long
+        ).to(self.dtype)
+        legal = self._legal_bins_mask(indices)
+        num_actions = legal.shape[1]
+        scalar_context[:, ScalarContext.MAX_COMMITTED.value] = max_committed / scale
+        scalar_context[:, ScalarContext.LAST_AGGRESSIVE_AMOUNT.value] = (
+            last_aggressive / scale
+        )
+        scalar_context[:, ScalarContext.UNOPENED_OR_CHECKED_TO_ACTOR.value] = (
+            actor_to_call <= 0
+        ).to(self.dtype)
+        scalar_context[:, ScalarContext.NUM_LEGAL_ACTIONS.value] = (
+            legal.to(self.dtype).sum(dim=1) / float(max(num_actions, 1))
+        )
+        scalar_context[:, ScalarContext.CAN_FOLD.value] = legal[:, 0].to(self.dtype)
+        scalar_context[:, ScalarContext.CAN_CALL.value] = legal[:, 1].to(self.dtype)
+        scalar_context[:, ScalarContext.CAN_RAISE.value] = legal[:, 2:-1].any(
+            dim=1
+        ).to(self.dtype)
+        scalar_context[:, ScalarContext.CAN_ALLIN.value] = legal[:, -1].to(self.dtype)
+
+    def _fill_value_betting_context(
+        self,
+        scalar_context: torch.Tensor,
+        to_act: torch.Tensor,
+        pot_float: torch.Tensor,
+        scale: torch.Tensor,
+        indices: torch.Tensor | None,
+    ) -> None:
+        committed = self._env_tensor("committed", indices).to(self.dtype)
+        actor_committed = committed.gather(1, to_act[:, None]).squeeze(1)
+        max_committed = committed.amax(dim=1)
+        actor_to_call = (max_committed - actor_committed).clamp_min(0.0)
+        last_aggressive = self._optional_env_tensor(
+            "last_aggressive_amount", indices, (to_act.shape[0],), torch.long
+        ).to(self.dtype)
+        legal = self._legal_bins_mask(indices)
+        num_actions = legal.shape[1]
+        scalar_context[:, ValueScalarContext.MAX_COMMITTED.value] = (
+            max_committed / scale
+        )
+        scalar_context[:, ValueScalarContext.LAST_AGGRESSIVE_AMOUNT.value] = (
+            last_aggressive / scale
+        )
+        scalar_context[
+            :, ValueScalarContext.UNOPENED_OR_CHECKED_TO_ACTOR.value
+        ] = (actor_to_call <= 0).to(self.dtype)
+        scalar_context[:, ValueScalarContext.NUM_LEGAL_ACTIONS.value] = (
+            legal.to(self.dtype).sum(dim=1) / float(max(num_actions, 1))
+        )
+        scalar_context[:, ValueScalarContext.CAN_FOLD.value] = legal[:, 0].to(
+            self.dtype
+        )
+        scalar_context[:, ValueScalarContext.CAN_CALL.value] = legal[:, 1].to(
+            self.dtype
+        )
+        scalar_context[:, ValueScalarContext.CAN_RAISE.value] = legal[:, 2:-1].any(
+            dim=1
+        ).to(self.dtype)
+        scalar_context[:, ValueScalarContext.CAN_ALLIN.value] = legal[:, -1].to(
+            self.dtype
+        )
 
 
 class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
@@ -110,9 +252,14 @@ class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
 
         N = beliefs.shape[0]
         num_players = beliefs.shape[1]
+        scalar_context_count = (
+            LEGACY_NUM_SCALAR_CONTEXT
+            if self.legacy_context_features
+            else ScalarContext.NUM_SCALAR_CONTEXT.value
+        )
         scalar_context = torch.zeros(
             N,
-            ScalarContext.NUM_SCALAR_CONTEXT.value,
+            scalar_context_count,
             device=self.device,
             dtype=self.dtype,
         )
@@ -126,9 +273,10 @@ class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
         # Keep to_act for actor, as that's the player perspective the model should take,
         # even in the pre-chance node context.
         to_act = self._env_tensor("to_act", indices)
+        button = self._env_tensor("button", indices)
         scalar_context[:, ScalarContext.ACTOR.value] = to_act
         scalar_context[:, ScalarContext.POSITION.value] = (
-            to_act - self._env_tensor("button", indices)
+            to_act - button
         ) % num_players
         scalar_context[:, ScalarContext.ACTIONS_ROUND.value] = actions_round
         pot = self._env_tensor("pot", indices)
@@ -152,9 +300,17 @@ class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
             )
         )
         scalar_context[:, ScalarContext.LOG_POT_BB.value] = torch.log1p(pot_bb)
+        if not self.legacy_context_features:
+            self._fill_policy_betting_context(
+                scalar_context,
+                to_act,
+                pot_float,
+                scale,
+                indices,
+            )
 
         player_context = self._player_context(
-            N, num_players, scale, pot_float, bb, indices
+            N, num_players, scale, pot_float, bb, indices, to_act, button
         )
 
         street_tensor = self._env_tensor("street", indices)
@@ -192,18 +348,24 @@ class BetterStreetValueFeatureEncoder(_BetterFeatureEncoderBase):
 
         N = beliefs.shape[0]
         num_players = beliefs.shape[1]
+        scalar_context_count = (
+            LEGACY_NUM_SCALAR_CONTEXT
+            if self.legacy_context_features
+            else ValueScalarContext.NUM_SCALAR_CONTEXT.value
+        )
         scalar_context = torch.zeros(
             N,
-            ValueScalarContext.NUM_SCALAR_CONTEXT.value,
+            scalar_context_count,
             device=self.device,
             dtype=self.dtype,
         )
 
         pre_chance_node = self._pre_chance_mask(N, pre_chance_node)
         to_act = self._env_tensor("to_act", indices)
+        button = self._env_tensor("button", indices)
         scalar_context[:, ValueScalarContext.ACTOR.value] = to_act
         scalar_context[:, ValueScalarContext.POSITION.value] = (
-            to_act - self._env_tensor("button", indices)
+            to_act - button
         ) % num_players
         scalar_context[:, ValueScalarContext.CHANCE_PHASE.value] = torch.where(
             pre_chance_node,
@@ -242,9 +404,17 @@ class BetterStreetValueFeatureEncoder(_BetterFeatureEncoderBase):
             )
         )
         scalar_context[:, ValueScalarContext.LOG_POT_BB.value] = torch.log1p(pot_bb)
+        if not self.legacy_context_features:
+            self._fill_value_betting_context(
+                scalar_context,
+                to_act,
+                pot_float,
+                scale,
+                indices,
+            )
 
         player_context = self._player_context(
-            N, num_players, scale, pot_float, bb, indices
+            N, num_players, scale, pot_float, bb, indices, to_act, button
         )
 
         actions_this_round = self._env_tensor("actions_this_round", indices)

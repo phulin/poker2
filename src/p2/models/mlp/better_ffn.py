@@ -22,6 +22,7 @@ from p2.models.mlp.better_features import (
     ChancePhase,
     ValueScalarContext,
     context_length,
+    legacy_context_length,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
@@ -109,6 +110,7 @@ class BetterFFN(BaseMLPModel):
         policy_rank: int = 64,
         policy_hand_bias_rank: int = 32,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
+        legacy_context_features: bool = False,
     ) -> None:
         super().__init__()
         self.num_actions = num_actions
@@ -123,6 +125,7 @@ class BetterFFN(BaseMLPModel):
         self.policy_rank = policy_rank
         self.policy_hand_bias_rank = policy_hand_bias_rank
         self.nonlinearity = nonlinearity
+        self.legacy_context_features = bool(legacy_context_features)
 
         if range_hidden_dim < 0:
             raise ValueError("range_hidden_dim must be non-negative")
@@ -184,8 +187,13 @@ class BetterFFN(BaseMLPModel):
         self.belief_proj = ffn_block(
             belief_in_dim, belief_hidden_dim, hidden_dim, nonlinearity
         )
+        context_in_dim = (
+            legacy_context_length(num_players)
+            if self.legacy_context_features
+            else context_length(num_players)
+        )
         self.context_encoder = ffn_block(
-            context_length(num_players), hidden_dim, hidden_dim, nonlinearity
+            context_in_dim, hidden_dim, hidden_dim, nonlinearity
         )
         if board_interaction_dim > 0:
             self.rank_pair_low_embedding = nn.Embedding(91, board_interaction_dim)
@@ -947,7 +955,12 @@ class BetterFFN(BaseMLPModel):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> BetterFeatureEncoder:
-        return BetterFeatureEncoder(env=env, device=device, dtype=dtype)
+        return BetterFeatureEncoder(
+            env=env,
+            device=device,
+            dtype=dtype,
+            legacy_context_features=self.legacy_context_features,
+        )
 
     def repeat(
         self,
@@ -1012,7 +1025,12 @@ class BetterPolicyFFN(BetterFFN):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> BetterPolicyFeatureEncoder:
-        return BetterPolicyFeatureEncoder(env=env, device=device, dtype=dtype)
+        return BetterPolicyFeatureEncoder(
+            env=env,
+            device=device,
+            dtype=dtype,
+            legacy_context_features=self.legacy_context_features,
+        )
 
 
 class BetterStreetValueFFN(BetterFFN):
@@ -1322,7 +1340,12 @@ class BetterStreetValueFFN(BetterFFN):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> BetterStreetValueFeatureEncoder:
-        return BetterStreetValueFeatureEncoder(env=env, device=device, dtype=dtype)
+        return BetterStreetValueFeatureEncoder(
+            env=env,
+            device=device,
+            dtype=dtype,
+            legacy_context_features=self.legacy_context_features,
+        )
 
 
 def _preflop_class_ranks() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1357,6 +1380,7 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
         policy_rank: int = 64,
         policy_hand_bias_rank: int = 32,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
+        legacy_context_features: bool = False,
     ) -> None:
         super().__init__()
         if range_hidden_dim < 0:
@@ -1381,6 +1405,7 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
         self.policy_rank = policy_rank
         self.policy_hand_bias_rank = policy_hand_bias_rank
         self.nonlinearity = nonlinearity
+        self.legacy_context_features = bool(legacy_context_features)
 
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
@@ -1407,8 +1432,13 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
             hidden_dim,
             nonlinearity,
         )
+        context_in_dim = (
+            legacy_context_length(num_players)
+            if self.legacy_context_features
+            else context_length(num_players)
+        )
         self.context_encoder = ffn_block(
-            context_length(num_players), hidden_dim, hidden_dim, nonlinearity
+            context_in_dim, hidden_dim, hidden_dim, nonlinearity
         )
 
         alpha = 1 / math.sqrt(num_hidden_layers + max(1, num_value_layers))
@@ -1682,7 +1712,12 @@ class BetterPreflopValueFFN(_BetterPreflopCompactFFN):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> BetterPreflopValueFeatureEncoder:
-        return BetterPreflopValueFeatureEncoder(env=env, device=device, dtype=dtype)
+        return BetterPreflopValueFeatureEncoder(
+            env=env,
+            device=device,
+            dtype=dtype,
+            legacy_context_features=self.legacy_context_features,
+        )
 
 
 class BetterPreflopPolicyFFN(_BetterPreflopCompactFFN):
@@ -1765,7 +1800,12 @@ class BetterPreflopPolicyFFN(_BetterPreflopCompactFFN):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> BetterPreflopPolicyFeatureEncoder:
-        return BetterPreflopPolicyFeatureEncoder(env=env, device=device, dtype=dtype)
+        return BetterPreflopPolicyFeatureEncoder(
+            env=env,
+            device=device,
+            dtype=dtype,
+            legacy_context_features=self.legacy_context_features,
+        )
 
 
 class BetterSplitFFN(BaseMLPModel):

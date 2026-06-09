@@ -270,6 +270,7 @@ class ModelConfig:
     value_rank: int = 128
     street_value_heads: StreetValueHeads = StreetValueHeads.both
     preflop_hand_dim: int = 1326
+    legacy_context_features: bool = False
 
     # Better TRM parameters
     num_recursions: int = 6

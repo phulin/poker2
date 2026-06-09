@@ -22,7 +22,7 @@ from p2.env.card_utils import (
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
 from p2.models.mlp import RebelFFN
-from p2.models.mlp.better_features import context_length
+from p2.models.mlp.better_features import context_length, legacy_context_length
 from p2.models.mlp.better_ffn import (
     BetterPolicyFFN,
     BetterPreflopPolicyFFN,
@@ -115,6 +115,31 @@ def _compile_setting(cfg: Config) -> str:
             f"got {cfg.model.compile!r}"
         )
     return value
+
+
+def _infer_legacy_context_features_from_state(
+    state_dict: dict[str, torch.Tensor],
+    *,
+    num_players: int,
+) -> bool | None:
+    """Infer BetterFFN context layout from a saved context encoder input width."""
+    candidates = (
+        "context_encoder.norm.weight",
+        "policy_model.context_encoder.norm.weight",
+        "value_model.context_encoder.norm.weight",
+    )
+    expected_current = context_length(num_players)
+    expected_legacy = legacy_context_length(num_players)
+    for key in candidates:
+        tensor = state_dict.get(key)
+        if tensor is None or tensor.ndim != 1:
+            continue
+        width = int(tensor.shape[0])
+        if width == expected_legacy:
+            return True
+        if width == expected_current:
+            return False
+    return None
 
 
 def _compile_kwargs(cfg: Config) -> dict[str, object]:
@@ -241,7 +266,11 @@ class RebelCFRTrainer:
         # Model
         if cfg.model.name == ModelType.better_ffn:
             self.model = self._make_better_split_ffn()
-            num_context_features = context_length(self.num_players)
+            num_context_features = (
+                legacy_context_length(self.num_players)
+                if cfg.model.legacy_context_features
+                else context_length(self.num_players)
+            )
         elif cfg.model.name == ModelType.better_trm:
             self.model = BetterTRM(
                 num_actions=self.num_actions,
@@ -640,6 +669,7 @@ class RebelCFRTrainer:
             policy_rank=cfg.model.policy_rank,
             policy_hand_bias_rank=cfg.model.policy_hand_bias_rank,
             nonlinearity=cfg.model.nonlinearity,
+            legacy_context_features=cfg.model.legacy_context_features,
         )
         if int(getattr(cfg.model, "preflop_hand_dim", NUM_HANDS)) == 169:
             return BetterSplitFFN(
@@ -744,6 +774,7 @@ class RebelCFRTrainer:
             "policy_rank",
             "policy_hand_bias_rank",
             "street_value_heads",
+            "legacy_context_features",
         )
         original_model_arch = {
             key: getattr(self.cfg.model, key, None) for key in model_arch_keys
@@ -755,6 +786,18 @@ class RebelCFRTrainer:
                 setattr(self.cfg.model, key, checkpoint_model_config[key])
         if checkpoint_value_heads is not None:
             self.cfg.model.street_value_heads = checkpoint_value_heads
+        if "legacy_context_features" not in checkpoint_model_config:
+            model_state_for_shape = checkpoint.get("model", {})
+            inferred_legacy = _infer_legacy_context_features_from_state(
+                model_state_for_shape,
+                num_players=(
+                    int(checkpoint_num_players)
+                    if checkpoint_num_players is not None
+                    else self.num_players
+                ),
+            )
+            if inferred_legacy is not None:
+                self.cfg.model.legacy_context_features = inferred_legacy
         self.cfg.model.preflop_hand_dim = int(
             checkpoint_model_config.get("preflop_hand_dim", NUM_HANDS) or NUM_HANDS
         )
