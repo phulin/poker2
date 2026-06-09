@@ -1,6 +1,7 @@
 import type { ModelCacheProgress } from "./modelCache.js";
 import type {
   BetterFfnManifest,
+  BetterFfnModelSetManifest,
   BrowserEvaluationResult,
   EvaluateSpotRequest,
   SolveProgress,
@@ -8,6 +9,7 @@ import type {
 
 export interface SolverRuntimeInfo {
   manifest: BetterFfnManifest;
+  modelSet?: BetterFfnModelSetManifest;
   cached: boolean;
   usingSubgroups: boolean;
 }

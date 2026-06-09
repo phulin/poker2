@@ -1,7 +1,14 @@
 import { createManifestAllInTableProvider } from "./allInTables.js";
-import { BetterFfnWebGpuModel, createBrowserCfrEvaluator, createBrowserDevice } from "./browser.js";
+import { createBrowserCfrEvaluator, createBrowserDevice } from "./browser.js";
+import { BetterFfnWebGpuModel } from "./betterFfnWebGpuModel.js";
 import type { BrowserCfrEvaluator } from "./browserEvaluator.js";
-import { loadModelBytesWithCache } from "./modelCache.js";
+import { isLoadedModelSetBytes, loadRuntimeBytesWithCache } from "./modelCache.js";
+import {
+  BetterFfnModelRegistry,
+  isBetterFfnModelRegistry,
+  rootModelForRuntime,
+  type BetterFfnRuntime,
+} from "./modelRegistry.js";
 import type { SolverWorkerRequest, SolverWorkerResponse } from "./solverWorkerMessages.js";
 
 const workerScope = globalThis as unknown as {
@@ -15,7 +22,7 @@ const workerScope = globalThis as unknown as {
 };
 
 let device: GPUDevice | undefined;
-let model: BetterFfnWebGpuModel | undefined;
+let runtime: BetterFfnRuntime | undefined;
 let evaluator: BrowserCfrEvaluator | undefined;
 let initPromise: Promise<void> | undefined;
 
@@ -30,7 +37,6 @@ function errorMessage(error: unknown): string {
 async function initRuntime(manifestUrl: string): Promise<void> {
   if (initPromise) return await initPromise;
   initPromise = (async () => {
-    const absoluteManifestUrl = new URL(manifestUrl, workerScope.location.href).toString();
     post({
       type: "model-progress",
       progress: { phase: "manifest", message: "Requesting WebGPU device" },
@@ -38,28 +44,69 @@ async function initRuntime(manifestUrl: string): Promise<void> {
     const nextDevice = await createBrowserDevice({
       onError: (message) => post({ type: "webgpu-error", message }),
     });
-    const loaded = await loadModelBytesWithCache(manifestUrl, {
+    const loaded = await loadRuntimeBytesWithCache(manifestUrl, {
       onProgress: (progress) => post({ type: "model-progress", progress }),
     });
     post({
       type: "model-progress",
-      progress: { phase: "manifest", message: "Creating WebGPU model" },
+      progress: { phase: "manifest", message: "Creating WebGPU runtime" },
     });
-    const nextModel = BetterFfnWebGpuModel.fromBuffers(nextDevice, loaded.manifest, loaded.weights);
-    nextModel.allInTableProvider = createManifestAllInTableProvider(
-      nextModel.manifest,
-      absoluteManifestUrl,
-      undefined,
-      nextDevice,
-    );
-    const nextEvaluator = createBrowserCfrEvaluator(nextDevice, nextModel);
+    const attachAllInProvider = (
+      model: BetterFfnWebGpuModel,
+      stageManifestUrl: string,
+    ): BetterFfnWebGpuModel => {
+      model.allInTableProvider = createManifestAllInTableProvider(
+        model.manifest,
+        stageManifestUrl,
+        undefined,
+        nextDevice,
+      );
+      return model;
+    };
+    const nextRuntime: BetterFfnRuntime = isLoadedModelSetBytes(loaded)
+      ? new BetterFfnModelRegistry(
+          {
+            flop: attachAllInProvider(
+              BetterFfnWebGpuModel.fromBuffers(
+                nextDevice,
+                loaded.stages.flop.manifest,
+                loaded.stages.flop.weights,
+              ),
+              loaded.stages.flop.manifestUrl,
+            ),
+            turn: attachAllInProvider(
+              BetterFfnWebGpuModel.fromBuffers(
+                nextDevice,
+                loaded.stages.turn.manifest,
+                loaded.stages.turn.weights,
+              ),
+              loaded.stages.turn.manifestUrl,
+            ),
+            river: attachAllInProvider(
+              BetterFfnWebGpuModel.fromBuffers(
+                nextDevice,
+                loaded.stages.river.manifest,
+                loaded.stages.river.weights,
+              ),
+              loaded.stages.river.manifestUrl,
+            ),
+          },
+          loaded.manifest.defaultStage,
+        )
+      : attachAllInProvider(
+          BetterFfnWebGpuModel.fromBuffers(nextDevice, loaded.manifest, loaded.weights),
+          loaded.manifestUrl,
+        );
+    const nextModel = rootModelForRuntime(nextRuntime);
+    const nextEvaluator = createBrowserCfrEvaluator(nextDevice, nextRuntime);
     device = nextDevice;
-    model = nextModel;
+    runtime = nextRuntime;
     evaluator = nextEvaluator;
     post({
       type: "ready",
       runtime: {
         manifest: nextModel.manifest,
+        ...(isLoadedModelSetBytes(loaded) ? { modelSet: loaded.manifest } : {}),
         cached: loaded.cached,
         usingSubgroups: nextDevice.features.has("subgroups" as GPUFeatureName),
       },
@@ -91,7 +138,7 @@ async function solve(id: number, request: SolverWorkerRequest & { type: "solve" 
 async function prefetchAllInTable(board: readonly number[]): Promise<void> {
   try {
     await initPromise;
-    await model?.allInTableProvider?.prefetchForBoard?.(board);
+    await rootModelForRuntime(runtime!)?.allInTableProvider?.prefetchForBoard?.(board);
   } catch {
     // Prefetch is opportunistic; the solve path will surface any required fetch errors.
   }
@@ -99,10 +146,13 @@ async function prefetchAllInTable(board: readonly number[]): Promise<void> {
 
 function disposeRuntime(): void {
   evaluator?.dispose();
-  model?.dispose();
+  if (runtime) {
+    if (isBetterFfnModelRegistry(runtime)) runtime.dispose();
+    else runtime.dispose();
+  }
   device?.destroy();
   evaluator = undefined;
-  model = undefined;
+  runtime = undefined;
   device = undefined;
   initPromise = undefined;
 }

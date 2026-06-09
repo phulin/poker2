@@ -4,16 +4,19 @@ This folder contains an isolated TypeScript/WebGPU harness for evaluating a
 BetterFFN-backed local CFR problem. It supports:
 
 - A Node/Dawn parity path that can still ask Python to produce CFR fixtures.
-- A browser-safe exported-model path that loads `model.json` and compressed
-  fp16 `weights.bin.gz`, evaluates sparse public-tree leaves with BetterFFN
-  inference in WebGPU, and runs CFR without Python at runtime.
+- A browser-safe exported-model path that loads either one `model.json` or a
+  curriculum `model_set.json` with flop/turn/river BetterFFN exports, evaluates
+  sparse public-tree leaves with the selected WebGPU model, and runs CFR without
+  Python at runtime.
 - A Vite/Solid spot-solver UI that caches the exported model in IndexedDB,
   guides hero-card/board/action entry, and runs local WebGPU CFR solves.
 
 ## Shape
 
 - `python/export_model.py` converts a PyTorch `BetterFFN` checkpoint into
-  `model.json` plus gzip-compressed row-major fp16 `weights.bin.gz`.
+  `model.json` plus gzip-compressed row-major fp16 `weights.bin.gz`; its
+  `--curriculum` mode writes `S_flop/`, `S_turn/`, `S_river/`, and a
+  `model_set.json` street registry.
 - `python/reference.py` loads a PyTorch `BetterFFN` checkpoint, replays a
   heads-up action-bin sequence, emits model-derived local CFR fixtures, and
   computes the Python reference result.
@@ -22,8 +25,8 @@ BetterFFN-backed local CFR problem. It supports:
 - `src/hunlEnv.ts` ports the single-state public HUNL action-bin environment.
 - `src/browserEvaluator.ts` replays prefixes through the sparse public-tree CFR
   resolver and returns beliefs/action probabilities. Sparse CFR tensor updates
-  run through WGSL kernels while model leaf evaluation remains on the exported
-  BetterFFN WebGPU runtime.
+  run through WGSL kernels while model leaf evaluation is routed through either
+  the single BetterFFN runtime or the curriculum street registry.
 - `src/cards.ts`, `src/beliefs.ts`, and `src/modelCache.ts` provide browser-safe
   card parsing, public-card belief initialization, blocked combo masks, streamed
   model download progress, and IndexedDB cache invalidation.
@@ -78,6 +81,23 @@ root:
 uv run python website/python/export_model.py --snapshot checkpoints-rebel/rebel_latest.pt --out website/public/models/rebel_latest
 ```
 
+Export promoted postflop curriculum checkpoints:
+
+```bash
+uv run python website/python/export_model.py \
+  --curriculum \
+  --flop-snapshot checkpoints-rebel/S_flop.pt \
+  --turn-snapshot checkpoints-rebel/S_turn.pt \
+  --river-snapshot checkpoints-rebel/S_river.pt \
+  --out website/public/models/curriculum
+```
+
+This writes `website/public/models/curriculum/model_set.json` plus one existing
+BetterFFN export per stage. `VITE_MODEL_MANIFEST_URL` may point to either
+`.../model.json` or `.../model_set.json`. Curriculum model sets are postflop
+only: flop, turn, and river public states are supported; preflop handoff is not
+part of this website path.
+
 Generate optional WebGPU all-in payoff assets. These are model-independent and
 served from `/allin`, while the exported model manifest embeds references to
 that shared asset root:
@@ -122,12 +142,25 @@ npm run eval -- --snapshot checkpoints-rebel/rebel_latest.pt --spot 1 --iteratio
 
 `WEBGPU_BACKEND` defaults to `vulkan`. Set it if you need another Dawn backend.
 
-For the browser spot solver, export the model into
-`website/public/models/rebel_latest` and run `npm run dev` or
-`npm run build && npm run preview`. The app loads `/models/rebel_latest/model.json`
-and the manifest-referenced `/models/rebel_latest/weights.bin.gz`, decompressing
-and caching the decoded weights in IndexedDB until the manifest weight hash or
-byte length changes.
+For the browser spot solver, export a single model into
+`website/public/models/rebel_latest` or a curriculum set into
+`website/public/models/curriculum`, then run `npm run dev` or
+`npm run build && npm run preview`. The default local app still loads
+`/models/rebel_latest/model.json`; set
+`VITE_MODEL_MANIFEST_URL=/models/curriculum/model_set.json` to load the
+curriculum registry. Each stage manifest and weights blob gets its own
+IndexedDB cache key.
+
+Upload assets to R2:
+
+```bash
+npm run upload:assets -- --source-model public/models/rebel_latest --latest
+npm run upload:assets -- --source-model-set public/models/curriculum/model_set.json --latest
+```
+
+The curriculum upload stages all three model manifests and weights under the
+immutable `models/<version>/` prefix. With `--latest`, it also publishes
+`models/curriculum_latest/model_set.json`.
 
 The same build/export flow also enables `website/public/benchmark.html`,
 which times repeated browser evaluations with configurable spots, CFR settings,

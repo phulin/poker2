@@ -164,6 +164,27 @@ export interface BetterFfnManifest {
   };
 }
 
+export type BetterFfnCurriculumStreet = "flop" | "turn" | "river";
+
+export interface BetterFfnModelSetStreetEntry {
+  label: string;
+  manifest: string;
+}
+
+export interface BetterFfnModelSetManifest {
+  schemaVersion: 1;
+  format: "p2.better_ffn.curriculum.webgpu";
+  defaultStage: BetterFfnCurriculumStreet;
+  source?: {
+    exporter?: string;
+    curriculum?: string;
+    promotedCheckpoints?: Partial<Record<BetterFfnCurriculumStreet, string>>;
+    [key: string]: unknown;
+  };
+  streets: Record<BetterFfnCurriculumStreet, BetterFfnModelSetStreetEntry>;
+  metadata?: Record<string, unknown>;
+}
+
 export interface BrowserCfrInitialState {
   button?: PlayerIndex;
   stack?: number;

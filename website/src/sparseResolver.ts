@@ -3,6 +3,7 @@ import { normalizeBeliefVector } from "./beliefs.js";
 import type {
   BetterFfnWebGpuModel,
   ExactBelief,
+  GpuHandValuePrediction,
   PreparedBatchFeatures,
 } from "./betterFfnWebGpuModel.js";
 import { HAND_COMBOS, handOverlapsCards } from "./cards.js";
@@ -13,6 +14,11 @@ import {
   showdownTerminalRankCodes,
   showdownTerminalValues,
 } from "./hunlEnv.js";
+import {
+  modelForRuntimeStreet,
+  rootModelForRuntime,
+  type BetterFfnRuntime,
+} from "./modelRegistry.js";
 import { SparseCfrGpuKernels } from "./sparseCfr/SparseCfrGpuKernels.js";
 import type { SparseGpuTreeBuffers, SparseGpuTreeData } from "./sparseCfr/treeBuffers.js";
 import type { LocalSolveResult, PlayerIndex } from "./types.js";
@@ -63,6 +69,7 @@ interface SparseLeafGpuBatch {
   modelEnvs: PublicHunlEnv[];
   modelValuePreChance: boolean[];
   modelNodeIndices: Uint32Array<ArrayBuffer>;
+  modelGroups: SparseLeafModelGroup[];
   showdownNodeIndices: Uint32Array<ArrayBuffer>;
   showdownRankCodes: Uint32Array<ArrayBuffer>;
   showdownRankOrdinals: Uint32Array<ArrayBuffer>;
@@ -74,6 +81,18 @@ interface SparseLeafGpuBatch {
   showdownPayoffs: Float32Array<ArrayBuffer>;
   allInNodeIndices: Uint32Array<ArrayBuffer>;
   allInScaleFactors: Float32Array<ArrayBuffer>;
+}
+
+interface SparseLeafModelGroup {
+  model: BetterFfnWebGpuModel;
+  modelEnvs: PublicHunlEnv[];
+  modelValuePreChance: boolean[];
+  modelNodeIndices: Uint32Array<ArrayBuffer>;
+}
+
+interface SparseStaticGpuModelGroup extends SparseLeafModelGroup {
+  modelLeafNodeBuffer: GPUBuffer;
+  preparedLeafFeatures?: PreparedBatchFeatures;
 }
 
 interface SparseStaticGpuData {
@@ -91,6 +110,7 @@ interface SparseStaticGpuData {
   showdownPayoffBuffer: GPUBuffer;
   allInNodeBuffer: GPUBuffer;
   allInScaleBuffer: GPUBuffer;
+  modelGroups: SparseStaticGpuModelGroup[];
   allInTableBuffer?: GPUBuffer;
   allInComboPermBuffer?: GPUBuffer;
   allInContext?: AllInTableContext;
@@ -155,17 +175,19 @@ export interface SparseResolveOptions {
 
 export class SparseCfrResolver {
   readonly model: BetterFfnWebGpuModel;
+  readonly runtime: BetterFfnRuntime;
   readonly numActions: number;
   private readonly actionMasksByDepth: number[][] | undefined;
   private readonly gpuKernels?: SparseCfrGpuKernels;
   private readonly treeCache = new Map<string, SparseTreeCacheEntry>();
 
-  constructor(model: BetterFfnWebGpuModel) {
-    this.model = model;
-    this.numActions = model.manifest.architecture.numActions;
+  constructor(model: BetterFfnRuntime) {
+    this.runtime = model;
+    this.model = rootModelForRuntime(model);
+    this.numActions = this.model.manifest.architecture.numActions;
     this.actionMasksByDepth = this.buildActionMasksByDepth();
-    if (model.device) {
-      this.gpuKernels = new SparseCfrGpuKernels(model.device);
+    if (this.model.device) {
+      this.gpuKernels = new SparseCfrGpuKernels(this.model.device);
     }
   }
 
@@ -374,10 +396,18 @@ export class SparseCfrResolver {
     const allInComboPermBuffer = allInContext
       ? makeStorageBuffer(device, allInContext.comboPerms ?? identityPerms)
       : undefined;
-    const preparedLeafFeatures =
-      leafBatch.modelEnvs.length > 0 && this.model.prepareBatchFeatures
-        ? this.model.prepareBatchFeatures(leafBatch.modelEnvs, leafBatch.modelValuePreChance)
-        : undefined;
+    const modelGroups = leafBatch.modelGroups.map((group) => {
+      const modelLeafNodeBuffer = makeStorageBuffer(device, group.modelNodeIndices);
+      const preparedLeafFeatures =
+        group.modelEnvs.length > 0 && group.model.prepareBatchFeatures
+          ? group.model.prepareBatchFeatures(group.modelEnvs, group.modelValuePreChance)
+          : undefined;
+      return {
+        ...group,
+        modelLeafNodeBuffer,
+        ...(preparedLeafFeatures ? { preparedLeafFeatures } : {}),
+      };
+    });
     const staticData: SparseStaticGpuData = {
       treeBuffers,
       leafBatch,
@@ -393,10 +423,10 @@ export class SparseCfrResolver {
       showdownPayoffBuffer,
       allInNodeBuffer,
       allInScaleBuffer,
+      modelGroups,
       ...(allInTableBuffer ? { allInTableBuffer } : {}),
       ...(allInComboPermBuffer ? { allInComboPermBuffer } : {}),
       ...(allInContext ? { allInContext } : {}),
-      ...(preparedLeafFeatures ? { preparedLeafFeatures } : {}),
       dispose: () => {
         treeBuffers.dispose();
         modelLeafNodeBuffer.destroy();
@@ -410,9 +440,12 @@ export class SparseCfrResolver {
         showdownPayoffBuffer.destroy();
         allInNodeBuffer.destroy();
         allInScaleBuffer.destroy();
+        for (const group of modelGroups) {
+          group.modelLeafNodeBuffer.destroy();
+          group.preparedLeafFeatures?.dispose();
+        }
         allInTableBuffer?.destroy();
         allInComboPermBuffer?.destroy();
-        preparedLeafFeatures?.dispose();
         staticData.workspace?.dispose();
       },
     };
@@ -1203,7 +1236,7 @@ export class SparseCfrResolver {
           leafBatch,
           cfrAvg ? beliefsAvgBuffer! : beliefsBuffer,
           valuesBuffer,
-          staticGpu.modelLeafNodeBuffer,
+          staticGpu.modelGroups,
           modelLeafBeliefsBuffer,
           staticGpu.showdownNodeBuffer,
           staticGpu.showdownRankBuffer,
@@ -1219,7 +1252,6 @@ export class SparseCfrResolver {
           staticGpu.allInTableBuffer,
           staticGpu.allInComboPermBuffer,
           staticGpu.allInContext,
-          staticGpu.preparedLeafFeatures,
           exactBelief,
           undefined,
           encodeExpectedThenMaybeNextPrefix(
@@ -1255,7 +1287,7 @@ export class SparseCfrResolver {
             leafBatch,
             cfrAvg ? beliefsAvgBuffer! : beliefsBuffer,
             valuesBuffer,
-            staticGpu.modelLeafNodeBuffer,
+            staticGpu.modelGroups,
             modelLeafBeliefsBuffer,
             staticGpu.showdownNodeBuffer,
             staticGpu.showdownRankBuffer,
@@ -1271,7 +1303,6 @@ export class SparseCfrResolver {
             staticGpu.allInTableBuffer,
             staticGpu.allInComboPermBuffer,
             staticGpu.allInContext,
-            staticGpu.preparedLeafFeatures,
             exactBelief,
             undefined,
             encodeExpectedThenMaybeNextPrefix(
@@ -1304,7 +1335,7 @@ export class SparseCfrResolver {
               leafBatch,
               cfrAvg ? beliefsAvgBuffer! : beliefsBuffer,
               valuesBuffer,
-              staticGpu.modelLeafNodeBuffer,
+              staticGpu.modelGroups,
               modelLeafBeliefsBuffer,
               staticGpu.showdownNodeBuffer,
               staticGpu.showdownRankBuffer,
@@ -1320,7 +1351,6 @@ export class SparseCfrResolver {
               staticGpu.allInTableBuffer,
               staticGpu.allInComboPermBuffer,
               staticGpu.allInContext,
-              staticGpu.preparedLeafFeatures,
               exactBelief,
               undefined,
               encodeExpectedThenMaybeNextPrefix(combinePrefixWithLeaf ? t + 1 : undefined),
@@ -1363,7 +1393,7 @@ export class SparseCfrResolver {
     leafBatch: SparseLeafGpuBatch,
     leafBeliefsBuffer: GPUBuffer,
     valuesBuffer: GPUBuffer,
-    modelLeafNodeBuffer: GPUBuffer,
+    modelGroups: readonly SparseStaticGpuModelGroup[],
     modelLeafBeliefsBuffer: GPUBuffer,
     showdownNodeBuffer: GPUBuffer,
     showdownRankBuffer: GPUBuffer,
@@ -1379,7 +1409,6 @@ export class SparseCfrResolver {
     allInTableBuffer?: GPUBuffer,
     allInComboPermBuffer?: GPUBuffer,
     allInContext?: AllInTableContext,
-    preparedLeafFeatures?: PreparedBatchFeatures,
     exactBelief?: ExactBelief,
     beforeLeafValues?: (encoder: GPUCommandEncoder) => GPUBuffer[],
     afterLeafValues?: (encoder: GPUCommandEncoder) => GPUBuffer[],
@@ -1465,42 +1494,55 @@ export class SparseCfrResolver {
       return () => undefined;
     }
 
-    let scatterParams: GPUBuffer[] | undefined;
-    const prediction = await this.model.predictBatchHandValuesGpu(
-      leafBatch.modelEnvs,
-      modelLeafBeliefsBuffer,
-      preparedLeafFeatures,
-      (encoder, handValues) => {
-        scatterParams = this.gpuKernels!.encodeScatterNodeValues(
-          encoder,
-          treeBuffers,
-          modelLeafNodeBuffer,
-          handValues,
-          valuesBuffer,
-          leafBatch.modelNodeIndices.length,
-        );
-        deferredParams.push(...(afterLeafValues?.(encoder) ?? []));
-      },
-      exactBelief,
-      (encoder) => {
-        deferredParams.push(...(beforeLeafValues?.(encoder) ?? []));
-        encodeShowdown(encoder);
-        encodeAllIn(encoder);
-        deferredParams.push(
-          ...this.gpuKernels!.encodeGatherNodeBeliefs(
+    const predictions: GpuHandValuePrediction[] = [];
+    for (let groupIndex = 0; groupIndex < modelGroups.length; groupIndex += 1) {
+      const group = modelGroups[groupIndex]!;
+      const isFirstGroup = groupIndex === 0;
+      const isLastGroup = groupIndex === modelGroups.length - 1;
+      let scatterParams: GPUBuffer[] | undefined;
+      const prediction = await group.model.predictBatchHandValuesGpu(
+        group.modelEnvs,
+        modelLeafBeliefsBuffer,
+        group.preparedLeafFeatures,
+        (encoder, handValues) => {
+          scatterParams = this.gpuKernels!.encodeScatterNodeValues(
             encoder,
             treeBuffers,
-            modelLeafNodeBuffer,
-            leafBeliefsBuffer,
-            modelLeafBeliefsBuffer,
-            leafBatch.modelNodeIndices.length,
-          ),
-        );
-      },
-    );
-    this.gpuKernels.releaseParams(scatterParams ?? []);
+            group.modelLeafNodeBuffer,
+            handValues,
+            valuesBuffer,
+            group.modelNodeIndices.length,
+          );
+          if (isLastGroup) {
+            deferredParams.push(...(afterLeafValues?.(encoder) ?? []));
+          }
+        },
+        exactBelief,
+        (encoder) => {
+          if (isFirstGroup) {
+            deferredParams.push(...(beforeLeafValues?.(encoder) ?? []));
+            encodeShowdown(encoder);
+            encodeAllIn(encoder);
+          }
+          deferredParams.push(
+            ...this.gpuKernels!.encodeGatherNodeBeliefs(
+              encoder,
+              treeBuffers,
+              group.modelLeafNodeBuffer,
+              leafBeliefsBuffer,
+              modelLeafBeliefsBuffer,
+              group.modelNodeIndices.length,
+            ),
+          );
+        },
+      );
+      predictions.push(prediction);
+      this.gpuKernels.releaseParams(scatterParams ?? []);
+    }
     this.gpuKernels.releaseParams(deferredParams.splice(0));
-    return () => prediction.dispose();
+    return () => {
+      for (const prediction of predictions) prediction.dispose();
+    };
   }
 
   private sparseGpuWorkspace(
@@ -1580,6 +1622,14 @@ export class SparseCfrResolver {
     const modelEnvs: PublicHunlEnv[] = [];
     const modelValuePreChance: boolean[] = [];
     const modelNodeIndices: number[] = [];
+    const groupedModelLeaves = new Map<
+      BetterFfnWebGpuModel,
+      {
+        modelEnvs: PublicHunlEnv[];
+        modelValuePreChance: boolean[];
+        modelNodeIndices: number[];
+      }
+    >();
     const showdownNodeIndices: number[] = [];
     const showdownRankCodes: number[] = [];
     const showdownRankOrdinals: number[] = [];
@@ -1601,9 +1651,22 @@ export class SparseCfrResolver {
             Math.max(node.env.scale, 1.0e-8),
         );
       } else if (!node.env.done) {
+        const model = modelForRuntimeStreet(this.runtime, node.env.street);
         modelEnvs.push(node.env);
         modelValuePreChance.push(node.newStreet);
         modelNodeIndices.push(nodeIndex);
+        let group = groupedModelLeaves.get(model);
+        if (!group) {
+          group = {
+            modelEnvs: [],
+            modelValuePreChance: [],
+            modelNodeIndices: [],
+          };
+          groupedModelLeaves.set(model, group);
+        }
+        group.modelEnvs.push(node.env);
+        group.modelValuePreChance.push(node.newStreet);
+        group.modelNodeIndices.push(nodeIndex);
       } else if (!node.env.hasFolded[0] && !node.env.hasFolded[1]) {
         showdownNodeIndices.push(nodeIndex);
         const rankCodes = showdownTerminalRankCodes(node.env);
@@ -1648,6 +1711,12 @@ export class SparseCfrResolver {
       modelEnvs,
       modelValuePreChance,
       modelNodeIndices: new Uint32Array(modelNodeIndices),
+      modelGroups: Array.from(groupedModelLeaves.entries()).map(([model, group]) => ({
+        model,
+        modelEnvs: group.modelEnvs,
+        modelValuePreChance: group.modelValuePreChance,
+        modelNodeIndices: new Uint32Array(group.modelNodeIndices),
+      })),
       showdownNodeIndices: new Uint32Array(showdownNodeIndices),
       showdownRankCodes: new Uint32Array(showdownRankCodes),
       showdownRankOrdinals: new Uint32Array(showdownRankOrdinals),
@@ -2151,6 +2220,15 @@ export class SparseCfrResolver {
     const modelValuePreChance: boolean[] = [];
     const modelBeliefs: Float32Array<ArrayBuffer>[] = [];
     const modelValueBases: number[] = [];
+    const groupedModelLeaves = new Map<
+      BetterFfnWebGpuModel,
+      {
+        envs: PublicHunlEnv[];
+        valuePreChance: boolean[];
+        beliefs: Float32Array<ArrayBuffer>[];
+        valueBases: number[];
+      }
+    >();
     for (let nodeIndex = 0; nodeIndex < tree.nodes.length; nodeIndex += 1) {
       const node = tree.nodes[nodeIndex]!;
       if (!node.leaf) continue;
@@ -2169,29 +2247,41 @@ export class SparseCfrResolver {
           latestValues.set(showdownTerminalValues(node.env, nodeBeliefs), valueBase);
         }
       } else {
+        const model = modelForRuntimeStreet(this.runtime, node.env.street);
         modelEnvs.push(node.env);
         modelValuePreChance.push(node.newStreet);
         modelBeliefs.push(nodeBeliefs);
         modelValueBases.push(valueBase);
+        let group = groupedModelLeaves.get(model);
+        if (!group) {
+          group = { envs: [], valuePreChance: [], beliefs: [], valueBases: [] };
+          groupedModelLeaves.set(model, group);
+        }
+        group.envs.push(node.env);
+        group.valuePreChance.push(node.newStreet);
+        group.beliefs.push(nodeBeliefs);
+        group.valueBases.push(valueBase);
       }
     }
 
     if (modelEnvs.length > 0) {
       const beliefSize = 2 * NUM_HANDS;
-      const batchedBeliefs = new Float32Array(modelEnvs.length * beliefSize);
-      for (let i = 0; i < modelBeliefs.length; i += 1) {
-        batchedBeliefs.set(modelBeliefs[i]!, i * beliefSize);
-      }
-      const handValues = await this.model.predictBatchHandValues(
-        modelEnvs,
-        batchedBeliefs,
-        modelValuePreChance,
-      );
-      for (let i = 0; i < modelValueBases.length; i += 1) {
-        latestValues.set(
-          handValues.subarray(i * beliefSize, (i + 1) * beliefSize),
-          modelValueBases[i]!,
+      for (const [model, group] of groupedModelLeaves) {
+        const batchedBeliefs = new Float32Array(group.envs.length * beliefSize);
+        for (let i = 0; i < group.beliefs.length; i += 1) {
+          batchedBeliefs.set(group.beliefs[i]!, i * beliefSize);
+        }
+        const handValues = await model.predictBatchHandValues(
+          group.envs,
+          batchedBeliefs,
+          group.valuePreChance,
         );
+        for (let i = 0; i < group.valueBases.length; i += 1) {
+          latestValues.set(
+            handValues.subarray(i * beliefSize, (i + 1) * beliefSize),
+            group.valueBases[i]!,
+          );
+        }
       }
     }
   }

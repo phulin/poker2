@@ -3,9 +3,12 @@ import { BetterFfnWebGpuModel } from "./betterFfnWebGpuModel.js";
 import { BrowserCfrEvaluator, createBrowserCfrEvaluator } from "./browserEvaluator.js";
 import {
   decodeModelWeights,
+  isLoadedModelSetBytes,
   loadModelBytesWithCache,
+  loadRuntimeBytesWithCache,
   type ModelCacheProgress,
 } from "./modelCache.js";
+import { BetterFfnModelRegistry, type BetterFfnRuntime } from "./modelRegistry.js";
 import { parseBetterFfnManifest } from "./modelFormat.js";
 import type { BetterFfnManifest } from "./types.js";
 
@@ -19,6 +22,20 @@ function absoluteBrowserUrl(url: string): string {
     return new URL(url, "http://localhost/").toString();
   }
   return new URL(url, globalThis.location.href).toString();
+}
+
+function attachManifestAllInProvider(
+  model: BetterFfnWebGpuModel,
+  manifestUrl: string,
+  device: GPUDevice,
+): BetterFfnWebGpuModel {
+  model.allInTableProvider = createManifestAllInTableProvider(
+    model.manifest,
+    absoluteBrowserUrl(manifestUrl),
+    undefined,
+    device,
+  );
+  return model;
 }
 
 function isLoopbackHost(hostname: string): boolean {
@@ -124,13 +141,7 @@ export async function loadBrowserModel(
   const weights = await decodeModelWeights(await weightsResponse.arrayBuffer(), manifest);
   const modelDevice = device ?? (await createBrowserDevice());
   const model = BetterFfnWebGpuModel.fromBuffers(modelDevice, manifest, weights);
-  model.allInTableProvider = createManifestAllInTableProvider(
-    manifest,
-    absoluteBrowserUrl(manifestUrl),
-    undefined,
-    modelDevice,
-  );
-  return model;
+  return attachManifestAllInProvider(model, manifestUrl, modelDevice);
 }
 
 export async function loadBrowserModelCached(
@@ -150,13 +161,35 @@ export async function loadBrowserModelCached(
   const loaded = await loadModelBytesWithCache(manifestUrl, cacheOptions);
   const modelDevice = options.device ?? (await createBrowserDevice());
   const model = BetterFfnWebGpuModel.fromBuffers(modelDevice, loaded.manifest, loaded.weights);
-  model.allInTableProvider = createManifestAllInTableProvider(
-    loaded.manifest,
-    absoluteBrowserUrl(manifestUrl),
-    undefined,
-    modelDevice,
-  );
-  return model;
+  return attachManifestAllInProvider(model, loaded.manifestUrl, modelDevice);
+}
+
+export async function loadBrowserRuntimeCached(
+  manifestUrl: string,
+  options: {
+    device?: GPUDevice;
+    onProgress?: (progress: ModelCacheProgress) => void;
+  } = {},
+): Promise<BetterFfnRuntime> {
+  const cacheOptions: { onProgress?: (progress: ModelCacheProgress) => void } = {};
+  if (options.onProgress) cacheOptions.onProgress = options.onProgress;
+  const loaded = await loadRuntimeBytesWithCache(manifestUrl, cacheOptions);
+  const modelDevice = options.device ?? (await createBrowserDevice());
+  if (!isLoadedModelSetBytes(loaded)) {
+    const model = BetterFfnWebGpuModel.fromBuffers(modelDevice, loaded.manifest, loaded.weights);
+    return attachManifestAllInProvider(model, loaded.manifestUrl, modelDevice);
+  }
+
+  const stages = {} as ConstructorParameters<typeof BetterFfnModelRegistry>[0];
+  for (const street of ["flop", "turn", "river"] as const) {
+    const stage = loaded.stages[street];
+    stages[street] = attachManifestAllInProvider(
+      BetterFfnWebGpuModel.fromBuffers(modelDevice, stage.manifest, stage.weights),
+      stage.manifestUrl,
+      modelDevice,
+    );
+  }
+  return new BetterFfnModelRegistry(stages, loaded.manifest.defaultStage);
 }
 
 export function loadBrowserModelFromBuffers(
@@ -183,4 +216,5 @@ export {
   BrowserCfrEvaluator,
   createBrowserCfrEvaluator,
   loadModelBytesWithCache,
+  loadRuntimeBytesWithCache,
 };

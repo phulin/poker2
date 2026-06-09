@@ -1,8 +1,9 @@
 import { performance } from "node:perf_hooks";
 import { BrowserCfrEvaluator } from "./browserEvaluator.js";
 import { createDawnDevice } from "./gpu.js";
+import { rootModelForRuntime } from "./modelRegistry.js";
 import { resolveCfrDefaults } from "./modelFormat.js";
-import { loadNodeModel } from "./nodeModel.js";
+import { loadNodeRuntime } from "./nodeModel.js";
 
 interface BenchOptions {
   manifest: string;
@@ -90,8 +91,9 @@ function stats(samples: number[]): {
 
 const options = readArgs();
 const device = await createDawnDevice();
-const model = await loadNodeModel(device, options.manifest, options.weights);
-const evaluator = new BrowserCfrEvaluator(device, model);
+const runtime = await loadNodeRuntime(device, options.manifest, options.weights);
+const model = rootModelForRuntime(runtime);
+const evaluator = new BrowserCfrEvaluator(device, runtime);
 const cfrDefaults = resolveCfrDefaults(model.manifest);
 const iterations = options.iterations ?? cfrDefaults.iterations;
 const depth = options.depth ?? cfrDefaults.depth;
@@ -143,6 +145,6 @@ try {
   );
 } finally {
   evaluator.dispose();
-  model.dispose();
+  runtime.dispose();
   device.destroy();
 }

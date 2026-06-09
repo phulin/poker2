@@ -10,7 +10,12 @@ import type {
   SolverWorkerRequest,
   SolverWorkerResponse,
 } from "./solverWorkerMessages.js";
-import type { BetterFfnManifest, BrowserEvaluationResult, PlayerIndex } from "./types.js";
+import type {
+  BetterFfnManifest,
+  BetterFfnModelSetManifest,
+  BrowserEvaluationResult,
+  PlayerIndex,
+} from "./types.js";
 
 const MODEL_MANIFEST_URL =
   import.meta.env.VITE_MODEL_MANIFEST_URL ?? "/models/rebel_latest/model.json";
@@ -53,6 +58,7 @@ function waitForBrowserPaint(): Promise<void> {
 
 interface Runtime {
   manifest: BetterFfnManifest;
+  modelSet?: BetterFfnModelSetManifest;
   cached: boolean;
   usingSubgroups: boolean;
 }
@@ -1614,6 +1620,18 @@ function App(): JSX.Element {
     if (!progress.totalBytes || progress.loadedBytes === undefined) return undefined;
     return Math.min(100, (progress.loadedBytes / progress.totalBytes) * 100);
   });
+  const runtimeLabel = createMemo(() => {
+    const current = runtime();
+    if (!current?.modelSet) return "Single BetterFFN";
+    return `Curriculum ${current.modelSet.defaultStage}`;
+  });
+  const streetRegistryLabel = createMemo(() => {
+    const modelSet = runtime()?.modelSet;
+    if (!modelSet) return undefined;
+    return ["flop", "turn", "river"]
+      .map((street) => modelSet.streets[street as "flop" | "turn" | "river"].label)
+      .join(" / ");
+  });
 
   function nextAvailableCard(used: Set<number>): number {
     for (let card = 0; card < CARD_OPTIONS.length; card += 1) {
@@ -1817,16 +1835,21 @@ function App(): JSX.Element {
           <span>{modelError() || modelProgress().message}</span>
           <Show when={runtime()}>
             {(current) => (
-              <span
-                class={`feature-badge ${current().usingSubgroups ? "on" : "off"}`}
-                title={
-                  current().usingSubgroups
-                    ? "BetterFFN subgroup kernels are enabled"
-                    : "Using non-subgroup fallback kernels"
-                }
-              >
-                Subgroups {current().usingSubgroups ? "on" : "off"}
-              </span>
+              <>
+                <span class="feature-badge on" title={streetRegistryLabel() ?? runtimeLabel()}>
+                  {runtimeLabel()}
+                </span>
+                <span
+                  class={`feature-badge ${current().usingSubgroups ? "on" : "off"}`}
+                  title={
+                    current().usingSubgroups
+                      ? "BetterFFN subgroup kernels are enabled"
+                      : "Using non-subgroup fallback kernels"
+                  }
+                >
+                  Subgroups {current().usingSubgroups ? "on" : "off"}
+                </span>
+              </>
             )}
           </Show>
         </div>

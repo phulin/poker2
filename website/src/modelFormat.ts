@@ -1,4 +1,9 @@
-import type { BetterFfnManifest, BetterFfnTensorManifest } from "./types.js";
+import type {
+  BetterFfnCurriculumStreet,
+  BetterFfnManifest,
+  BetterFfnModelSetManifest,
+  BetterFfnTensorManifest,
+} from "./types.js";
 
 export interface LoadedTensor {
   manifest: BetterFfnTensorManifest;
@@ -42,6 +47,12 @@ function optionalInt16Dtype(value: unknown, label: string): void {
 function requiredString(value: unknown, label: string): void {
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`model manifest allIn.${label} must be a non-empty string`);
+  }
+}
+
+function requiredModelSetString(value: unknown, label: string): void {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`model set manifest ${label} must be a non-empty string`);
   }
 }
 
@@ -203,6 +214,48 @@ export function parseBetterFfnManifest(value: unknown): BetterFfnManifest {
     }
   }
   return manifest;
+}
+
+export function isBetterFfnModelSetManifest(value: unknown): value is BetterFfnModelSetManifest {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === 1 &&
+    value.format === "p2.better_ffn.curriculum.webgpu"
+  );
+}
+
+export function parseBetterFfnModelSetManifest(value: unknown): BetterFfnModelSetManifest {
+  if (!isRecord(value)) {
+    throw new Error("model set manifest must be an object");
+  }
+  if (value.schemaVersion !== 1 || value.format !== "p2.better_ffn.curriculum.webgpu") {
+    throw new Error("unsupported BetterFFN model set manifest schema");
+  }
+  const manifest = value as unknown as BetterFfnModelSetManifest;
+  const streetNames: BetterFfnCurriculumStreet[] = ["flop", "turn", "river"];
+  if (!streetNames.includes(manifest.defaultStage)) {
+    throw new Error("model set manifest defaultStage must be flop, turn, or river");
+  }
+  if (!isRecord(manifest.streets)) {
+    throw new Error("model set manifest streets must be an object");
+  }
+  for (const street of streetNames) {
+    const entry = manifest.streets[street];
+    if (!isRecord(entry)) {
+      throw new Error(`model set manifest streets.${street} must be an object`);
+    }
+    requiredModelSetString(entry.label, `streets.${street}.label`);
+    requiredModelSetString(entry.manifest, `streets.${street}.manifest`);
+  }
+  return manifest;
+}
+
+export function parseBetterFfnManifestOrModelSet(
+  value: unknown,
+): BetterFfnManifest | BetterFfnModelSetManifest {
+  return isBetterFfnModelSetManifest(value)
+    ? parseBetterFfnModelSetManifest(value)
+    : parseBetterFfnManifest(value);
 }
 
 export function resolveCfrDefaults(manifest: BetterFfnManifest): ResolvedCfrDefaults {

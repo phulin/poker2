@@ -1,6 +1,11 @@
 import { buildPublicBeliefs, normalizeBeliefs } from "./beliefs.js";
 import type { BetterFfnWebGpuModel } from "./betterFfnWebGpuModel.js";
 import { PublicHunlEnv } from "./hunlEnv.js";
+import {
+  modelForRuntimeStreet,
+  rootModelForRuntime,
+  type BetterFfnRuntime,
+} from "./modelRegistry.js";
 import { resolveCfrDefaults } from "./modelFormat.js";
 import { SparseCfrResolver, type SparseResolveOptions } from "./sparseResolver.js";
 import type { BrowserEvaluationResult, EvaluateSpotRequest, SolveProgress } from "./types.js";
@@ -8,39 +13,17 @@ import type { BrowserEvaluationResult, EvaluateSpotRequest, SolveProgress } from
 export class BrowserCfrEvaluator {
   readonly device: GPUDevice;
   readonly model: BetterFfnWebGpuModel;
+  readonly runtime: BetterFfnRuntime;
   private readonly sparseCfr: SparseCfrResolver;
 
-  constructor(device: GPUDevice, model: BetterFfnWebGpuModel) {
+  constructor(device: GPUDevice, model: BetterFfnRuntime) {
     this.device = device;
-    this.model = model;
+    this.runtime = model;
+    this.model = rootModelForRuntime(model);
     this.sparseCfr = new SparseCfrResolver(model);
   }
 
   async evaluateSpot(request: EvaluateSpotRequest): Promise<BrowserEvaluationResult> {
-    const cfrDefaults = resolveCfrDefaults(this.model.manifest);
-    const iterations = request.iterations ?? cfrDefaults.iterations;
-    if (!Number.isInteger(iterations) || iterations <= 0) {
-      throw new Error("iterations must be a positive integer");
-    }
-    const depth = request.depth ?? cfrDefaults.depth;
-    if (!Number.isInteger(depth) || depth <= 0) {
-      throw new Error("depth must be a positive integer");
-    }
-    return await this.evaluateSpotSparse(request, depth, iterations, cfrDefaults.cfrAvg);
-  }
-
-  dispose(): void {
-    this.sparseCfr.dispose();
-  }
-
-  private async evaluateSpotSparse(
-    request: EvaluateSpotRequest,
-    depth: number,
-    iterations: number,
-    defaultCfrAvg: boolean,
-  ): Promise<BrowserEvaluationResult> {
-    const cfrAvg = request.cfrAvg ?? defaultCfrAvg;
-    const numActions = this.model.manifest.architecture.numActions;
     const env = PublicHunlEnv.fromManifest(this.model.manifest, request.initialState);
     const knownCards: {
       publicCards?: readonly number[];
@@ -51,6 +34,32 @@ export class BrowserCfrEvaluator {
     if (request.heroPlayer !== undefined) knownCards.heroPlayer = request.heroPlayer;
     if (request.heroHand) knownCards.heroHand = request.heroHand;
     env.configureKnownCards(knownCards);
+
+    const cfrDefaults = resolveCfrDefaults(modelForRuntimeStreet(this.runtime, env.street).manifest);
+    const iterations = request.iterations ?? cfrDefaults.iterations;
+    if (!Number.isInteger(iterations) || iterations <= 0) {
+      throw new Error("iterations must be a positive integer");
+    }
+    const depth = request.depth ?? cfrDefaults.depth;
+    if (!Number.isInteger(depth) || depth <= 0) {
+      throw new Error("depth must be a positive integer");
+    }
+    return await this.evaluateSpotSparse(request, env, depth, iterations, cfrDefaults.cfrAvg);
+  }
+
+  dispose(): void {
+    this.sparseCfr.dispose();
+  }
+
+  private async evaluateSpotSparse(
+    request: EvaluateSpotRequest,
+    env: PublicHunlEnv,
+    depth: number,
+    iterations: number,
+    defaultCfrAvg: boolean,
+  ): Promise<BrowserEvaluationResult> {
+    const cfrAvg = request.cfrAvg ?? defaultCfrAvg;
+    const numActions = this.model.manifest.architecture.numActions;
 
     let beliefs = this.initialBeliefs(request);
     const solveCount = request.spot.length + 1;
@@ -153,7 +162,7 @@ export class BrowserCfrEvaluator {
 
 export function createBrowserCfrEvaluator(
   device: GPUDevice,
-  model: BetterFfnWebGpuModel,
+  model: BetterFfnRuntime,
 ): BrowserCfrEvaluator {
   return new BrowserCfrEvaluator(device, model);
 }

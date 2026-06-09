@@ -11,6 +11,7 @@ import { HAND_COMBOS } from "../src/cards.js";
 import { createDawnDevice } from "../src/gpu.js";
 import { makeEmptyStorageBuffer } from "../src/gpuBuffers.js";
 import { DEFAULT_FORCE_DECK, NUM_HANDS, PublicHunlEnv } from "../src/hunlEnv.js";
+import { BetterFfnModelRegistry } from "../src/modelRegistry.js";
 import { SparseCfrResolver } from "../src/sparseResolver.js";
 import type { SolveProgress } from "../src/types.js";
 
@@ -29,7 +30,7 @@ function fakeModel(
     ...(device ? { device } : {}),
     ...(allInTableProvider ? { allInTableProvider } : {}),
     manifest: {
-      architecture: { numActions },
+      architecture: { numHands: NUM_HANDS, numPlayers: 2, numActions },
       env: {
         stack: 20,
         sb: 1,
@@ -39,6 +40,7 @@ function fakeModel(
         defaultButton: 1,
         defaultForceDeck: DEFAULT_FORCE_DECK,
       },
+      actionLabels: Array.from({ length: numActions }, (_, index) => String(index)),
     },
     actionLabels: Array.from({ length: numActions }, (_, index) => String(index)),
     async predict(): Promise<BetterFfnPrediction> {
@@ -88,6 +90,19 @@ function fakeModel(
       };
     },
   } as unknown as BetterFfnWebGpuModel;
+}
+
+function publicEnvOnStreet(publicCards: readonly number[]): PublicHunlEnv {
+  const env = new PublicHunlEnv({
+    stack: 20,
+    sb: 1,
+    bb: 2,
+    betBins: [0.5],
+    button: 1,
+    forceDeck: DEFAULT_FORCE_DECK,
+  });
+  env.configureKnownCards({ publicCards });
+  return env;
 }
 
 function positiveAllInProvider(): AllInTableProvider {
@@ -232,6 +247,48 @@ test("sparse resolver selected action uses root action lookup", async () => {
     }
     assert.ok(Math.abs(mass - 1) < 1e-5, `belief mass ${mass}`);
   }
+});
+
+test("curriculum registry routes sparse model leaves by public street", async () => {
+  const betBins = [0.5];
+  const numActions = betBins.length + 3;
+  const counters = {
+    flop: { singleLeafCalls: 0, batchLeafSizes: [] },
+    turn: { singleLeafCalls: 0, batchLeafSizes: [] },
+    river: { singleLeafCalls: 0, batchLeafSizes: [] },
+  } satisfies Record<string, FakeModelCounters>;
+  const registry = new BetterFfnModelRegistry(
+    {
+      flop: fakeModel(numActions, undefined, counters.flop),
+      turn: fakeModel(numActions, undefined, counters.turn),
+      river: fakeModel(numActions, undefined, counters.river),
+    },
+    "flop",
+  );
+  const resolver = new SparseCfrResolver(registry);
+
+  await resolver.solve(publicEnvOnStreet([0, 13, 26]), uniformBeliefs(), {
+    depth: 1,
+    iterations: 1,
+    readPolicy: false,
+    readActionProbs: false,
+  });
+  await resolver.solve(publicEnvOnStreet([0, 13, 26, 1]), uniformBeliefs(), {
+    depth: 1,
+    iterations: 1,
+    readPolicy: false,
+    readActionProbs: false,
+  });
+  await resolver.solve(publicEnvOnStreet([0, 13, 26, 1, 14]), uniformBeliefs(), {
+    depth: 1,
+    iterations: 1,
+    readPolicy: false,
+    readActionProbs: false,
+  });
+
+  assert.ok(counters.flop.batchLeafSizes.some((size) => size > 0));
+  assert.ok(counters.turn.batchLeafSizes.some((size) => size > 0));
+  assert.ok(counters.river.batchLeafSizes.some((size) => size > 0));
 });
 
 test("public env steps exact custom raise-to amounts", () => {

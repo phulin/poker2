@@ -1,8 +1,9 @@
 import { BrowserCfrEvaluator } from "./browserEvaluator.js";
 import { evaluateFixture } from "./evaluator.js";
 import { createDawnDevice } from "./gpu.js";
+import { rootModelForRuntime } from "./modelRegistry.js";
 import { resolveCfrDefaults } from "./modelFormat.js";
-import { loadNodeModel } from "./nodeModel.js";
+import { loadNodeRuntime } from "./nodeModel.js";
 import { loadPythonReference } from "./pythonBridge.js";
 
 interface CliOptions {
@@ -50,8 +51,9 @@ let output: unknown;
 try {
   if (options.manifest) {
     const manifestPath = options.manifest;
-    const model = await loadNodeModel(device, manifestPath, options.weights);
-    const evaluator = new BrowserCfrEvaluator(device, model);
+    const runtime = await loadNodeRuntime(device, manifestPath, options.weights);
+    const model = rootModelForRuntime(runtime);
+    const evaluator = new BrowserCfrEvaluator(device, runtime);
     try {
       const cfrDefaults = resolveCfrDefaults(model.manifest);
       const iterations = options.iterations ?? cfrDefaults.iterations;
@@ -73,7 +75,7 @@ try {
       };
     } finally {
       evaluator.dispose();
-      model.dispose();
+      runtime.dispose();
     }
   } else {
     const iterations = options.iterations ?? 8;

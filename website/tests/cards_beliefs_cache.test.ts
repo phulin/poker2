@@ -10,7 +10,7 @@ import {
   parseCards,
 } from "../src/cards.js";
 import { isCachedModelFresh } from "../src/modelCache.js";
-import { resolveCfrDefaults } from "../src/modelFormat.js";
+import { parseBetterFfnModelSetManifest, resolveCfrDefaults } from "../src/modelFormat.js";
 import type { BetterFfnManifest } from "../src/types.js";
 
 function sum(values: Float32Array, start: number, count: number): number {
@@ -82,4 +82,28 @@ test("CFR defaults resolve from manifest configuration", () => {
     depth: 5,
     cfrAvg: true,
   });
+});
+
+test("model-set manifest parser validates curriculum street registry", () => {
+  const manifest = parseBetterFfnModelSetManifest({
+    schemaVersion: 1,
+    format: "p2.better_ffn.curriculum.webgpu",
+    defaultStage: "flop",
+    streets: {
+      flop: { label: "S_flop", manifest: "S_flop/model.json" },
+      turn: { label: "S_turn", manifest: "S_turn/model.json" },
+      river: { label: "S_river", manifest: "S_river/model.json" },
+    },
+  });
+  assert.equal(manifest.streets.turn.manifest, "S_turn/model.json");
+  assert.throws(
+    () =>
+      parseBetterFfnModelSetManifest({
+        schemaVersion: 1,
+        format: "p2.better_ffn.curriculum.webgpu",
+        defaultStage: "preflop",
+        streets: {},
+      }),
+    /defaultStage/,
+  );
 });

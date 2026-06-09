@@ -1,5 +1,13 @@
-import { parseBetterFfnManifest } from "./modelFormat.js";
-import type { BetterFfnManifest } from "./types.js";
+import {
+  isBetterFfnModelSetManifest,
+  parseBetterFfnManifest,
+  parseBetterFfnManifestOrModelSet,
+} from "./modelFormat.js";
+import type {
+  BetterFfnCurriculumStreet,
+  BetterFfnManifest,
+  BetterFfnModelSetManifest,
+} from "./types.js";
 
 const DB_NAME = "p2-webgpu-cfr-model-cache";
 const STORE_NAME = "models";
@@ -29,6 +37,20 @@ export interface LoadedModelBytes {
   weights: ArrayBuffer;
   cached: boolean;
   cacheKey: string;
+  manifestUrl: string;
+}
+
+export interface LoadedModelSetBytes {
+  manifest: BetterFfnModelSetManifest;
+  stages: Record<BetterFfnCurriculumStreet, LoadedModelBytes>;
+  cached: boolean;
+  manifestUrl: string;
+}
+
+export type LoadedRuntimeBytes = LoadedModelBytes | LoadedModelSetBytes;
+
+export function isLoadedModelSetBytes(value: LoadedRuntimeBytes): value is LoadedModelSetBytes {
+  return "stages" in value;
 }
 
 export function isCachedModelFresh(
@@ -70,14 +92,26 @@ export async function loadModelBytesWithCache(
       message: "IndexedDB unavailable; downloading model without cache",
     });
     const weights = await fetchWeights(weightsUrl, manifest, options.onProgress);
-    return { manifest, weights, cached: false, cacheKey };
+    return {
+      manifest,
+      weights,
+      cached: false,
+      cacheKey,
+      manifestUrl: manifestAbsoluteUrl.toString(),
+    };
   }
 
   try {
     const cached = await getCachedRecord(db, cacheKey);
     if (cached && isCachedModelFresh(cached, manifest)) {
       options.onProgress?.({ phase: "cache-hit", message: "Using cached model weights" });
-      return { manifest, weights: cached.weights, cached: true, cacheKey };
+      return {
+        manifest,
+        weights: cached.weights,
+        cached: true,
+        cacheKey,
+        manifestUrl: manifestAbsoluteUrl.toString(),
+      };
     }
 
     const weights = await fetchWeights(weightsUrl, manifest, options.onProgress);
@@ -90,10 +124,68 @@ export async function loadModelBytesWithCache(
       updatedAt: Date.now(),
     });
     options.onProgress?.({ phase: "stored", message: "Model cached locally" });
-    return { manifest, weights, cached: false, cacheKey };
+    return {
+      manifest,
+      weights,
+      cached: false,
+      cacheKey,
+      manifestUrl: manifestAbsoluteUrl.toString(),
+    };
   } finally {
     db.close();
   }
+}
+
+export async function loadRuntimeBytesWithCache(
+  manifestUrl: string,
+  options: {
+    weightsUrl?: string;
+    cacheKey?: string;
+    onProgress?: (progress: ModelCacheProgress) => void;
+  } = {},
+): Promise<LoadedRuntimeBytes> {
+  options.onProgress?.({ phase: "manifest", message: "Fetching model manifest" });
+  const manifestResponse = await fetch(manifestUrl);
+  if (!manifestResponse.ok) {
+    throw new Error(`failed to fetch ${manifestUrl}: ${manifestResponse.status}`);
+  }
+  const parsed = parseBetterFfnManifestOrModelSet(await manifestResponse.json());
+  if (!isBetterFfnModelSetManifest(parsed)) {
+    return await loadModelBytesWithCache(manifestUrl, options);
+  }
+  if (options.weightsUrl) {
+    throw new Error("--weightsUrl is not supported for curriculum model sets");
+  }
+
+  const baseUrl =
+    typeof globalThis.location === "undefined" ? "http://localhost/" : globalThis.location.href;
+  const modelSetUrl = new URL(manifestUrl, baseUrl).toString();
+  const stageEntries = Object.entries(parsed.streets) as Array<
+    [BetterFfnCurriculumStreet, { manifest: string }]
+  >;
+  const stages = {} as Record<BetterFfnCurriculumStreet, LoadedModelBytes>;
+  let cached = true;
+  for (const [street, entry] of stageEntries) {
+    options.onProgress?.({
+      phase: "manifest",
+      message: `Fetching ${street} model manifest`,
+    });
+    const stageUrl = new URL(entry.manifest, modelSetUrl).toString();
+    const stageOptions: {
+      cacheKey: string;
+      onProgress?: (progress: ModelCacheProgress) => void;
+    } = { cacheKey: stageUrl };
+    if (options.onProgress) stageOptions.onProgress = options.onProgress;
+    const loaded = await loadModelBytesWithCache(stageUrl, stageOptions);
+    stages[street] = loaded;
+    cached &&= loaded.cached;
+  }
+  return {
+    manifest: parsed,
+    stages,
+    cached,
+    manifestUrl: modelSetUrl,
+  };
 }
 
 async function fetchWeights(

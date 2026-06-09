@@ -271,10 +271,115 @@ def export_model(
     return manifest
 
 
+CURRICULUM_STAGES = {
+    "flop": "S_flop",
+    "turn": "S_turn",
+    "river": "S_river",
+}
+
+
+def _compatibility_signature(manifest: dict[str, Any]) -> dict[str, Any]:
+    arch = manifest["architecture"]
+    env = manifest["env"]
+    return {
+        "numHands": arch["numHands"],
+        "numPlayers": arch["numPlayers"],
+        "numActions": arch["numActions"],
+        "actionLabels": manifest["actionLabels"],
+        "stack": env["stack"],
+        "sb": env["sb"],
+        "bb": env["bb"],
+        "betBins": env["betBins"],
+        "flopShowdown": env["flopShowdown"],
+        "maxStackBb": env.get("maxStackBb"),
+    }
+
+
+def export_curriculum_model_set(
+    *,
+    flop_snapshot: Path,
+    turn_snapshot: Path,
+    river_snapshot: Path,
+    out: Path,
+    default_stage: str = "flop",
+    storage_dtype: str = "float16",
+    compression: str = "gzip",
+    allin_manifest: Path | None = None,
+    curriculum_source: str | None = None,
+) -> dict[str, Any]:
+    if default_stage not in CURRICULUM_STAGES:
+        raise ValueError("default_stage must be one of flop, turn, or river")
+
+    out.mkdir(parents=True, exist_ok=True)
+    snapshots = {
+        "flop": flop_snapshot,
+        "turn": turn_snapshot,
+        "river": river_snapshot,
+    }
+    exported: dict[str, dict[str, Any]] = {}
+    reference_signature: dict[str, Any] | None = None
+    for street, stage_dir_name in CURRICULUM_STAGES.items():
+        stage_manifest = export_model(
+            snapshots[street],
+            out / stage_dir_name,
+            weights_name="weights.bin.gz",
+            storage_dtype=storage_dtype,
+            compression=compression,
+            allin_manifest=allin_manifest,
+        )
+        signature = _compatibility_signature(stage_manifest)
+        if reference_signature is None:
+            reference_signature = signature
+        elif signature != reference_signature:
+            raise ValueError(f"{stage_dir_name} is not compatible with the default curriculum shape")
+        exported[street] = stage_manifest
+
+    model_set = {
+        "schemaVersion": 1,
+        "format": "p2.better_ffn.curriculum.webgpu",
+        "defaultStage": default_stage,
+        "source": {
+            "exporter": "website.python.export_model",
+            "promotedCheckpoints": {
+                street: str(snapshot) for street, snapshot in snapshots.items()
+            },
+            **({"curriculum": curriculum_source} if curriculum_source else {}),
+        },
+        "streets": {
+            street: {
+                "label": stage_dir_name,
+                "manifest": f"{stage_dir_name}/model.json",
+            }
+            for street, stage_dir_name in CURRICULUM_STAGES.items()
+        },
+        "metadata": {
+            "storageDtype": storage_dtype,
+            "compression": compression,
+            "stageSteps": {
+                street: exported[street]["source"].get("step")
+                for street in CURRICULUM_STAGES
+                if exported[street]["source"].get("step") is not None
+            },
+        },
+    }
+    (out / "model_set.json").write_text(json.dumps(model_set, indent=2) + "\n")
+    return model_set
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--snapshot", type=Path, required=True)
+    parser.add_argument("--snapshot", type=Path, default=None)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--curriculum", action="store_true")
+    parser.add_argument("--flop-snapshot", type=Path, default=None)
+    parser.add_argument("--turn-snapshot", type=Path, default=None)
+    parser.add_argument("--river-snapshot", type=Path, default=None)
+    parser.add_argument(
+        "--default-stage",
+        choices=("flop", "turn", "river"),
+        default="flop",
+    )
+    parser.add_argument("--curriculum-source", default=None)
     parser.add_argument("--weights-name", default="weights.bin.gz")
     parser.add_argument(
         "--storage-dtype",
@@ -290,6 +395,44 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.curriculum:
+        missing = [
+            name
+            for name, value in (
+                ("--flop-snapshot", args.flop_snapshot),
+                ("--turn-snapshot", args.turn_snapshot),
+                ("--river-snapshot", args.river_snapshot),
+            )
+            if value is None
+        ]
+        if missing:
+            raise SystemExit(f"--curriculum requires {', '.join(missing)}")
+        model_set = export_curriculum_model_set(
+            flop_snapshot=args.flop_snapshot,
+            turn_snapshot=args.turn_snapshot,
+            river_snapshot=args.river_snapshot,
+            out=args.out,
+            default_stage=args.default_stage,
+            storage_dtype=args.storage_dtype,
+            compression=args.compression,
+            allin_manifest=args.allin_manifest,
+            curriculum_source=args.curriculum_source,
+        )
+        print(
+            json.dumps(
+                {
+                    "manifest": str(args.out / "model_set.json"),
+                    "format": model_set["format"],
+                    "defaultStage": model_set["defaultStage"],
+                    "stages": model_set["streets"],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    if args.snapshot is None:
+        raise SystemExit("--snapshot is required unless --curriculum is set")
     manifest = export_model(
         args.snapshot,
         args.out,

@@ -17,6 +17,7 @@ interface CliArgs {
   "allin-version"?: string;
   "asset-origin"?: string;
   "source-model"?: string;
+  "source-model-set"?: string;
   "source-allin"?: string;
   staging?: string;
   "dry-run"?: string;
@@ -36,6 +37,14 @@ interface WebGpuModelManifest {
     file: string;
   };
   allIn?: AllInManifest;
+  [key: string]: unknown;
+}
+
+interface ModelSetManifest {
+  schemaVersion: 1;
+  format: "p2.better_ffn.curriculum.webgpu";
+  defaultStage: "flop" | "turn" | "river";
+  streets: Record<"flop" | "turn" | "river", { label: string; manifest: string }>;
   [key: string]: unknown;
 }
 
@@ -65,6 +74,7 @@ const modelVersion = args["model-version"] ?? DEFAULT_MODEL_VERSION;
 const allinVersion = args["allin-version"] ?? DEFAULT_ALLIN_VERSION;
 const assetOrigin = stripTrailingSlash(args["asset-origin"] ?? DEFAULT_ASSET_ORIGIN);
 const sourceModel = resolve(args["source-model"] ?? "public/models/rebel_latest");
+const sourceModelSet = args["source-model-set"] ? resolve(args["source-model-set"]) : undefined;
 const sourceAllIn = resolve(args["source-allin"] ?? "public/allin");
 const stagingRoot = resolve(args.staging ?? "dist/r2-assets");
 const dryRun = isTruthy(args["dry-run"]);
@@ -78,54 +88,32 @@ const latestCache = "public, max-age=300";
 
 await mkdir(stagingRoot, { recursive: true });
 
-const modelJsonPath = join(sourceModel, "model.json");
-const model = JSON.parse(await readFile(modelJsonPath, "utf8")) as WebGpuModelManifest;
-const weightsName = basename(model.weights.file);
-const sourceWeights = join(sourceModel, weightsName);
-
 const stagedModelDir = join(stagingRoot, modelPrefix);
 await mkdir(stagedModelDir, { recursive: true });
-await cp(sourceWeights, join(stagedModelDir, weightsName));
-
 const allIn = await buildAllInManifest(sourceAllIn, allinPrefix);
-if (allIn) model.allIn = allIn;
-model.weights.file = weightsName;
-await writeJson(join(stagedModelDir, "model.json"), model);
-
-const uploads: UploadSpec[] = [
-  uploadSpec(
-    `${modelPrefix}/model.json`,
-    join(stagedModelDir, "model.json"),
-    "application/json",
-    immutableCache,
-  ),
-  uploadSpec(
-    `${modelPrefix}/${weightsName}`,
-    join(stagedModelDir, weightsName),
-    "application/gzip",
-    immutableCache,
-  ),
-];
+const detectedModelSetPath =
+  sourceModelSet ??
+  ((await exists(join(sourceModel, "model_set.json"))) ? join(sourceModel, "model_set.json") : "");
+const uploads: UploadSpec[] = detectedModelSetPath
+  ? await stageModelSet(detectedModelSetPath, stagedModelDir, modelPrefix, allIn)
+  : await stageSingleModel(join(sourceModel, "model.json"), stagedModelDir, modelPrefix, allIn);
 
 if (latestAlias) {
-  const latestDir = join(stagingRoot, "models/rebel_latest");
+  const latestPrefix = detectedModelSetPath ? "models/curriculum_latest" : "models/rebel_latest";
+  const latestDir = join(stagingRoot, latestPrefix);
   await mkdir(latestDir, { recursive: true });
-  await cp(join(stagedModelDir, "model.json"), join(latestDir, "model.json"));
-  await cp(join(stagedModelDir, weightsName), join(latestDir, weightsName));
-  uploads.push(
-    uploadSpec(
-      "models/rebel_latest/model.json",
-      join(latestDir, "model.json"),
-      "application/json",
-      latestCache,
-    ),
-    uploadSpec(
-      `models/rebel_latest/${weightsName}`,
-      join(latestDir, weightsName),
-      "application/gzip",
-      immutableCache,
-    ),
-  );
+  await cp(stagedModelDir, latestDir, { recursive: true });
+  for (const file of await listFiles(latestDir)) {
+    const key = toObjectKey(stagingRoot, file);
+    uploads.push(
+      uploadSpec(
+        key,
+        file,
+        contentTypeFor(file),
+        file.endsWith(".json") ? latestCache : immutableCache,
+      ),
+    );
+  }
 }
 
 const stagedAllInDir = join(stagingRoot, allinPrefix);
@@ -140,7 +128,7 @@ console.log(
   JSON.stringify(
     {
       bucket,
-      modelManifestUrl: `${assetOrigin}/${modelPrefix}/model.json`,
+      modelManifestUrl: `${assetOrigin}/${modelPrefix}/${detectedModelSetPath ? "model_set.json" : "model.json"}`,
       stagedFiles: uploads.length,
       stagingRoot,
     },
@@ -165,6 +153,60 @@ for (const upload of uploads) {
     "--cache-control",
     upload.cacheControl,
   ]);
+}
+
+async function stageSingleModel(
+  sourceManifestPath: string,
+  stagedDir: string,
+  prefix: string,
+  allIn: AllInManifest | undefined,
+): Promise<UploadSpec[]> {
+  const sourceDir = dirname(sourceManifestPath);
+  const model = JSON.parse(await readFile(sourceManifestPath, "utf8")) as WebGpuModelManifest;
+  const weightsName = basename(model.weights.file);
+  await cp(resolve(sourceDir, model.weights.file), join(stagedDir, weightsName));
+  if (allIn) model.allIn = allIn;
+  model.weights.file = weightsName;
+  await writeJson(join(stagedDir, "model.json"), model);
+  return [
+    uploadSpec(`${prefix}/model.json`, join(stagedDir, "model.json"), "application/json", immutableCache),
+    uploadSpec(`${prefix}/${weightsName}`, join(stagedDir, weightsName), contentTypeFor(weightsName), immutableCache),
+  ];
+}
+
+async function stageModelSet(
+  sourceModelSetPath: string,
+  stagedDir: string,
+  prefix: string,
+  allIn: AllInManifest | undefined,
+): Promise<UploadSpec[]> {
+  const sourceDir = dirname(sourceModelSetPath);
+  const modelSet = JSON.parse(await readFile(sourceModelSetPath, "utf8")) as ModelSetManifest;
+  const uploadsOut: UploadSpec[] = [];
+  for (const street of ["flop", "turn", "river"] as const) {
+    const entry = modelSet.streets[street];
+    const sourceManifestPath = resolve(sourceDir, entry.manifest);
+    const sourceStageDir = dirname(sourceManifestPath);
+    const stagedManifestPath = join(stagedDir, entry.manifest);
+    const stagedStageDir = dirname(stagedManifestPath);
+    await mkdir(stagedStageDir, { recursive: true });
+
+    const model = JSON.parse(await readFile(sourceManifestPath, "utf8")) as WebGpuModelManifest;
+    const weightsName = basename(model.weights.file);
+    await cp(resolve(sourceStageDir, model.weights.file), join(stagedStageDir, weightsName));
+    if (allIn) model.allIn = allIn;
+    model.weights.file = weightsName;
+    await writeJson(stagedManifestPath, model);
+    uploadsOut.push(
+      uploadSpec(`${prefix}/${entry.manifest}`, stagedManifestPath, "application/json", immutableCache),
+      uploadSpec(`${prefix}/${dirname(entry.manifest)}/${weightsName}`, join(stagedStageDir, weightsName), contentTypeFor(weightsName), immutableCache),
+    );
+  }
+  await writeJson(join(stagedDir, "model_set.json"), modelSet);
+  uploadsOut.push(
+    uploadSpec(`${prefix}/model_set.json`, join(stagedDir, "model_set.json"), "application/json", immutableCache),
+  );
+  return uploadsOut;
 }
 
 async function buildAllInManifest(

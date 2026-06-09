@@ -9,9 +9,10 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `kernels.ts`: WGSL kernels for regret matching, belief updates, and action probability reductions.
 - `gpuPokerState.ts`: TypeScript wrapper for packed GPU poker state buffers and the poker-state kernels used by browser solving.
 - `modelFormat.ts`: Manifest parsing, CFR default resolution, tensor loading, and action-label helpers.
+- `modelRegistry.ts`: Curriculum street-model registry that validates compatible flop/turn/river BetterFFN exports and routes model leaves by public street while preserving single-model runtime behavior.
 - `cards.ts`: Standard card notation parsing/formatting, duplicate validation, and 1326 hand-combo lookup helpers.
 - `beliefs.ts`: Initial belief normalization, public-card beliefs, and blocked-hand mask helpers.
-- `modelCache.ts`: Browser IndexedDB model cache, streamed weights download progress, and cache invalidation helpers.
+- `modelCache.ts`: Browser IndexedDB model cache, streamed weights download progress, cache invalidation helpers, and model-set byte loading with per-stage cache keys.
 - `allInTableCache.ts`: Browser IndexedDB cache for the preflop all-in table and the most recent flop all-in table shards.
 - `allInTables.ts`: Street-local all-in payoff table metadata loading, canonical flop lookup helpers, int16 table packing, and CPU reference value computation for sparse resolver all-in leaves.
 - `allInTableGenerator.ts`: WebGPU fallback generation for exact flop/turn all-in payoff tables, with rank-code and payoff-table kernels.
@@ -22,13 +23,13 @@ TypeScript source for WebGPU CFR solving, BetterFFN inference, browser/Node load
 - `solverWorker.ts`: Browser module-worker entry point that owns the WebGPU device/model/evaluator, loads cached model bytes, runs solves off the UI thread, and posts progress/results back to the app.
 - `solverWorkerMessages.ts`: Typed message contract shared between the Solid app and solver worker.
 - `sparseResolver.ts`: Arbitrary-depth sparse public-tree CFR resolver that batches nonterminal leaf model evaluation, optionally evaluates regrets/leaves on CFR-average beliefs, uses the WebGPU BetterFFN runtime for policy/value inference, keeps mutable CFR tensors GPU-resident across WGSL sparse-kernel iterations when a GPU device is available, reuses warm-start regret storage by default, defers delayed average-policy copies when `cfrAvg=false`, skips unused CFR-average belief uploads when `cfrAvg=false`, and releases sparse kernel params through the reusable uniform-buffer pool.
-- `browser.ts`: Browser device/model loading exports.
+- `browser.ts`: Browser device/model/runtime loading exports for either one BetterFFN manifest or a curriculum model-set manifest.
 - `main.tsx`: Vite/Solid application mount entry point.
 - `App.tsx`: Guided browser spot solver UI and result rendering.
 - `styles.css`: Solver UI styling.
 - `vite-env.d.ts`: Vite client ambient types.
 - `nodeGpu.ts`: Node/Dawn GPU device creation.
-- `nodeModel.ts`: Node model loading from manifest and weights.
+- `nodeModel.ts`: Node model/runtime loading from single manifests or curriculum model-set manifests.
 - `pythonBridge.ts`: Python fixture bridge for Node parity tests.
 - `cli.ts`: Command-line evaluator entry point.
 - `bench.ts`: Command-line benchmark entry point.
