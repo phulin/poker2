@@ -201,9 +201,16 @@ class PreOnlyMockModel(MockModel):
 
 
 class ConstantValueModel:
-    def __init__(self, value: float, *, num_players: int = 2) -> None:
+    def __init__(
+        self,
+        value: float,
+        *,
+        num_players: int = 2,
+        output_dtype: torch.dtype | None = None,
+    ) -> None:
         self.value = float(value)
         self.num_players = num_players
+        self.output_dtype = output_dtype
         self.enforce_zero_sum = False
         self.call_contexts: list[torch.Tensor] = []
         self.forward_pre_contexts: list[torch.Tensor] = []
@@ -217,7 +224,7 @@ class ConstantValueModel:
             (batch, self.num_players, NUM_HANDS),
             self.value,
             device=features.context.device,
-            dtype=features.context.dtype,
+            dtype=self.output_dtype or features.context.dtype,
         )
         return ModelOutput(
             policy_logits=None,
@@ -231,7 +238,7 @@ class ConstantValueModel:
             (len(features), self.num_players, NUM_HANDS),
             self.value,
             device=features.context.device,
-            dtype=features.context.dtype,
+            dtype=self.output_dtype or features.context.dtype,
         )
 
 
@@ -464,8 +471,8 @@ def test_fused_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() 
     from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
     evaluator = object.__new__(FusedSparseCFREvaluator)
-    current_model = ConstantValueModel(1.0)
-    closing_model = ConstantValueModel(2.0)
+    current_model = ConstantValueModel(1.0, output_dtype=torch.bfloat16)
+    closing_model = ConstantValueModel(2.0, output_dtype=torch.bfloat16)
     evaluator.model = current_model
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
@@ -492,6 +499,7 @@ def test_fused_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() 
     torch.testing.assert_close(hand_values[0], torch.ones(2, NUM_HANDS))
     torch.testing.assert_close(hand_values[1], torch.full((2, NUM_HANDS), 2.0))
     torch.testing.assert_close(hand_values[2], torch.ones(2, NUM_HANDS))
+    assert hand_values.dtype == evaluator.latest_values.dtype
     assert not model_applied_zero_sum
     torch.testing.assert_close(
         current_model.call_contexts[0],

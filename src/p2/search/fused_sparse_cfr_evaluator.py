@@ -2415,7 +2415,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     use_pre_head=False,
                 )
                 hand_values.index_copy_(
-                    0, self.cutoff_model_positions, cutoff_values
+                    0,
+                    self.cutoff_model_positions,
+                    cutoff_values.to(dtype=hand_values.dtype),
                 )
                 model_applied_zero_sum = model_applied_zero_sum and cutoff_zero_sum
                 evaluated_any = True
@@ -2426,7 +2428,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     use_pre_head=False,
                 )
                 hand_values.index_copy_(
-                    0, self.new_street_model_positions, closing_values
+                    0,
+                    self.new_street_model_positions,
+                    closing_values.to(dtype=hand_values.dtype),
                 )
                 model_applied_zero_sum = model_applied_zero_sum and closing_zero_sum
                 evaluated_any = True
