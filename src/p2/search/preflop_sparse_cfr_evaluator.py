@@ -53,12 +53,12 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             raise ValueError(
                 "PreflopSparseCFREvaluator is compact-only; attach a "
                 f"{PREFLOP_HANDS}-hand preflop policy/value model"
-        )
+            )
         self.warm_start_iterations = 0
         self._preflop_unblocked_projection: torch.Tensor | None = None
-        self._preflop_unblocked_projection_key: tuple[torch.device, torch.dtype] | None = (
-            None
-        )
+        self._preflop_unblocked_projection_key: (
+            tuple[torch.device, torch.dtype] | None
+        ) = None
         self._preflop_ev_action_weights_buf: torch.Tensor | None = None
         self._preflop_ev_child_values_buf: torch.Tensor | None = None
 
@@ -85,9 +85,9 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             projection is None
             or getattr(self, "_preflop_unblocked_projection_key", None) != key
         ):
-            multiplicity = preflop_class_multiplicity_tensor(
-                device=ref.device
-            ).to(dtype=ref.dtype)
+            multiplicity = preflop_class_multiplicity_tensor(device=ref.device).to(
+                dtype=ref.dtype
+            )
             compatibility = preflop_class_compatibility_counts_tensor(
                 device=ref.device
             ).to(dtype=ref.dtype)
@@ -151,12 +151,28 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             raise ValueError("PreflopSparseCFREvaluator only accepts street-0 roots")
         root_boards = src_env.board_indices[src_indices]
         if (root_boards >= 0).any():
-            raise ValueError("PreflopSparseCFREvaluator roots must have no public board")
+            raise ValueError(
+                "PreflopSparseCFREvaluator roots must have no public board"
+            )
         initial_beliefs = self._compact_initial_beliefs(
             src_indices.numel(), initial_beliefs
         )
         super().initialize_subgame(src_env, src_indices, initial_beliefs)
         self._validate_compact_shapes()
+
+    def _construct_subgame(
+        self,
+        src_env: HUNLTensorEnv | PBSEnv,
+        src_indices: torch.Tensor,
+    ) -> None:
+        if not isinstance(src_env, PBSEnv):
+            raise TypeError("PreflopSparseCFREvaluator requires PBSEnv roots")
+        old_force = src_env.force_heads_up_preflop_flop
+        src_env.force_heads_up_preflop_flop = True
+        try:
+            SparseCFREvaluator._construct_subgame(self, src_env, src_indices)
+        finally:
+            src_env.force_heads_up_preflop_flop = old_force
 
     def _compact_initial_beliefs(
         self,
@@ -258,9 +274,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         for live_count in range(self.num_players + 1):
             mask = live_counts == live_count
             indices_by_count.append(self.allin_call_indices[mask].contiguous())
-            parents_by_count.append(
-                self.allin_call_parent_indices[mask].contiguous()
-            )
+            parents_by_count.append(self.allin_call_parent_indices[mask].contiguous())
         self.preflop_allin_indices_by_live_count = tuple(indices_by_count)
         self.preflop_allin_parent_indices_by_live_count = tuple(parents_by_count)
         self.preflop_allin_exact_indices = (
@@ -291,9 +305,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             self.preflop_allin_live3_opp0_players = empty
             self.preflop_allin_live3_opp1_players = empty
 
-    def _cache_allin_call_street_partitions(
-        self, parent_streets: torch.Tensor
-    ) -> None:
+    def _cache_allin_call_street_partitions(self, parent_streets: torch.Tensor) -> None:
         empty = torch.empty(0, dtype=torch.long, device=self.device)
         empty_boards = torch.empty(0, 5, dtype=torch.long, device=self.device)
         if self.allin_call_indices.numel() == 0:
@@ -525,10 +537,14 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             prev_actor = self.prev_actor[child_start:child_end]
             child_policy = policy[child_start:child_end]
 
-            actor_beliefs = beliefs[parent].gather(
-                1,
-                prev_actor[:, None, None].expand(-1, 1, PREFLOP_HANDS),
-            ).squeeze(1)
+            actor_beliefs = (
+                beliefs[parent]
+                .gather(
+                    1,
+                    prev_actor[:, None, None].expand(-1, 1, PREFLOP_HANDS),
+                )
+                .squeeze(1)
+            )
             matchup_mass = self._preflop_unblocked_mass(actor_beliefs)
             policy_blocked = self._preflop_unblocked_mass(actor_beliefs * child_policy)
             opponent_conditioned_policy = torch.where(
@@ -542,13 +558,12 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             )
             if hasattr(self.env, "has_folded"):
                 player_ids = torch.arange(self.num_players, device=self.device)
-                live_non_actor = (
-                    ~self.env.has_folded[parent, :, None]
-                    & (player_ids[None, :, None] != prev_actor[:, None, None])
+                live_non_actor = ~self.env.has_folded[parent, :, None] & (
+                    player_ids[None, :, None] != prev_actor[:, None, None]
                 )
                 marginal_action_policy = (
-                    actor_beliefs * child_policy
-                ).sum(dim=-1).view(-1, 1, 1)
+                    (actor_beliefs * child_policy).sum(dim=-1).view(-1, 1, 1)
+                )
                 torch.where(
                     live_non_actor,
                     opponent_conditioned_policy[:, None, :],
@@ -578,18 +593,16 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         bottom = self.depth_offsets[1]
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
         regrets = torch.zeros_like(self.policy_probs)
-        src_actor_indices = self.env.to_act[:, None, None].expand(
-            -1, 1, PREFLOP_HANDS
-        )
+        src_actor_indices = self.env.to_act[:, None, None].expand(-1, 1, PREFLOP_HANDS)
         prev_actor_indices = self.prev_actor[bottom:, None, None].expand(
             -1, 1, PREFLOP_HANDS
         )
         actor_values_expected = self._fan_out(
             values_expected.gather(1, src_actor_indices).squeeze(1)
         )
-        actor_values_achieved = values_achieved[bottom:].gather(
-            1, prev_actor_indices
-        ).squeeze(1)
+        actor_values_achieved = (
+            values_achieved[bottom:].gather(1, prev_actor_indices).squeeze(1)
+        )
         unblocked_reach = self._preflop_unblocked_mass(beliefs)
         player_ids = torch.arange(self.num_players, device=self.device)
         other_live = player_ids[None, :, None] != self.env.to_act[:, None, None]
@@ -610,9 +623,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
     def _compute_exploitability(self) -> ExploitabilityStats:
         """Skip heads-up exploitability diagnostics for multiway preflop solves."""
 
-        local = torch.zeros(
-            self.root_nodes, dtype=self.float_dtype, device=self.device
-        )
+        local = torch.zeros(self.root_nodes, dtype=self.float_dtype, device=self.device)
         br_values = torch.zeros(
             self.root_nodes,
             self.num_players,
@@ -624,7 +635,9 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             local_best_response_values=br_values,
         )
 
-    def _root_leaf_target_source_counts(self, num_roots: int) -> dict[str, torch.Tensor]:
+    def _root_leaf_target_source_counts(
+        self, num_roots: int
+    ) -> dict[str, torch.Tensor]:
         if self.num_players == 2:
             return super()._root_leaf_target_source_counts(num_roots)
 

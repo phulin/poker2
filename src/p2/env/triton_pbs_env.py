@@ -198,6 +198,7 @@ class TritonPBSEnv(PBSEnv):
             mid_stack_bb=proto.mid_stack_bb,
             max_stack_bb=proto.max_stack_bb,
             high_stack_mass_ratio=proto.high_stack_mass_ratio,
+            force_heads_up_preflop_flop=proto.force_heads_up_preflop_flop,
             init_state=init_state,
         )
 
@@ -299,6 +300,7 @@ class TritonPBSEnv(PBSEnv):
             dealt_cards,
             self.bb,
             self.num_players,
+            self.force_heads_up_preflop_flop,
             BLOCK_P=_next_power_of_2(self.num_players),
             num_warps=1,
         )
@@ -582,7 +584,9 @@ class TritonPBSEnv(PBSEnv):
             return self._default_bet_bins_tensor
         return torch.tensor(bet_bins, dtype=torch.float32, device=self.device)
 
-    def _select_to_tensor(self, select: torch.Tensor | slice, upper: int) -> torch.Tensor:
+    def _select_to_tensor(
+        self, select: torch.Tensor | slice, upper: int
+    ) -> torch.Tensor:
         if isinstance(select, slice):
             return torch.arange(upper, device=self.device)[select]
         return select.to(self.device)
@@ -637,7 +641,9 @@ if triton is not None:
 
         deck_offsets = tl.arange(0, 8)
         deck_mask = deck_offsets < 5
-        cards = tl.load(decks_ptr + reset_row * 5 + deck_offsets, mask=deck_mask, other=0)
+        cards = tl.load(
+            decks_ptr + reset_row * 5 + deck_offsets, mask=deck_mask, other=0
+        )
         tl.store(deck_ptr + env * 5 + deck_offsets, cards, mask=deck_mask)
         tl.store(deck_pos_ptr + env, 0)
         tl.store(button_ptr + env, button)
@@ -659,7 +665,9 @@ if triton is not None:
             mask=p_mask,
             other=0,
         )
-        blind = tl.where(p_offsets == sb_player, sb, tl.where(p_offsets == bb_player, bb, 0))
+        blind = tl.where(
+            p_offsets == sb_player, sb, tl.where(p_offsets == bb_player, bb, 0)
+        )
         posted = tl.minimum(starting_stack, blind)
         stack = starting_stack - posted
         tl.store(pot_ptr + env, tl.sum(tl.where(p_mask, posted, 0), axis=0))
@@ -677,7 +685,9 @@ if triton is not None:
         board_small = tl.arange(0, 8)
         board_small_mask = board_small < 5
         tl.store(board_indices_ptr + env * 5 + board_small, -1, mask=board_small_mask)
-        tl.store(last_board_indices_ptr + env * 5 + board_small, -1, mask=board_small_mask)
+        tl.store(
+            last_board_indices_ptr + env * 5 + board_small, -1, mask=board_small_mask
+        )
         board_offsets = tl.arange(0, BLOCK_BOARD)
         board_mask = board_offsets < 260
         tl.store(board_onehot_ptr + env * 260 + board_offsets, False, mask=board_mask)
@@ -752,7 +762,9 @@ if triton is not None:
         if COPY_DECK:
             deck_offsets = tl.arange(0, 8)
             deck_mask = deck_offsets < 5
-            deck = tl.load(src_deck_ptr + src * 5 + deck_offsets, mask=deck_mask, other=0)
+            deck = tl.load(
+                src_deck_ptr + src * 5 + deck_offsets, mask=deck_mask, other=0
+            )
             tl.store(dst_deck_ptr + dst * 5 + deck_offsets, deck, mask=deck_mask)
         tl.store(dst_deck_pos_ptr + dst, tl.load(src_deck_pos_ptr + src))
         tl.store(dst_button_ptr + dst, tl.load(src_button_ptr + src))
@@ -826,19 +838,31 @@ if triton is not None:
         board_small_mask = board_small < 5
         tl.store(
             dst_board_indices_ptr + dst * 5 + board_small,
-            tl.load(src_board_indices_ptr + src * 5 + board_small, mask=board_small_mask, other=-1),
+            tl.load(
+                src_board_indices_ptr + src * 5 + board_small,
+                mask=board_small_mask,
+                other=-1,
+            ),
             mask=board_small_mask,
         )
         tl.store(
             dst_last_board_indices_ptr + dst * 5 + board_small,
-            tl.load(src_last_board_indices_ptr + src * 5 + board_small, mask=board_small_mask, other=-1),
+            tl.load(
+                src_last_board_indices_ptr + src * 5 + board_small,
+                mask=board_small_mask,
+                other=-1,
+            ),
             mask=board_small_mask,
         )
         board_offsets = tl.arange(0, BLOCK_BOARD)
         board_mask = board_offsets < 260
         tl.store(
             dst_board_onehot_ptr + dst * 260 + board_offsets,
-            tl.load(src_board_onehot_ptr + src * 260 + board_offsets, mask=board_mask, other=0),
+            tl.load(
+                src_board_onehot_ptr + src * 260 + board_offsets,
+                mask=board_mask,
+                other=0,
+            ),
             mask=board_mask,
         )
 
@@ -926,9 +950,13 @@ if triton is not None:
         tl.store(dst_button_ptr + dsts, tl.load(src_button_ptr + src), mask=r_mask)
         tl.store(dst_street_ptr + dsts, tl.load(src_street_ptr + src), mask=r_mask)
         tl.store(dst_to_act_ptr + dsts, tl.load(src_to_act_ptr + src), mask=r_mask)
-        tl.store(dst_last_to_act_ptr + dsts, tl.load(src_last_to_act_ptr + src), mask=r_mask)
+        tl.store(
+            dst_last_to_act_ptr + dsts, tl.load(src_last_to_act_ptr + src), mask=r_mask
+        )
         tl.store(dst_pot_ptr + dsts, tl.load(src_pot_ptr + src), mask=r_mask)
-        tl.store(dst_min_raise_ptr + dsts, tl.load(src_min_raise_ptr + src), mask=r_mask)
+        tl.store(
+            dst_min_raise_ptr + dsts, tl.load(src_min_raise_ptr + src), mask=r_mask
+        )
         tl.store(
             dst_last_aggressive_amount_ptr + dsts,
             tl.load(src_last_aggressive_amount_ptr + src),
@@ -968,27 +996,37 @@ if triton is not None:
         )
         tl.store(
             dst_starting_stacks_ptr + dst_p,
-            tl.load(src_starting_stacks_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            tl.load(src_starting_stacks_ptr + src_p + p_offsets, mask=p_mask, other=0)[
+                None, :
+            ],
             mask=r_mask[:, None] & p_mask[None, :],
         )
         tl.store(
             dst_committed_ptr + dst_p,
-            tl.load(src_committed_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            tl.load(src_committed_ptr + src_p + p_offsets, mask=p_mask, other=0)[
+                None, :
+            ],
             mask=r_mask[:, None] & p_mask[None, :],
         )
         tl.store(
             dst_chips_placed_ptr + dst_p,
-            tl.load(src_chips_placed_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            tl.load(src_chips_placed_ptr + src_p + p_offsets, mask=p_mask, other=0)[
+                None, :
+            ],
             mask=r_mask[:, None] & p_mask[None, :],
         )
         tl.store(
             dst_has_folded_ptr + dst_p,
-            tl.load(src_has_folded_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            tl.load(src_has_folded_ptr + src_p + p_offsets, mask=p_mask, other=0)[
+                None, :
+            ],
             mask=r_mask[:, None] & p_mask[None, :],
         )
         tl.store(
             dst_is_allin_ptr + dst_p,
-            tl.load(src_is_allin_ptr + src_p + p_offsets, mask=p_mask, other=0)[None, :],
+            tl.load(src_is_allin_ptr + src_p + p_offsets, mask=p_mask, other=0)[
+                None, :
+            ],
             mask=r_mask[:, None] & p_mask[None, :],
         )
         tl.store(
@@ -1083,13 +1121,7 @@ if triton is not None:
         tl.store(amounts_ptr + row * B + 1, tl.minimum(to_call, actor_stack))
         tl.store(mask_ptr + row * B + 1, can_act)
 
-        responder = (
-            p_mask
-            & (p_offsets != actor)
-            & (~folded)
-            & (~allin)
-            & (stacks > 0)
-        )
+        responder = p_mask & (p_offsets != actor) & (~folded) & (~allin) & (stacks > 0)
         live_can_respond = tl.sum(tl.where(responder, 1, 0), axis=0) > 0
         pot = tl.load(pot_ptr + row).to(tl.float32)
         min_raise = tl.load(min_raise_ptr + row)
@@ -1107,8 +1139,12 @@ if triton is not None:
             & (bet_amount < actor_stack)
             & (raise_increment >= min_raise)
         )
-        tl.store(amounts_ptr + row * B + 2 + preset_offsets, bet_amount, mask=preset_mask)
-        tl.store(mask_ptr + row * B + 2 + preset_offsets, preset_legal, mask=preset_mask)
+        tl.store(
+            amounts_ptr + row * B + 2 + preset_offsets, bet_amount, mask=preset_mask
+        )
+        tl.store(
+            mask_ptr + row * B + 2 + preset_offsets, preset_legal, mask=preset_mask
+        )
         tl.store(amounts_ptr + row * B + B - 1, actor_stack)
         tl.store(mask_ptr + row * B + B - 1, can_act & (actor_stack > 0))
 
@@ -1148,12 +1184,18 @@ if triton is not None:
     ):
         contributions = starting_stacks - stacks
         levels = contributions
-        less = (contributions[None, :] < levels[:, None]) & p_mask[None, :] & p_mask[:, None]
+        less = (
+            (contributions[None, :] < levels[:, None])
+            & p_mask[None, :]
+            & p_mask[:, None]
+        )
         previous = tl.max(tl.where(less, contributions[None, :], 0), axis=1)
         duplicate_count = tl.maximum(
             tl.sum(
                 tl.where(
-                    (contributions[None, :] == levels[:, None]) & p_mask[None, :] & p_mask[:, None],
+                    (contributions[None, :] == levels[:, None])
+                    & p_mask[None, :]
+                    & p_mask[:, None],
                     1,
                     0,
                 ),
@@ -1161,20 +1203,34 @@ if triton is not None:
             ),
             1,
         )
-        widths = tl.maximum(levels - previous, 0).to(tl.float32) / duplicate_count.to(tl.float32)
-        participants = (contributions[None, :] >= levels[:, None]) & p_mask[None, :] & p_mask[:, None]
+        widths = tl.maximum(levels - previous, 0).to(tl.float32) / duplicate_count.to(
+            tl.float32
+        )
+        participants = (
+            (contributions[None, :] >= levels[:, None])
+            & p_mask[None, :]
+            & p_mask[:, None]
+        )
         participant_count = tl.sum(tl.where(participants, 1, 0), axis=1)
         layer_amount = widths * participant_count.to(tl.float32)
         eligible_winners = participants & winners[None, :]
         winner_count = tl.maximum(tl.sum(tl.where(eligible_winners, 1, 0), axis=1), 1)
-        shares = layer_amount[:, None] * eligible_winners.to(tl.float32) / winner_count[:, None].to(tl.float32)
+        shares = (
+            layer_amount[:, None]
+            * eligible_winners.to(tl.float32)
+            / winner_count[:, None].to(tl.float32)
+        )
         payouts = tl.sum(shares, axis=0)
         denom = tl.maximum(starting_stacks.to(tl.float32), 1.0)
-        reward = (stacks.to(tl.float32) + payouts - starting_stacks.to(tl.float32)) / denom
+        reward = (
+            stacks.to(tl.float32) + payouts - starting_stacks.to(tl.float32)
+        ) / denom
         tl.store(rewards_ptr + row_p + p_offsets, reward, mask=p_mask)
 
     @triton.jit
-    def _pbs_next_after(row_p, start, stacks, folded, allin, P: tl.constexpr, BLOCK_P: tl.constexpr):
+    def _pbs_next_after(
+        row_p, start, stacks, folded, allin, P: tl.constexpr, BLOCK_P: tl.constexpr
+    ):
         d_offsets = tl.arange(0, BLOCK_P)
         d_mask = d_offsets < P
         distances = d_offsets + 1
@@ -1235,6 +1291,7 @@ if triton is not None:
         dealt_cards_ptr,
         bb: tl.constexpr,
         P: tl.constexpr,
+        force_heads_up_preflop_flop: tl.constexpr,
         BLOCK_P: tl.constexpr,
     ):
         row = tl.program_id(0)
@@ -1254,21 +1311,34 @@ if triton is not None:
         actor = tl.load(to_act_ptr + row)
         actor_offset = row_p + actor
 
-        last_board = tl.load(board_indices_ptr + row * 5 + board_offsets, mask=board_mask, other=-1)
-        tl.store(last_board_indices_ptr + row * 5 + board_offsets, last_board, mask=acting & board_mask)
+        last_board = tl.load(
+            board_indices_ptr + row * 5 + board_offsets, mask=board_mask, other=-1
+        )
+        tl.store(
+            last_board_indices_ptr + row * 5 + board_offsets,
+            last_board,
+            mask=acting & board_mask,
+        )
 
         committed = tl.load(committed_ptr + row_p + p_offsets, mask=p_mask, other=0)
+        chips_placed = tl.load(
+            chips_placed_ptr + row_p + p_offsets, mask=p_mask, other=0
+        )
         stacks = tl.load(stacks_ptr + row_p + p_offsets, mask=p_mask, other=0)
         folded = tl.load(has_folded_ptr + row_p + p_offsets, mask=p_mask, other=1)
         allin = tl.load(is_allin_ptr + row_p + p_offsets, mask=p_mask, other=1)
         acted = tl.load(acted_ptr + row_p + p_offsets, mask=p_mask, other=0)
-        starting_stacks = tl.load(starting_stacks_ptr + row_p + p_offsets, mask=p_mask, other=0)
+        starting_stacks = tl.load(
+            starting_stacks_ptr + row_p + p_offsets, mask=p_mask, other=0
+        )
         max_committed_before = tl.max(committed, axis=0)
         actor_stack = tl.load(stacks_ptr + actor_offset)
         actor_committed = tl.load(committed_ptr + actor_offset)
         to_call = max_committed_before - actor_committed
         call_amount = tl.minimum(to_call, actor_stack)
-        bet_amount = tl.minimum(tl.maximum(tl.load(bet_amount_ptr + row), 0), actor_stack)
+        bet_amount = tl.minimum(
+            tl.maximum(tl.load(bet_amount_ptr + row), 0), actor_stack
+        )
 
         put_in = tl.full((), 0, tl.int64)
         put_in = tl.where(action == 1, call_amount, put_in)
@@ -1279,8 +1349,12 @@ if triton is not None:
         actor_lane = p_offsets == actor
         new_actor_stack = actor_stack - put_in
         new_actor_committed = actor_committed + put_in
+        new_actor_chips_placed = tl.load(chips_placed_ptr + actor_offset) + put_in
         stacks = tl.where(actor_lane & p_mask, new_actor_stack, stacks)
         committed = tl.where(actor_lane & p_mask, new_actor_committed, committed)
+        chips_placed = tl.where(
+            actor_lane & p_mask, new_actor_chips_placed, chips_placed
+        )
         folded = tl.where(actor_lane & p_mask, folded | (action == 0), folded)
         allin = tl.where(
             actor_lane & p_mask,
@@ -1293,19 +1367,27 @@ if triton is not None:
         tl.store(committed_ptr + actor_offset, new_actor_committed, mask=acting)
         tl.store(
             chips_placed_ptr + actor_offset,
-            tl.load(chips_placed_ptr + actor_offset) + put_in,
+            new_actor_chips_placed,
             mask=acting,
         )
         tl.store(pot_ptr + row, tl.load(pot_ptr + row) + put_in, mask=acting)
-        tl.store(has_folded_ptr + row_p + p_offsets, folded, mask=acting & actor_lane & p_mask)
-        tl.store(is_allin_ptr + row_p + p_offsets, allin, mask=acting & actor_lane & p_mask)
+        tl.store(
+            has_folded_ptr + row_p + p_offsets,
+            folded,
+            mask=acting & actor_lane & p_mask,
+        )
+        tl.store(
+            is_allin_ptr + row_p + p_offsets, allin, mask=acting & actor_lane & p_mask
+        )
 
         raise_increment = new_actor_committed - max_committed_before
         aggressive = acting & (raise_increment > 0) & ((action == 2) | (action == 3))
         old_min_raise = tl.load(min_raise_ptr + row)
         tl.store(
             min_raise_ptr + row,
-            tl.where(aggressive, tl.maximum(old_min_raise, raise_increment), old_min_raise),
+            tl.where(
+                aggressive, tl.maximum(old_min_raise, raise_increment), old_min_raise
+            ),
             mask=acting,
         )
         old_last_aggressive = tl.load(last_aggressive_amount_ptr + row)
@@ -1314,7 +1396,9 @@ if triton is not None:
             tl.where(aggressive, new_actor_committed, old_last_aggressive),
             mask=acting,
         )
-        acted = tl.where(aggressive, actor_lane & p_mask, tl.where(actor_lane & p_mask, True, acted))
+        acted = tl.where(
+            aggressive, actor_lane & p_mask, tl.where(actor_lane & p_mask, True, acted)
+        )
         tl.store(acted_ptr + row_p + p_offsets, acted, mask=acting & p_mask)
         tl.store(
             actions_this_round_ptr + row,
@@ -1337,7 +1421,9 @@ if triton is not None:
         matched = committed == max_committed
         ready = (~eligible) | (acted & matched)
         all_ready = tl.min(tl.where(p_mask, ready.to(tl.int32), 1), axis=0) == 1
-        no_more_betting = acting & (~done_after_fold) & (live_count > 1) & (eligible_count == 0)
+        no_more_betting = (
+            acting & (~done_after_fold) & (live_count > 1) & (eligible_count == 0)
+        )
         round_closed = acting & (~done_after_fold) & (eligible_count > 0) & all_ready
 
         pot = tl.load(pot_ptr + row)
@@ -1359,6 +1445,22 @@ if triton is not None:
 
         old_street = tl.load(street_ptr + row)
         deck_pos = tl.load(deck_pos_ptr + row)
+        if force_heads_up_preflop_flop:
+            live_allin_count = tl.sum(tl.where(live & allin, 1, 0), axis=0)
+            allin_call_leaf = (eligible_count == 1) & (live_allin_count > 0)
+            force_hu = (
+                round_closed & (old_street == 0) & (live_count > 2) & (~allin_call_leaf)
+            )
+            other_live = live & (~actor_lane)
+            other_score = chips_placed * (P + 1) + (P - p_offsets)
+            other_score = tl.where(other_live, other_score, -1)
+            keep_other_score = tl.max(other_score, axis=0)
+            keep_other = other_live & (other_score == keep_other_score)
+            force_fold = force_hu & live & (~actor_lane) & (~keep_other)
+            folded = folded | force_fold
+            allin = allin & (~force_fold)
+            tl.store(has_folded_ptr + row_p + p_offsets, folded, mask=force_hu & p_mask)
+            tl.store(is_allin_ptr + row_p + p_offsets, allin, mask=force_hu & p_mask)
 
         if no_more_betting:
             c0 = tl.load(deck_ptr + row * 5)
@@ -1385,7 +1487,9 @@ if triton is not None:
 
         if round_closed:
             tl.store(committed_ptr + row_p + p_offsets, 0, mask=p_mask)
-            tl.store(actions_last_round_ptr + row, tl.load(actions_this_round_ptr + row))
+            tl.store(
+                actions_last_round_ptr + row, tl.load(actions_this_round_ptr + row)
+            )
             tl.store(actions_this_round_ptr + row, 0)
             tl.store(acted_ptr + row_p + p_offsets, False, mask=p_mask)
             tl.store(min_raise_ptr + row, bb)

@@ -65,7 +65,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         src_env: HUNLTensorEnv | PBSEnv,
         src_indices: torch.Tensor,
     ) -> None:
-        SparseCFREvaluator._construct_subgame(self, src_env, src_indices)
+        PreflopSparseCFREvaluator._construct_subgame(self, src_env, src_indices)
 
     def _continuation_value_target_sampling_enabled(self) -> bool:
         return True
@@ -183,9 +183,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             return
         super()._prepare_compact_leaf_sampling(training_mode)
         assert self._sample_leaf_players is not None
-        self._sample_leaf_players.random_(
-            0, self.num_players, generator=self.generator
-        )
+        self._sample_leaf_players.random_(0, self.num_players, generator=self.generator)
 
     def _model_features_for_beliefs(
         self, beliefs_at_model: torch.Tensor
@@ -233,9 +231,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def _cache_preflop_allin_live_partitions(self) -> None:
         PreflopSparseCFREvaluator._cache_preflop_allin_live_partitions(self)
 
-    def _cache_allin_call_street_partitions(
-        self, parent_streets: torch.Tensor
-    ) -> None:
+    def _cache_allin_call_street_partitions(self, parent_streets: torch.Tensor) -> None:
         PreflopSparseCFREvaluator._cache_allin_call_street_partitions(
             self,
             parent_streets,
@@ -667,9 +663,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                     self.beliefs_avg,
                 )
                 return
-            self._renormalize_policy_reach(
-                self.policy_probs_avg, self.self_reach_avg
-            )
+            self._renormalize_policy_reach(self.policy_probs_avg, self.self_reach_avg)
             return
         self.policy_probs_avg[: self.root_nodes] = 0.0
         self._prepare_tree_slices()
@@ -775,8 +769,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 self._last_model_values_buf = self.latest_values.new_empty(empty_shape)
             self.last_model_values = self._last_model_values_buf
 
-        compact_public_preflop = (
-            beliefs.shape[-1] == PREFLOP_HANDS and isinstance(self.env, PBSEnv)
+        compact_public_preflop = beliefs.shape[-1] == PREFLOP_HANDS and isinstance(
+            self.env, PBSEnv
         )
         if self.showdown_indices.numel() > 0 and not compact_public_preflop:
             showdown_beliefs = beliefs[self.showdown_indices]
@@ -913,9 +907,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         return CFREvaluator.evaluate_cfr(self, training_mode, sample_continuation)
 
     def _compute_exploitability(self) -> ExploitabilityStats:
-        local = torch.zeros(
-            self.root_nodes, dtype=self.float_dtype, device=self.device
-        )
+        local = torch.zeros(self.root_nodes, dtype=self.float_dtype, device=self.device)
         br_values = torch.zeros(
             self.root_nodes,
             self.num_players,
@@ -927,7 +919,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             local_best_response_values=br_values,
         )
 
-    def _root_leaf_target_source_counts(self, num_roots: int) -> dict[str, torch.Tensor]:
+    def _root_leaf_target_source_counts(
+        self, num_roots: int
+    ) -> dict[str, torch.Tensor]:
         device = self.device
         return {
             "leaf_total_count": torch.zeros(num_roots, dtype=torch.long, device=device),

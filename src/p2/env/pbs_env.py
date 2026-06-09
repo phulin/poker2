@@ -40,6 +40,7 @@ class PBSEnv:
         mid_stack_bb: int = 200,
         max_stack_bb: int = 400,
         high_stack_mass_ratio: float = 1.0 / 3.0,
+        force_heads_up_preflop_flop: bool = False,
         init_state: bool = True,
     ) -> None:
         if num_envs < 0:
@@ -76,6 +77,7 @@ class PBSEnv:
         self.max_stack_bb = int(max_stack_bb)
         self.high_stack_mass_ratio = float(high_stack_mass_ratio)
         self.randomize_stacks = stack_mode != "fixed"
+        self.force_heads_up_preflop_flop = bool(force_heads_up_preflop_flop)
         self.sb = int(sb)
         self.bb = int(bb)
         self.default_bet_bins = default_bet_bins or DEFAULT_BET_BINS
@@ -182,6 +184,7 @@ class PBSEnv:
             mid_stack_bb=proto.mid_stack_bb,
             max_stack_bb=proto.max_stack_bb,
             high_stack_mass_ratio=proto.high_stack_mass_ratio,
+            force_heads_up_preflop_flop=proto.force_heads_up_preflop_flop,
             init_state=init_state,
         )
 
@@ -531,6 +534,8 @@ class PBSEnv:
         rewards = self._finish_no_more_betting(
             rewards, no_more_betting, new_streets, dealt_cards
         )
+        if self.force_heads_up_preflop_flop:
+            self._force_heads_up_preflop_closure(round_closed, actor)
         rewards = self._advance_closed_rounds(
             rewards, round_closed, new_streets, dealt_cards
         )
@@ -547,6 +552,37 @@ class PBSEnv:
             self.to_act,
         )
         return rewards, new_streets, dealt_cards
+
+    def _force_heads_up_preflop_closure(
+        self, round_closed: torch.Tensor, actor: torch.Tensor
+    ) -> torch.Tensor:
+        """Fold surplus live seats before a preflop closure advances to flop."""
+        live = ~self.has_folded
+        eligible = live & ~self.is_allin & (self.stacks > 0)
+        live_allin = live & self.is_allin
+        allin_call_leaf = (eligible.sum(dim=1) == 1) & live_allin.any(dim=1)
+        force_rows = (
+            round_closed & (self.street == 0) & (live.sum(dim=1) > 2) & ~allin_call_leaf
+        )
+        actor_keep = torch.zeros_like(live)
+        actor_keep[self.arange_n, actor] = force_rows
+
+        live_other = live & ~actor_keep
+        tie_break = self.num_players - self.players
+        keep_score = self.chips_placed * (self.num_players + 1) + tie_break
+        keep_score = torch.where(
+            live_other,
+            keep_score,
+            torch.full_like(keep_score, -1),
+        )
+        other = keep_score.argmax(dim=1)
+        other_keep = torch.zeros_like(live)
+        other_keep[self.arange_n, other] = force_rows
+
+        force_fold = force_rows[:, None] & live & ~(actor_keep | other_keep)
+        self.has_folded |= force_fold
+        self.is_allin &= ~force_fold
+        return force_fold
 
     def finish_and_assign_rewards(
         self, env_indices: torch.Tensor, winners: torch.Tensor

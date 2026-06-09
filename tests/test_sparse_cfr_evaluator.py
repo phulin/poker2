@@ -538,7 +538,9 @@ def test_fused_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() 
     )
 
 
-def test_fused_model_leaf_values_use_closing_model_when_model_leaves_close_street() -> None:
+def test_fused_model_leaf_values_use_closing_model_when_model_leaves_close_street() -> (
+    None
+):
     from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
     evaluator = object.__new__(FusedSparseCFREvaluator)
@@ -823,7 +825,9 @@ def test_preflop_sparse_evaluator_uses_compact_169_tensors() -> None:
     )
     env.reset(
         force_button=torch.zeros(1, dtype=torch.long, device=device),
-        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14]], dtype=torch.long, device=device
+        ),
     )
     model = CompactPreflopMockModel(
         num_actions=len(cfg.env.bet_bins) + 3,
@@ -856,6 +860,47 @@ def test_preflop_sparse_evaluator_uses_compact_169_tensors() -> None:
         assert tensor.shape[-1] == PREFLOP_HANDS
 
 
+def test_preflop_sparse_new_street_leaves_are_heads_up() -> None:
+    device = get_device()
+    num_players = 4
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.depth = num_players
+    cfg.search.allin_call_terminal_abstraction = False
+    env = PBSEnv(
+        num_envs=1,
+        num_players=num_players,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(1, dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14]], dtype=torch.long, device=device
+        ),
+    )
+    model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = PreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+
+    evaluator.initialize_subgame(env, torch.arange(1, device=device))
+
+    assert env.force_heads_up_preflop_flop is False
+    assert evaluator.new_street_mask.any()
+    live_counts = (~evaluator.env.has_folded[evaluator.new_street_mask]).sum(dim=1)
+    assert int(live_counts.max()) <= 2
+
+
 def test_preflop_sparse_evaluator_runs_compact_iteration_and_policy_batch() -> None:
     device = get_device()
     num_players = 3
@@ -874,7 +919,9 @@ def test_preflop_sparse_evaluator_runs_compact_iteration_and_policy_batch() -> N
     )
     env.reset(
         force_button=torch.zeros(1, dtype=torch.long, device=device),
-        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14]], dtype=torch.long, device=device
+        ),
     )
     model = CompactPreflopMockModel(
         num_actions=len(cfg.env.bet_bins) + 3,
@@ -926,7 +973,9 @@ def test_preflop_sparse_ev_uses_marginal_action_policy_for_folded_players() -> N
     )
     env.reset(
         force_button=torch.zeros(1, dtype=torch.long, device=device),
-        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14]], dtype=torch.long, device=device
+        ),
     )
     env.to_act[0] = 0
     env.has_folded[0, 2] = True
@@ -959,7 +1008,9 @@ def test_preflop_sparse_ev_uses_marginal_action_policy_for_folded_players() -> N
     for child, value in zip(children, action_values, strict=True):
         leaf_values[child, 2] = value
     values = torch.empty_like(evaluator.latest_values)
-    evaluator.compute_expected_values(policy=policy, leaf_values=leaf_values, values=values)
+    evaluator.compute_expected_values(
+        policy=policy, leaf_values=leaf_values, values=values
+    )
 
     actor_belief = evaluator.beliefs[0, 0]
     marginal_policy = (actor_belief[None, :] * policy[children]).sum(dim=-1)
@@ -972,7 +1023,9 @@ def test_preflop_sparse_ev_uses_marginal_action_policy_for_folded_players() -> N
     )
 
 
-def test_preflop_sparse_continuation_sampling_returns_abort_root_not_value_target() -> None:
+def test_preflop_sparse_continuation_sampling_returns_abort_root_not_value_target() -> (
+    None
+):
     device = get_device()
     num_players = 3
     cfg = make_config([0.5])
@@ -992,7 +1045,9 @@ def test_preflop_sparse_continuation_sampling_returns_abort_root_not_value_targe
     )
     env.reset(
         force_button=torch.zeros(1, dtype=torch.long, device=device),
-        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14]], dtype=torch.long, device=device
+        ),
     )
     model = CompactPreflopMockModel(
         num_actions=len(cfg.env.bet_bins) + 3,
@@ -1111,7 +1166,9 @@ def test_preflop_sparse_allin_call_leaf_marked_during_construction() -> None:
     )
     env.reset(
         force_button=torch.zeros(1, dtype=torch.long, device=device),
-        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14]], dtype=torch.long, device=device
+        ),
     )
     env.street[0] = 0
     env.to_act[0] = 0
@@ -1224,7 +1281,9 @@ def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
         def __init__(self) -> None:
             self.live_counts: list[int] = []
             self.batch_sizes: list[int] = []
-            self.live3_entries: list[tuple[list[int], list[int], list[int], list[int]]] = []
+            self.live3_entries: list[
+                tuple[list[int], list[int], list[int], list[int]]
+            ] = []
 
         def values(self, *, beliefs, live_players, **kwargs):
             del kwargs
@@ -1269,11 +1328,21 @@ def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
     assert fake.live_counts == [2, 6]
     assert fake.batch_sizes == [1, 3]
     assert fake.live3_entries == [([0, 0, 0], [0, 1, 2], [1, 0, 0], [2, 2, 1])]
-    assert_close(evaluator.latest_values[0], torch.full((num_players, PREFLOP_HANDS), 2.0))
-    assert_close(evaluator.latest_values[1], torch.full((num_players, PREFLOP_HANDS), 3.0))
-    assert_close(evaluator.latest_values[2], torch.full((num_players, PREFLOP_HANDS), 6.0))
-    assert_close(evaluator.latest_values[3], torch.full((num_players, PREFLOP_HANDS), 6.0))
-    assert_close(evaluator.latest_values[4], torch.full((num_players, PREFLOP_HANDS), 6.0))
+    assert_close(
+        evaluator.latest_values[0], torch.full((num_players, PREFLOP_HANDS), 2.0)
+    )
+    assert_close(
+        evaluator.latest_values[1], torch.full((num_players, PREFLOP_HANDS), 3.0)
+    )
+    assert_close(
+        evaluator.latest_values[2], torch.full((num_players, PREFLOP_HANDS), 6.0)
+    )
+    assert_close(
+        evaluator.latest_values[3], torch.full((num_players, PREFLOP_HANDS), 6.0)
+    )
+    assert_close(
+        evaluator.latest_values[4], torch.full((num_players, PREFLOP_HANDS), 6.0)
+    )
 
 
 def test_preflop_sparse_evaluator_rejects_fused_config() -> None:
@@ -1320,7 +1389,9 @@ def test_fused_preflop_sparse_evaluator_is_compact_only(monkeypatch) -> None:
     )
     env.reset(
         force_button=torch.zeros(1, dtype=torch.long, device=device),
-        force_deck=torch.tensor([[10, 11, 12, 13, 14]], dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14]], dtype=torch.long, device=device
+        ),
     )
     model = CompactPreflopMockModel(
         num_actions=len(cfg.env.bet_bins) + 3,
@@ -1344,9 +1415,13 @@ def test_fused_preflop_sparse_evaluator_is_compact_only(monkeypatch) -> None:
     assert evaluator.latest_values.shape[-1] == PREFLOP_HANDS
     assert features.hand_dim == PREFLOP_HANDS
     assert features.beliefs.shape[1] == num_players * PREFLOP_HANDS
-    partition_positions = torch.cat(
-        (evaluator.new_street_model_positions, evaluator.cutoff_model_positions)
-    ).sort().values
+    partition_positions = (
+        torch.cat(
+            (evaluator.new_street_model_positions, evaluator.cutoff_model_positions)
+        )
+        .sort()
+        .values
+    )
     torch.testing.assert_close(
         partition_positions,
         torch.arange(evaluator.model_indices.numel(), device=device),
@@ -1366,6 +1441,57 @@ def test_fused_preflop_sparse_evaluator_is_compact_only(monkeypatch) -> None:
             device=device,
             cfg=cfg,
         )
+
+
+def test_fused_preflop_sparse_new_street_leaves_are_heads_up(monkeypatch) -> None:
+    from p2.search.fused_preflop_sparse_cfr_evaluator import (
+        FusedPreflopSparseCFREvaluator,
+    )
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    monkeypatch.setattr(
+        FusedSparseCFREvaluator,
+        "__init__",
+        SparseCFREvaluator.__init__,
+    )
+    device = get_device()
+    num_players = 4
+    cfg = make_config([0.5])
+    cfg.env.num_players = num_players
+    cfg.search.depth = num_players
+    cfg.search.allin_call_terminal_abstraction = False
+    env = PBSEnv(
+        num_envs=1,
+        num_players=num_players,
+        mean_stack=1000,
+        sb=5,
+        bb=10,
+        default_bet_bins=cfg.env.bet_bins,
+        device=device,
+    )
+    env.reset(
+        force_button=torch.zeros(1, dtype=torch.long, device=device),
+        force_deck=torch.tensor(
+            [[10, 11, 12, 13, 14]], dtype=torch.long, device=device
+        ),
+    )
+    model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    evaluator = FusedPreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+    )
+
+    evaluator.initialize_subgame(env, torch.arange(1, device=device))
+
+    assert env.force_heads_up_preflop_flop is False
+    assert evaluator.new_street_mask.any()
+    live_counts = (~evaluator.env.has_folded[evaluator.new_street_mask]).sum(dim=1)
+    assert int(live_counts.max()) <= 2
 
 
 def test_initialize_policy_and_beliefs() -> None:
@@ -1411,10 +1537,7 @@ def test_action_mix_records_root_mix_and_total_bet_mass() -> None:
     evaluator.stats = {}
 
     evaluator.parent_index = torch.tensor(
-        [0, 0]
-        + [0] * 6
-        + [1] * 6
-        + [2] * 6,
+        [0, 0] + [0] * 6 + [1] * 6 + [2] * 6,
         dtype=torch.long,
         device=device,
     )
@@ -1426,7 +1549,9 @@ def test_action_mix_records_root_mix_and_total_bet_mass() -> None:
         dtype=torch.long,
         device=device,
     )
-    evaluator.leaf_mask = torch.ones(evaluator.total_nodes, dtype=torch.bool, device=device)
+    evaluator.leaf_mask = torch.ones(
+        evaluator.total_nodes, dtype=torch.bool, device=device
+    )
     evaluator.leaf_mask[:2] = False
     evaluator.leaf_mask[2] = False
 
@@ -1985,9 +2110,13 @@ def test_street_cutoff_depth_five_expands_fold_call_only() -> None:
     env.default_bet_bins = cfg.env.bet_bins
     env.num_bet_bins = cfg.model.num_actions
     model = MockModel(num_actions=cfg.model.num_actions, device=device)
-    evaluator, _, _ = make_sparse_evaluator(model=model, env=env, cfg=cfg, device=device)
+    evaluator, _, _ = make_sparse_evaluator(
+        model=model, env=env, cfg=cfg, device=device
+    )
 
-    evaluator.initialize_subgame(env, torch.tensor([0], dtype=torch.long, device=device))
+    evaluator.initialize_subgame(
+        env, torch.tensor([0], dtype=torch.long, device=device)
+    )
 
     assert len(evaluator.depth_offsets) >= 8
     depth5_start = evaluator.depth_offsets[5]
@@ -1996,9 +2125,8 @@ def test_street_cutoff_depth_five_expands_fold_call_only() -> None:
     depth6_end = evaluator.depth_offsets[7]
     depth6_children = torch.arange(depth6_start, depth6_end, device=device)
 
-    depth5_child_mask = (
-        (evaluator.parent_index[depth6_children] >= depth5_start)
-        & (evaluator.parent_index[depth6_children] < depth5_end)
+    depth5_child_mask = (evaluator.parent_index[depth6_children] >= depth5_start) & (
+        evaluator.parent_index[depth6_children] < depth5_end
     )
     depth5_children = depth6_children[depth5_child_mask]
     assert depth5_children.numel() > 0
@@ -2006,7 +2134,9 @@ def test_street_cutoff_depth_five_expands_fold_call_only() -> None:
 
     call_children = depth5_children[evaluator.action_from_parent[depth5_children] == 1]
     assert call_children.numel() > 0
-    assert evaluator.new_street_mask[call_children[~evaluator.env.done[call_children]]].all()
+    assert evaluator.new_street_mask[
+        call_children[~evaluator.env.done[call_children]]
+    ].all()
 
     model_leaf_mask = evaluator.leaf_mask & ~evaluator.env.done
     model_leaf_mask &= ~evaluator.allin_call_mask
@@ -2021,9 +2151,13 @@ def test_street_cutoff_model_leaves_use_configured_end_model() -> None:
     env.default_bet_bins = cfg.env.bet_bins
     env.num_bet_bins = cfg.model.num_actions
     model = PreOnlyMockModel(num_actions=cfg.model.num_actions, device=device)
-    evaluator, _, _ = make_sparse_evaluator(model=model, env=env, cfg=cfg, device=device)
+    evaluator, _, _ = make_sparse_evaluator(
+        model=model, env=env, cfg=cfg, device=device
+    )
 
-    evaluator.initialize_subgame(env, torch.tensor([0], dtype=torch.long, device=device))
+    evaluator.initialize_subgame(
+        env, torch.tensor([0], dtype=torch.long, device=device)
+    )
     evaluator.set_leaf_values(0)
 
     assert evaluator.model_indices.numel() > 0

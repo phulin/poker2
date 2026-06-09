@@ -250,6 +250,24 @@ def test_pbs_env_matches_nl_env_raise_call_close_round():
     assert int(pbs.pot[0]) == ref.state.pot
 
 
+def test_pbs_env_can_force_heads_up_preflop_flop_transition():
+    pbs = _make_pbs(num_players=4)
+    pbs.force_heads_up_preflop_flop = True
+
+    for action_bin in [1, 1, 1, 1]:
+        _, new_streets, _ = pbs.step_bins(torch.tensor([action_bin], dtype=torch.long))
+
+    assert int(new_streets[0]) == 1
+    assert int(pbs.street[0]) == 1
+    assert int((~pbs.has_folded[0]).sum()) == 2
+    torch.testing.assert_close(
+        pbs.has_folded[0].cpu(),
+        torch.tensor([False, True, False, True]),
+    )
+    torch.testing.assert_close(pbs.committed[0].cpu(), torch.zeros(4, dtype=torch.long))
+    assert int(pbs.pot[0]) == 40
+
+
 def test_pbs_env_matches_nl_env_multiway_fold_terminal():
     ref = _make_ref()
     pbs = _make_pbs()
