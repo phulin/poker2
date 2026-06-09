@@ -731,24 +731,43 @@ class RebelCFRTrainer:
         )
         checkpoint_value_heads = checkpoint_model_config.get("street_value_heads")
         checkpoint_num_players = checkpoint_env_config.get("num_players")
-        original_value_heads = getattr(self.cfg.model, "street_value_heads", None)
-        original_enforce_zero_sum = getattr(self.cfg.model, "enforce_zero_sum", None)
+        model_arch_keys = (
+            "hidden_dim",
+            "range_hidden_dim",
+            "ffn_dim",
+            "num_hidden_layers",
+            "num_policy_layers",
+            "num_value_layers",
+            "shared_trunk",
+            "enforce_zero_sum",
+            "board_interaction_dim",
+            "policy_rank",
+            "policy_hand_bias_rank",
+            "street_value_heads",
+        )
+        original_model_arch = {
+            key: getattr(self.cfg.model, key, None) for key in model_arch_keys
+        }
+        original_preflop_hand_dim = getattr(self.cfg.model, "preflop_hand_dim", None)
         original_num_players = self.num_players
+        for key in model_arch_keys:
+            if key in checkpoint_model_config:
+                setattr(self.cfg.model, key, checkpoint_model_config[key])
         if checkpoint_value_heads is not None:
             self.cfg.model.street_value_heads = checkpoint_value_heads
-        if "enforce_zero_sum" in checkpoint_model_config:
-            self.cfg.model.enforce_zero_sum = bool(
-                checkpoint_model_config["enforce_zero_sum"]
-            )
+        self.cfg.model.preflop_hand_dim = int(
+            checkpoint_model_config.get("preflop_hand_dim", NUM_HANDS) or NUM_HANDS
+        )
         if checkpoint_num_players is not None:
             self.num_players = int(checkpoint_num_players)
         try:
             model = self._make_eval_twin(compile_model=False)
         finally:
-            if original_value_heads is not None:
-                self.cfg.model.street_value_heads = original_value_heads
-            if original_enforce_zero_sum is not None:
-                self.cfg.model.enforce_zero_sum = original_enforce_zero_sum
+            for key, value in original_model_arch.items():
+                if value is not None:
+                    setattr(self.cfg.model, key, value)
+            if original_preflop_hand_dim is not None:
+                self.cfg.model.preflop_hand_dim = original_preflop_hand_dim
             self.num_players = original_num_players
         model_state = checkpoint["model"]
         model_state = {
