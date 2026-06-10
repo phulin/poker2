@@ -418,7 +418,6 @@ def test_compact_preflop_model_shapes_and_policy_loss() -> None:
         PREFLOP_HANDS,
         num_actions,
     )
-
     targets = torch.full(
         (batch_size, PREFLOP_HANDS, num_actions),
         1.0 / num_actions,
@@ -470,6 +469,11 @@ def test_compact_preflop_transformer_model_shapes_and_policy_loss() -> None:
     value_model.init_weights(torch.Generator(device="cpu").manual_seed(4))
     policy_model.init_weights(torch.Generator(device="cpu").manual_seed(5))
 
+    assert len(value_model.encoder) == 2
+    assert len(value_model.value_encoder) == 1
+    assert len(policy_model.encoder) == 2
+    assert len(policy_model.policy_encoder) == 1
+
     value_output = value_model(features, include_policy=False)
     policy_output = policy_model(features, include_policy=True, include_value=False)
 
@@ -483,7 +487,6 @@ def test_compact_preflop_transformer_model_shapes_and_policy_loss() -> None:
         PREFLOP_HANDS,
         num_actions,
     )
-
     targets = torch.full(
         (batch_size, PREFLOP_HANDS, num_actions),
         1.0 / num_actions,
@@ -498,6 +501,49 @@ def test_compact_preflop_transformer_model_shapes_and_policy_loss() -> None:
         batch,
     )
     assert torch.isfinite(loss["policy_loss"])
+
+
+def test_compact_preflop_transformer_head_layers_work_without_shared_layers() -> None:
+    features = _compact_features(batch_size=2, num_players=3)
+    value_model = BetterPreflopTransformerValueFFN(
+        num_actions=1,
+        hidden_dim=48,
+        range_hidden_dim=16,
+        ffn_dim=96,
+        num_hidden_layers=0,
+        num_policy_layers=2,
+        num_value_layers=3,
+        num_players=3,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        transformer_heads=4,
+    )
+    policy_model = BetterPreflopTransformerPolicyFFN(
+        num_actions=5,
+        hidden_dim=48,
+        range_hidden_dim=16,
+        ffn_dim=96,
+        num_hidden_layers=0,
+        num_policy_layers=2,
+        num_value_layers=3,
+        num_players=3,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        transformer_heads=4,
+    )
+
+    assert len(value_model.encoder) == 0
+    assert len(value_model.value_encoder) == 3
+    assert len(policy_model.encoder) == 0
+    assert len(policy_model.policy_encoder) == 2
+    assert value_model(features, include_policy=False).hand_values.shape == (
+        2,
+        3,
+        PREFLOP_HANDS,
+    )
+    assert policy_model(
+        features, include_policy=True, include_value=False
+    ).policy_logits.shape == (2, PREFLOP_HANDS, 5)
 
 
 def test_compact_preflop_legacy_context_features_load_old_width_state() -> None:

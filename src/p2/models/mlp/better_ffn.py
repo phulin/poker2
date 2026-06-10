@@ -1843,11 +1843,11 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         del board
         return prefix
 
-    def _encode_tokens(
+    def _encode_base_tokens(
         self,
         features: MLPFeatures,
         static_game_token: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if features.hand_dim != PREFLOP_HANDS:
             raise ValueError(
                 f"compact preflop transformer requires hand_dim={PREFLOP_HANDS}, "
@@ -1879,6 +1879,11 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         encoded = torch.cat((game_token[:, None, :], player_tokens), dim=1)
         for block in self.encoder:
             encoded = block(encoded)
+        return player_beliefs, encoded, hand_emb
+
+    def _states_from_tokens(
+        self, encoded: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         game_state = encoded[:, 0]
         player_state = self.player_state(
             torch.cat(
@@ -1889,6 +1894,21 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
                 dim=-1,
             )
         )
+        return game_state, player_state
+
+    def _encode_tokens(
+        self,
+        features: MLPFeatures,
+        static_game_token: torch.Tensor | None = None,
+        extra_encoder: nn.ModuleList | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        player_beliefs, encoded, hand_emb = self._encode_base_tokens(
+            features, static_game_token=static_game_token
+        )
+        if extra_encoder is not None:
+            for block in extra_encoder:
+                encoded = block(encoded)
+        game_state, player_state = self._states_from_tokens(encoded)
         return player_beliefs, game_state, player_state, hand_emb
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
@@ -1929,6 +1949,17 @@ class BetterPreflopTransformerValueFFN(_BetterPreflopTransformerBase):
             kwargs.setdefault("num_actions", 1)
         super().__init__(*args, **kwargs)
         del value_heads
+        self.value_encoder = nn.ModuleList(
+            [
+                _PreflopTokenEncoderBlock(
+                    self.hidden_dim,
+                    num_heads=self.transformer_heads,
+                    ffn_dim=self.ffn_dim,
+                    nonlinearity=self.nonlinearity,
+                )
+                for _ in range(self.num_value_layers)
+            ]
+        )
         self.value_hand_proj = nn.Linear(
             self.preflop_hand_embed_dim, self.hidden_dim, bias=False
         )
@@ -1973,7 +2004,9 @@ class BetterPreflopTransformerValueFFN(_BetterPreflopTransformerBase):
     ) -> ModelOutput:
         del latent, value_head
         player_beliefs, _, player_state, hand_emb = self._encode_tokens(
-            features, static_game_token=static_base_features
+            features,
+            static_game_token=static_base_features,
+            extra_encoder=self.value_encoder,
         )
         return self._value_from_tokens(
             player_beliefs,
@@ -2060,18 +2093,13 @@ class BetterPreflopTransformerPolicyFFN(_BetterPreflopTransformerBase):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        policy_alpha = (
-            1 / math.sqrt(max(1, self.num_policy_layers))
-            if not self.shared_trunk
-            else 1 / math.sqrt(max(1, self.num_policy_layers + self.num_hidden_layers))
-        )
-        self.policy_tower = nn.Sequential(
-            *[
-                ResidualBlock(
-                    ffn_block(
-                        self.hidden_dim, self.ffn_dim, nonlinearity=self.nonlinearity
-                    ),
-                    policy_alpha,
+        self.policy_encoder = nn.ModuleList(
+            [
+                _PreflopTokenEncoderBlock(
+                    self.hidden_dim,
+                    num_heads=self.transformer_heads,
+                    ffn_dim=self.ffn_dim,
+                    nonlinearity=self.nonlinearity,
                 )
                 for _ in range(self.num_policy_layers)
             ]
@@ -2091,16 +2119,18 @@ class BetterPreflopTransformerPolicyFFN(_BetterPreflopTransformerBase):
         )
 
     def forward_policy(self, features: MLPFeatures, latent=None) -> torch.Tensor:
-        _, game_state, player_state, hand_emb = self._encode_tokens(features)
+        _, encoded, hand_emb = self._encode_base_tokens(features)
+        if not self.shared_trunk:
+            encoded = encoded.detach()
+        for block in self.policy_encoder:
+            encoded = block(encoded)
+        game_state, player_state = self._states_from_tokens(encoded)
         actor = features.to_act.long().clamp(min=0, max=self.num_players - 1)
         actor_state = player_state.gather(
             1,
             actor[:, None, None].expand(-1, 1, self.hidden_dim),
         ).squeeze(1)
-        policy_input = actor_state + game_state
-        if not self.shared_trunk:
-            policy_input = policy_input.detach()
-        policy_state = self.policy_tower(policy_input)
+        policy_state = actor_state + game_state
         action_emb = self.policy_action_head(policy_state).view(
             -1, self.num_actions, self.policy_rank
         )
