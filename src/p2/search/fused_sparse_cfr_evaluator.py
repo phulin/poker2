@@ -238,10 +238,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._static_model_feature_fields: tuple[torch.Tensor, ...] | None = None
         self._leaf_belief_gather_indices: torch.Tensor | None = None
         self._leaf_belief_gather_key: tuple[int, int, int] | None = None
-        self._model_leaf_scatter_enabled: bool = (
-            os.environ.get("P2_FUSED_MODEL_LEAF_SCATTER", "1").strip().lower()
-            not in {"0", "false", "off", "no"}
-        )
+        self._model_leaf_scatter_enabled: bool = os.environ.get(
+            "P2_FUSED_MODEL_LEAF_SCATTER", "1"
+        ).strip().lower() not in {"0", "false", "off", "no"}
         self._model_leaf_beliefs_buf: torch.Tensor | None = None
         self._model_leaf_slot: torch.Tensor | None = None
         self._model_leaf_slot_key: tuple[int, int, int, int] | None = None
@@ -529,10 +528,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if not hasattr(self, "_leaf_belief_gather_key"):
             self._leaf_belief_gather_key = None
         if not hasattr(self, "_model_leaf_scatter_enabled"):
-            self._model_leaf_scatter_enabled = (
-                os.environ.get("P2_FUSED_MODEL_LEAF_SCATTER", "1").strip().lower()
-                not in {"0", "false", "off", "no"}
-            )
+            self._model_leaf_scatter_enabled = os.environ.get(
+                "P2_FUSED_MODEL_LEAF_SCATTER", "1"
+            ).strip().lower() not in {"0", "false", "off", "no"}
         if not hasattr(self, "_model_leaf_beliefs_buf"):
             self._model_leaf_beliefs_buf = None
         if not hasattr(self, "_model_leaf_slot"):
@@ -1279,48 +1277,50 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self.last_model_values = None
 
         with _init_profile_region("cfr_init_attempt_feature_encoder"):
-            self.policy_feature_encoder = self.policy_model.create_feature_encoder(
-                env=self.env, device=self.device, dtype=self.float_dtype
+            self._init_fused_feature_encoders()
+        return True
+
+    def _init_fused_feature_encoders(self) -> None:
+        self.policy_feature_encoder = self.policy_model.create_feature_encoder(
+            env=self.env, device=self.device, dtype=self.float_dtype
+        )
+        self.value_feature_encoder = self.value_model.create_feature_encoder(
+            env=self.env, device=self.device, dtype=self.float_dtype
+        )
+        self.closing_leaf_value_encoder = None
+        if self.closing_leaf_value_model is not None:
+            closing_players = int(
+                getattr(
+                    self.closing_leaf_value_model,
+                    "num_players",
+                    self.num_players,
+                )
             )
-            self.value_feature_encoder = self.value_model.create_feature_encoder(
-                env=self.env, device=self.device, dtype=self.float_dtype
-            )
-            if self.closing_leaf_value_model is not None:
-                closing_players = int(
-                    getattr(
-                        self.closing_leaf_value_model,
-                        "num_players",
-                        self.num_players,
+            if closing_players != self.num_players:
+                if not self._can_project_heads_up_closing_model():
+                    raise ValueError(
+                        "closing leaf value model num_players="
+                        f"{closing_players} is incompatible with evaluator "
+                        f"num_players={self.num_players}"
+                    )
+                self.closing_leaf_value_encoder = (
+                    self.closing_leaf_value_model.create_feature_encoder(
+                        env=self.env,
+                        device=self.device,
+                        dtype=self.float_dtype,
+                    )
+                    if hasattr(self.closing_leaf_value_model, "create_feature_encoder")
+                    else None
+                )
+            else:
+                self.closing_leaf_value_encoder = (
+                    self.closing_leaf_value_model.create_feature_encoder(
+                        env=self.env,
+                        device=self.device,
+                        dtype=self.float_dtype,
                     )
                 )
-                if closing_players != self.num_players:
-                    if not self._can_project_heads_up_closing_model():
-                        raise ValueError(
-                            "closing leaf value model num_players="
-                            f"{closing_players} is incompatible with evaluator "
-                            f"num_players={self.num_players}"
-                        )
-                    self.closing_leaf_value_encoder = (
-                        self.closing_leaf_value_model.create_feature_encoder(
-                            env=self.env,
-                            device=self.device,
-                            dtype=self.float_dtype,
-                        )
-                        if hasattr(
-                            self.closing_leaf_value_model, "create_feature_encoder"
-                        )
-                        else None
-                    )
-                else:
-                    self.closing_leaf_value_encoder = (
-                        self.closing_leaf_value_model.create_feature_encoder(
-                            env=self.env,
-                            device=self.device,
-                            dtype=self.float_dtype,
-                        )
-                    )
-            self.feature_encoder = self.policy_feature_encoder
-        return True
+        self.feature_encoder = self.policy_feature_encoder
 
     def _root_allowed_from_board_indices(
         self, n: int
@@ -1978,8 +1978,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     parent_base = self.depth_offsets[depth]
                     store_child = depth < self.tree_depth - 1
                     scatter_depth = (
-                        depth < len(leaf_depth_has_slot)
-                        and leaf_depth_has_slot[depth]
+                        depth < len(leaf_depth_has_slot) and leaf_depth_has_slot[depth]
                     )
                     fused_reach_beliefs_avg_scratch_depth_(
                         parent_reach=parent_reach,
@@ -2009,8 +2008,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             else:
                 for depth in range(self.tree_depth):
                     scatter_depth = (
-                        depth < len(leaf_depth_has_slot)
-                        and leaf_depth_has_slot[depth]
+                        depth < len(leaf_depth_has_slot) and leaf_depth_has_slot[depth]
                     )
                     fused_reach_beliefs_avg_depth_(
                         reach=self.self_reach,

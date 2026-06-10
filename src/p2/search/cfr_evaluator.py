@@ -573,7 +573,12 @@ class CFREvaluator(ABC):
             target_hand_dim=target_hand_dim,
             is_belief=True,
         )
-        if encoder is None:
+        source_encoder = encoder
+        if source_encoder is None:
+            source_encoder = getattr(
+                self, "value_feature_encoder", getattr(self, "feature_encoder", None)
+            )
+        if source_encoder is None:
             base = features[positions]
             return (
                 MLPFeatures(
@@ -590,11 +595,16 @@ class CFREvaluator(ABC):
             )
 
         projected_env = self._project_heads_up_pbs_env(node_indices, live_players)
-        projected_encoder = type(encoder)(
-            env=projected_env,
-            device=self.device,
-            dtype=getattr(encoder, "dtype", self.float_dtype),
-        )
+        encoder_kwargs = {
+            "env": projected_env,
+            "device": self.device,
+            "dtype": getattr(source_encoder, "dtype", self.float_dtype),
+        }
+        if hasattr(source_encoder, "legacy_context_features"):
+            encoder_kwargs["legacy_context_features"] = getattr(
+                source_encoder, "legacy_context_features", False
+            )
+        projected_encoder = type(source_encoder)(**encoder_kwargs)
         projected_features = projected_encoder.encode(
             selected_beliefs,
             pre_chance_node=torch.ones(

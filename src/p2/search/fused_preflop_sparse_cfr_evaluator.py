@@ -173,6 +173,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             initial_beliefs,
         )
         CFREvaluator.initialize_subgame(self, src_env, src_indices, initial_beliefs)
+        self._init_fused_feature_encoders()
         PreflopSparseCFREvaluator._validate_compact_shapes(self)
         self._prepare_tree_slices()
         self._reset_average_policy_accumulators()
