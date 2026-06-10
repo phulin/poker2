@@ -585,6 +585,8 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
             cfg=cfg_copy,
             generator=rng,
         )
+        self.analysis_actor_seat = 0
+        self.analysis_response_seat = 1
         self.current_index = 1  # Root node is at index 0, so current_index = 1 for root_index = current_index - 1
 
         # Reinitialize both the base and CFR environments now that CFR state is set up.
@@ -640,9 +642,9 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
         Returns:
             Tuple of (probabilities [hand_dim, num_bet_bins], values [hand_dim], legal_masks [hand_dim, num_bet_bins])
         """
-        assert (
-            self.cfr_evaluator is not None and self.cfr_env is not None
-        ), "RebelPreflopAnalyzer must initialize CFR evaluator."
+        assert self.cfr_evaluator is not None and self.cfr_env is not None, (
+            "RebelPreflopAnalyzer must initialize CFR evaluator."
+        )
 
         # Run CFR search to compute policies
         self.cfr_evaluator.initialize_subgame(
@@ -706,6 +708,50 @@ class RebelPreflopAnalyzer(PreflopAnalyzer):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Override to use CFR search when configured, else belief-averaged model outputs."""
         return self.get_probabilities_from_cfr(seat)
+
+    def get_preflop_grids(self) -> Dict[str, Union[str, List[str]]]:
+        """Get preflop grids for the first player to act at the root."""
+        self.reset(0)
+        actor_seat = int(self.cfr_env.to_act[0].item())
+        self.analysis_actor_seat = actor_seat
+        probs, values, _ = self.get_probabilities(actor_seat)
+
+        return {
+            "ranges": [
+                self.make_range_grid(probs[:, bin_index], "probability")
+                for bin_index in range(probs.shape[1])
+            ],
+            "betting": self.make_range_grid(
+                probs[:, 2 : probs.shape[1] - 1].sum(dim=1), "probability"
+            ),
+            "value": self.make_range_grid(values, "value"),
+            "suited_vs_offsuit": torch.stack(
+                [
+                    self.calculate_suited_vs_offsuit(probs[:, bin_index])
+                    for bin_index in range(probs.shape[1])
+                ],
+                dim=0,
+            ),
+        }
+
+    def get_preflop_grids_allin_response(self) -> Dict[str, Union[str, List[str]]]:
+        """Get response grids after the root first actor jams."""
+        self.reset(0)
+        self.step_sb_action("allin")
+        response_seat = int(self.cfr_env.to_act[0].item())
+        self.analysis_response_seat = response_seat
+        probs, values, _ = self.get_probabilities(response_seat)
+
+        return {
+            "ranges": [
+                self.make_range_grid(probs[:, bin_index], "probability")
+                for bin_index in range(probs.shape[1])
+            ],
+            "betting": self.make_range_grid(
+                probs[:, 2 : probs.shape[1] - 1].sum(dim=1), "probability"
+            ),
+            "value": self.make_range_grid(values, "value"),
+        }
 
     def step_sb_action(self, sb_action: str = "allin") -> None:
         """Override to apply the SB action inside the CFR root environment."""

@@ -157,22 +157,22 @@ def print_preflop_range_grid(
     # First row: Fold | Call
     print_combined_tables(
         [
-            (fold_grid, "Small blind (first) - fold (%)"),
-            (call_grid, "Small blind (first) - call (%)"),
+            (fold_grid, "First actor - fold (%)"),
+            (call_grid, "First actor - call (%)"),
         ],
     )
 
     # Second row: Betting | All-in
     print_combined_tables(
         [
-            (betting_grid, "Small blind (first) - betting (%)"),
-            (allin_grid, "Small blind (first) - all-in (%)"),
+            (betting_grid, "First actor - betting (%)"),
+            (allin_grid, "First actor - all-in (%)"),
         ],
     )
 
     # Print value estimates grid
     print("--- Preflop Value Estimates (Step {}) ---".format(step + 1))
-    print("Small blind (first) - value estimates (×1000)")
+    print("First actor - value estimates (×1000)")
 
     print(value_grid)
     print()
@@ -194,8 +194,8 @@ def print_preflop_range_grid(
     )
     print()
 
-    # Also print BB response (facing SB all-in), matching debug_tensor_env
-    print("--- BB Response vs SB All-in (Step {}) ---".format(step + 1))
+    # Also print the next player's response after the root first actor jams.
+    print("--- Response vs First Actor All-in (Step {}) ---".format(step + 1))
 
     grids = analyzer.get_preflop_grids_allin_response()
     bb_fold_grid = grids["ranges"][0].splitlines()
@@ -204,8 +204,8 @@ def print_preflop_range_grid(
 
     print_combined_tables(
         [
-            (bb_fold_grid, "Big blind (facing all-in) - fold (%)"),
-            (bb_call_grid, "Big blind (facing all-in) - call (%)"),
+            (bb_fold_grid, "Responder (facing all-in) - fold (%)"),
+            (bb_call_grid, "Responder (facing all-in) - call (%)"),
         ],
     )
 
@@ -254,7 +254,6 @@ def print_training_stats(
     ev = stats.get("explained_var")
     d2 = stats.get("delta2_mean")
     d3 = stats.get("delta3_mean")
-    epsilon = stats.get("epsilon")
     lr = stats.get("learning_rate")
     parts = []
     if pol is not None:
@@ -271,8 +270,6 @@ def print_training_stats(
         parts.append(f"ev {ev:6.3f}")
     if d2 is not None and d3 is not None:
         parts.append(f"d2 {d2:.1f} d3 {d3:.1f}")
-    # if epsilon is not None:
-    #     parts.append(f"eps {epsilon:.3f}")
     if lr is not None:
         parts.append(f"lr {lr:.5f}")
     if parts:
