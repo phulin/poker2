@@ -237,7 +237,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._static_model_feature_key: tuple[int, int, int, int] | None = None
         self._static_model_feature_fields: tuple[torch.Tensor, ...] | None = None
         self._leaf_belief_gather_indices: torch.Tensor | None = None
-        self._leaf_belief_gather_key: tuple[int, int, int, int, int] | None = None
+        self._leaf_belief_gather_key: tuple[int, int, int] | None = None
         self._subgame_generation: int = 0
         self._br_action_parent_index_cache: dict[tuple[int, int], torch.Tensor] = {}
         self._tree_slice_key: tuple[int, ...] | None = None
@@ -1727,30 +1727,21 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             beliefs=beliefs_at_model.reshape(-1, 2 * NUM_HANDS),
         )
 
-    def _leaf_beliefs_for_model_and_showdown(
-        self, beliefs: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _leaf_beliefs_for_model(self, beliefs: torch.Tensor) -> torch.Tensor:
         m = int(self.model_indices.numel())
-        s = int(self.showdown_indices.numel())
         key = (
             int(self._subgame_generation),
             int(self.model_indices.data_ptr()),
-            int(self.showdown_indices.data_ptr()),
             m,
-            s,
         )
         if (
             self._leaf_belief_gather_key != key
             or self._leaf_belief_gather_indices is None
         ):
-            self._leaf_belief_gather_indices = torch.cat(
-                (self.model_indices, self.showdown_indices),
-                dim=0,
-            ).contiguous()
+            self._leaf_belief_gather_indices = self.model_indices.contiguous()
             self._leaf_belief_gather_key = key
 
-        gathered = beliefs[self._leaf_belief_gather_indices]
-        return gathered[:m], gathered[m:]
+        return beliefs[self._leaf_belief_gather_indices]
 
     # ------------------------------------------------------------------
     # Beliefs: fused block + normalize.
@@ -2652,12 +2643,17 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if beliefs is None:
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
+        runner = getattr(self, "_showdown_graph_runner", None)
+
         if self.model_indices.numel() > 0:
-            beliefs_at_model, showdown_beliefs = (
-                self._leaf_beliefs_for_model_and_showdown(beliefs)
-            )
+            beliefs_at_model = self._leaf_beliefs_for_model(beliefs)
             features_at_model = self._model_features_for_beliefs(beliefs_at_model)
             self._set_model_values(t, beliefs_at_model, features_at_model)
+            if runner is not None:
+                runner.write_indexed(beliefs, self.showdown_indices, self.latest_values)
+                self._set_allin_call_values(beliefs)
+                return
+            showdown_beliefs = beliefs[self.showdown_indices]
         else:
             empty_shape = (0, self.num_players, NUM_HANDS)
             if self._last_model_values_buf is None or (
@@ -2665,7 +2661,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             ):
                 self._last_model_values_buf = self.latest_values.new_empty(empty_shape)
             self.last_model_values = self._last_model_values_buf
-            runner = getattr(self, "_showdown_graph_runner", None)
             if runner is not None:
                 runner.write_indexed(beliefs, self.showdown_indices, self.latest_values)
                 self._set_allin_call_values(beliefs)
