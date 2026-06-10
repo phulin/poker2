@@ -83,6 +83,8 @@ model:
   policy_rank: 96
   policy_hand_bias_rank: 24
   street_value_heads: both
+  preflop_model_type: ffn
+  preflop_transformer_heads: 8
   legacy_context_features: false
 
   shared_trunk: true # Keep policy gradients through shared input encoders.

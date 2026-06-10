@@ -3,6 +3,7 @@ import torch
 
 from p2.core.structured_config import (
     Config,
+    CurriculumSubstepConfig,
     ModelScope,
     ModelType,
     PregeneratedDatasetConfig,
@@ -22,6 +23,7 @@ from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from p2.models.model_output import ModelOutput
 from p2.models.street_model_registry import StreetModelRegistry
+from p2.cli.train_rebel_curriculum import _value_initialization_checkpoint
 from p2.rl.cfr_trainer import RebelCFRTrainer, _value_samples_per_step
 from p2.rl.losses import RebelSupervisedLoss
 from p2.rl.rebel_batch import RebelBatch
@@ -48,6 +50,16 @@ def test_value_samples_per_step_allows_fractional_reuse_goal():
 
     with pytest.raises(ValueError, match="value_reuse_goal"):
         _value_samples_per_step(batch_size=512, value_reuse_goal=0.0)
+
+
+def test_curriculum_value_checkpoint_off_disables_closing_fallback():
+    cfg = Config()
+    cfg.search.closing_leaf_checkpoint = "/tmp/E_preflop.pt"
+    substep = CurriculumSubstepConfig()
+    substep.closing_net = "E_preflop"
+    substep.value_checkpoint = "off"
+
+    assert _value_initialization_checkpoint(cfg, substep) is None
 
 
 def test_rebel_cfr_trainer_passes_closing_leaf_checkpoint_to_fused_evaluator(
@@ -133,9 +145,7 @@ def test_rebel_cfr_trainer_loads_pre_only_value_checkpoint(tmp_path):
     source_cfg.model.street_value_heads = StreetValueHeads.pre
     source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
     checkpoint_path = tmp_path / "E_turn.pt"
-    source_trainer.save_value_checkpoint(
-        checkpoint_path, step=7, save_optimizer=False
-    )
+    source_trainer.save_value_checkpoint(checkpoint_path, step=7, save_optimizer=False)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     assert any(key.startswith("pre_value_head.") for key in checkpoint["model"])
     assert not any(key.startswith("post_value_head.") for key in checkpoint["model"])
@@ -156,9 +166,7 @@ def test_rebel_cfr_trainer_loads_frozen_checkpoint_with_source_player_count(tmp_
     source_cfg.model.street_value_heads = StreetValueHeads.pre
     source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
     checkpoint_path = tmp_path / "E_preflop.pt"
-    source_trainer.save_value_checkpoint(
-        checkpoint_path, step=7, save_optimizer=False
-    )
+    source_trainer.save_value_checkpoint(checkpoint_path, step=7, save_optimizer=False)
 
     cfg = _tiny_rebel_cfg()
     cfg.env.num_players = 3
@@ -167,6 +175,33 @@ def test_rebel_cfr_trainer_loads_frozen_checkpoint_with_source_player_count(tmp_
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
     frozen = trainer._load_closing_leaf_model(str(checkpoint_path))
 
+    assert frozen.num_players == 2
+
+
+def test_rebel_cfr_trainer_loads_legacy_compact_value_checkpoint_as_ffn(tmp_path):
+    from p2.models.mlp import BetterPreflopValueFFN
+
+    source_cfg = _tiny_rebel_cfg()
+    source_cfg.model.name = ModelType.better_ffn
+    source_cfg.model.preflop_hand_dim = 169
+    source_cfg.model.preflop_model_type = "ffn"
+    source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
+    checkpoint_path = tmp_path / "E_preflop_169_legacy.pt"
+    source_trainer.save_value_checkpoint(checkpoint_path, step=7, save_optimizer=False)
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint["config"]["model"].pop("preflop_model_type", None)
+    torch.save(checkpoint, checkpoint_path)
+
+    cfg = _tiny_rebel_cfg()
+    cfg.env.num_players = 6
+    cfg.model.name = ModelType.better_ffn
+    cfg.model.preflop_hand_dim = 169
+    cfg.model.preflop_model_type = "transformer"
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    frozen = trainer._load_closing_leaf_model(str(checkpoint_path))
+
+    assert isinstance(frozen, BetterPreflopValueFFN)
     assert frozen.num_players == 2
 
 
@@ -479,6 +514,47 @@ def test_rebel_cfr_trainer_constructs_multiway_pbs_env():
     assert trainer.env.num_players == 3
     assert isinstance(trainer.cfr_evaluator, PreflopSparseCFREvaluator)
     assert cfg.model.enforce_zero_sum is False
+
+
+def test_rebel_cfr_trainer_constructs_preflop_transformer_models():
+    cfg = Config()
+    cfg.num_envs = 1
+    cfg.env.num_players = 3
+    cfg.env.bet_bins = [0.5]
+    cfg.search.depth = 1
+    cfg.search.iterations = 1
+    cfg.search.warm_start_iterations = 0
+    cfg.search.sparse = True
+    cfg.search.sparse_fused = False
+    cfg.search.allin_call_terminal_abstraction = False
+    cfg.train.batch_size = 1
+    cfg.train.replay_buffer_batches = 1
+    cfg.train.value_reuse_goal = 1.0
+    cfg.train.policy_capacity_factor = 1.0
+    cfg.model.name = ModelType.better_ffn
+    cfg.model.preflop_hand_dim = 169
+    cfg.model.preflop_model_type = "transformer"
+    cfg.model.preflop_transformer_heads = 4
+    cfg.model.hidden_dim = 16
+    cfg.model.range_hidden_dim = 8
+    cfg.model.ffn_dim = 48
+    cfg.model.num_hidden_layers = 1
+    cfg.model.num_policy_layers = 1
+    cfg.model.num_value_layers = 1
+    cfg.model.policy_rank = 8
+    cfg.model.policy_hand_bias_rank = 4
+    cfg.model.board_interaction_dim = 0
+    cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+
+    from p2.models.mlp import (
+        BetterPreflopTransformerPolicyFFN,
+        BetterPreflopTransformerValueFFN,
+    )
+
+    assert isinstance(trainer.model.policy_model, BetterPreflopTransformerPolicyFFN)
+    assert isinstance(trainer.model.value_model, BetterPreflopTransformerValueFFN)
 
 
 def test_rebel_cfr_trainer_routes_multiway_pbs_env_to_fused_preflop(

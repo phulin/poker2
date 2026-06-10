@@ -256,7 +256,10 @@ def _value_initialization_checkpoint(
     substep: CurriculumSubstepConfig,
 ) -> str | None:
     if substep.value_checkpoint is not None:
-        return substep.value_checkpoint
+        value_checkpoint = str(substep.value_checkpoint).strip()
+        if value_checkpoint.lower() in {"", "none", "null", "off", "false"}:
+            return None
+        return value_checkpoint
     if substep.closing_net is not None:
         return stage_cfg.search.closing_leaf_checkpoint
     return None

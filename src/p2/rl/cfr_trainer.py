@@ -26,6 +26,8 @@ from p2.models.mlp.better_features import context_length, legacy_context_length
 from p2.models.mlp.better_ffn import (
     BetterPolicyFFN,
     BetterPreflopPolicyFFN,
+    BetterPreflopTransformerPolicyFFN,
+    BetterPreflopTransformerValueFFN,
     BetterPreflopValueFFN,
     BetterSplitFFN,
     BetterStreetValueFFN,
@@ -672,6 +674,29 @@ class RebelCFRTrainer:
             legacy_context_features=cfg.model.legacy_context_features,
         )
         if int(getattr(cfg.model, "preflop_hand_dim", NUM_HANDS)) == 169:
+            preflop_model_type = (
+                str(getattr(cfg.model, "preflop_model_type", "ffn")).strip().lower()
+            )
+            if preflop_model_type in {"transformer", "tokens", "player_transformer"}:
+                transformer_common = dict(
+                    common,
+                    transformer_heads=int(cfg.model.preflop_transformer_heads),
+                )
+                return BetterSplitFFN(
+                    policy_model=BetterPreflopTransformerPolicyFFN(
+                        num_actions=self.num_actions, **transformer_common
+                    ),
+                    value_model=BetterPreflopTransformerValueFFN(
+                        num_actions=1,
+                        value_heads=cfg.model.street_value_heads,
+                        **transformer_common,
+                    ),
+                )
+            if preflop_model_type not in {"ffn", "mlp", "compact"}:
+                raise ValueError(
+                    "model.preflop_model_type must be one of: ffn, transformer; "
+                    f"got {cfg.model.preflop_model_type!r}"
+                )
             return BetterSplitFFN(
                 policy_model=BetterPreflopPolicyFFN(
                     num_actions=self.num_actions, **common
@@ -757,7 +782,9 @@ class RebelCFRTrainer:
             else {}
         )
         checkpoint_env_config = (
-            checkpoint_config.get("env", {}) if isinstance(checkpoint_config, dict) else {}
+            checkpoint_config.get("env", {})
+            if isinstance(checkpoint_config, dict)
+            else {}
         )
         checkpoint_value_heads = checkpoint_model_config.get("street_value_heads")
         checkpoint_num_players = checkpoint_env_config.get("num_players")
@@ -774,6 +801,8 @@ class RebelCFRTrainer:
             "policy_rank",
             "policy_hand_bias_rank",
             "street_value_heads",
+            "preflop_model_type",
+            "preflop_transformer_heads",
             "legacy_context_features",
         )
         original_model_arch = {
@@ -786,6 +815,18 @@ class RebelCFRTrainer:
                 setattr(self.cfg.model, key, checkpoint_model_config[key])
         if checkpoint_value_heads is not None:
             self.cfg.model.street_value_heads = checkpoint_value_heads
+        checkpoint_preflop_hand_dim = int(
+            checkpoint_model_config.get("preflop_hand_dim", NUM_HANDS) or NUM_HANDS
+        )
+        self.cfg.model.preflop_hand_dim = checkpoint_preflop_hand_dim
+        if (
+            checkpoint_preflop_hand_dim == 169
+            and "preflop_model_type" not in checkpoint_model_config
+        ):
+            # Older compact preflop checkpoints predate the model-type field and
+            # were saved from BetterPreflop{Value,Policy}FFN. Do not inherit a
+            # current transformer run's architecture when reconstructing them.
+            self.cfg.model.preflop_model_type = "ffn"
         if "legacy_context_features" not in checkpoint_model_config:
             model_state_for_shape = checkpoint.get("model", {})
             inferred_legacy = _infer_legacy_context_features_from_state(
@@ -798,9 +839,6 @@ class RebelCFRTrainer:
             )
             if inferred_legacy is not None:
                 self.cfg.model.legacy_context_features = inferred_legacy
-        self.cfg.model.preflop_hand_dim = int(
-            checkpoint_model_config.get("preflop_hand_dim", NUM_HANDS) or NUM_HANDS
-        )
         if checkpoint_num_players is not None:
             self.num_players = int(checkpoint_num_players)
         try:

@@ -270,6 +270,8 @@ class ModelConfig:
     value_rank: int = 128
     street_value_heads: StreetValueHeads = StreetValueHeads.both
     preflop_hand_dim: int = 1326
+    preflop_model_type: str = "ffn"
+    preflop_transformer_heads: int = 8
     legacy_context_features: bool = False
 
     # Better TRM parameters

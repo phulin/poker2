@@ -16,7 +16,12 @@ from p2.env.card_utils import (
     preflop_class_unblocked_mass,
 )
 from p2.models.mlp.better_features import context_length, legacy_context_length
-from p2.models.mlp.better_ffn import BetterPreflopPolicyFFN, BetterPreflopValueFFN
+from p2.models.mlp.better_ffn import (
+    BetterPreflopPolicyFFN,
+    BetterPreflopTransformerPolicyFFN,
+    BetterPreflopTransformerValueFFN,
+    BetterPreflopValueFFN,
+)
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
 from p2.rl.losses import RebelSupervisedLoss
@@ -213,7 +218,9 @@ def test_compact_policy_loss_ignores_folded_opponent_belief() -> None:
         )
 
     loss_fn = RebelSupervisedLoss(num_players=num_players)
-    base = loss_fn.forward_policy(ModelOutput(policy_logits=logits), make_batch(beliefs))
+    base = loss_fn.forward_policy(
+        ModelOutput(policy_logits=logits), make_batch(beliefs)
+    )
     changed = loss_fn.forward_policy(
         ModelOutput(policy_logits=logits),
         make_batch(beliefs_changed),
@@ -233,16 +240,22 @@ def test_compact_value_loss_excludes_folded_focal_players() -> None:
     target = torch.randn_like(pred)
     pred_changed = pred.clone()
     target_changed = target.clone()
-    pred_changed[:, 2] = torch.randn(
-        batch_size,
-        PREFLOP_HANDS,
-        generator=generator,
-    ) * 100.0
-    target_changed[:, 2] = torch.randn(
-        batch_size,
-        PREFLOP_HANDS,
-        generator=generator,
-    ) * -100.0
+    pred_changed[:, 2] = (
+        torch.randn(
+            batch_size,
+            PREFLOP_HANDS,
+            generator=generator,
+        )
+        * 100.0
+    )
+    target_changed[:, 2] = (
+        torch.randn(
+            batch_size,
+            PREFLOP_HANDS,
+            generator=generator,
+        )
+        * -100.0
+    )
     folded = torch.tensor(
         [[False, False, True], [False, False, True]],
         dtype=torch.bool,
@@ -391,6 +404,71 @@ def test_compact_preflop_model_shapes_and_policy_loss() -> None:
     )
     value_model.init_weights(torch.Generator(device="cpu").manual_seed(1))
     policy_model.init_weights(torch.Generator(device="cpu").manual_seed(2))
+
+    value_output = value_model(features, include_policy=False)
+    policy_output = policy_model(features, include_policy=True, include_value=False)
+
+    assert value_output.hand_values.shape == (
+        batch_size,
+        num_players,
+        PREFLOP_HANDS,
+    )
+    assert policy_output.policy_logits.shape == (
+        batch_size,
+        PREFLOP_HANDS,
+        num_actions,
+    )
+
+    targets = torch.full(
+        (batch_size, PREFLOP_HANDS, num_actions),
+        1.0 / num_actions,
+    )
+    batch = RebelBatch(
+        features=features,
+        legal_masks=torch.ones(batch_size, num_actions, dtype=torch.bool),
+        policy_targets=targets,
+    )
+    loss = RebelSupervisedLoss(num_players=num_players).forward_policy(
+        policy_output,
+        batch,
+    )
+    assert torch.isfinite(loss["policy_loss"])
+
+
+def test_compact_preflop_transformer_model_shapes_and_policy_loss() -> None:
+    batch_size = 2
+    num_players = 3
+    num_actions = 5
+    features = _compact_features(batch_size, num_players)
+    features.to_act[:] = torch.tensor([0, 2], dtype=torch.long)
+    value_model = BetterPreflopTransformerValueFFN(
+        num_actions=1,
+        hidden_dim=48,
+        range_hidden_dim=16,
+        ffn_dim=96,
+        num_hidden_layers=2,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        transformer_heads=4,
+    )
+    policy_model = BetterPreflopTransformerPolicyFFN(
+        num_actions=num_actions,
+        hidden_dim=48,
+        range_hidden_dim=16,
+        ffn_dim=96,
+        num_hidden_layers=2,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        transformer_heads=4,
+    )
+    value_model.init_weights(torch.Generator(device="cpu").manual_seed(4))
+    policy_model.init_weights(torch.Generator(device="cpu").manual_seed(5))
 
     value_output = value_model(features, include_policy=False)
     policy_output = policy_model(features, include_policy=True, include_value=False)
