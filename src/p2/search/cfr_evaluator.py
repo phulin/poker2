@@ -2825,7 +2825,17 @@ class CFREvaluator(ABC):
         )
         root_value_targets = source_values[:N].clamp(-1.0, 1.0)
         root_indices = torch.arange(N, dtype=torch.long, device=self.device)
-        value_node_indices = root_indices
+        value_root_mask = torch.ones(N, dtype=torch.bool, device=self.device)
+        if exclude_start:
+            value_root_mask &= (
+                self.valid_mask[:N]
+                & ~self.env.done[:N]
+                & (self.env.actions_this_round[:N] >= int(self.max_depth))
+            )
+            allin_call_mask = getattr(self, "allin_call_mask", None)
+            if allin_call_mask is not None and allin_call_mask.shape[0] >= N:
+                value_root_mask &= ~allin_call_mask[:N]
+        value_node_indices = root_indices[value_root_mask]
         value_roots_only = True
         value_targets = source_values[value_node_indices].clamp(-1.0, 1.0)
 
@@ -2854,7 +2864,7 @@ class CFREvaluator(ABC):
             value_features_all = value_encoder.encode(
                 self.beliefs_avg, pre_chance_node=False
             )[:top]
-            value_features = value_features_all[:N]
+            value_features = value_features_all[value_node_indices]
         else:
             value_features_all = value_encoder.encode(
                 self.beliefs_avg, pre_chance_node=False
@@ -2905,15 +2915,21 @@ class CFREvaluator(ABC):
             dtype=torch.long,
             device=self.device,
         )
-        value_statistics["local_exploitability"] = exploit_stats.local_exploitability
-        value_statistics["local_exploitability_mbbg"] = exploit_mbbg
+        value_statistics["local_exploitability"] = exploit_stats.local_exploitability[
+            value_node_indices
+        ]
+        value_statistics["local_exploitability_mbbg"] = exploit_mbbg[
+            value_node_indices
+        ]
         value_statistics["local_best_response_values"] = (
-            exploit_stats.local_best_response_values
+            exploit_stats.local_best_response_values[value_node_indices]
         )
-        continuation_value_mask = torch.zeros(N, dtype=torch.bool, device=self.device)
+        continuation_value_mask = torch.zeros(
+            value_node_indices.numel(), dtype=torch.bool, device=self.device
+        )
         value_statistics["continuation_value_target"] = continuation_value_mask
         for key, value in root_leaf_counts.items():
-            value_statistics[key] = value
+            value_statistics[key] = value[value_node_indices]
 
         value_batch = RebelBatch(
             features=value_features,
@@ -2922,20 +2938,27 @@ class CFREvaluator(ABC):
             statistics=value_statistics,
         )
 
+        self.stats["value_target_count"] = float(value_node_indices.numel())
         street_root = self.env.street[:N]
         actions_root = self.env.actions_this_round[:N]
-        mid_street_value_roots = (street_root < 4) & (actions_root > 0)
-        if mid_street_value_roots.any():
-            count = int(mid_street_value_roots.sum().item())
-            self.stats["mid_street_value_root_count"] = float(count)
-            if not self._mid_street_value_roots_are_expected():
-                warnings.warn(
-                    "training_data() received mid-street roots for value targets; "
-                    "value supervision is intended for street-boundary roots only. "
-                    f"count={count}",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+        if value_node_indices.numel() > 0:
+            selected_streets = self.env.street[value_node_indices]
+            selected_actions = self.env.actions_this_round[value_node_indices]
+            mid_street_value_roots = (selected_streets < 4) & (selected_actions > 0)
+            if mid_street_value_roots.any():
+                count = int(mid_street_value_roots.sum().item())
+                self.stats["mid_street_value_root_count"] = float(count)
+                if (
+                    not exclude_start
+                    and not self._mid_street_value_roots_are_expected()
+                ):
+                    warnings.warn(
+                        "training_data() received mid-street roots for value targets; "
+                        "value supervision is intended for street-boundary roots only. "
+                        f"count={count}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
         if exclude_start:
             value_start_nodes = (
                 (self.env.street[value_node_indices] == 0)

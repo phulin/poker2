@@ -1892,6 +1892,44 @@ def test_variable_stack_root_training_data_is_finite() -> None:
         )
 
 
+def test_training_data_filters_value_roots_by_action_depth() -> None:
+    device = get_device()
+    env = make_env(3, device=device)
+    cfg = make_config(env.default_bet_bins)
+    cfg.search.depth = 2
+    evaluator, _, _ = make_sparse_evaluator(env=env, cfg=cfg, device=device)
+    roots = torch.arange(env.N, device=device)
+    evaluator.initialize_subgame(env, roots)
+    evaluator.evaluate_cfr(training_mode=False)
+
+    evaluator.env.actions_this_round[: env.N] = torch.tensor(
+        [0, evaluator.max_depth - 1, evaluator.max_depth],
+        device=device,
+    )
+    evaluator.env.done[: env.N] = False
+
+    value_batch, pre_value_batch, policy_batch = evaluator.training_data(
+        include_pre_chance_value_batch=False,
+        include_policy_batch=False,
+    )
+
+    assert pre_value_batch is None
+    assert policy_batch is None
+    assert len(value_batch) == 1
+    assert value_batch.statistics["actions_this_round"].tolist() == [
+        evaluator.max_depth
+    ]
+    assert value_batch.statistics["continuation_value_target"].tolist() == [False]
+    assert value_batch.statistics["local_exploitability"].shape[0] == 1
+
+    raw_value_batch, _, _ = evaluator.training_data(
+        exclude_start=False,
+        include_pre_chance_value_batch=False,
+        include_policy_batch=False,
+    )
+    assert len(raw_value_batch) == env.N
+
+
 def test_leaf_mask() -> None:
     """Test that leaf mask is correctly set."""
     device = get_device()
