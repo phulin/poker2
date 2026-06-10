@@ -5347,6 +5347,8 @@ if triton is not None:
         to_act_ptr,  # [total]
         avg_num_ptr,  # [total, H] in/out if WRITE_AVG
         avg_den_ptr,  # [total, H] in/out if WRITE_AVG
+        leaf_slot_ptr,  # [total], -1 for rows that should not be scattered
+        leaf_out_ptr,  # [M, 2, H] OUT if WRITE_LEAF
         new_scalar_ptr,
         start,
         end,
@@ -5355,6 +5357,7 @@ if triton is not None:
         APPLY_ALLOWED: tl.constexpr,
         WRITE_AVG: tl.constexpr,
         STORE_REACH: tl.constexpr,
+        WRITE_LEAF: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
         c = tl.program_id(0) + start
@@ -5425,6 +5428,12 @@ if triton is not None:
         out1 = tl.where(sum1 > EPS, b1 / sum1, fallback)
         tl.store(beliefs_ptr + (c * 2 + 0) * H + offs, out0, mask=mask)
         tl.store(beliefs_ptr + (c * 2 + 1) * H + offs, out1, mask=mask)
+        if WRITE_LEAF:
+            slot_raw = tl.load(leaf_slot_ptr + c)
+            slot = tl.maximum(slot_raw, 0)
+            leaf_mask = mask & (slot_raw >= 0)
+            tl.store(leaf_out_ptr + (slot * 2 + 0) * H + offs, out0, mask=leaf_mask)
+            tl.store(leaf_out_ptr + (slot * 2 + 1) * H + offs, out1, mask=leaf_mask)
 
 
 def fused_reach_beliefs_avg_depth_(
@@ -5445,6 +5454,8 @@ def fused_reach_beliefs_avg_depth_(
     write_average_policy: bool,
     store_reach: bool = True,
     apply_allowed_mask: bool = True,
+    leaf_slot: torch.Tensor | None = None,
+    leaf_out: torch.Tensor | None = None,
     eps: float = 1e-5,
     block_h: int = 2048,
 ) -> None:
@@ -5473,6 +5484,15 @@ def fused_reach_beliefs_avg_depth_(
     assert average_policy_denominator.is_contiguous()
     assert average_policy_denominator.shape == (total, h)
     assert new.is_cuda and new.numel() == 1
+    write_leaf = leaf_slot is not None and leaf_out is not None
+    if write_leaf:
+        assert leaf_slot is not None and leaf_out is not None
+        assert leaf_slot.is_contiguous() and leaf_slot.shape == (total,)
+        assert leaf_out.is_contiguous() and leaf_out.dim() == 3
+        assert leaf_out.shape[1:] == (2, h)
+    else:
+        leaf_slot = parent_index
+        leaf_out = beliefs
     assert h <= block_h, f"fused reach/beliefs assumes H ({h}) <= BLOCK_H ({block_h})"
     n = end - start
     if n <= 0:
@@ -5490,6 +5510,8 @@ def fused_reach_beliefs_avg_depth_(
         to_act,
         average_policy_numerator,
         average_policy_denominator,
+        leaf_slot,
+        leaf_out,
         new,
         start,
         end,
@@ -5498,6 +5520,7 @@ def fused_reach_beliefs_avg_depth_(
         APPLY_ALLOWED=apply_allowed_mask,
         WRITE_AVG=write_average_policy,
         STORE_REACH=store_reach,
+        WRITE_LEAF=write_leaf,
         BLOCK_H=block_h,
         num_warps=8,
     )
@@ -5519,6 +5542,8 @@ if triton is not None:
         to_act_ptr,  # [total]
         avg_num_ptr,  # [total, H] in/out if WRITE_AVG
         avg_den_ptr,  # [total, H] in/out if WRITE_AVG
+        leaf_slot_ptr,  # [total], -1 for rows that should not be scattered
+        leaf_out_ptr,  # [M, 2, H] OUT if WRITE_LEAF
         new_scalar_ptr,
         parent_base,
         start,
@@ -5529,6 +5554,7 @@ if triton is not None:
         APPLY_ALLOWED: tl.constexpr,
         WRITE_AVG: tl.constexpr,
         STORE_CHILD: tl.constexpr,
+        WRITE_LEAF: tl.constexpr,
         BLOCK_H: tl.constexpr,
     ):
         c_rel = tl.program_id(0)
@@ -5606,6 +5632,12 @@ if triton is not None:
         out1 = tl.where(sum1 > EPS, b1 / sum1, fallback)
         tl.store(beliefs_ptr + (c * 2 + 0) * H + offs, out0, mask=mask)
         tl.store(beliefs_ptr + (c * 2 + 1) * H + offs, out1, mask=mask)
+        if WRITE_LEAF:
+            slot_raw = tl.load(leaf_slot_ptr + c)
+            slot = tl.maximum(slot_raw, 0)
+            leaf_mask = mask & (slot_raw >= 0)
+            tl.store(leaf_out_ptr + (slot * 2 + 0) * H + offs, out0, mask=leaf_mask)
+            tl.store(leaf_out_ptr + (slot * 2 + 1) * H + offs, out1, mask=leaf_mask)
 
 
 def fused_reach_beliefs_avg_scratch_depth_(
@@ -5629,6 +5661,8 @@ def fused_reach_beliefs_avg_scratch_depth_(
     write_average_policy: bool,
     store_child: bool = True,
     apply_allowed_mask: bool = True,
+    leaf_slot: torch.Tensor | None = None,
+    leaf_out: torch.Tensor | None = None,
     eps: float = 1e-5,
     block_h: int = 2048,
 ) -> None:
@@ -5654,6 +5688,15 @@ def fused_reach_beliefs_avg_scratch_depth_(
     assert average_policy_denominator.is_contiguous()
     assert average_policy_denominator.shape == (total, h)
     assert new.is_cuda and new.numel() == 1
+    write_leaf = leaf_slot is not None and leaf_out is not None
+    if write_leaf:
+        assert leaf_slot is not None and leaf_out is not None
+        assert leaf_slot.is_contiguous() and leaf_slot.shape == (total,)
+        assert leaf_out.is_contiguous() and leaf_out.dim() == 3
+        assert leaf_out.shape[1:] == (2, h)
+    else:
+        leaf_slot = parent_index
+        leaf_out = beliefs
     assert h <= block_h, f"fused reach/beliefs assumes H ({h}) <= BLOCK_H ({block_h})"
     n = end - start
     if n <= 0:
@@ -5673,6 +5716,8 @@ def fused_reach_beliefs_avg_scratch_depth_(
         to_act,
         average_policy_numerator,
         average_policy_denominator,
+        leaf_slot,
+        leaf_out,
         new,
         parent_base,
         start,
@@ -5683,6 +5728,7 @@ def fused_reach_beliefs_avg_scratch_depth_(
         APPLY_ALLOWED=apply_allowed_mask,
         WRITE_AVG=write_average_policy,
         STORE_CHILD=store_child,
+        WRITE_LEAF=write_leaf,
         BLOCK_H=block_h,
         num_warps=8,
     )

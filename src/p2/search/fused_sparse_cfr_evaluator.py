@@ -238,6 +238,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._static_model_feature_fields: tuple[torch.Tensor, ...] | None = None
         self._leaf_belief_gather_indices: torch.Tensor | None = None
         self._leaf_belief_gather_key: tuple[int, int, int] | None = None
+        self._model_leaf_scatter_enabled: bool = (
+            os.environ.get("P2_FUSED_MODEL_LEAF_SCATTER", "1").strip().lower()
+            not in {"0", "false", "off", "no"}
+        )
+        self._model_leaf_beliefs_buf: torch.Tensor | None = None
+        self._model_leaf_slot: torch.Tensor | None = None
+        self._model_leaf_slot_key: tuple[int, int, int, int] | None = None
+        self._model_leaf_depth_has_slot: tuple[bool, ...] = ()
+        self._model_leaf_beliefs_valid: bool = False
         self._subgame_generation: int = 0
         self._br_action_parent_index_cache: dict[tuple[int, int], torch.Tensor] = {}
         self._tree_slice_key: tuple[int, ...] | None = None
@@ -519,6 +528,21 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._leaf_belief_gather_indices = None
         if not hasattr(self, "_leaf_belief_gather_key"):
             self._leaf_belief_gather_key = None
+        if not hasattr(self, "_model_leaf_scatter_enabled"):
+            self._model_leaf_scatter_enabled = (
+                os.environ.get("P2_FUSED_MODEL_LEAF_SCATTER", "1").strip().lower()
+                not in {"0", "false", "off", "no"}
+            )
+        if not hasattr(self, "_model_leaf_beliefs_buf"):
+            self._model_leaf_beliefs_buf = None
+        if not hasattr(self, "_model_leaf_slot"):
+            self._model_leaf_slot = None
+        if not hasattr(self, "_model_leaf_slot_key"):
+            self._model_leaf_slot_key = None
+        if not hasattr(self, "_model_leaf_depth_has_slot"):
+            self._model_leaf_depth_has_slot = ()
+        if not hasattr(self, "_model_leaf_beliefs_valid"):
+            self._model_leaf_beliefs_valid = False
         if not hasattr(self, "_subgame_generation"):
             self._subgame_generation = 0
         if not hasattr(self, "_br_action_parent_index_cache"):
@@ -593,6 +617,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._static_model_feature_fields = None
         self._leaf_belief_gather_indices = None
         self._leaf_belief_gather_key = None
+        self._model_leaf_slot = None
+        self._model_leaf_slot_key = None
+        self._model_leaf_depth_has_slot = ()
+        self._model_leaf_beliefs_valid = False
         self._sample_root_rows = None
         self._sample_root_counts = None
         self._sample_root_key = None
@@ -1743,6 +1771,74 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
         return beliefs[self._leaf_belief_gather_indices]
 
+    def _ensure_model_leaf_belief_buffers(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[bool, ...]]:
+        m = int(self.model_indices.numel())
+        shape = (m, self.num_players, NUM_HANDS)
+        if (
+            self._model_leaf_beliefs_buf is None
+            or self._model_leaf_beliefs_buf.shape != shape
+            or self._model_leaf_beliefs_buf.dtype != self.beliefs.dtype
+            or self._model_leaf_beliefs_buf.device != self.beliefs.device
+        ):
+            self._model_leaf_beliefs_buf = self.beliefs.new_empty(shape)
+            self._model_leaf_beliefs_valid = False
+
+        total = int(self.beliefs.shape[0])
+        key = (
+            int(self._subgame_generation),
+            int(self.model_indices.data_ptr()),
+            m,
+            total,
+        )
+        if self._model_leaf_slot_key != key or self._model_leaf_slot is None:
+            slot = torch.full(
+                (total,),
+                -1,
+                device=self.device,
+                dtype=torch.int64,
+            )
+            if m > 0:
+                slot[self.model_indices] = torch.arange(
+                    m,
+                    device=self.device,
+                    dtype=torch.int64,
+                )
+                self._model_leaf_beliefs_buf.copy_(
+                    self._leaf_beliefs_for_model(self.beliefs)
+                )
+                model_indices_cpu = self.model_indices.detach().cpu()
+                depth_has_slot = []
+                for depth in range(self.tree_depth):
+                    start = int(self.depth_offsets[depth + 1])
+                    end = int(self.depth_offsets[depth + 2])
+                    in_depth = (model_indices_cpu >= start) & (model_indices_cpu < end)
+                    depth_has_slot.append(bool(in_depth.any().item()))
+                self._model_leaf_depth_has_slot = tuple(depth_has_slot)
+            else:
+                self._model_leaf_depth_has_slot = (False,) * int(self.tree_depth)
+            self._model_leaf_slot = slot.contiguous()
+            self._model_leaf_slot_key = key
+            self._model_leaf_beliefs_valid = False
+
+        return (
+            self._model_leaf_beliefs_buf,
+            self._model_leaf_slot,
+            self._model_leaf_depth_has_slot,
+        )
+
+    def _model_leaf_beliefs_for_values(self, beliefs: torch.Tensor) -> torch.Tensor:
+        if (
+            beliefs is self.beliefs
+            and self._model_leaf_scatter_enabled
+            and self._model_leaf_beliefs_valid
+            and self._model_leaf_beliefs_buf is not None
+            and self._model_leaf_beliefs_buf.shape[0] == int(self.model_indices.numel())
+        ):
+            return self._model_leaf_beliefs_buf
+        return self._leaf_beliefs_for_model(beliefs)
+
     # ------------------------------------------------------------------
     # Beliefs: fused block + normalize.
     # ------------------------------------------------------------------
@@ -1807,6 +1903,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
     def update_policy(self, t: int) -> None:
         self._prepare_tree_slices()
+        self._model_leaf_beliefs_valid = False
         bottom = self._bottom
         child_offsets_top = self._child_offsets_top
         child_count_top = self._child_count_top
@@ -1859,6 +1956,17 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             assert parent_index_all is not None
             to_act = self.env.to_act.contiguous()
             prev_actor = self.prev_actor.contiguous()
+            leaf_out = None
+            leaf_slot = None
+            leaf_depth_has_slot: tuple[bool, ...] = ()
+            if (
+                self._model_leaf_scatter_enabled
+                and not self.cfr_avg
+                and int(self.model_indices.numel()) > 0
+            ):
+                leaf_out, leaf_slot, leaf_depth_has_slot = (
+                    self._ensure_model_leaf_belief_buffers()
+                )
             use_scratch_reach = self._skip_record_stats
             if use_scratch_reach:
                 scratch_a, scratch_b = self._ensure_reach_scratch_buffers()
@@ -1869,6 +1977,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     end = self.depth_offsets[depth + 2]
                     parent_base = self.depth_offsets[depth]
                     store_child = depth < self.tree_depth - 1
+                    scatter_depth = (
+                        depth < len(leaf_depth_has_slot)
+                        and leaf_depth_has_slot[depth]
+                    )
                     fused_reach_beliefs_avg_scratch_depth_(
                         parent_reach=parent_reach,
                         child_reach=child_reach,
@@ -1890,10 +2002,16 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         write_average_policy=write_average_policy,
                         store_child=store_child,
                         apply_allowed_mask=depth == 0,
+                        leaf_slot=leaf_slot if scatter_depth else None,
+                        leaf_out=leaf_out if scatter_depth else None,
                     )
                     parent_reach, child_reach = child_reach, parent_reach
             else:
                 for depth in range(self.tree_depth):
+                    scatter_depth = (
+                        depth < len(leaf_depth_has_slot)
+                        and leaf_depth_has_slot[depth]
+                    )
                     fused_reach_beliefs_avg_depth_(
                         reach=self.self_reach,
                         beliefs=self.beliefs,
@@ -1917,7 +2035,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         store_reach=(
                             depth < self.tree_depth - 1 or not self._skip_record_stats
                         ),
+                        leaf_slot=leaf_slot if scatter_depth else None,
+                        leaf_out=leaf_out if scatter_depth else None,
                     )
+            self._model_leaf_beliefs_valid = leaf_out is not None
             self.average_policy_initialized = write_average_policy
         else:
             self._calculate_reach_weights(self.self_reach, self.policy_probs)
@@ -2646,7 +2767,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         runner = getattr(self, "_showdown_graph_runner", None)
 
         if self.model_indices.numel() > 0:
-            beliefs_at_model = self._leaf_beliefs_for_model(beliefs)
+            beliefs_at_model = self._model_leaf_beliefs_for_values(beliefs)
             features_at_model = self._model_features_for_beliefs(beliefs_at_model)
             self._set_model_values(t, beliefs_at_model, features_at_model)
             if runner is not None:
