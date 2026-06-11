@@ -5886,12 +5886,15 @@ if triton is not None:
         hands_ptr,  # [N, 2]
         uniform_draws_ptr,  # [D, N]
         action_draws_ptr,  # [D, N]
+        target_enabled_ptr,  # [N] bool
+        target_depths_ptr,  # [N]
         effective_leaf_ptr,  # [total] bool
         sampling_masks_ptr,  # [total, B] bool
         uniform_policy_ptr,  # [total, B]
         child_nodes_ptr,  # [total, B]
         to_act_ptr,  # [total]
         done_ptr,  # [total] bool
+        allin_call_ptr,  # [total] bool
         new_street_ptr,  # [total] bool
         out_nodes_ptr,  # [N + 1]
         out_beliefs_ptr,  # [N + 1, 2 * H]
@@ -5913,6 +5916,9 @@ if triton is not None:
         safe_root = tl.minimum(root, N - 1)
         node = safe_root
         active = valid & (~tl.load(effective_leaf_ptr + node, mask=valid, other=1))
+        target_enabled = tl.load(target_enabled_ptr + safe_root, mask=valid, other=0)
+        target_depth = tl.load(target_depths_ptr + safe_root, mask=valid, other=D + 1)
+        stopped_for_target = False
 
         for depth in tl.static_range(0, D):
             to_act = tl.load(to_act_ptr + node, mask=valid, other=0)
@@ -5972,12 +5978,34 @@ if triton is not None:
                 child_nodes_ptr + node * B + action, mask=valid, other=0
             )
             node = tl.where(active, next_node, node)
-            active = active & (~tl.load(effective_leaf_ptr + node, mask=valid, other=1))
+            done_now = tl.load(done_ptr + node, mask=valid, other=1)
+            allin_now = tl.load(allin_call_ptr + node, mask=valid, other=1)
+            hit_target = (
+                active
+                & target_enabled
+                & (target_depth == depth + 1)
+                & (node >= N)
+                & (~done_now)
+                & (~allin_now)
+            )
+            stopped_for_target = stopped_for_target | hit_target
+            active = (
+                active
+                & (~hit_target)
+                & (~tl.load(effective_leaf_ptr + node, mask=valid, other=1))
+            )
 
         done = tl.load(done_ptr + node, mask=valid, other=1)
+        allin_call = tl.load(allin_call_ptr + node, mask=valid, other=1)
         effective_leaf = tl.load(effective_leaf_ptr + node, mask=valid, other=0)
         new_street = tl.load(new_street_ptr + node, mask=valid, other=0)
-        ready = valid & (node >= N) & effective_leaf & new_street & (~done)
+        ready = (
+            valid
+            & (node >= N)
+            & (~done)
+            & (~allin_call)
+            & (stopped_for_target | (effective_leaf & new_street))
+        )
         tl.store(out_nodes_ptr + root, node, mask=valid)
         tl.store(out_ready_ptr + root, ready, mask=valid)
 
@@ -6045,12 +6073,15 @@ def fused_sample_leaf_compact_(
     hands: torch.Tensor,
     uniform_draws: torch.Tensor,
     action_draws: torch.Tensor,
+    target_enabled: torch.Tensor,
+    target_depths: torch.Tensor,
     effective_leaf_mask: torch.Tensor,
     sampling_masks: torch.Tensor,
     uniform_policy: torch.Tensor,
     child_nodes_by_action: torch.Tensor,
     to_act: torch.Tensor,
     done: torch.Tensor,
+    allin_call_mask: torch.Tensor,
     new_street_mask: torch.Tensor,
     out_nodes: torch.Tensor,
     out_beliefs: torch.Tensor,
@@ -6071,6 +6102,8 @@ def fused_sample_leaf_compact_(
     assert hands.is_contiguous() and hands.dim() == 2 and hands.shape[1] == 2
     assert uniform_draws.is_contiguous() and uniform_draws.dim() == 2
     assert action_draws.is_contiguous() and action_draws.shape == uniform_draws.shape
+    assert target_enabled.is_contiguous() and target_enabled.dim() == 1
+    assert target_depths.is_contiguous() and target_depths.shape == target_enabled.shape
     assert effective_leaf_mask.is_contiguous() and effective_leaf_mask.dim() == 1
     assert sampling_masks.is_contiguous() and sampling_masks.dim() == 2
     assert (
@@ -6081,6 +6114,7 @@ def fused_sample_leaf_compact_(
         and child_nodes_by_action.shape == sampling_masks.shape
     )
     assert to_act.is_contiguous() and done.is_contiguous()
+    assert allin_call_mask.is_contiguous() and allin_call_mask.shape == done.shape
     assert new_street_mask.is_contiguous() and new_street_mask.dim() == 1
     assert out_nodes.is_contiguous() and out_ready.is_contiguous()
     assert out_beliefs.is_contiguous() and out_beliefs.dim() == 3
@@ -6093,6 +6127,7 @@ def fused_sample_leaf_compact_(
     b = sampling_masks.shape[1]
     d = uniform_draws.shape[0]
     assert beliefs.shape == (policy_probs.shape[0], 2, h)
+    assert target_enabled.shape[0] == n
     assert out_beliefs.shape == (n + 1, 2, h)
     assert out_nodes.shape[0] == n + 1 and out_ready.shape[0] == n + 1
     belief_blocks = triton.cdiv(2 * h, block_belief)
@@ -6107,12 +6142,15 @@ def fused_sample_leaf_compact_(
         hands,
         uniform_draws,
         action_draws,
+        target_enabled,
+        target_depths,
         effective_leaf_mask,
         sampling_masks,
         uniform_policy,
         child_nodes_by_action,
         to_act,
         done,
+        allin_call_mask,
         new_street_mask,
         out_nodes,
         out_beliefs,

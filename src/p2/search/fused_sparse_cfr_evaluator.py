@@ -223,6 +223,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._sample_leaf_hands: torch.Tensor | None = None
         self._sample_leaf_uniform_draws: torch.Tensor | None = None
         self._sample_leaf_action_draws: torch.Tensor | None = None
+        self._sample_leaf_target_enabled: torch.Tensor | None = None
+        self._sample_leaf_target_depths: torch.Tensor | None = None
         self._sample_leaf_indices_padded: torch.Tensor | None = None
         self._sample_leaf_beliefs_padded: torch.Tensor | None = None
         self._sample_leaf_ready_padded: torch.Tensor | None = None
@@ -1630,6 +1632,27 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._sample_leaf_action_draws = torch.rand(
             depth, N, generator=self.generator, device=self.device
         )
+        target_enabled = torch.zeros(N, dtype=torch.bool, device=self.device)
+        target_depths = torch.full((N,), depth + 1, dtype=torch.long, device=self.device)
+        if training_mode and self._continuation_value_target_sampling_enabled():
+            bounds = self._continuation_value_target_depth_bounds()
+            target_streets = self._continuation_value_target_streets()
+            if bounds is not None and target_streets:
+                min_depth, max_depth = bounds
+                root_street = self.env.street[:N]
+                for street in target_streets:
+                    target_enabled |= root_street == street
+                if bool(target_enabled.any().item()):
+                    draws = torch.randint(
+                        min_depth,
+                        max_depth + 1,
+                        (N,),
+                        generator=self.generator,
+                        device=self.device,
+                    )
+                    target_depths = torch.where(target_enabled, draws, target_depths)
+        self._sample_leaf_target_enabled = target_enabled
+        self._sample_leaf_target_depths = target_depths
         self._sample_leaf_indices_padded = torch.full(
             (N + 1,), N, dtype=torch.long, device=self.device
         )
@@ -1688,6 +1711,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         assert self._sample_leaf_hands is not None
         assert self._sample_leaf_uniform_draws is not None
         assert self._sample_leaf_action_draws is not None
+        assert self._sample_leaf_target_enabled is not None
+        assert self._sample_leaf_target_depths is not None
         assert self._sample_leaf_indices_padded is not None
         assert self._sample_leaf_beliefs_padded is not None
         assert self._sample_leaf_ready_padded is not None
@@ -1706,12 +1731,15 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             hands=self._sample_leaf_hands.contiguous(),
             uniform_draws=self._sample_leaf_uniform_draws.contiguous(),
             action_draws=self._sample_leaf_action_draws.contiguous(),
+            target_enabled=self._sample_leaf_target_enabled.contiguous(),
+            target_depths=self._sample_leaf_target_depths.contiguous(),
             effective_leaf_mask=self._sample_leaf_effective_leaf_mask.contiguous(),
             sampling_masks=self._sample_leaf_sampling_masks.contiguous(),
             uniform_policy=self._sample_leaf_uniform_policy.contiguous(),
             child_nodes_by_action=self._sample_leaf_child_nodes_by_action.contiguous(),
             to_act=self.env.to_act.contiguous(),
             done=self.env.done.contiguous(),
+            allin_call_mask=self.allin_call_mask.contiguous(),
             new_street_mask=self.new_street_mask.contiguous(),
             out_nodes=self._sample_leaf_indices_padded,
             out_beliefs=self._sample_leaf_beliefs_padded,
@@ -3069,7 +3097,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def sample_leaves(self, training_mode: bool) -> PublicBeliefState:
         if (
             not self._sample_leaf_enabled
-            or self._continuation_value_target_sampling_enabled()
             or self._sample_leaf_indices_padded is None
             or self._sample_leaf_beliefs_padded is None
             or self._sample_leaf_ready_padded is None

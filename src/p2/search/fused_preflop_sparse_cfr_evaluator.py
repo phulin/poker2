@@ -179,9 +179,6 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._reset_average_policy_accumulators()
 
     def _prepare_compact_leaf_sampling(self, training_mode: bool) -> None:
-        if self._continuation_value_target_sampling_enabled():
-            self._sample_leaf_enabled = False
-            return
         super()._prepare_compact_leaf_sampling(training_mode)
         assert self._sample_leaf_players is not None
         self._sample_leaf_players.random_(0, self.num_players, generator=self.generator)
