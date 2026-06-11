@@ -5,7 +5,6 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from p2.core.structured_config import NonlinearityType, StreetValueHeads
 from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
@@ -1423,7 +1422,14 @@ class _PreflopTokenEncoderBlock(nn.Module):
             self.head_dim,
         )
         qkv = qkv.permute(2, 0, 3, 1, 4)
-        attn = F.scaled_dot_product_attention(qkv[0], qkv[1], qkv[2])
+        # The preflop token stream is tiny (1 game token + players). Explicit
+        # attention avoids TorchInductor dispatching flash-attention kernels
+        # that are fragile for these small dynamic shapes.
+        scores = torch.matmul(qkv[0], qkv[1].transpose(-2, -1)) / math.sqrt(
+            float(self.head_dim)
+        )
+        weights = torch.softmax(scores, dim=-1)
+        attn = torch.matmul(weights, qkv[2])
         attn = attn.transpose(1, 2).reshape(batch_size, token_count, dim)
         x = x + self.out(attn) / math.sqrt(2.0)
         return x + self.ffn(x) / math.sqrt(2.0)
