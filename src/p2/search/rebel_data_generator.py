@@ -1,4 +1,5 @@
 from collections.abc import Callable
+import os
 
 import torch
 
@@ -278,8 +279,19 @@ class RebelDataGenerator:
         return_policy_batch: bool = True,
         max_return_policy_samples: int | None = None,
     ) -> tuple[RebelBatch | None, RebelBatch | None]:
+        debug = bool(os.environ.get("P2_DEBUG_TRAINER_INIT"))
+
+        def trace(message: str) -> None:
+            if debug:
+                print(f"[RebelDataGenerator] {message}", flush=True)
+
         target_batch_size = self.target_batch_size
         collected = self.last_extra
+        trace(
+            "generate_data start "
+            f"value_sample_count={value_sample_count} collected={collected} "
+            f"target_batch_size={target_batch_size}"
+        )
 
         value_batches = []
         policy_batches = []
@@ -301,28 +313,39 @@ class RebelDataGenerator:
 
             root_count = int(self.current_pbs.env.N)
             root_indices = torch.arange(root_count, device=self.device)
+            trace(f"initialize_subgame roots={root_count}")
             self.evaluator.initialize_subgame(
                 self.current_pbs.env,
                 root_indices,
                 self.current_pbs.beliefs[:root_count],
             )
 
+            trace("evaluate_cfr start")
             next_pbs = self.evaluator.evaluate_cfr(
                 sample_continuation=self.sample_continuations
             )
+            trace("evaluate_cfr done")
             self.current_pbs = None if self.root_sampler is not None else next_pbs
             if self.record_batch_diag:
+                trace("record_batch_diag start")
                 self._record_batch_diag(refilled)
+                trace("record_batch_diag done")
 
             need_policy_batch = self.store_replay or return_policy_batch
             need_pre_chance_value_batch = self.include_pre_chance_value_batches and (
                 self.store_replay or return_value_batch
             )
+            trace("training_data start")
             value_batch, augmented_value_batch, policy_batch = (
                 self.evaluator.training_data(
                     include_pre_chance_value_batch=need_pre_chance_value_batch,
                     include_policy_batch=need_policy_batch,
                 )
+            )
+            trace(
+                "training_data done "
+                f"value={len(value_batch)} "
+                f"policy={len(policy_batch) if policy_batch is not None else 0}"
             )
             if policy_batch is not None and policy_batch.policy_targets is not None:
                 valid_actor = (policy_batch.features.to_act >= 0) & (
@@ -339,8 +362,14 @@ class RebelDataGenerator:
                     raise RuntimeError("store_replay=True requires replay buffers")
                 if policy_batch is None:
                     raise RuntimeError("store_replay=True requires policy batch")
+                trace("add replay start")
                 self.policy_buffer.add_batch(policy_batch)
                 self.value_buffer.add_batch(value_batch)
+                trace(
+                    "add replay done "
+                    f"value_buffer={len(self.value_buffer)} "
+                    f"policy_buffer={len(self.policy_buffer)}"
+                )
                 if self.include_pre_chance_value_batches:
                     if augmented_value_batch is None:
                         raise RuntimeError(
@@ -376,8 +405,10 @@ class RebelDataGenerator:
                     value_batches.append(augmented_value_batch)
 
             collected += len(value_batch)
+            trace(f"generate loop collected={collected}")
 
         self.last_extra = collected - value_sample_count
+        trace(f"generate_data done last_extra={self.last_extra}")
 
         fresh_value_batch = (
             RebelBatch.cat(value_batches)

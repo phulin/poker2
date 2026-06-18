@@ -12,7 +12,7 @@ from p2.rl.target_provenance import (
     TARGET_SOURCE_CLOSING_NET,
     TARGET_SOURCE_EXACT_TERMINAL,
 )
-from p2.search.cfr_evaluator import CFREvaluator, ExploitabilityStats
+from p2.search.cfr_evaluator import CFREvaluator, ExploitabilityStats, PublicBeliefState
 from p2.search.fused_cfr_triton import (
     fused_average_policy_mix_multiway_with_tensors_,
     fused_average_policy_reach_beliefs_depth_preflop_multiway_,
@@ -880,7 +880,61 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def _record_stats(self, t: int, old_policy_probs: torch.Tensor) -> None:
         return None
 
+    def _sample_preflop_cutoff_roots(self) -> PublicBeliefState | None:
+        bounds = self._continuation_value_target_depth_bounds()
+        min_actions = int(bounds[0]) if bounds is not None else int(self.max_depth)
+        N = int(self.root_nodes)
+        total = int(self.total_nodes)
+        if total <= N:
+            return None
+
+        rows = torch.arange(total, device=self.device)
+        candidate_mask = (
+            (rows >= N)
+            & self.valid_mask
+            & (self.env.street == 0)
+            & (self.env.actions_this_round >= min_actions)
+            & (~self.env.done)
+            & (~self.allin_call_mask)
+            & (self.env.to_act >= 0)
+            & (self.env.to_act < self.num_players)
+        )
+        candidates = torch.where(candidate_mask)[0]
+        if candidates.numel() == 0:
+            return None
+
+        root_owner = self._get_root_index()[candidates].clamp(min=0, max=N - 1)
+        scores = torch.rand(
+            candidates.numel(),
+            generator=self.generator,
+            device=self.device,
+            dtype=self.float_dtype,
+        )
+        best_scores = torch.full((N,), -1.0, dtype=self.float_dtype, device=self.device)
+        best_scores.scatter_reduce_(
+            0, root_owner, scores, reduce="amax", include_self=True
+        )
+        chosen = candidates[scores >= best_scores[root_owner]]
+        if chosen.numel() > N:
+            chosen = chosen[:N]
+
+        pbs = PublicBeliefState.from_proto(
+            env_proto=self.env,
+            beliefs=self.beliefs_sample[chosen].clone(),
+            num_envs=chosen.numel(),
+        )
+        pbs.env.copy_state_from(
+            self.env,
+            chosen,
+            torch.arange(chosen.numel(), device=self.device),
+        )
+        return pbs
+
     def sample_leaves(self, training_mode: bool):
+        if training_mode and self._continuation_value_target_sampling_enabled():
+            pbs = self._sample_preflop_cutoff_roots()
+            if pbs is not None:
+                return pbs
         pbs = SparseCFREvaluator.sample_leaves(self, training_mode)
         keep = pbs.env.street == 0
         if bool(keep.all().item()):

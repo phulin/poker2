@@ -209,7 +209,7 @@ def print_preflop_range_grid(
         ],
     )
 
-    print("BB value estimates when facing SB all-in (×1000)")
+    print("Responder value estimates when facing first-actor all-in (×1000)")
     print(bb_value_grid)
     print()
 

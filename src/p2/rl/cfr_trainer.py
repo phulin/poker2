@@ -160,6 +160,13 @@ class RebelCFRTrainer:
     def __init__(
         self, cfg: Config, device: torch.device, pregeneration_only: bool = False
     ) -> None:
+        debug_init = bool(os.environ.get("P2_DEBUG_TRAINER_INIT"))
+
+        def init_trace(message: str) -> None:
+            if debug_init:
+                print(f"[RebelCFRTrainer:init] {message}", flush=True)
+
+        init_trace("start")
         self.cfg = cfg
         apply_action_schedule_to_config(cfg)
         if cfg.data.mode not in {"live", "pregenerated", "hybrid"}:
@@ -222,9 +229,15 @@ class RebelCFRTrainer:
             cfg.model.num_actions = self.num_actions
 
         # Environment used to provide root states for CFR search. Heads-up keeps
-        # the private-card tensor env as the fast regression path; multiway uses
-        # the public-state env because private deals are represented by beliefs.
-        if self.num_players == 2:
+        # the private-card tensor env as the fast regression path unless the
+        # model is the compact 169-hand preflop variant, which is a PBS model
+        # even with two players.
+        compact_preflop_self_play = (
+            int(getattr(cfg.model, "preflop_hand_dim", NUM_HANDS) or NUM_HANDS)
+            == PREFLOP_HANDS
+            and cfg.data.live_root_source == "self_play"
+        )
+        if self.num_players == 2 and not compact_preflop_self_play:
             self.env = HUNLTensorEnv(
                 num_envs=self.cfg.num_envs,
                 starting_stack=cfg.env.stack,
@@ -264,6 +277,7 @@ class RebelCFRTrainer:
                 high_stack_mass_ratio=cfg.env.high_stack_mass_ratio,
             )
         self.env.reset()
+        init_trace("environment ready")
 
         # Model
         if cfg.model.name == ModelType.better_ffn:
@@ -310,6 +324,7 @@ class RebelCFRTrainer:
         self.model.to(self.device)
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
             self.model.compile_forward_modes(**_compile_kwargs(cfg))
+        init_trace("training model ready")
 
         # data generation rate per training step
         self.K_value = _value_samples_per_step(
@@ -362,6 +377,7 @@ class RebelCFRTrainer:
                 depth_stratify_probs=cfg.train.policy_depth_stratify_probs,
                 depth_stratify_buckets=cfg.search.depth,
             )
+        init_trace("replay buffers ready")
 
         # Optimizer & loss
         self.optimizer = build_optimizer(self.model, cfg.train, device)
@@ -393,6 +409,7 @@ class RebelCFRTrainer:
         self._sync_inference_model()
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":
             self.inference_model.compile_forward_modes(**_compile_kwargs(cfg))
+        init_trace("inference model ready")
         eval_model = self.inference_model
         if cfg.search.street_model_checkpoints:
             if cfg.search.sparse_fused:
@@ -408,13 +425,14 @@ class RebelCFRTrainer:
             closing_leaf_model = self._load_closing_leaf_model(
                 cfg.search.closing_leaf_checkpoint
             )
+        init_trace("closing leaf model ready")
 
         if not cfg.search.sparse:
             raise ValueError(
                 "Dense RebelCFREvaluator has been removed; set search.sparse=true."
             )
         evaluator_cls: type[SparseCFREvaluator] = SparseCFREvaluator
-        if self.num_players != 2 and cfg.data.live_root_source == "self_play":
+        if compact_preflop_self_play:
             if cfg.search.sparse_fused:
                 from p2.search.fused_preflop_sparse_cfr_evaluator import (
                     FusedPreflopSparseCFREvaluator,
@@ -438,6 +456,7 @@ class RebelCFRTrainer:
             generator=self.rng,
             closing_leaf_model=closing_leaf_model,
         )
+        init_trace(f"evaluator ready ({evaluator_cls.__name__})")
         root_sampler = None
         random_street_sources = {
             "random_flop": 1,
@@ -521,12 +540,14 @@ class RebelCFRTrainer:
                 evaluator=self.cfr_evaluator,
                 value_buffer=self.value_buffer,
                 policy_buffer=self.policy_buffer,
+                warmup=cfg.data.warmup_self_play_roots,
                 root_sampler=root_sampler,
                 include_pre_chance_value_batches=cfg.data.include_pre_chance_value_batches,
                 store_replay=not pregeneration_only,
                 sample_continuations=not pregeneration_only,
                 record_batch_diag=not pregeneration_only,
             )
+            init_trace("data generator ready")
             if pregeneration_only:
                 self.data_source = None
                 self.aggression_analyzer = AggressionAnalyzer(device=self.device)
@@ -2343,7 +2364,19 @@ class RebelCFRTrainer:
     def _update_model(
         self, step: int
     ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
+        debug = bool(os.environ.get("P2_DEBUG_TRAINER_INIT"))
+
+        def trace(message: str) -> None:
+            if debug:
+                print(f"[RebelCFRTrainer:update] {message}", flush=True)
+
+        trace(f"step {step} prepare_step start")
         fresh_value_batch, fresh_policy_batch = self.data_source.prepare_step(step)
+        trace(
+            f"step {step} prepare_step done "
+            f"value={len(fresh_value_batch) if fresh_value_batch is not None else 0} "
+            f"policy={len(fresh_policy_batch) if fresh_policy_batch is not None else 0}"
+        )
 
         # Warmup: make sure we have enough samples.
         min_policy_samples = max(
@@ -2354,7 +2387,12 @@ class RebelCFRTrainer:
                 else self.batch_size
             ),
         )
+        trace(
+            f"step {step} ensure_min_samples start "
+            f"value={self.batch_size} policy={min_policy_samples}"
+        )
         self.data_source.ensure_min_samples(self.batch_size, min_policy_samples)
+        trace("ensure_min_samples done")
 
         supervisions = (
             self.cfg.model.num_supervisions if isinstance(self.model, BetterTRM) else 1
@@ -2411,6 +2449,7 @@ class RebelCFRTrainer:
 
         self.model.train()
         for episode in range(episodes):
+            trace(f"episode {episode} sample batches start")
             value_latent, policy_latent, permuted_latent = None, None, None
             # TODO: think about how to interleave these/ratio in a smarter way.
             # Might need to use different sizes for the two batches.
@@ -2423,6 +2462,7 @@ class RebelCFRTrainer:
             policy_batch = self.data_source.sample_policy(
                 self.batch_size, stratify_streets=policy_stratify
             ).to(self.device)
+            trace(f"episode {episode} sample batches done")
 
             # Sample suit permutations and apply to features/targets together.
             suit_permutations_idxs = torch.randint(
@@ -2442,6 +2482,7 @@ class RebelCFRTrainer:
             )
 
             for _ in range(supervisions):
+                trace(f"episode {episode} supervise start")
                 (
                     episode_stats,
                     permuted_value_output,
@@ -2460,6 +2501,7 @@ class RebelCFRTrainer:
                     policy_latent,
                     permuted_latent,
                 )
+                trace(f"episode {episode} supervise done")
                 value_latent = (
                     value_output_orig.latent.detach()
                     if value_output_orig.latent is not None
