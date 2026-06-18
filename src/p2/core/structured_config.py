@@ -126,6 +126,7 @@ class TrainingConfig:
     # how many batches of data do we want to store in the replay buffer?
     # i.e. maximum age of a sample.
     replay_buffer_batches: int = 4
+    target_update_block_batches: int = 0
     replay_buffer_device: str = "cpu"
     replay_buffer_underfull_evict_fraction: float = 0.25
 

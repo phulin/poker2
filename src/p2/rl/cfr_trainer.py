@@ -219,6 +219,13 @@ class RebelCFRTrainer:
         )
         if self.policy_extra_batch_size <= 0:
             raise ValueError("train.policy_extra_batch_size must be positive")
+        self.target_update_block_batches = int(
+            getattr(cfg.train, "target_update_block_batches", 0) or 0
+        )
+        if self.target_update_block_batches < 0:
+            raise ValueError("train.target_update_block_batches must be >= 0")
+        self.cfr_target_model: nn.Module | None = None
+        self.cfr_target_model_step = 0
 
         if cfg.model.num_actions != self.num_actions:
             print(
@@ -411,6 +418,22 @@ class RebelCFRTrainer:
             self.inference_model.compile_forward_modes(**_compile_kwargs(cfg))
         init_trace("inference model ready")
         eval_model = self.inference_model
+        if self.target_update_block_batches > 0:
+            if cfg.search.street_model_checkpoints:
+                raise ValueError(
+                    "train.target_update_block_batches is incompatible with "
+                    "search.street_model_checkpoints because the CFR evaluator "
+                    "uses an external street model registry."
+                )
+            self.cfr_target_model = self._make_eval_twin(compile_model=False)
+            self._sync_cfr_target_model(step=0)
+            if self.device.type == "cuda" and _compile_setting(cfg) != "off":
+                self.cfr_target_model.compile_forward_modes(**_compile_kwargs(cfg))
+            eval_model = self.cfr_target_model
+            init_trace(
+                "block CFR target model ready "
+                f"(block={self.target_update_block_batches})"
+            )
         if cfg.search.street_model_checkpoints:
             if cfg.search.sparse_fused:
                 raise NotImplementedError(
@@ -899,13 +922,13 @@ class RebelCFRTrainer:
         return registry
 
     @torch.no_grad()
-    def _sync_inference_model(self) -> None:
-        """Copy train or EMA weights into the dedicated inference model."""
+    def _sync_eval_model_from_training(self, target_model: nn.Module) -> None:
+        """Copy train or EMA weights into a frozen eval twin."""
         source_params = dict(self.model.named_parameters())
         source_buffers = dict(self.model.named_buffers())
         ema_shadow = self.ema_helper.shadow if self.ema_helper is not None else {}
 
-        for name, param in self.inference_model.named_parameters():
+        for name, param in target_model.named_parameters():
             src = ema_shadow.get(name)
             if src is None:
                 src = source_params[name].data
@@ -913,14 +936,35 @@ class RebelCFRTrainer:
                 src = src.to(device=param.device, dtype=param.dtype)
             param.data.copy_(src)
 
-        for name, buf in self.inference_model.named_buffers():
+        for name, buf in target_model.named_buffers():
             src = source_buffers.get(name)
             if src is None:
                 continue
             if src.device != buf.device or src.dtype != buf.dtype:
                 src = src.to(device=buf.device, dtype=buf.dtype)
             buf.copy_(src)
-        self.inference_model.eval()
+        target_model.eval()
+
+    @torch.no_grad()
+    def _sync_inference_model(self) -> None:
+        """Copy train or EMA weights into the dedicated inference model."""
+        self._sync_eval_model_from_training(self.inference_model)
+
+    @torch.no_grad()
+    def _sync_cfr_target_model(self, step: int) -> bool:
+        """Promote train or EMA weights into the block-frozen CFR target model."""
+        if self.cfr_target_model is None:
+            return False
+        self._sync_eval_model_from_training(self.cfr_target_model)
+        self.cfr_target_model_step = int(step)
+        return True
+
+    def _maybe_promote_cfr_target_model(self, step: int) -> bool:
+        if self.cfr_target_model is None or self.target_update_block_batches <= 0:
+            return False
+        if step <= 0 or step % self.target_update_block_batches != 0:
+            return False
+        return self._sync_cfr_target_model(step)
 
     def trueskill_snapshot_weights(self) -> dict[str, torch.Tensor]:
         """Return the weights to snapshot for TrueSkill. Prefers EMA shadow
@@ -2623,6 +2667,7 @@ class RebelCFRTrainer:
 
         # Apply schedules before training step
         self._apply_schedules(step)
+        cfr_target_promoted = self._maybe_promote_cfr_target_model(step)
 
         update_info = self._update_model(step)
         update_info["step"] = step_public
@@ -2642,6 +2687,15 @@ class RebelCFRTrainer:
         if adamw_lrs:
             update_info["adamw_learning_rate"] = adamw_lrs[0]
         update_info["cfr_iterations"] = self.cfr_evaluator.cfr_iterations
+        if self.target_update_block_batches > 0:
+            update_info["cfr_target_update_block_batches"] = (
+                self.target_update_block_batches
+            )
+            update_info["cfr_target_model_step"] = self.cfr_target_model_step
+            update_info["cfr_target_block_index"] = (
+                step // self.target_update_block_batches
+            )
+            update_info["cfr_target_promoted"] = float(cfr_target_promoted)
 
         return update_info
 
@@ -2744,6 +2798,19 @@ class RebelCFRTrainer:
                 }
             state["model_avg"] = model_avg_state
 
+        if self.cfr_target_model is not None:
+            cfr_target_state = self.cfr_target_model.state_dict()
+            if save_dtype is not None:
+                cfr_target_state = {
+                    k: v.to(save_dtype) if v.dtype.is_floating_point else v
+                    for k, v in cfr_target_state.items()
+                }
+            state["cfr_target_model"] = cfr_target_state
+            state["cfr_target_model_step"] = self.cfr_target_model_step
+            state["cfr_target_update_block_batches"] = (
+                self.target_update_block_batches
+            )
+
         # Save batch if provided (move to CPU for storage)
         if batch is not None:
             batch_cpu = batch.to(torch.device("cpu"))
@@ -2838,6 +2905,19 @@ class RebelCFRTrainer:
                 for k, v in model_avg_state.items()
                 if k in shadow_keys
             }
+
+        if self.cfr_target_model is not None:
+            cfr_target_state = ckpt.get("cfr_target_model")
+            if cfr_target_state is not None:
+                self.cfr_target_model.load_state_dict(
+                    cfr_target_state, strict=self.cfg.strict_model_loading
+                )
+                self.cfr_target_model.eval()
+                self.cfr_target_model_step = int(
+                    ckpt.get("cfr_target_model_step", ckpt.get("step", 0))
+                )
+            else:
+                self._sync_cfr_target_model(step=int(ckpt.get("step", 0)) + 1)
 
         # Only load optimizer if it exists in checkpoint
         if load_optimizer and "optimizer" in ckpt:

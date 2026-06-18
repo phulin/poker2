@@ -28,6 +28,7 @@ train:
   batch_size: 2048
   episodes_per_step: 5
   replay_buffer_batches: 128
+  target_update_block_batches: 0
   replay_buffer_device: cuda
   replay_buffer_underfull_evict_fraction: 0.25
   value_reuse_goal: 2
