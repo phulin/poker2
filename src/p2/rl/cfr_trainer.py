@@ -2820,8 +2820,15 @@ class RebelCFRTrainer:
         # Compatibility for checkpoints written before the data-source refactor.
         state["data_generator"] = data_source_state
 
+        save_replay_buffers = bool(
+            getattr(self.cfg.train, "save_replay_buffers", True)
+        )
+        if not save_replay_buffers:
+            state["replay_buffer_checkpoint"] = None
+
         torch.save(state, path)
-        self.save_replay_buffers(path, step)
+        if save_replay_buffers:
+            self.save_replay_buffers(path, step)
 
     def save_value_checkpoint(
         self,

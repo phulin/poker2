@@ -127,6 +127,7 @@ class TrainingConfig:
     # i.e. maximum age of a sample.
     replay_buffer_batches: int = 4
     target_update_block_batches: int = 0
+    save_replay_buffers: bool = True
     replay_buffer_device: str = "cpu"
     replay_buffer_underfull_evict_fraction: float = 0.25
 
