@@ -2808,6 +2808,145 @@ class CFREvaluator(ABC):
         if not self.use_final_policy_values:
             self.update_average_values(t)
 
+    def _backup_consistency_enabled(self) -> bool:
+        train_cfg = getattr(getattr(self, "cfg", None), "train", None)
+        if train_cfg is None:
+            return False
+        return float(getattr(train_cfg, "backup_consistency_coef", 0.0) or 0.0) > 0.0
+
+    def _backup_feature_storage_dtype(self, dtype: torch.dtype) -> torch.dtype:
+        if self.device.type == "cuda" and dtype in {
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+            torch.float64,
+        }:
+            return torch.bfloat16
+        return dtype
+
+    def _empty_backup_consistency_statistics(
+        self,
+        value_node_indices: torch.Tensor,
+        value_features_all: MLPFeatures,
+    ) -> dict[str, torch.Tensor]:
+        count = int(value_node_indices.numel())
+        action_count = int(self.num_actions)
+        context_dtype = self._backup_feature_storage_dtype(
+            value_features_all.context.dtype
+        )
+        belief_dtype = self._backup_feature_storage_dtype(
+            value_features_all.beliefs.dtype
+        )
+        actor = self.env.to_act[value_node_indices].long()
+        actor = actor.clamp(min=0, max=max(self.num_players - 1, 0))
+        return {
+            "backup_child_context": torch.zeros(
+                count,
+                action_count,
+                value_features_all.context.shape[1],
+                dtype=context_dtype,
+                device=self.device,
+            ),
+            "backup_child_street": torch.zeros(
+                count,
+                action_count,
+                dtype=torch.long,
+                device=self.device,
+            ),
+            "backup_child_to_act": torch.zeros(
+                count,
+                action_count,
+                dtype=torch.long,
+                device=self.device,
+            ),
+            "backup_child_board": torch.full(
+                (count, action_count, 5),
+                -1,
+                dtype=torch.long,
+                device=self.device,
+            ),
+            "backup_child_beliefs": torch.zeros(
+                count,
+                action_count,
+                value_features_all.beliefs.shape[1],
+                dtype=belief_dtype,
+                device=self.device,
+            ),
+            "backup_child_valid": torch.zeros(
+                count,
+                action_count,
+                dtype=torch.bool,
+                device=self.device,
+            ),
+            "backup_actor": actor,
+        }
+
+    def _backup_consistency_child_statistics(
+        self,
+        value_node_indices: torch.Tensor,
+        value_features_all: MLPFeatures,
+        top: int,
+    ) -> dict[str, torch.Tensor]:
+        stats = self._empty_backup_consistency_statistics(
+            value_node_indices, value_features_all
+        )
+        if value_node_indices.numel() == 0 or len(self.depth_offsets) < 3 or top <= 0:
+            return stats
+
+        child_start = self.depth_offsets[1]
+        child_end = min(self.depth_offsets[2], self.total_nodes)
+        if child_start >= child_end:
+            return stats
+
+        child_nodes = torch.arange(child_start, child_end, device=self.device)
+        parent, action = self._parent_action_for_nodes(child_nodes)
+        in_range = (
+            (parent >= 0)
+            & (parent < self.root_nodes)
+            & (action >= 0)
+            & (action < self.num_actions)
+        )
+        child_by_parent_action = torch.full(
+            (self.root_nodes, self.num_actions),
+            -1,
+            dtype=torch.long,
+            device=self.device,
+        )
+        child_by_parent_action[parent[in_range], action[in_range]] = child_nodes[
+            in_range
+        ]
+
+        child_indices = child_by_parent_action[value_node_indices]
+        has_child = child_indices >= 0
+        safe_child_indices = child_indices.clamp(min=0, max=top - 1)
+        parent_street = self.env.street[value_node_indices]
+        child_to_act = self.env.to_act[safe_child_indices]
+        child_valid = (
+            has_child
+            & (child_indices < top)
+            & self.valid_mask[safe_child_indices]
+            & ~self.env.done[safe_child_indices]
+            & (self.env.street[safe_child_indices] == parent_street[:, None])
+            & (child_to_act >= 0)
+            & (child_to_act < self.num_players)
+            & self.legal_mask[safe_child_indices].any(dim=-1)
+        )
+        allin_call_mask = getattr(self, "allin_call_mask", None)
+        if allin_call_mask is not None and allin_call_mask.shape[0] >= self.total_nodes:
+            child_valid &= ~allin_call_mask[safe_child_indices]
+
+        stats["backup_child_context"] = value_features_all.context[
+            safe_child_indices
+        ].to(dtype=stats["backup_child_context"].dtype)
+        stats["backup_child_street"] = value_features_all.street[safe_child_indices]
+        stats["backup_child_to_act"] = value_features_all.to_act[safe_child_indices]
+        stats["backup_child_board"] = value_features_all.board[safe_child_indices]
+        stats["backup_child_beliefs"] = value_features_all.beliefs[
+            safe_child_indices
+        ].to(dtype=stats["backup_child_beliefs"].dtype)
+        stats["backup_child_valid"] = child_valid
+        return stats
+
     @profile
     def training_data(
         self,
@@ -2930,6 +3069,15 @@ class CFREvaluator(ABC):
         value_statistics["continuation_value_target"] = continuation_value_mask
         for key, value in root_leaf_counts.items():
             value_statistics[key] = value[value_node_indices]
+        backup_consistency_enabled = self._backup_consistency_enabled()
+        if backup_consistency_enabled:
+            value_statistics.update(
+                self._backup_consistency_child_statistics(
+                    value_node_indices,
+                    value_features_all,
+                    top,
+                )
+            )
 
         value_batch = RebelBatch(
             features=value_features,
@@ -3021,6 +3169,13 @@ class CFREvaluator(ABC):
         )
         for key, value in root_leaf_counts.items():
             value_statistics_pre[key] = value.clone()
+        if backup_consistency_enabled:
+            value_statistics_pre.update(
+                self._empty_backup_consistency_statistics(
+                    root_indices,
+                    root_value_features,
+                )
+            )
         value_statistics_pre["board"] = self.env.last_board_indices[:N].clone()
         prev_street = torch.where(
             (street_root > 0) & (street_root < 4) & (actions_root == 0),

@@ -158,6 +158,10 @@ class TrainingConfig:
     entropy_coef_final: float = 0.002
     entropy_decay_portion: float = 0.6  # Portion of training for linear entropy decay
     permutation_coef: float = 0.01
+    backup_consistency_coef: float = 0.0
+    backup_consistency_sample_fraction: float = 1.0
+    backup_consistency_max_samples: int = 0
+    backup_consistency_min_policy_mass: float = 1e-4
     grad_clip: float = 1.0
     # Separate clip for the policy net's gradients. Only takes effect when the
     # policy and value heads have disjoint parameters (separate nets, or a TRM

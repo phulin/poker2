@@ -1072,6 +1072,203 @@ class RebelCFRTrainer:
             value_output.hand_values.float(), hand_values_permuted_reversed.float()
         )
 
+    def _backup_consistency_coef(self) -> float:
+        return float(getattr(self.cfg.train, "backup_consistency_coef", 0.0) or 0.0)
+
+    def _backup_consistency_loss(
+        self,
+        batch: RebelBatch,
+        value_output: ModelOutput,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        device = batch.features.context.device
+        zero = torch.zeros((), device=device)
+        if self._backup_consistency_coef() <= 0.0:
+            return zero, zero
+        if isinstance(self.model, BetterTRM):
+            return zero, zero
+        if value_output.hand_values is None:
+            return zero, zero
+
+        stats = batch.statistics
+        required = (
+            "backup_child_context",
+            "backup_child_street",
+            "backup_child_to_act",
+            "backup_child_board",
+            "backup_child_beliefs",
+            "backup_child_valid",
+            "backup_actor",
+        )
+        if any(key not in stats for key in required):
+            return zero, zero
+
+        child_valid_all = stats["backup_child_valid"].to(device=device, dtype=torch.bool)
+        eligible = child_valid_all.any(dim=1)
+        sample_indices = torch.where(eligible)[0]
+        if sample_indices.numel() == 0:
+            return zero, zero
+
+        sample_fraction = float(
+            getattr(self.cfg.train, "backup_consistency_sample_fraction", 1.0) or 0.0
+        )
+        sample_fraction = max(0.0, min(1.0, sample_fraction))
+        if sample_fraction <= 0.0:
+            return zero, zero
+        if sample_fraction < 1.0:
+            keep = (
+                torch.rand(
+                    sample_indices.numel(),
+                    device=device,
+                    generator=self.rng,
+                )
+                < sample_fraction
+            )
+            sample_indices = sample_indices[keep]
+            if sample_indices.numel() == 0:
+                return zero, zero
+
+        max_samples = int(
+            getattr(self.cfg.train, "backup_consistency_max_samples", 0) or 0
+        )
+        if max_samples > 0 and sample_indices.numel() > max_samples:
+            perm = torch.randperm(
+                sample_indices.numel(),
+                device=device,
+                generator=self.rng,
+            )[:max_samples]
+            sample_indices = sample_indices[perm]
+
+        child_valid = child_valid_all[sample_indices]
+        sample_count = int(sample_indices.numel())
+        action_count = int(child_valid.shape[1])
+        hand_dim = int(batch.features.hand_dim)
+        actor = stats["backup_actor"][sample_indices].long().clamp(
+            min=0,
+            max=max(self.num_players - 1, 0),
+        )
+
+        flat_child_valid = child_valid.reshape(-1)
+        child_context = stats["backup_child_context"][sample_indices].reshape(
+            sample_count * action_count,
+            -1,
+        )[flat_child_valid].float()
+        child_features = MLPFeatures(
+            context=child_context,
+            street=stats["backup_child_street"][sample_indices].reshape(-1)[
+                flat_child_valid
+            ],
+            to_act=stats["backup_child_to_act"][sample_indices].reshape(-1)[
+                flat_child_valid
+            ],
+            board=stats["backup_child_board"][sample_indices].reshape(-1, 5)[
+                flat_child_valid
+            ],
+            beliefs=stats["backup_child_beliefs"][sample_indices].reshape(
+                sample_count * action_count,
+                -1,
+            )[flat_child_valid].float(),
+            hand_dim=hand_dim,
+        )
+        parent_features = batch.features[sample_indices]
+        selected_batch = batch[sample_indices]
+
+        with torch.no_grad():
+            with self._model_autocast():
+                child_output = self.model(child_features, include_policy=False)
+                policy_output = self.model(
+                    parent_features,
+                    include_policy=True,
+                    include_value=False,
+                )
+        if child_output.hand_values is None or policy_output.policy_logits is None:
+            return zero, zero
+        if child_output.hand_values.shape[-1] != hand_dim:
+            raise ValueError(
+                "Backup-consistency child hand dimension mismatch: "
+                f"expected {hand_dim}, got {child_output.hand_values.shape[-1]}"
+            )
+
+        child_values_flat = torch.zeros(
+            sample_count * action_count,
+            self.num_players,
+            hand_dim,
+            dtype=child_output.hand_values.dtype,
+            device=device,
+        )
+        child_values_flat[flat_child_valid] = child_output.hand_values
+        child_values = child_values_flat.view(
+            sample_count,
+            action_count,
+            self.num_players,
+            hand_dim,
+        ).float()
+        child_actor_values = child_values.gather(
+            2,
+            actor[:, None, None, None].expand(-1, action_count, 1, hand_dim),
+        ).squeeze(2)
+
+        policy_logits = policy_output.policy_logits.float()
+        if policy_logits.shape[-1] != action_count or policy_logits.shape[1] != hand_dim:
+            raise ValueError(
+                "Backup-consistency policy shape mismatch: "
+                f"got {tuple(policy_logits.shape)}, expected "
+                f"[{sample_count}, {hand_dim}, {action_count}]"
+            )
+        legal = selected_batch.legal_masks[:, None, :].to(dtype=torch.bool)
+        legal_logits = torch.where(
+            legal,
+            policy_logits,
+            torch.full_like(policy_logits, -1.0e9),
+        )
+        action_probs = F.softmax(legal_logits, dim=-1) * legal.to(
+            dtype=policy_logits.dtype
+        )
+        valid_action = child_valid[:, None, :]
+        action_probs = action_probs * valid_action.to(dtype=action_probs.dtype)
+        valid_policy_mass = action_probs.sum(dim=-1, keepdim=True)
+        action_probs = action_probs / valid_policy_mass.clamp_min(1e-12)
+
+        backup_target = (
+            action_probs.transpose(1, 2) * child_actor_values
+        ).sum(dim=1).detach()
+        parent_values = value_output.hand_values[sample_indices].float()
+        parent_actor_values = parent_values.gather(
+            1,
+            actor[:, None, None].expand(-1, 1, hand_dim),
+        ).squeeze(1)
+
+        if hand_dim == PREFLOP_HANDS:
+            value_weights = self.loss_fn._compact_value_weights(
+                selected_batch,
+                parent_actor_values.dtype,
+            )
+        else:
+            _, allowed_hands_float, unblocked_mass = self.loss_fn._base_weights(
+                selected_batch
+            )
+            value_weights = self.loss_fn._value_weights(
+                unblocked_mass,
+                allowed_hands_float,
+                live_mask=self.loss_fn._live_player_mask(selected_batch),
+            )
+        actor_weights = value_weights.gather(
+            1,
+            actor[:, None, None].expand(-1, 1, hand_dim),
+        ).squeeze(1)
+        min_policy_mass = float(
+            getattr(self.cfg.train, "backup_consistency_min_policy_mass", 1e-4)
+            or 0.0
+        )
+        valid_hand = valid_policy_mass.squeeze(-1) > min_policy_mass
+        weights = actor_weights.to(dtype=parent_actor_values.dtype) * valid_hand.to(
+            dtype=parent_actor_values.dtype
+        )
+        denom = weights.sum()
+        sq_error = (parent_actor_values - backup_target).square()
+        loss = (sq_error * weights).sum() / denom.clamp_min(1e-8)
+        loss = torch.where(denom > 0, loss, zero)
+        return loss, torch.tensor(float(sample_count), device=device)
+
     def _compute_entropy(self, probs: torch.Tensor) -> float:
         eps = 1e-8
         norm = probs.clamp_min(eps)
@@ -1862,6 +2059,15 @@ class RebelCFRTrainer:
             "value_loss": step_stats["value_loss"] / episodes,
             "entropy_loss": step_stats["entropy_loss"] / episodes,
             "permutation_loss": step_stats["permutation_loss"] / episodes,
+            "backup_consistency_loss": (
+                step_stats["backup_consistency_loss"] / episodes
+            ),
+            "backup_consistency_weighted_loss": (
+                step_stats["backup_consistency_weighted_loss"] / episodes
+            ),
+            "backup_consistency_samples": (
+                step_stats["backup_consistency_samples"] / episodes
+            ),
             "param_update_norm": step_stats["update_norm"] / episodes,
             "value_buffer": value_buffer_streets_stats,
             "value_buffer_size": len(self.value_buffer) if has_replay_buffers else 0,
@@ -2164,6 +2370,14 @@ class RebelCFRTrainer:
             total_loss + self.loss_fn.permutation_weight * permutation_loss_tensor
         )
 
+        backup_consistency_loss, backup_consistency_samples = (
+            self._backup_consistency_loss(value_batch, value_output_orig)
+        )
+        backup_consistency_weighted_loss = (
+            self._backup_consistency_coef() * backup_consistency_loss
+        )
+        total_loss = total_loss + backup_consistency_weighted_loss
+
         with self._model_autocast():
             if isinstance(self.model, BetterTRM):
                 policy_output = self.model(
@@ -2234,6 +2448,11 @@ class RebelCFRTrainer:
                 "value_loss": value_loss.detach(),
                 "entropy_loss": entropy_loss.detach(),
                 "permutation_loss": permutation_loss_tensor.detach(),
+                "backup_consistency_loss": backup_consistency_loss.detach(),
+                "backup_consistency_weighted_loss": (
+                    backup_consistency_weighted_loss.detach()
+                ),
+                "backup_consistency_samples": backup_consistency_samples.detach(),
                 "total_loss": total_loss.detach(),
                 "update_norm": update_norm.detach(),
             },
@@ -2475,6 +2694,9 @@ class RebelCFRTrainer:
             "value_loss": None,
             "entropy_loss": None,
             "permutation_loss": None,
+            "backup_consistency_loss": None,
+            "backup_consistency_weighted_loss": None,
+            "backup_consistency_samples": None,
             "total_loss": None,
             "update_norm": None,
         }

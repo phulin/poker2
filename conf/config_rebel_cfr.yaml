@@ -45,6 +45,10 @@ train:
   value_coef: 1.0
   entropy_coef: 0.0
   permutation_coef: 0.1
+  backup_consistency_coef: 0.0
+  backup_consistency_sample_fraction: 1.0
+  backup_consistency_max_samples: 0
+  backup_consistency_min_policy_mass: 1e-4
   grad_clip: 1.0
 
   stratify_streets: []
