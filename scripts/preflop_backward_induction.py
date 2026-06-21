@@ -492,9 +492,14 @@ def run_train_specialists(args: argparse.Namespace) -> None:
             bucket_dir = output_dir / bucket_label
             bucket_dir.mkdir(parents=True, exist_ok=True)
             solved_dir = bucket_dir / "solved"
-            if solved_dir.exists() and any(solved_dir.iterdir()) and not args.overwrite:
-                raise FileExistsError(f"{solved_dir} exists; pass --overwrite")
-            solved_dir.mkdir(parents=True, exist_ok=True)
+            if args.write_solved_shards:
+                if (
+                    solved_dir.exists()
+                    and any(solved_dir.iterdir())
+                    and not args.overwrite
+                ):
+                    raise FileExistsError(f"{solved_dir} exists; pass --overwrite")
+                solved_dir.mkdir(parents=True, exist_ok=True)
 
             cfg = _load_checkpoint_config(
                 previous_value_checkpoint,
@@ -520,9 +525,13 @@ def run_train_specialists(args: argparse.Namespace) -> None:
                 device=device,
                 seed=args.seed + bucket_index + 100,
             )
-            writer = RebelSolvedDatasetWriter(
-                solved_dir,
-                storage_float_dtype=args.storage_dtype,
+            writer = (
+                RebelSolvedDatasetWriter(
+                    solved_dir,
+                    storage_float_dtype=args.storage_dtype,
+                )
+                if args.write_solved_shards
+                else None
             )
             roots_solved = 0
             value_examples = 0
@@ -560,7 +569,8 @@ def run_train_specialists(args: argparse.Namespace) -> None:
                 value_stream = _value_only(value_batch) if train_value else None
                 policy_stream = _policy_only(policy_batch)
                 if value_stream is not None:
-                    writer.append("value", value_stream)
+                    if writer is not None:
+                        writer.append("value", value_stream)
                     value_examples += len(value_stream)
                     value_stats = trainer.train_value_batch(
                         value_stream,
@@ -571,7 +581,8 @@ def run_train_specialists(args: argparse.Namespace) -> None:
                 else:
                     value_stats = {}
                 if policy_stream is not None:
-                    writer.append("policy", policy_stream)
+                    if writer is not None:
+                        writer.append("policy", policy_stream)
                     policy_examples += len(policy_stream)
                     policy_stats = _policy_update(
                         trainer,
@@ -618,21 +629,31 @@ def run_train_specialists(args: argparse.Namespace) -> None:
 
             if value_examples == 0 and policy_examples == 0:
                 raise RuntimeError(f"No solved examples produced for {bucket_label}")
-            manifest = writer.finalize(
-                {
-                    "format_note": "preflop backward-induction solved bucket",
-                    "bucket_label": bucket_label,
-                    "bucket_low": spec.low,
-                    "bucket_high": spec.high,
-                    "root_states_solved": roots_solved,
-                    "train_value": train_value,
-                    "source_state_dataset": os.path.realpath(args.state_dataset),
-                    "solver_checkpoint": os.path.realpath(previous_value_checkpoint),
-                    "depth": args.depth,
-                    "cfr_iterations": args.cfr_iterations,
-                    "belief_mode": args.belief_mode,
-                }
-            )
+            bucket_summary = {
+                "format_note": "preflop backward-induction solved bucket",
+                "bucket_label": bucket_label,
+                "bucket_low": spec.low,
+                "bucket_high": spec.high,
+                "root_states_solved": roots_solved,
+                "value_examples": value_examples,
+                "policy_examples": policy_examples,
+                "train_value": train_value,
+                "write_solved_shards": bool(args.write_solved_shards),
+                "source_state_dataset": os.path.realpath(args.state_dataset),
+                "solver_checkpoint": os.path.realpath(previous_value_checkpoint),
+                "depth": args.depth,
+                "cfr_iterations": args.cfr_iterations,
+                "belief_mode": args.belief_mode,
+            }
+            if writer is not None:
+                bucket_summary["solved_dataset"] = writer.finalize(bucket_summary)
+                bucket_summary["solved_manifest"] = str(solved_dir / "manifest.json")
+            else:
+                summary_path = bucket_dir / "training_summary.json"
+                summary_path.write_text(
+                    json.dumps(_jsonable(bucket_summary), indent=2, sort_keys=True)
+                    + "\n"
+                )
             checkpoint_path = bucket_dir / "checkpoints" / "rebel_latest.pt"
             _save_trainer_checkpoint(
                 trainer,
@@ -643,8 +664,8 @@ def run_train_specialists(args: argparse.Namespace) -> None:
                     "kind": "preflop_backward_induction_specialist",
                     "bucket_label": bucket_label,
                     "train_value": train_value,
-                    "solved_manifest": str(solved_dir / "manifest.json"),
-                    "solved_dataset": manifest,
+                    "training_summary": bucket_summary,
+                    "solved_manifest": bucket_summary.get("solved_manifest"),
                     "solver_checkpoint": os.path.realpath(previous_value_checkpoint),
                 },
             )
@@ -890,6 +911,12 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cfr-batch-size", type=int, default=512)
     parser.add_argument("--replay-buffer-batches", type=int, default=1)
     parser.add_argument("--storage-dtype", default="bfloat16", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument(
+        "--write-solved-shards",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write solved RebelBatch value/policy shards while training.",
+    )
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--progress-roots", type=int, default=10_000)
