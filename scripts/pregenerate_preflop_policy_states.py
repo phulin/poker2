@@ -749,6 +749,9 @@ def _write_unique_frontier_manifest(
 
 def generate(args: argparse.Namespace) -> None:
     if args.unique_frontier:
+        if args.unique_frontier_buckets:
+            generate_unique_frontier_buckets_streaming(args)
+            return
         if args.unique_frontier_streaming:
             generate_unique_frontier_streaming(args)
             return
@@ -1178,7 +1181,7 @@ def _build_root_frontier(
     env: PBSEnv,
     beliefs: torch.Tensor,
     uniform_belief: torch.Tensor,
-    writer: ShardWriter,
+    writer: ShardWriter | None,
     root_states: int | None = None,
     writer_cap: int = 0,
     flush_writer: bool = True,
@@ -1194,9 +1197,10 @@ def _build_root_frontier(
         if take < env.N:
             env.done[take:] = True
         pool.append(env, beliefs, rows)
-        _writer_append_bounded(writer, env, rows, max_rows=writer_cap)
+        if writer is not None:
+            _writer_append_bounded(writer, env, rows, max_rows=writer_cap)
         created += take
-    if flush_writer:
+    if writer is not None and flush_writer:
         writer.flush()
     return pool
 
@@ -1469,6 +1473,447 @@ def _merge_unique_frontier_summary(
         merged["remaining"] += int(attempt_summary["remaining"])
 
 
+def _unique_bucket_action_cap(args: argparse.Namespace) -> int:
+    if args.frontier_bucket_action_cap > 0:
+        return int(args.frontier_bucket_action_cap)
+    if args.frontier_result_cap > 0:
+        return max(1, (int(args.frontier_result_cap) + 3) // 4)
+    return 0
+
+
+def _append_unique_bucket_rows(
+    *,
+    writer: ShardWriter,
+    per_action_written: dict[int, int],
+    env: PBSEnv,
+    rows: torch.Tensor,
+    action_count: int,
+    bucket_cap: int,
+    action_cap: int,
+) -> int:
+    total = int(rows.numel())
+    if total <= 0:
+        return 0
+    remaining_bucket = bucket_cap - writer.rows if bucket_cap > 0 else total
+    remaining_action = (
+        action_cap - per_action_written.get(action_count, 0)
+        if action_cap > 0
+        else total
+    )
+    take = min(total, remaining_bucket, remaining_action)
+    if take <= 0:
+        return 0
+    written = _writer_append_bounded(
+        writer,
+        env,
+        rows[:take],
+        max_rows=bucket_cap,
+    )
+    per_action_written[action_count] = (
+        per_action_written.get(action_count, 0) + written
+    )
+    return written
+
+
+def _advance_unique_bucket(
+    *,
+    source: FrontierPool,
+    bucket: BucketSpec,
+    target_action_count: int,
+    target: FrontierPool | None,
+    writer: ShardWriter,
+    per_action_written: dict[int, int],
+    policy_model: torch.nn.Module,
+    encoder: Any,
+    env: PBSEnv,
+    beliefs: torch.Tensor,
+    rng: torch.Generator,
+    args: argparse.Namespace,
+    device: torch.device,
+    bucket_cap: int,
+    action_cap: int,
+) -> dict[str, Any]:
+    start_count = bucket.low
+    width = target_action_count - start_count
+    if width <= 0:
+        raise ValueError("target_action_count must be greater than bucket.low")
+    pending = torch.arange(source.count, dtype=torch.long, device=device)
+    saved_by_source = torch.zeros(source.count, width, dtype=torch.bool, device=device)
+    attempts_summary: list[dict[str, int]] = []
+    rows_all = torch.arange(env.N, dtype=torch.long, device=device)
+
+    for attempt in range(1, args.frontier_attempts + 1):
+        if pending.numel() == 0:
+            break
+        next_pending: list[torch.Tensor] = []
+        successes_this_attempt = 0
+        attempted_this_attempt = int(pending.numel())
+
+        for offset in range(0, int(pending.numel()), env.N):
+            src = pending[offset : offset + env.N]
+            rows = rows_all[: src.numel()]
+            source.copy_indices_into(env, beliefs, src, rows)
+            if src.numel() < env.N:
+                env.done[src.numel() :] = True
+
+            succeeded = torch.zeros(src.numel(), dtype=torch.bool, device=device)
+            for _ in range(width):
+                active = (
+                    (env.street[rows] == 0)
+                    & ~env.done[rows]
+                    & ~succeeded
+                    & (env.actions_this_round[rows] < target_action_count)
+                )
+                for action_count in range(bucket.low, bucket.high + 1):
+                    local = action_count - start_count
+                    if local < 0 or local >= width:
+                        continue
+                    save_pos = torch.where(
+                        active
+                        & (env.actions_this_round[rows] == action_count)
+                        & ~saved_by_source[src, local]
+                    )[0]
+                    if save_pos.numel() == 0:
+                        continue
+                    written = _append_unique_bucket_rows(
+                        writer=writer,
+                        per_action_written=per_action_written,
+                        env=env,
+                        rows=rows[save_pos],
+                        action_count=action_count,
+                        bucket_cap=bucket_cap,
+                        action_cap=action_cap,
+                    )
+                    if written > 0:
+                        saved_by_source[src[save_pos[:written]], local] = True
+
+                if not bool(active.any().item()):
+                    break
+                if bool(succeeded.any().item()):
+                    env.done[rows[succeeded]] = True
+                stepped = _policy_step(
+                    policy_model=policy_model,
+                    encoder=encoder,
+                    env=env,
+                    beliefs=beliefs,
+                    rng=rng,
+                    args=args,
+                    device=device,
+                )
+                if not stepped:
+                    break
+                reached = (
+                    (env.street[rows] == 0)
+                    & ~env.done[rows]
+                    & (env.actions_this_round[rows] == target_action_count)
+                    & ~succeeded
+                )
+                if bool(reached.any().item()):
+                    reached_rows = rows[reached]
+                    if target is not None:
+                        target.append(env, beliefs, reached_rows)
+                    succeeded |= reached
+                    env.done[reached_rows] = True
+
+            failed = ~succeeded
+            if bool(failed.any().item()):
+                next_pending.append(src[failed])
+            successes_this_attempt += int(succeeded.sum().item())
+
+        pending = (
+            torch.cat(next_pending, dim=0)
+            if next_pending
+            else torch.empty(0, dtype=torch.long, device=device)
+        )
+        attempts_summary.append(
+            {
+                "attempt": attempt,
+                "attempted": attempted_this_attempt,
+                "successes": successes_this_attempt,
+                "remaining": int(pending.numel()),
+            }
+        )
+
+    writer.flush()
+    return {
+        "source_count": source.count,
+        "target_count": 0 if target is None else target.count,
+        "target_action_count": target_action_count,
+        "attempts": attempts_summary,
+        "failed": int(pending.numel()),
+    }
+
+
+def _write_unique_bucket_manifest(
+    output_dir: Path,
+    *,
+    args: argparse.Namespace,
+    metadata: dict[str, Any],
+    writers: list[ShardWriter],
+    per_action_written: dict[int, int],
+    complete: bool,
+    elapsed_s: float,
+    root_states_sampled: int,
+) -> None:
+    buckets = []
+    for spec, writer in zip(BUCKET_SPECS, writers, strict=True):
+        buckets.append(
+            {
+                "label": spec.label,
+                "low": spec.low,
+                "high": spec.high,
+                "target_rows": args.frontier_result_cap,
+                "num_rows": writer.rows,
+                "action_count_rows": {
+                    str(action_count): per_action_written.get(action_count, 0)
+                    for action_count in range(spec.low, spec.high + 1)
+                },
+                "shards": list(writer.shards),
+            }
+        )
+    manifest = {
+        "format_version": 1,
+        "kind": "preflop_policy_unique_frontier_buckets",
+        "complete": complete,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "elapsed_s": elapsed_s,
+        "source_checkpoint": os.path.realpath(args.checkpoint),
+        "source_wandb_run_id": metadata.get("checkpoint_wandb_run_id"),
+        "source_step": metadata.get("checkpoint_step"),
+        "num_rows": sum(writer.rows for writer in writers),
+        "root_states_sampled": root_states_sampled,
+        "root_states": args.root_states,
+        "state_fields": list(STATE_FIELDS),
+        "state_dtype_policy": {
+            "int16": sorted(INT16_FIELDS),
+            "int32": sorted(INT32_FIELDS),
+            "bool": [
+                "has_folded",
+                "is_allin",
+                "acted_this_round",
+                "done",
+                "winners",
+            ],
+            "float32": ["scale"],
+        },
+        "rollout": {
+            "mode": "unique_frontier_bucket_streaming",
+            "num_envs": args.num_envs,
+            "buckets": [
+                {"label": spec.label, "low": spec.low, "high": spec.high}
+                for spec in BUCKET_SPECS
+            ],
+            "frontier_attempts": args.frontier_attempts,
+            "frontier_result_cap": args.frontier_result_cap,
+            "frontier_bucket_action_cap": _unique_bucket_action_cap(args),
+            "seed": args.seed,
+            "belief_init": args.belief_init,
+            "belief_update": "actor_bayes_update_from_sampled_legal_action",
+            "action_sampling": "actor_belief_weighted_policy_probs",
+            "temperature": args.temperature,
+            "epsilon": args.epsilon,
+            "uniqueness": (
+                "for each root and four-action bucket, retries at most "
+                "frontier_attempts continuations; saves at most one state per "
+                "action count and carries at most one successor frontier forward"
+            ),
+        },
+        "buckets": buckets,
+        "model": {
+            "model_type": metadata.get("model_type"),
+            "num_actions": metadata.get("num_actions"),
+            "num_players": metadata.get("num_players"),
+            "model_dtype": args.model_dtype,
+            "compile": args.compile,
+        },
+        "env_config": metadata.get("env_config"),
+        "model_config": metadata.get("model_config"),
+    }
+    path = output_dir / ("manifest.json" if complete else "manifest.partial.json")
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(_jsonable(manifest), f, indent=2, sort_keys=True)
+
+
+def generate_unique_frontier_buckets_streaming(args: argparse.Namespace) -> None:
+    if not args.unique_frontier_streaming:
+        raise ValueError("--unique-frontier-buckets requires --unique-frontier-streaming")
+    device = _device(args.device)
+    dtype = _model_dtype(args.model_dtype, device)
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
+    torch.manual_seed(args.seed)
+
+    output_dir = Path(args.output_dir)
+    if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite:
+        raise FileExistsError(
+            f"{output_dir} is not empty; choose a new output dir or pass --overwrite"
+        )
+
+    policy_model, metadata = _load_policy_model(
+        args.checkpoint,
+        device=device,
+        dtype=dtype,
+        compile_model=args.compile,
+        strict=not args.non_strict,
+    )
+    env = _make_env(metadata, num_envs=args.num_envs, device=device, seed=args.seed)
+    encoder = policy_model.create_feature_encoder(env, device=device, dtype=dtype)
+    beliefs = _initial_beliefs(
+        args.num_envs,
+        int(metadata["num_players"]),
+        device=device,
+        mode=args.belief_init,
+    )
+    uniform_belief = beliefs[0].clone()
+    rng = torch.Generator(device=device)
+    rng.manual_seed(args.seed + 1)
+    writers = [
+        ShardWriter(
+            output_dir / spec.label,
+            shard_size=args.shard_size,
+            overwrite=args.overwrite,
+        )
+        for spec in BUCKET_SPECS
+    ]
+    per_action_written: dict[int, int] = {
+        action_count: 0 for action_count in range(BUCKET_SPECS[-1].high + 1)
+    }
+    bucket_cap = int(args.frontier_result_cap)
+    action_cap = _unique_bucket_action_cap(args)
+
+    started = time.time()
+    last_progress = started
+    sampled_roots = 0
+    chunk_index = 0
+    stage_summaries: dict[int, dict[str, Any]] = {}
+    print(
+        "Starting streaming unique-frontier bucket generation: "
+        f"roots={args.root_states:,} attempts={args.frontier_attempts} "
+        f"cap_per_bucket={bucket_cap:,} cap_per_action={action_cap:,} "
+        f"chunk_roots={args.num_envs:,} device={device} dtype={dtype} "
+        f"checkpoint_step={metadata['checkpoint_step']}"
+    )
+    print(f"Output: {output_dir}")
+
+    with torch.inference_mode():
+        while sampled_roots < args.root_states:
+            chunk_roots = min(args.num_envs, args.root_states - sampled_roots)
+            pools: dict[int, FrontierPool] = {}
+            pools[0] = _build_root_frontier(
+                args=args,
+                env=env,
+                beliefs=beliefs,
+                uniform_belief=uniform_belief,
+                writer=None,
+                root_states=chunk_roots,
+                flush_writer=False,
+            )
+            for stage, spec in enumerate(BUCKET_SPECS):
+                target_action_count = spec.high + 1
+                source = pools[spec.low]
+                target = (
+                    None
+                    if stage == len(BUCKET_SPECS) - 1
+                    else FrontierPool(
+                        env=env,
+                        beliefs=beliefs,
+                        capacity=source.count,
+                    )
+                )
+                summary = _advance_unique_bucket(
+                    source=source,
+                    bucket=spec,
+                    target_action_count=target_action_count,
+                    target=target,
+                    writer=writers[stage],
+                    per_action_written=per_action_written,
+                    policy_model=policy_model,
+                    encoder=encoder,
+                    env=env,
+                    beliefs=beliefs,
+                    rng=rng,
+                    args=args,
+                    device=device,
+                    bucket_cap=bucket_cap,
+                    action_cap=action_cap,
+                )
+                _merge_unique_frontier_summary(stage_summaries, summary)
+                if target is not None:
+                    pools[target_action_count] = target
+
+            sampled_roots += chunk_roots
+            chunk_index += 1
+            now = time.time()
+            if (
+                now - last_progress >= args.progress_interval_s
+                or sampled_roots >= args.root_states
+            ):
+                elapsed = now - started
+                bucket_rows = {
+                    spec.label: writer.rows
+                    for spec, writer in zip(BUCKET_SPECS, writers, strict=True)
+                }
+                stage_counts = {
+                    target: summary["target_count"]
+                    for target, summary in sorted(stage_summaries.items())
+                }
+                rate = sampled_roots / max(elapsed, 1.0e-9)
+                print(
+                    f"progress chunks={chunk_index:,} "
+                    f"roots={sampled_roots:,}/{args.root_states:,} "
+                    f"saved={bucket_rows} reached={stage_counts} "
+                    f"rate={rate:,.0f} roots/s elapsed={elapsed:.1f}s",
+                    flush=True,
+                )
+                _write_unique_bucket_manifest(
+                    output_dir,
+                    args=args,
+                    metadata=metadata,
+                    writers=writers,
+                    per_action_written=per_action_written,
+                    complete=False,
+                    elapsed_s=elapsed,
+                    root_states_sampled=sampled_roots,
+                )
+                last_progress = now
+
+    for writer in writers:
+        writer.flush()
+
+    elapsed = time.time() - started
+    _write_unique_bucket_manifest(
+        output_dir,
+        args=args,
+        metadata=metadata,
+        writers=writers,
+        per_action_written=per_action_written,
+        complete=True,
+        elapsed_s=elapsed,
+        root_states_sampled=sampled_roots,
+    )
+    stage_summary_list = [
+        stage_summaries[target]
+        for target in sorted(stage_summaries)
+    ]
+    summary_path = output_dir / "attempt_summary.json"
+    with summary_path.open("w", encoding="utf-8") as f:
+        json.dump(_jsonable(stage_summary_list), f, indent=2, sort_keys=True)
+    print(
+        "Done: saved={"
+        + ", ".join(
+            f"{spec.label}:{writer.rows}"
+            for spec, writer in zip(BUCKET_SPECS, writers, strict=True)
+        )
+        + "} reached={"
+        + ", ".join(
+            f"{target}:{stage_summaries[target]['target_count']}"
+            for target in sorted(stage_summaries)
+        )
+        + f"}} sampled_roots={sampled_roots:,} elapsed={elapsed:.1f}s "
+        f"output={output_dir}"
+    )
+
+
 def generate_unique_frontier_streaming(args: argparse.Namespace) -> None:
     device = _device(args.device)
     dtype = _model_dtype(args.model_dtype, device)
@@ -1648,6 +2093,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Process unique-frontier roots in num-env chunks instead of one GPU pool.",
     )
+    parser.add_argument(
+        "--unique-frontier-buckets",
+        action="store_true",
+        help=(
+            "With --unique-frontier-streaming, write range buckets 0-3/4-7/8-11/12-15 "
+            "along unique retry trajectories instead of exact frontier rows."
+        ),
+    )
     parser.add_argument("--root-states", type=int, default=100_000)
     parser.add_argument("--frontier-attempts", type=int, default=5)
     parser.add_argument("--frontier-start-target", type=int, default=500_000)
@@ -1656,6 +2109,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Maximum saved rows per frontier; 0 means unlimited.",
+    )
+    parser.add_argument(
+        "--frontier-bucket-action-cap",
+        type=int,
+        default=0,
+        help=(
+            "Maximum saved rows per individual action count in unique bucket mode; "
+            "0 derives ceil(frontier-result-cap / 4)."
+        ),
     )
     parser.add_argument("--bucket-target", type=int, default=1_000_000)
     parser.add_argument("--frontier-capacity", type=int, default=262_144)
