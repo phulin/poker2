@@ -4,6 +4,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from p2.config.rebel_load import load_rebel_config, load_rebel_experiment_config
+from p2.env.card_utils import PREFLOP_HANDS
 
 
 def test_load_rebel_config_applies_rebel_logging_defaults() -> None:
@@ -51,7 +52,7 @@ def test_rebel_experiment_config_round_trips_to_trainer_config() -> None:
                 "wandb_name": "run",
                 "wandb_tags": ["custom"],
                 "train": {"batch_size": 11},
-                "data": {"mode": "pregenerated"},
+                "data": {"mode": "hybrid"},
                 "curriculum": {"stages": ["river"]},
             }
         )
@@ -67,5 +68,81 @@ def test_rebel_experiment_config_round_trips_to_trainer_config() -> None:
     assert cfg.checkpoint_interval == 3
     assert cfg.resume_from == "resume.pt"
     assert cfg.train.batch_size == 11
-    assert cfg.data.mode == "pregenerated"
+    assert cfg.data.mode == "hybrid"
     assert cfg.curriculum.stages == ["river"]
+
+
+def test_load_rebel_config_rejects_invalid_data_mode() -> None:
+    with pytest.raises(ValueError, match="data.mode"):
+        load_rebel_config(
+            OmegaConf.create(
+                {
+                    "device": "cpu",
+                    "data": {"mode": "legacy_rollout"},
+                }
+            )
+        )
+
+
+def test_load_rebel_config_rejects_unknown_live_root_source() -> None:
+    with pytest.raises(ValueError, match="data.live_root_source"):
+        load_rebel_config(
+            OmegaConf.create(
+                {
+                    "device": "cpu",
+                    "data": {"live_root_source": "riverish"},
+                }
+            )
+        )
+
+
+def test_load_rebel_config_rejects_pregenerated_curriculum() -> None:
+    with pytest.raises(ValueError, match="curriculum stages"):
+        load_rebel_config(
+            OmegaConf.create(
+                {
+                    "device": "cpu",
+                    "data": {"mode": "pregenerated"},
+                    "curriculum": {
+                        "stages": ["river"],
+                        "substeps": {
+                            "river": {
+                                "kind": "train",
+                                "net": "S_river",
+                                "num_steps": 3,
+                            }
+                        },
+                    },
+                }
+            )
+        )
+
+
+def test_load_rebel_config_normalizes_multiway_preflop_self_play() -> None:
+    cfg = load_rebel_config(
+        OmegaConf.create(
+            {
+                "device": "cpu",
+                "env": {"num_players": 6},
+                "model": {"name": "BetterFFN"},
+                "data": {"live_root_source": "self_play"},
+            }
+        )
+    )
+
+    assert cfg.model.preflop_hand_dim == PREFLOP_HANDS
+
+
+def test_load_rebel_config_rejects_multiway_random_fused_roots() -> None:
+    with pytest.raises(ValueError, match="Multiway fused sparse CFR"):
+        load_rebel_config(
+            OmegaConf.create(
+                {
+                    "device": "cpu",
+                    "env": {"num_players": 6},
+                    "model": {"name": "BetterFFN"},
+                    "data": {"live_root_source": "random_river"},
+                    "search": {"sparse_fused": True},
+                }
+            )
+        )
