@@ -83,6 +83,11 @@ class StreetValueHeads(str, Enum):
     post = "post"
 
 
+class PreflopModelType(str, Enum):
+    ffn = "ffn"
+    transformer = "transformer"
+
+
 class NonlinearityType(str, Enum):
     relu = "relu"
     leaky_relu = "leaky_relu"
@@ -103,6 +108,7 @@ torch.serialization.add_safe_globals(CFRType)
 torch.serialization.add_safe_globals(WarmStartType)
 torch.serialization.add_safe_globals(ModelScope)
 torch.serialization.add_safe_globals(StreetValueHeads)
+torch.serialization.add_safe_globals(PreflopModelType)
 torch.serialization.add_safe_globals(NonlinearityType)
 torch.serialization.add_safe_globals(PPOClipping)
 
@@ -290,7 +296,7 @@ class ModelConfig:
     value_rank: int = 128
     street_value_heads: StreetValueHeads = StreetValueHeads.both
     preflop_hand_dim: int = 1326
-    preflop_model_type: str = "ffn"
+    preflop_model_type: PreflopModelType = PreflopModelType.ffn
     preflop_transformer_heads: int = 8
     legacy_context_features: bool = False
 
@@ -305,6 +311,9 @@ class ModelConfig:
         self.nonlinearity = _coerce_enum(NonlinearityType, self.nonlinearity)
         self.street_value_heads = _coerce_enum(
             StreetValueHeads, self.street_value_heads
+        )
+        self.preflop_model_type = _coerce_enum(
+            PreflopModelType, self.preflop_model_type
         )
 
 

@@ -6,7 +6,7 @@ from typing import Any
 from omegaconf import DictConfig, OmegaConf
 
 from p2.config.rebel_schema import RebelExperimentConfig
-from p2.core.structured_config import Config, ModelType
+from p2.core.structured_config import Config, ModelType, PreflopModelType
 from p2.env.card_utils import PREFLOP_HANDS
 
 
@@ -34,7 +34,9 @@ _LIVE_ROOT_SOURCES = frozenset(
         "random_river_prefix",
     }
 )
-_PREFLOP_MODEL_TYPES = frozenset({"ffn", "transformer"})
+_PREFLOP_MODEL_TYPES = frozenset(
+    {PreflopModelType.ffn, PreflopModelType.transformer}
+)
 
 
 def _container_from_dict_config(dict_config: DictConfig) -> dict[str, Any]:

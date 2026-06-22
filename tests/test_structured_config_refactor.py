@@ -10,6 +10,7 @@ from p2.core.structured_config import (
     ModelType,
     NonlinearityType,
     KLType,
+    PreflopModelType,
     PolicyLossType,
     PolicyNodeWeighting,
     PPOClipping,
@@ -74,6 +75,7 @@ def test_config_from_dict_coerces_yaml_strings_to_enums() -> None:
                 "value_head_type": "scalar",
                 "nonlinearity": "gelu",
                 "street_value_heads": "pre",
+                "preflop_model_type": "transformer",
             },
             "search": {
                 "warm_start_type": "model_br",
@@ -94,6 +96,7 @@ def test_config_from_dict_coerces_yaml_strings_to_enums() -> None:
     assert cfg.model.value_head_type is ValueHeadType.scalar
     assert cfg.model.nonlinearity is NonlinearityType.gelu
     assert cfg.model.street_value_heads is StreetValueHeads.pre
+    assert cfg.model.preflop_model_type is PreflopModelType.transformer
     assert cfg.search.warm_start_type is WarmStartType.model_br
     assert cfg.search.cfr_type is CFRType.discounted
     assert cfg.search.model_scope is ModelScope.single_street

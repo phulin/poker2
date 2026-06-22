@@ -6,6 +6,7 @@ from p2.core.structured_config import (
     CurriculumSubstepConfig,
     ModelScope,
     ModelType,
+    PreflopModelType,
     PregeneratedDatasetConfig,
     PolicyLossType,
     PolicyNodeWeighting,
@@ -184,7 +185,7 @@ def test_rebel_cfr_trainer_uses_current_config_for_compact_value_checkpoint(tmp_
     source_cfg = _tiny_rebel_cfg()
     source_cfg.model.name = ModelType.better_ffn
     source_cfg.model.preflop_hand_dim = 169
-    source_cfg.model.preflop_model_type = "transformer"
+    source_cfg.model.preflop_model_type = PreflopModelType.transformer
     source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
     checkpoint_path = tmp_path / "E_preflop_169.pt"
     source_trainer.save_value_checkpoint(checkpoint_path, step=7, save_optimizer=False)
@@ -196,7 +197,7 @@ def test_rebel_cfr_trainer_uses_current_config_for_compact_value_checkpoint(tmp_
     cfg = _tiny_rebel_cfg()
     cfg.model.name = ModelType.better_ffn
     cfg.model.preflop_hand_dim = 169
-    cfg.model.preflop_model_type = "transformer"
+    cfg.model.preflop_model_type = PreflopModelType.transformer
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
     frozen = trainer._load_closing_leaf_model(str(checkpoint_path))
 
@@ -519,7 +520,7 @@ def test_rebel_cfr_trainer_constructs_preflop_transformer_models():
     cfg.train.policy_capacity_factor = 1.0
     cfg.model.name = ModelType.better_ffn
     cfg.model.preflop_hand_dim = 169
-    cfg.model.preflop_model_type = "transformer"
+    cfg.model.preflop_model_type = PreflopModelType.transformer
     cfg.model.preflop_transformer_heads = 4
     cfg.model.hidden_dim = 16
     cfg.model.range_hidden_dim = 8

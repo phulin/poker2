@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from p2.core.action_schedule import apply_action_schedule_to_config
-from p2.core.structured_config import Config, LrSchedule, ModelType
+from p2.core.structured_config import Config, LrSchedule, ModelType, PreflopModelType
 from p2.env.aggression_analyzer import AggressionAnalyzer
 from p2.env.card_utils import (
     NUM_HANDS,
@@ -684,8 +684,7 @@ class RebelCFRTrainer:
             legacy_context_features=cfg.model.legacy_context_features,
         )
         if int(cfg.model.preflop_hand_dim) == 169:
-            preflop_model_type = str(cfg.model.preflop_model_type).strip().lower()
-            if preflop_model_type in {"transformer", "tokens", "player_transformer"}:
+            if cfg.model.preflop_model_type is PreflopModelType.transformer:
                 transformer_common = dict(
                     common,
                     transformer_heads=int(cfg.model.preflop_transformer_heads),
@@ -699,11 +698,6 @@ class RebelCFRTrainer:
                         value_heads=cfg.model.street_value_heads,
                         **transformer_common,
                     ),
-                )
-            if preflop_model_type not in {"ffn", "mlp", "compact"}:
-                raise ValueError(
-                    "model.preflop_model_type must be one of: ffn, transformer; "
-                    f"got {cfg.model.preflop_model_type!r}"
                 )
             return BetterSplitFFN(
                 policy_model=BetterPreflopPolicyFFN(
