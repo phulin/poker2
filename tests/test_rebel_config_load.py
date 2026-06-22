@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+import json
+from pathlib import Path
+
+from hydra import compose, initialize_config_dir
 import pytest
 from omegaconf import OmegaConf
 
@@ -71,6 +76,27 @@ def test_rebel_experiment_config_round_trips_to_trainer_config() -> None:
     assert cfg.train.batch_size == 11
     assert cfg.data.mode == "hybrid"
     assert cfg.curriculum.stages == ["river"]
+
+
+def test_all_shipped_rebel_configs_resolve_through_hydra() -> None:
+    conf_dir = Path("conf").resolve()
+    config_names = sorted(
+        path.stem for path in conf_dir.glob("config_rebel*.yaml")
+    )
+    assert config_names
+
+    with initialize_config_dir(config_dir=str(conf_dir), version_base=None):
+        for config_name in config_names:
+            experiment = load_rebel_experiment_config(compose(config_name=config_name))
+            cfg = experiment.to_trainer_config()
+            payload = asdict(experiment)
+            payload_text = json.dumps(payload)
+
+            assert cfg.model.name.value in {"BetterFFN", "BetterTRM", "RebelFFN"}
+            assert cfg.wandb_tags[0] == "rebel"
+            assert "ppo_eps" not in payload_text
+            assert "cards_channels" not in payload_text
+            assert "opponent_pool_type" not in payload
 
 
 def test_load_rebel_config_rejects_invalid_data_mode() -> None:
