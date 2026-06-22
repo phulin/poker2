@@ -891,7 +891,7 @@ def run_train_specialists(args: argparse.Namespace) -> None:
             _load_model_weights(solver, previous_value_checkpoint)
             trainer = RebelCFRTrainer(cfg=copy.deepcopy(cfg), device=device)
             _load_model_weights(trainer, previous_value_checkpoint)
-            if bucket_index == 0 and isinstance(run, wandb.Run):
+            if bucket_index == 0 and run is not None:
                 run.summary.update(count_model_parameters(trainer.model))
 
             env = _make_env_from_manifest(
@@ -920,7 +920,7 @@ def run_train_specialists(args: argparse.Namespace) -> None:
             last_tree_stats: dict[str, float] = {}
 
             def log_validation(epoch: int, epoch_roots: int) -> None:
-                if not isinstance(run, wandb.Run):
+                if run is None:
                     return
                 metrics = _evaluate_validation_set(
                     trainer,
@@ -1061,7 +1061,7 @@ def run_train_specialists(args: argparse.Namespace) -> None:
                             for key, value in tree_stats.items()
                         }
                     )
-                    if isinstance(run, wandb.Run):
+                    if run is not None:
                         run.log(log_payload, step=global_step)
                     if (
                         args.validation_interval_steps > 0
@@ -1120,7 +1120,7 @@ def run_train_specialists(args: argparse.Namespace) -> None:
                 trainer,
                 checkpoint_path,
                 step=global_step,
-                run_id=run.id if isinstance(run, wandb.Run) else None,
+                run_id=None if run is None else run.id,
                 metadata={
                     "kind": "preflop_backward_induction_specialist",
                     "bucket_label": bucket_label,
@@ -1133,7 +1133,7 @@ def run_train_specialists(args: argparse.Namespace) -> None:
             specialist_paths[bucket_label] = str(checkpoint_path)
             if train_value:
                 previous_value_checkpoint = str(checkpoint_path)
-            if isinstance(run, wandb.Run):
+            if run is not None:
                 run.summary[f"{bucket_label}/checkpoint"] = str(checkpoint_path)
                 run.summary[f"{bucket_label}/roots_solved"] = roots_solved
                 run.summary[f"{bucket_label}/value_examples"] = value_examples
@@ -1155,7 +1155,7 @@ def run_train_specialists(args: argparse.Namespace) -> None:
         (output_dir / "specialists_summary.json").write_text(
             json.dumps(_jsonable(summary), indent=2, sort_keys=True) + "\n"
         )
-        if isinstance(run, wandb.Run):
+        if run is not None:
             run.summary.update(_jsonable(summary))
 
 
@@ -1261,7 +1261,7 @@ def run_distill(args: argparse.Namespace) -> None:
     run_cm = _init_wandb(args, cfg, name=f"preflop-bi-distill-{_now_slug()}")
 
     with run_cm as run:
-        if isinstance(run, wandb.Run):
+        if run is not None:
             run.summary.update(count_model_parameters(student.model))
         global_step = 0
         for bucket_label in BUCKET_ORDER_DEEP_TO_SHALLOW:
@@ -1340,7 +1340,7 @@ def run_distill(args: argparse.Namespace) -> None:
                 payload.update(
                     _prefixed_metrics(f"distill/{bucket_label}", "policy", policy_stats)
                 )
-                if isinstance(run, wandb.Run):
+                if run is not None:
                     run.log(payload, step=global_step)
                 if roots >= args.states_per_bucket:
                     break
@@ -1351,7 +1351,7 @@ def run_distill(args: argparse.Namespace) -> None:
             student,
             checkpoint_path,
             step=global_step,
-            run_id=run.id if isinstance(run, wandb.Run) else None,
+            run_id=None if run is None else run.id,
             metadata={
                 "kind": "preflop_backward_induction_distilled_model",
                 "state_dataset": os.path.realpath(args.state_dataset),
