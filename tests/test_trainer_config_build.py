@@ -63,17 +63,19 @@ def test_rebel_curriculum_and_data_config_parse_from_hydra_shape():
                 "curriculum": {
                     "stages": ["river", "distill_E_turn"],
                     "wandb_group": "rebel_postflop_curriculum",
-                    "river": {
-                        "kind": "train",
-                        "net": "S_river",
-                        "num_steps": 100,
-                    },
-                    "distill_E_turn": {
-                        "kind": "distill",
-                        "net": "E_turn",
-                        "from": "S_river",
-                        "chance": "single_card",
-                        "num_steps": 10,
+                    "substeps": {
+                        "river": {
+                            "kind": "train",
+                            "net": "S_river",
+                            "num_steps": 100,
+                        },
+                        "distill_E_turn": {
+                            "kind": "distill",
+                            "net": "E_turn",
+                            "from_net": "S_river",
+                            "chance": "single_card",
+                            "num_steps": 10,
+                        },
                     },
                 },
             }

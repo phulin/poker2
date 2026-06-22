@@ -511,15 +511,16 @@ curriculum:
   # alternating train / distill sub-steps, run in order; resume re-enters the active sub-step
   stages: [river, distill_E_turn, turn, distill_E_flop, flop, distill_E_preflop]
   wandb_group: rebel_postflop_curriculum   # one run per sub-step, shared group
-  river:           { kind: train,   net: S_river, num_steps: 200000 }
-  distill_E_turn:  { kind: distill, net: E_turn,  from: S_river, chance: single_card, num_steps: 20000 }
-  turn:            { kind: train,   net: S_turn,  closing_net: E_turn, num_steps: 150000 }
-  distill_E_flop:  { kind: distill, net: E_flop,  from: S_turn,  chance: single_card, num_steps: 20000 }
-  flop:            { kind: train,   net: S_flop,  closing_net: E_flop, num_steps: 150000 }
-  distill_E_preflop: { kind: distill, net: E_preflop, from: S_flop, chance: sample_flops, num_steps: 30000 }
+  substeps:
+    river:           { kind: train,   net: S_river, num_steps: 200000 }
+    distill_E_turn:  { kind: distill, net: E_turn,  from_net: S_river, chance: single_card, num_steps: 20000 }
+    turn:            { kind: train,   net: S_turn,  closing_net: E_turn, num_steps: 150000 }
+    distill_E_flop:  { kind: distill, net: E_flop,  from_net: S_turn,  chance: single_card, num_steps: 20000 }
+    flop:            { kind: train,   net: S_flop,  closing_net: E_flop, num_steps: 150000 }
+    distill_E_preflop: { kind: distill, net: E_preflop, from_net: S_flop, chance: sample_flops, num_steps: 30000 }
 ```
 
-`train` sub-steps run street CFR + supervised training (the `S_X` nets need value+policy); `distill` sub-steps are value-only supervised regression of `E_X` onto chance expectations of a frozen `from` net, with `chance` selecting single-card enumeration vs flop sampling.
+`train` sub-steps run street CFR + supervised training (the `S_X` nets need value+policy); `distill` sub-steps are value-only supervised regression of `E_X` onto chance expectations of a frozen `from_net`, with `chance` selecting single-card enumeration vs flop sampling.
 
 For play/resolve jobs after the curriculum has promoted the postflop S-net set, load the frozen street registry through `search.street_model_checkpoints`:
 

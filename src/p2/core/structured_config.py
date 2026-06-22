@@ -635,9 +635,6 @@ class Config:
         substep_containers = dict(curriculum_container.get("substeps", {}))
         substeps = {}
         for name, substep_container in substep_containers.items():
-            substep_container = dict(substep_container)
-            if "from" in substep_container:
-                substep_container["from_net"] = substep_container.pop("from")
             substeps[name] = CurriculumSubstepConfig(**substep_container)
         curriculum_clean = dict(curriculum_container)
         curriculum_clean["substeps"] = substeps

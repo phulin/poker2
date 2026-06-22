@@ -26,7 +26,7 @@ curriculum:
     distill_E_flop:
       kind: distill
       net: E_flop
-      from: S_turn
+      from_net: S_turn
       chance: single_card
       num_steps: ${num_steps}
       train_overrides:
@@ -38,14 +38,14 @@ curriculum:
     flop:
       kind: train
       net: S_flop
-      from: S_turn
+      from_net: S_turn
       closing_net: E_flop
       closing_checkpoint: null
       num_steps: ${num_steps}
     distill_E_preflop:
       kind: distill
       net: E_preflop
-      from: S_flop
+      from_net: S_flop
       chance: sample_flops
       num_steps: ${num_steps}
       model_overrides:

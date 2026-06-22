@@ -21,7 +21,7 @@ def test_curriculum_requires_explicit_substeps_key() -> None:
         )
 
 
-def test_curriculum_explicit_substeps_parse_from_alias() -> None:
+def test_curriculum_explicit_substeps_parse_from_net() -> None:
     cfg = Config.from_dict(
         {
             "curriculum": {
@@ -30,7 +30,7 @@ def test_curriculum_explicit_substeps_parse_from_alias() -> None:
                     "turn": {
                         "kind": "train",
                         "net": "S_turn",
-                        "from": "S_river",
+                        "from_net": "S_river",
                         "num_steps": 3,
                     }
                 },

@@ -25,7 +25,7 @@ curriculum:
     distill_E_turn:
       kind: distill
       net: E_turn
-      from: S_river
+      from_net: S_river
       chance: single_card
       num_steps: ${num_steps}
       train_overrides:
@@ -37,7 +37,7 @@ curriculum:
     turn:
       kind: train
       net: S_turn
-      from: S_river
+      from_net: S_river
       closing_net: E_turn
       closing_checkpoint: null
       num_steps: ${num_steps}
