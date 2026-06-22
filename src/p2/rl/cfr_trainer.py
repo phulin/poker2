@@ -119,31 +119,6 @@ def _compile_setting(cfg: Config) -> str:
     return value
 
 
-def _infer_legacy_context_features_from_state(
-    state_dict: dict[str, torch.Tensor],
-    *,
-    num_players: int,
-) -> bool | None:
-    """Infer BetterFFN context layout from a saved context encoder input width."""
-    candidates = (
-        "context_encoder.norm.weight",
-        "policy_model.context_encoder.norm.weight",
-        "value_model.context_encoder.norm.weight",
-    )
-    expected_current = context_length(num_players)
-    expected_legacy = legacy_context_length(num_players)
-    for key in candidates:
-        tensor = state_dict.get(key)
-        if tensor is None or tensor.ndim != 1:
-            continue
-        width = int(tensor.shape[0])
-        if width == expected_legacy:
-            return True
-        if width == expected_current:
-            return False
-    return None
-
-
 def _compile_kwargs(cfg: Config) -> dict[str, object]:
     kwargs: dict[str, object] = {"dynamic": True}
     mode = _compile_setting(cfg)
@@ -240,8 +215,7 @@ class RebelCFRTrainer:
         # model is the compact 169-hand preflop variant, which is a PBS model
         # even with two players.
         compact_preflop_self_play = (
-            int(getattr(cfg.model, "preflop_hand_dim", NUM_HANDS) or NUM_HANDS)
-            == PREFLOP_HANDS
+            int(cfg.model.preflop_hand_dim) == PREFLOP_HANDS
             and cfg.data.live_root_source == "self_play"
         )
         if self.num_players == 2 and not compact_preflop_self_play:
@@ -349,9 +323,7 @@ class RebelCFRTrainer:
         policy_capacity = int(
             math.ceil(value_capacity * self.cfg.train.policy_capacity_factor)
         )
-        replay_hand_dim = int(
-            getattr(cfg.model, "preflop_hand_dim", NUM_HANDS) or NUM_HANDS
-        )
+        replay_hand_dim = int(cfg.model.preflop_hand_dim)
 
         if pregeneration_only:
             self.value_buffer = None
@@ -651,11 +623,9 @@ class RebelCFRTrainer:
         (separate nets, or a TRM whose policy head detaches from the trunk).
         With a shared trunk we fall back to a single combined clip."""
         model = self.model
-        policy_model = getattr(model, "policy_model", None)
-        value_model = getattr(model, "value_model", None)
-        if isinstance(policy_model, nn.Module) and isinstance(value_model, nn.Module):
-            self._grad_clip_policy_params = list(policy_model.parameters())
-            self._grad_clip_value_params = list(value_model.parameters())
+        if type(model) is BetterSplitFFN:
+            self._grad_clip_policy_params = list(model.policy_model.parameters())
+            self._grad_clip_value_params = list(model.value_model.parameters())
             self._split_grad_clip = True
             return
         if isinstance(model, BetterTRM) and not model.shared_trunk:
@@ -717,10 +687,8 @@ class RebelCFRTrainer:
             nonlinearity=cfg.model.nonlinearity,
             legacy_context_features=cfg.model.legacy_context_features,
         )
-        if int(getattr(cfg.model, "preflop_hand_dim", NUM_HANDS)) == 169:
-            preflop_model_type = (
-                str(getattr(cfg.model, "preflop_model_type", "ffn")).strip().lower()
-            )
+        if int(cfg.model.preflop_hand_dim) == 169:
+            preflop_model_type = str(cfg.model.preflop_model_type).strip().lower()
             if preflop_model_type in {"transformer", "tokens", "player_transformer"}:
                 transformer_common = dict(
                     common,
@@ -819,88 +787,16 @@ class RebelCFRTrainer:
             checkpoint_path, map_location=self.device, weights_only=False
         )
         model_component = checkpoint.get("model_component")
-        checkpoint_config = checkpoint.get("config", {})
-        checkpoint_model_config = (
-            checkpoint_config.get("model", {})
-            if isinstance(checkpoint_config, dict)
-            else {}
-        )
-        checkpoint_env_config = (
-            checkpoint_config.get("env", {})
-            if isinstance(checkpoint_config, dict)
-            else {}
-        )
-        checkpoint_value_heads = checkpoint_model_config.get("street_value_heads")
-        checkpoint_num_players = checkpoint_env_config.get("num_players")
-        model_arch_keys = (
-            "hidden_dim",
-            "range_hidden_dim",
-            "ffn_dim",
-            "num_hidden_layers",
-            "num_policy_layers",
-            "num_value_layers",
-            "shared_trunk",
-            "enforce_zero_sum",
-            "board_interaction_dim",
-            "policy_rank",
-            "policy_hand_bias_rank",
-            "street_value_heads",
-            "preflop_model_type",
-            "preflop_transformer_heads",
-            "legacy_context_features",
-        )
-        original_model_arch = {
-            key: getattr(self.cfg.model, key, None) for key in model_arch_keys
-        }
-        original_preflop_hand_dim = getattr(self.cfg.model, "preflop_hand_dim", None)
-        original_num_players = self.num_players
-        for key in model_arch_keys:
-            if key in checkpoint_model_config:
-                setattr(self.cfg.model, key, checkpoint_model_config[key])
-        if checkpoint_value_heads is not None:
-            self.cfg.model.street_value_heads = checkpoint_value_heads
-        checkpoint_preflop_hand_dim = int(
-            checkpoint_model_config.get("preflop_hand_dim", NUM_HANDS) or NUM_HANDS
-        )
-        self.cfg.model.preflop_hand_dim = checkpoint_preflop_hand_dim
-        if (
-            checkpoint_preflop_hand_dim == 169
-            and "preflop_model_type" not in checkpoint_model_config
-        ):
-            # Older compact preflop checkpoints predate the model-type field and
-            # were saved from BetterPreflop{Value,Policy}FFN. Do not inherit a
-            # current transformer run's architecture when reconstructing them.
-            self.cfg.model.preflop_model_type = "ffn"
-        if "legacy_context_features" not in checkpoint_model_config:
-            model_state_for_shape = checkpoint.get("model", {})
-            inferred_legacy = _infer_legacy_context_features_from_state(
-                model_state_for_shape,
-                num_players=(
-                    int(checkpoint_num_players)
-                    if checkpoint_num_players is not None
-                    else self.num_players
-                ),
-            )
-            if inferred_legacy is not None:
-                self.cfg.model.legacy_context_features = inferred_legacy
-        if checkpoint_num_players is not None:
-            self.num_players = int(checkpoint_num_players)
-        try:
-            model = self._make_eval_twin(compile_model=False)
-        finally:
-            for key, value in original_model_arch.items():
-                if value is not None:
-                    setattr(self.cfg.model, key, value)
-            if original_preflop_hand_dim is not None:
-                self.cfg.model.preflop_hand_dim = original_preflop_hand_dim
-            self.num_players = original_num_players
+        model = self._make_eval_twin(compile_model=False)
         model_state = checkpoint["model"]
         model_state = {
             key: value.to(self.float_dtype) if value.dtype.is_floating_point else value
             for key, value in model_state.items()
         }
         if model_component == "value_model":
-            model = getattr(model, "value_model", model)
+            if type(model) is not BetterSplitFFN:
+                raise TypeError("value-only checkpoints require model.name=BetterFFN")
+            model = model.value_model
         model.load_state_dict(model_state, strict=self.cfg.strict_model_loading)
         model.eval()
         for param in model.parameters():
@@ -1073,7 +969,7 @@ class RebelCFRTrainer:
         )
 
     def _backup_consistency_coef(self) -> float:
-        return float(getattr(self.cfg.train, "backup_consistency_coef", 0.0) or 0.0)
+        return float(self.cfg.train.backup_consistency_coef or 0.0)
 
     def _backup_consistency_loss(
         self,
@@ -1109,7 +1005,7 @@ class RebelCFRTrainer:
             return zero, zero
 
         sample_fraction = float(
-            getattr(self.cfg.train, "backup_consistency_sample_fraction", 1.0) or 0.0
+            self.cfg.train.backup_consistency_sample_fraction or 0.0
         )
         sample_fraction = max(0.0, min(1.0, sample_fraction))
         if sample_fraction <= 0.0:
@@ -1127,9 +1023,7 @@ class RebelCFRTrainer:
             if sample_indices.numel() == 0:
                 return zero, zero
 
-        max_samples = int(
-            getattr(self.cfg.train, "backup_consistency_max_samples", 0) or 0
-        )
+        max_samples = int(self.cfg.train.backup_consistency_max_samples or 0)
         if max_samples > 0 and sample_indices.numel() > max_samples:
             perm = torch.randperm(
                 sample_indices.numel(),
@@ -1256,8 +1150,7 @@ class RebelCFRTrainer:
             actor[:, None, None].expand(-1, 1, hand_dim),
         ).squeeze(1)
         min_policy_mass = float(
-            getattr(self.cfg.train, "backup_consistency_min_policy_mass", 1e-4)
-            or 0.0
+            self.cfg.train.backup_consistency_min_policy_mass or 0.0
         )
         valid_hand = valid_policy_mass.squeeze(-1) > min_policy_mass
         weights = actor_weights.to(dtype=parent_actor_values.dtype) * valid_hand.to(
@@ -3042,9 +2935,7 @@ class RebelCFRTrainer:
         # Compatibility for checkpoints written before the data-source refactor.
         state["data_generator"] = data_source_state
 
-        save_replay_buffers = bool(
-            getattr(self.cfg.train, "save_replay_buffers", True)
-        )
+        save_replay_buffers = bool(self.cfg.train.save_replay_buffers)
         if not save_replay_buffers:
             state["replay_buffer_checkpoint"] = None
 
@@ -3061,7 +2952,9 @@ class RebelCFRTrainer:
         save_dtype: torch.dtype | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
-        value_model = getattr(self.model, "value_model", self.model)
+        if type(self.model) is not BetterSplitFFN:
+            raise TypeError("value-only checkpoints require model.name=BetterFFN")
+        value_model = self.model.value_model
         directory = os.path.dirname(path)
         if directory:
             os.makedirs(directory, exist_ok=True)
@@ -3109,8 +3002,9 @@ class RebelCFRTrainer:
             }
 
         if ckpt.get("model_component") == "value_model":
-            value_model = getattr(self.model, "value_model", self.model)
-            value_model.load_state_dict(
+            if type(self.model) is not BetterSplitFFN:
+                raise TypeError("value-only checkpoints require model.name=BetterFFN")
+            self.model.value_model.load_state_dict(
                 model_state, strict=self.cfg.strict_model_loading
             )
         else:

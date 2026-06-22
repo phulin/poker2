@@ -152,7 +152,7 @@ def test_rebel_cfr_trainer_loads_pre_only_value_checkpoint(tmp_path):
 
     cfg = _tiny_rebel_cfg()
     cfg.model.name = ModelType.better_ffn
-    cfg.model.street_value_heads = StreetValueHeads.both
+    cfg.model.street_value_heads = StreetValueHeads.pre
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
     frozen = trainer._load_closing_leaf_model(str(checkpoint_path))
 
@@ -173,36 +173,34 @@ def test_rebel_cfr_trainer_loads_frozen_checkpoint_with_source_player_count(tmp_
     cfg.model.name = ModelType.better_ffn
     cfg.model.street_value_heads = StreetValueHeads.both
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
-    frozen = trainer._load_closing_leaf_model(str(checkpoint_path))
 
-    assert frozen.num_players == 2
+    with pytest.raises(RuntimeError, match="size mismatch"):
+        trainer._load_closing_leaf_model(str(checkpoint_path))
 
 
-def test_rebel_cfr_trainer_loads_legacy_compact_value_checkpoint_as_ffn(tmp_path):
-    from p2.models.mlp import BetterPreflopValueFFN
+def test_rebel_cfr_trainer_uses_current_config_for_compact_value_checkpoint(tmp_path):
+    from p2.models.mlp.better_ffn import BetterPreflopTransformerValueFFN
 
     source_cfg = _tiny_rebel_cfg()
     source_cfg.model.name = ModelType.better_ffn
     source_cfg.model.preflop_hand_dim = 169
-    source_cfg.model.preflop_model_type = "ffn"
+    source_cfg.model.preflop_model_type = "transformer"
     source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
-    checkpoint_path = tmp_path / "E_preflop_169_legacy.pt"
+    checkpoint_path = tmp_path / "E_preflop_169.pt"
     source_trainer.save_value_checkpoint(checkpoint_path, step=7, save_optimizer=False)
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    checkpoint["config"]["model"].pop("preflop_model_type", None)
+    checkpoint["config"]["model"]["preflop_model_type"] = "ffn"
     torch.save(checkpoint, checkpoint_path)
 
     cfg = _tiny_rebel_cfg()
-    cfg.env.num_players = 6
     cfg.model.name = ModelType.better_ffn
     cfg.model.preflop_hand_dim = 169
     cfg.model.preflop_model_type = "transformer"
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
     frozen = trainer._load_closing_leaf_model(str(checkpoint_path))
 
-    assert isinstance(frozen, BetterPreflopValueFFN)
-    assert frozen.num_players == 2
+    assert type(frozen) is BetterPreflopTransformerValueFFN
 
 
 def _tiny_rebel_cfg() -> Config:
