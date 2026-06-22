@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
+from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
 from p2.config.rebel_schema import RebelExperimentConfig
@@ -120,8 +122,15 @@ def load_rebel_config(dict_config: DictConfig) -> Config:
     return load_rebel_experiment_config(dict_config).to_trainer_config()
 
 
+def load_rebel_config_file(config_path: str | Path) -> Config:
+    path = Path(config_path).expanduser().resolve()
+    with initialize_config_dir(config_dir=str(path.parent), version_base=None):
+        return load_rebel_config(compose(config_name=path.stem))
+
+
 __all__ = [
     "load_rebel_config",
+    "load_rebel_config_file",
     "load_rebel_experiment_config",
     "validate_rebel_config",
 ]

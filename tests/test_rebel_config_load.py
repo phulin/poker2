@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import importlib.util
 import json
 from pathlib import Path
 
@@ -8,8 +9,22 @@ from hydra import compose, initialize_config_dir
 import pytest
 from omegaconf import OmegaConf
 
-from p2.config.rebel_load import load_rebel_config, load_rebel_experiment_config
+from p2.config.rebel_load import (
+    load_rebel_config,
+    load_rebel_config_file,
+    load_rebel_experiment_config,
+)
 from p2.env.card_utils import PREFLOP_HANDS
+
+
+def _load_river_probe_module():
+    path = Path("scripts/river_cfr_exploitability_trajectory.py").resolve()
+    spec = importlib.util.spec_from_file_location("river_cfr_probe", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_load_rebel_config_applies_rebel_logging_defaults() -> None:
@@ -97,6 +112,34 @@ def test_all_shipped_rebel_configs_resolve_through_hydra() -> None:
             assert "ppo_eps" not in payload_text
             assert "cards_channels" not in payload_text
             assert "opponent_pool_type" not in payload
+
+
+def test_load_rebel_config_file_composes_defaults() -> None:
+    cfg = load_rebel_config_file("conf/config_rebel_debug.yaml")
+
+    assert cfg.model.name.value == "BetterFFN"
+    assert cfg.wandb_project == "poker-rebel-cfr"
+    assert cfg.checkpoint_dir == "checkpoints-rebel-debug"
+    assert cfg.train.batch_size == 11
+    assert cfg.search.iterations == 20
+
+
+def test_river_trajectory_probe_uses_current_config_not_checkpoint_config() -> None:
+    module = _load_river_probe_module()
+    cfg = module._build_config(
+        "conf/config_rebel_debug.yaml",
+        "checkpoints/from_weights_only.pt",
+        num_spots=7,
+        iterations=None,
+    )
+
+    assert cfg.resume_from == "checkpoints/from_weights_only.pt"
+    assert cfg.num_envs == 7
+    assert cfg.checkpoint_dir == "checkpoints-rebel-debug"
+    assert cfg.model.name.value == "BetterFFN"
+    assert cfg.search.iterations == 20
+    assert cfg.train.replay_buffer_device == "cpu"
+    assert cfg.train.replay_buffer_batches == 1
 
 
 def test_load_rebel_config_rejects_invalid_data_mode() -> None:
