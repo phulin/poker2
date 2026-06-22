@@ -9,6 +9,7 @@ from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.stages.preflop_backward_induction import (
     _estimate_train_updates,
+    _init_wandb,
     _load_model_weights,
 )
 from p2.stages.preflop_buckets import (
@@ -146,6 +147,45 @@ def test_estimate_train_updates_uses_train_batch_size(tmp_path) -> None:
     # value+policy updates over two epochs, middle buckets have value+policy
     # once, and actions_0_3 only trains policy: 8*2*2 + 8*2 + 8*2 + 8.
     assert _estimate_train_updates(args) == 72
+
+
+def test_preflop_wandb_init_passes_stage_payload(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    def fake_wandb_run(cfg, **kwargs):
+        captured["cfg"] = cfg
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        "p2.stages.preflop_backward_induction.wandb_run",
+        fake_wandb_run,
+    )
+
+    args = _execution_config(use_wandb=True, wandb_group="bucket-group")
+    cfg = build_run_config(
+        Config(device="cpu"),
+        args,
+        checkpoint_dir=tmp_path / "checkpoints",
+        num_steps=1,
+        num_envs=2,
+    )
+
+    assert (
+        _init_wandb(
+            args,
+            cfg,
+            name="bucket-run",
+            stage="preflop_bucket_specialists",
+        )
+        is None
+    )
+
+    assert captured["cfg"] is cfg
+    assert captured["group"] == "bucket-group"
+    assert captured["name"] == "preflop-run"
+    assert captured["stage"] == "preflop_bucket_specialists"
+    assert captured["resolved_config"].run.num_envs == 2
 
 
 class _FakeSplitLeaf(torch.nn.Linear):

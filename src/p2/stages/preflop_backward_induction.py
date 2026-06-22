@@ -110,13 +110,20 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _init_wandb(args: PreflopBucketExecutionConfig, cfg: Config, *, name: str):
+def _init_wandb(
+    args: PreflopBucketExecutionConfig,
+    cfg: Config,
+    *,
+    name: str,
+    stage: str,
+):
     run_name: str = str(args.wandb_name or name)
     group: str | None = None if args.wandb_group is None else str(args.wandb_group)
     return wandb_run(
         cfg,
         group=group,
         name=run_name,
+        stage=stage,
         resolved_config=RebelExperimentConfig.from_trainer_config(cfg),
     )
 
@@ -881,6 +888,7 @@ def run_train_specialists(
         args,
         base_cfg,
         name=f"preflop-bi-specialists-{_now_slug()}",
+        stage="preflop_bucket_specialists",
     )
     rng = torch.Generator(device=device)
     rng.manual_seed(int(args.seed))
@@ -1323,7 +1331,12 @@ def run_distill(
     _load_model_weights(student, args.student_init or args.base_checkpoint)
     rng = torch.Generator(device=device)
     rng.manual_seed(int(args.seed))
-    run_cm = _init_wandb(args, cfg, name=f"preflop-bi-distill-{_now_slug()}")
+    run_cm = _init_wandb(
+        args,
+        cfg,
+        name=f"preflop-bi-distill-{_now_slug()}",
+        stage="preflop_bucket_distill",
+    )
 
     with run_cm as run:
         if run is not None:
