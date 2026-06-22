@@ -14,24 +14,15 @@ model leaves at all.
   uv run python scripts/diagnose_river_convergence.py --num-spots 100 --iterations 300
 """
 from __future__ import annotations
-import argparse, copy, time
+import argparse, time
 import torch
-from p2.core.structured_config import Config
+from p2.config.rebel_load import load_rebel_config_file
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.search.postflop_spot_sampler import sample_river_start_roots
 
 
-def load_weights(trainer, ckpt):
-    ms = ckpt["model"]
-    sd = ckpt.get("save_dtype")
-    if sd is not None and sd != str(trainer.float_dtype):
-        ms = {k: (v.to(trainer.float_dtype) if v.dtype.is_floating_point else v)
-              for k, v in ms.items()}
-    if ckpt.get("model_component") == "value_model":
-        getattr(trainer.model, "value_model", trainer.model).load_state_dict(
-            ms, strict=trainer.cfg.strict_model_loading)
-    else:
-        trainer.model.load_state_dict(ms, strict=trainer.cfg.strict_model_loading)
+def load_weights(trainer: RebelCFRTrainer, checkpoint_path: str) -> None:
+    trainer.load_checkpoint(checkpoint_path)
     trainer.model.to(trainer.device)
     trainer._sync_inference_model()
     trainer.model.eval()
@@ -59,6 +50,7 @@ def measure_raw(ev):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="conf/config_rebel_cfr.yaml")
     ap.add_argument("--checkpoint", default="checkpoints-rebel-curriculum/river/rebel_latest.pt")
     ap.add_argument("--num-spots", type=int, default=100)
     ap.add_argument("--iterations", type=int, default=300)
@@ -73,9 +65,10 @@ def main():
 
     dev = torch.device("cuda")
     torch.set_float32_matmul_precision("high")
-    ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    ck = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     print(f"checkpoint={args.checkpoint}  step={ck.get('step')}")
-    cfg = Config.from_dict(copy.deepcopy(ck["config"]))
+    cfg = load_rebel_config_file(args.config)
+    cfg.resume_from = args.checkpoint
     cfg.num_envs = args.num_spots
     cfg.search.sparse = True
     cfg.search.sparse_fused = True
@@ -90,7 +83,7 @@ def main():
 
     t0 = time.time()
     tr = RebelCFRTrainer(cfg=cfg, device=dev)
-    load_weights(tr, ck)
+    load_weights(tr, args.checkpoint)
     ev = tr.cfr_evaluator
     print(f"trainer ready in {time.time()-t0:.0f}s")
 

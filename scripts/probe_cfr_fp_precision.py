@@ -29,6 +29,7 @@ from typing import Any
 import torch
 
 from p2.cli.sample_spots import build_pbs_from_spots, load_spots
+from p2.config.rebel_load import load_rebel_config_file
 from p2.core.structured_config import CFRType, Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
@@ -271,9 +272,8 @@ class PrecisionProbe:
         }
 
 
-def _load_config(checkpoint_path: str) -> Config:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    cfg = Config.from_dict(copy.deepcopy(checkpoint["config"]))
+def _load_config(config_path: str, checkpoint_path: str) -> Config:
+    cfg = load_rebel_config_file(config_path)
     cfg.resume_from = checkpoint_path
     cfg.search.sparse = True
     cfg.search.sparse_fused = True
@@ -420,6 +420,7 @@ def _print_summary(kind: str, summary: dict[str, Any]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--spots", default="outputs/spots.pt")
+    ap.add_argument("--config", default="conf/config_rebel_cfr.yaml")
     ap.add_argument("--checkpoint", default="checkpoints-rebel/rebel_step_2500.pt")
     ap.add_argument("--out", default="outputs/cfr_fp_precision_probe.json")
     ap.add_argument("--device", default="cuda")
@@ -469,7 +470,7 @@ def main() -> None:
     print(f"Checkpoint: {checkpoint}")
     print(f"Spots: {spots_path}")
 
-    cfg = _load_config(checkpoint)
+    cfg = _load_config(args.config, checkpoint)
     if args.iterations is not None:
         cfg.search.iterations = args.iterations
         cfg.search.iterations_final = None
