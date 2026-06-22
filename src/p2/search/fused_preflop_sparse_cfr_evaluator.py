@@ -684,8 +684,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 update_reach=False,
             )
 
-    def update_average_values(self, t: int) -> None:
-        self._refresh_fused_t_scalars(t)
+    def update_average_values(self, t: int, *, refresh_t_scalars: bool = True) -> None:
+        if refresh_t_scalars:
+            self._refresh_fused_t_scalars(t)
         old, new = self._get_mixing_weights(t)
         if old + new == 0:
             return
@@ -883,6 +884,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
 
         self.set_leaf_values(t)
         self.compute_expected_values()
+        if not self.use_final_policy_values:
+            self.update_average_values(t, refresh_t_scalars=False)
 
     def _record_stats(self, t: int, old_policy_probs: torch.Tensor) -> None:
         return None
