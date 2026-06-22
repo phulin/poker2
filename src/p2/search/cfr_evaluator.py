@@ -377,6 +377,7 @@ class CFREvaluator(ABC):
             self.model_hu_positions = empty
             self.new_street_baseline_model_positions = empty
             self.new_street_hu_model_positions = empty
+            self._heads_up_projected_feature_cache = {}
             return
 
         new_street_at_model = self.new_street_mask[self.model_indices]
@@ -396,6 +397,7 @@ class CFREvaluator(ABC):
         self.model_hu_positions = positions
         self.new_street_baseline_model_positions = empty
         self.new_street_hu_model_positions = self.new_street_model_positions
+        self._heads_up_projected_feature_cache = {}
         if (
             getattr(self, "closing_leaf_value_model", None) is not None
             and self._can_project_heads_up_closing_model()
@@ -626,20 +628,64 @@ class CFREvaluator(ABC):
                 live_players,
             )
 
-        projected_env = self._project_heads_up_pbs_env(node_indices, live_players)
-        encoder_kwargs = {
-            "env": projected_env,
-            "device": self.device,
-            "dtype": source_encoder.dtype,
-        }
-        projected_encoder = type(source_encoder)(**encoder_kwargs)
-        projected_features = projected_encoder.encode(
-            selected_beliefs,
-            pre_chance_node=torch.ones(
-                positions.numel(), dtype=torch.bool, device=self.device
-            ),
+        cache = getattr(self, "_heads_up_projected_feature_cache", None)
+        if cache is None:
+            cache = {}
+            self._heads_up_projected_feature_cache = cache
+        cache_key = (
+            type(source_encoder),
+            id(source_encoder),
+            int(positions.data_ptr()),
+            int(positions.numel()),
+            int(source_hand_dim),
+            int(target_hand_dim),
         )
-        return projected_features, live_players
+        cached = cache.get(cache_key)
+        if cached is None:
+            if (
+                node_indices.is_cuda
+                and torch.cuda.is_available()
+                and torch.cuda.is_current_stream_capturing()
+            ):
+                raise RuntimeError(
+                    "heads-up closing projection cache was not warmed before "
+                    "CUDA graph capture"
+                )
+            projected_env = self._project_heads_up_pbs_env(node_indices, live_players)
+            encoder_kwargs = {
+                "env": projected_env,
+                "device": self.device,
+                "dtype": source_encoder.dtype,
+            }
+            projected_encoder = type(source_encoder)(**encoder_kwargs)
+            projected_features = projected_encoder.encode(
+                selected_beliefs,
+                pre_chance_node=torch.ones(
+                    positions.numel(), dtype=torch.bool, device=self.device
+                ),
+            )
+            cached = (
+                projected_features.context,
+                projected_features.street,
+                projected_features.to_act,
+                projected_features.board,
+                live_players,
+            )
+            cache[cache_key] = cached
+        context, street, to_act, board, live_players = cached
+        return (
+            MLPFeatures(
+                context=context,
+                street=street,
+                to_act=to_act,
+                board=board,
+                beliefs=selected_beliefs.reshape(
+                    positions.numel(), 2 * target_hand_dim
+                ),
+                hand_dim=target_hand_dim,
+            ),
+            live_players,
+        )
 
     def _scatter_heads_up_closing_values(
         self,
