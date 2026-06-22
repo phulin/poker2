@@ -91,6 +91,42 @@ def test_training_run_initializes_wandb_with_resolved_config(
     )
 
 
+def test_wandb_run_can_skip_checkpoint_resume_and_add_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    captured = {}
+    fake_run = _FakeWandbRun()
+
+    def fake_init(**kwargs):
+        captured.update(kwargs)
+        return fake_run
+
+    checkpoint = tmp_path / "rebel_latest.pt"
+    torch.save({"wandb_run_id": "training-run"}, checkpoint)
+    monkeypatch.setattr(training_run.wandb, "init", fake_init)
+
+    cfg = Config(
+        device="cpu",
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        use_wandb=True,
+        wandb_project="project",
+        resume_from=str(checkpoint),
+    )
+
+    with training_run.wandb_run(
+        cfg,
+        stage="river-probe",
+        extra_config={"diagnostic": {"spots": 3}},
+        resume_from_checkpoint=False,
+    ) as run:
+        assert run is fake_run
+
+    assert "id" not in captured
+    assert "resume" not in captured
+    assert captured["config"]["stage"] == {"name": "river-probe"}
+    assert captured["config"]["diagnostic"] == {"spots": 3}
+
+
 def test_write_resolved_config_accepts_explicit_directory(tmp_path) -> None:
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path / "checkpoints"))
 

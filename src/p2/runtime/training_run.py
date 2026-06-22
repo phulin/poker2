@@ -115,11 +115,15 @@ def _wandb_init_kwargs(
     name: str | None,
     stage: str | None,
     resolved_config: ResolvedConfig | None,
+    extra_config: dict[str, Any] | None,
+    resume_from_checkpoint: bool,
 ) -> dict[str, Any]:
     payload = cfg if resolved_config is None else resolved_config
     config_payload: dict[str, Any] = {"resolved_config": asdict(payload)}
     if stage is not None:
         config_payload["stage"] = {"name": stage}
+    if extra_config is not None:
+        config_payload.update(extra_config)
 
     init_kwargs: dict[str, Any] = {
         "project": cfg.wandb_project,
@@ -130,7 +134,11 @@ def _wandb_init_kwargs(
     if group is not None:
         init_kwargs["group"] = group
 
-    checkpoint_run_id = wandb_run_id_from_checkpoint(cfg.resume_from)
+    checkpoint_run_id = (
+        wandb_run_id_from_checkpoint(cfg.resume_from)
+        if resume_from_checkpoint
+        else None
+    )
     run_id = cfg.wandb_run_id or checkpoint_run_id
     if run_id:
         init_kwargs["id"] = run_id
@@ -148,6 +156,8 @@ def wandb_run(
     name: str | None = None,
     stage: str | None = None,
     resolved_config: ResolvedConfig | None = None,
+    extra_config: dict[str, Any] | None = None,
+    resume_from_checkpoint: bool = True,
 ) -> Iterator[Any]:
     if not cfg.use_wandb:
         yield None
@@ -160,6 +170,8 @@ def wandb_run(
                 name=name,
                 stage=stage,
                 resolved_config=resolved_config,
+                extra_config=extra_config,
+                resume_from_checkpoint=resume_from_checkpoint,
             )
         )
     except Exception as exc:
@@ -183,6 +195,8 @@ def training_run(
     configure_torch: bool = True,
     recompile_limit: int = 16,
     resolved_config: ResolvedConfig | None = None,
+    extra_config: dict[str, Any] | None = None,
+    resume_from_checkpoint: bool = True,
 ) -> Iterator[TrainingRunContext]:
     if create_checkpoint_dir:
         os.makedirs(cfg.checkpoint_dir, exist_ok=True)
@@ -198,6 +212,8 @@ def training_run(
         name=name,
         stage=stage,
         resolved_config=resolved_config,
+        extra_config=extra_config,
+        resume_from_checkpoint=resume_from_checkpoint,
     ) as run:
         yield TrainingRunContext(cfg=cfg, device=device, run=run)
 
