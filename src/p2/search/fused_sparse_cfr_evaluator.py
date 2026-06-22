@@ -2568,7 +2568,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 (
                     len(features),
                     self.num_players,
-                    int(getattr(self, "hand_dim", NUM_HANDS)),
+                    self.hand_dim,
                 )
             )
             model_applied_zero_sum = True
@@ -2600,7 +2600,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         ]
                         baseline_values = self._stack_value_baseline(
                             node_indices[baseline_local],
-                            int(getattr(self, "hand_dim", NUM_HANDS)),
+                            self.hand_dim,
                         )
                         hand_values.index_copy_(
                             0,
@@ -2631,7 +2631,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     closing_values = self._scatter_heads_up_closing_values(
                         closing_values,
                         live_players,
-                        target_hand_dim=int(getattr(self, "hand_dim", NUM_HANDS)),
+                        target_hand_dim=self.hand_dim,
                         node_indices=self.model_indices[hu_positions],
                     )
                     hand_values.index_copy_(
@@ -2681,7 +2681,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     (
                         len(features),
                         self.num_players,
-                        int(getattr(self, "hand_dim", NUM_HANDS)),
+                        self.hand_dim,
                     )
                 )
                 baseline_local = torch.where(live_counts < 2)[0]
@@ -2691,7 +2691,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         baseline_local,
                         self._stack_value_baseline(
                             node_indices[baseline_local],
-                            int(getattr(self, "hand_dim", NUM_HANDS)),
+                            self.hand_dim,
                         ),
                     )
                 hu_local = torch.where(live_counts >= 2)[0]
@@ -2713,7 +2713,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 closing_values = self._scatter_heads_up_closing_values(
                     closing_values,
                     live_players,
-                    target_hand_dim=int(getattr(self, "hand_dim", NUM_HANDS)),
+                    target_hand_dim=self.hand_dim,
                     node_indices=self.model_indices[hu_positions],
                 )
                 projected_values.index_copy_(0, hu_local, closing_values)

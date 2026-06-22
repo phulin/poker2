@@ -146,6 +146,7 @@ class CFREvaluator(ABC):
     float_dtype: torch.dtype
     num_players: int
     num_actions: int
+    hand_dim: int = NUM_HANDS
     max_depth: int
     tree_depth: int
     cfr_iterations: int
@@ -263,7 +264,7 @@ class CFREvaluator(ABC):
     def _sample_root_hands_by_player(self) -> torch.Tensor:
         """Sample one private hand per root and player from root beliefs."""
         N = self.root_nodes
-        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
+        hand_dim = self.hand_dim
         return torch.multinomial(
             self.beliefs[:N].reshape(N * self.num_players, hand_dim),
             1,
@@ -419,12 +420,10 @@ class CFREvaluator(ABC):
         return encoded
 
     def _closing_model_num_players(self) -> int:
-        model = self.closing_leaf_value_model
-        return int(getattr(model, "num_players", self.num_players))
+        return self.closing_leaf_value_model.num_players
 
     def _closing_model_hand_dim(self) -> int:
-        model = self.closing_leaf_value_model
-        return int(getattr(model, "hand_dim", NUM_HANDS))
+        return self.closing_leaf_value_model.hand_dim
 
     def _can_project_heads_up_closing_model(self) -> bool:
         return (
@@ -1244,7 +1243,7 @@ class CFREvaluator(ABC):
         for depth in range(self.tree_depth):
             offset_next = self.depth_offsets[depth + 1]
             offset_next_next = self.depth_offsets[depth + 2]
-            hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
+            hand_dim = self.hand_dim
 
             target_dest = target[offset_next:offset_next_next]
             target_dest[:] = self._fan_out(target, level=depth)
@@ -1726,7 +1725,7 @@ class CFREvaluator(ABC):
         N = self.root_nodes
 
         # Handle initial beliefs
-        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
+        hand_dim = self.hand_dim
         if initial_beliefs is None:
             initial_beliefs = torch.full(
                 (N, self.num_players, hand_dim),
@@ -1820,7 +1819,7 @@ class CFREvaluator(ABC):
 
         # Pre-allocate policy_probs_src for efficiency (used by sparse, but harmless for dense)
         top = self.depth_offsets[-2] if len(self.depth_offsets) > 1 else self.root_nodes
-        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
+        hand_dim = self.hand_dim
         policy_probs_src = torch.empty(
             top, self.num_actions, hand_dim, device=self.device, dtype=self.float_dtype
         )
@@ -2195,7 +2194,7 @@ class CFREvaluator(ABC):
                 (
                     len(features),
                     self.num_players,
-                    int(getattr(self, "hand_dim", NUM_HANDS)),
+                    self.hand_dim,
                 )
             )
             if self.cutoff_model_positions.numel() > 0:
@@ -2219,7 +2218,7 @@ class CFREvaluator(ABC):
                         ]
                         baseline_values = self._stack_value_baseline(
                             node_indices[baseline_local],
-                            int(getattr(self, "hand_dim", NUM_HANDS)),
+                            self.hand_dim,
                         )
                         hand_values.index_copy_(0, baseline_positions, baseline_values)
                     hu_local = torch.where(live_counts >= 2)[0]
@@ -2241,7 +2240,7 @@ class CFREvaluator(ABC):
                     closing_values = self._scatter_heads_up_closing_values(
                         closing_values,
                         live_players,
-                        target_hand_dim=int(getattr(self, "hand_dim", NUM_HANDS)),
+                        target_hand_dim=self.hand_dim,
                         node_indices=self.model_indices[hu_positions],
                     )
                     hand_values.index_copy_(0, hu_positions, closing_values)
@@ -2279,7 +2278,7 @@ class CFREvaluator(ABC):
                     (
                         len(features),
                         self.num_players,
-                        int(getattr(self, "hand_dim", NUM_HANDS)),
+                        self.hand_dim,
                     )
                 )
                 baseline_local = torch.where(live_counts < 2)[0]
@@ -2289,7 +2288,7 @@ class CFREvaluator(ABC):
                         baseline_local,
                         self._stack_value_baseline(
                             node_indices[baseline_local],
-                            int(getattr(self, "hand_dim", NUM_HANDS)),
+                            self.hand_dim,
                         ),
                     )
                 hu_local = torch.where(live_counts >= 2)[0]
@@ -2311,7 +2310,7 @@ class CFREvaluator(ABC):
                 closing_values = self._scatter_heads_up_closing_values(
                     closing_values,
                     live_players,
-                    target_hand_dim=int(getattr(self, "hand_dim", NUM_HANDS)),
+                    target_hand_dim=self.hand_dim,
                     node_indices=self.model_indices[hu_positions],
                 )
                 projected_values.index_copy_(0, hu_local, closing_values)
@@ -2385,7 +2384,7 @@ class CFREvaluator(ABC):
             self.latest_values = new_values.clone()
             self.last_model_values = last_model_values.clone()
         else:
-            hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
+            hand_dim = self.hand_dim
             self.last_model_values = self.latest_values.new_empty(
                 (0, self.num_players, hand_dim)
             )
@@ -2440,7 +2439,7 @@ class CFREvaluator(ABC):
             )
 
         bottom, top = self.depth_offsets[1], self.depth_offsets[-2]
-        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
+        hand_dim = self.hand_dim
         actor_indices = self.env.to_act[:top]
         actor_indices_expanded = actor_indices[:top, None, None].expand(
             -1, -1, hand_dim
@@ -2496,7 +2495,7 @@ class CFREvaluator(ABC):
 
         regrets = torch.zeros_like(self.policy_probs)
 
-        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
+        hand_dim = self.hand_dim
         src_actor_indices = self.env.to_act[:, None, None].expand(-1, -1, hand_dim)
         prev_actor_indices = self.prev_actor[bottom:, None, None].expand(
             -1, -1, hand_dim
@@ -2605,7 +2604,7 @@ class CFREvaluator(ABC):
         # Get actor indices at source nodes (nodes that have children)
         # _fan_out expects tensors aligned with source nodes (0 to depth_offsets[-2])
         top = self.depth_offsets[-2]
-        hand_dim = int(getattr(self, "hand_dim", NUM_HANDS))
+        hand_dim = self.hand_dim
         actor_indices = self.env.to_act[:top, None, None].expand(-1, -1, hand_dim)
         reach_actor = self.self_reach[:top].gather(1, actor_indices).squeeze(1)
 

@@ -67,6 +67,8 @@ class _FakeEncoder:
 
 
 class _FakeModelComponent(torch.nn.Module):
+    hand_dim = NUM_HANDS
+
     def __init__(self) -> None:
         super().__init__()
         self.hidden_dim = 1

@@ -75,6 +75,8 @@ def make_env(num_envs: int = 1, device: torch.device | None = None) -> HUNLTenso
 class MockModel:
     """Simple mock model for testing."""
 
+    hand_dim = NUM_HANDS
+
     def __init__(
         self,
         num_actions: int = 5,
@@ -208,6 +210,8 @@ class PreOnlyMockModel(MockModel):
 
 
 class ConstantValueModel:
+    hand_dim = NUM_HANDS
+
     def __init__(
         self,
         value: float,

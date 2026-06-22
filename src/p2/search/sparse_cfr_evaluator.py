@@ -154,7 +154,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.root_nodes = cfg.num_envs
         self.depth_offsets = [0]
         self.env: HUNLTensorEnv | PBSEnv | None = None
-        self.hand_dim = int(getattr(self.policy_model, "hand_dim", NUM_HANDS))
+        self.hand_dim = self.policy_model.hand_dim
 
         self.leaf_mask = torch.empty(0, dtype=torch.bool, device=self.device)
         self.new_street_mask = torch.empty(0, dtype=torch.bool, device=self.device)
@@ -450,9 +450,7 @@ class SparseCFREvaluator(CFREvaluator):
             env=self.env, device=self.device, dtype=self.float_dtype
         )
         if self.closing_leaf_value_model is not None:
-            closing_players = int(
-                getattr(self.closing_leaf_value_model, "num_players", self.num_players)
-            )
+            closing_players = self.closing_leaf_value_model.num_players
             if closing_players != self.num_players:
                 if not self._can_project_heads_up_closing_model():
                     raise ValueError(

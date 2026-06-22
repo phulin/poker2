@@ -5,9 +5,17 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 
+from p2.env.card_utils import NUM_HANDS
+
 
 class BaseMLPModel(nn.Module, ABC):
     """Common interface for MLP poker models."""
+
+    hand_dim: int = NUM_HANDS
+    hidden_dim: int
+    num_actions: int
+    num_players: int
+    enforce_zero_sum: bool
 
     def compile_forward_modes(self, **kwargs):
         """Compile fixed-mode forwards without compiling boolean dispatch."""

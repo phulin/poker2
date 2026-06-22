@@ -94,6 +94,8 @@ def output_projection(in_dim: int, out_dim: int) -> nn.Module:
 class BetterFFN(BaseMLPModel):
     """Better PBS feed-forward poker model."""
 
+    hand_dim = NUM_HANDS
+
     def __init__(
         self,
         num_actions: int,
@@ -2416,9 +2418,14 @@ class BetterSplitFFN(BaseMLPModel):
         self.policy_model = policy_model
         self.value_model = value_model
         self.hidden_dim = policy_model.hidden_dim
+        self.hand_dim = policy_model.hand_dim
         self.num_players = policy_model.num_players
         self.num_actions = policy_model.num_actions
         self.enforce_zero_sum = value_model.enforce_zero_sum
+        if value_model.hand_dim != self.hand_dim:
+            raise ValueError(
+                f"split policy/value hand_dim mismatch: {self.hand_dim} vs {value_model.hand_dim}"
+            )
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
         self.policy_model.init_weights(rng)

@@ -66,18 +66,28 @@ class StreetModelRegistry(BaseMLPModel):
             raise ValueError("default_street must refer to a registered street")
 
         first = next(iter(self.street_models.values()))
-        self.hidden_dim = getattr(first, "hidden_dim", None)
-        self.num_players = getattr(first, "num_players", None)
-        self.num_actions = getattr(first, "num_actions", None)
-        self.enforce_zero_sum = getattr(first, "enforce_zero_sum", False)
+        self.hidden_dim = first.hidden_dim
+        self.hand_dim = first.hand_dim
+        self.num_players = first.num_players
+        self.num_actions = first.num_actions
+        self.enforce_zero_sum = first.enforce_zero_sum
         for name, model in self.street_models.items():
-            for attr in ("hidden_dim", "num_players", "num_actions"):
-                expected = getattr(self, attr)
-                actual = getattr(model, attr, expected)
-                if actual != expected:
-                    raise ValueError(
-                        f"Street model {name!r} has {attr}={actual}, expected {expected}"
-                    )
+            if model.hidden_dim != self.hidden_dim:
+                raise ValueError(
+                    f"Street model {name!r} has hidden_dim={model.hidden_dim}, expected {self.hidden_dim}"
+                )
+            if model.hand_dim != self.hand_dim:
+                raise ValueError(
+                    f"Street model {name!r} has hand_dim={model.hand_dim}, expected {self.hand_dim}"
+                )
+            if model.num_players != self.num_players:
+                raise ValueError(
+                    f"Street model {name!r} has num_players={model.num_players}, expected {self.num_players}"
+                )
+            if model.num_actions != self.num_actions:
+                raise ValueError(
+                    f"Street model {name!r} has num_actions={model.num_actions}, expected {self.num_actions}"
+                )
 
     def _model_for_index(self, index: int) -> BaseMLPModel:
         key = self._street_to_key[index]

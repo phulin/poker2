@@ -52,6 +52,8 @@ class _FFNBlock(nn.Module):
 class RebelFFN(BaseMLPModel):
     """ReBeL-inspired feed-forward poker model."""
 
+    hand_dim = NUM_HANDS
+
     def __init__(
         self,
         input_dim: int,

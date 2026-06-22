@@ -90,6 +90,8 @@ def ffn_block(
 class BetterTRM(BaseMLPModel):
     """Better PBS TRM poker model."""
 
+    hand_dim = NUM_HANDS
+
     def __init__(
         self,
         num_actions: int,

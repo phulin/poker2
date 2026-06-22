@@ -4,7 +4,6 @@ import os
 import torch
 
 from p2.env.card_utils import (
-    NUM_HANDS,
     PREFLOP_HANDS,
     preflop_class_multiplicity_tensor,
 )
@@ -155,7 +154,7 @@ class RebelDataGenerator:
         }
 
     def _new_pbs(self, target_batch_size: int) -> PublicBeliefState:
-        hand_dim = int(getattr(self.evaluator, "hand_dim", NUM_HANDS))
+        hand_dim = self.evaluator.hand_dim
         if hand_dim == PREFLOP_HANDS:
             prior = preflop_class_multiplicity_tensor(device=self.device).to(
                 dtype=getattr(self.evaluator, "float_dtype", torch.float32)

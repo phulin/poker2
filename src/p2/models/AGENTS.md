@@ -4,7 +4,7 @@ Shared model interfaces, outputs, activation helpers, and model-family subpackag
 ### Source files
 - `__init__.py`: Package marker.
 - `activation_utils.py`: Activation factory and SwiGLU module.
-- `base_mlp_model.py`: Abstract base for MLP-style models.
+- `base_mlp_model.py`: Abstract base for MLP-style models, including the shared hand-dimension/player/action metadata contract used by CFR evaluators.
 - `model_output.py`: Shared model output dataclasses, including TRM latent state.
 - `policy.py`: Categorical policy wrapper around model logits.
 - `street_model_registry.py`: Model-like dispatcher that routes MLP feature batches to frozen street-specific postflop nets by `features.street`.

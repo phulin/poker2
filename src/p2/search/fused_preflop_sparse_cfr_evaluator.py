@@ -44,7 +44,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        if int(getattr(self, "hand_dim", PREFLOP_HANDS)) != PREFLOP_HANDS:
+        if self.hand_dim != PREFLOP_HANDS:
             raise ValueError(
                 "FusedPreflopSparseCFREvaluator is compact-only; attach a "
                 f"{PREFLOP_HANDS}-hand preflop policy/value model"
@@ -713,7 +713,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             and not self._average_accumulation_delayed(t)
         )
         store_last = bool(self.cfr_avg)
-        hand_dim = int(getattr(self, "hand_dim", PREFLOP_HANDS))
+        hand_dim = self.hand_dim
         if store_last:
             last_shape = (hand_values.shape[0], self.num_players, hand_dim)
             if self._last_model_values_buf is None or (

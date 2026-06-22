@@ -49,7 +49,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             generator=generator,
             closing_leaf_model=closing_leaf_model,
         )
-        if int(getattr(self, "hand_dim", NUM_HANDS)) != PREFLOP_HANDS:
+        if self.hand_dim != PREFLOP_HANDS:
             raise ValueError(
                 "PreflopSparseCFREvaluator is compact-only; attach a "
                 f"{PREFLOP_HANDS}-hand preflop policy/value model"
