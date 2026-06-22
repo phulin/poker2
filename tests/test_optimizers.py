@@ -2,7 +2,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from p2.core.structured_config import LrSchedule, TrainingConfig
+from p2.core.structured_config import Config, LrSchedule, TrainingConfig
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.optimizers import (
     NorMuon,
@@ -214,18 +214,17 @@ def test_adamw_excludes_norm_params_from_weight_decay():
 
 def test_cfr_schedule_scales_policy_head_muon_lr():
     trainer = RebelCFRTrainer.__new__(RebelCFRTrainer)
-    trainer.cfg = type("_Cfg", (), {})()
+    trainer.cfg = Config()
     trainer.cfg.num_steps = 100
-    trainer.cfg.train = type("_Train", (), {})()
     trainer.cfg.train.learning_rate = 1e-3
     trainer.cfg.train.learning_rate_final = 1e-4
     trainer.cfg.train.lr_schedule = LrSchedule.linear
     trainer.cfg.train.warmup_steps = 0
     trainer.cfg.train.policy_head_muon_learning_rate = 0.05
     trainer.cfg.train.adamw_learning_rate = 2e-4
-    trainer.cfg.search = type("_Search", (), {})()
     trainer.cfg.search.iterations = 100
     trainer.cfg.search.iterations_final = None
+    trainer.num_players = 2
     trainer.optimizer = type("_Opt", (), {})()
     trainer.optimizer.param_groups = [
         {"lr": 1e-3},
@@ -243,6 +242,8 @@ def test_cfr_schedule_scales_policy_head_muon_lr():
 
 def test_cfr_train_step_logs_schedule_and_cfr_iterations():
     trainer = RebelCFRTrainer.__new__(RebelCFRTrainer)
+    trainer.cfr_target_model = None
+    trainer.target_update_block_batches = 0
     trainer._apply_schedules = lambda step: None
     trainer._update_model = lambda step: {"loss": 0.0}
     trainer.model = nn.Module()

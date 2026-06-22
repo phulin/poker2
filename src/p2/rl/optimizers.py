@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from p2.core.structured_config import TrainingConfig
+from p2.models.mlp.better_ffn import BetterSplitFFN
 
 
 class SplitOptimizer:
@@ -360,9 +361,9 @@ def _normuon(
         params,
         lr=lr,
         weight_decay=train_cfg.weight_decay,
-        beta1=getattr(train_cfg, "normuon_beta1", train_cfg.muon_momentum),
-        beta2=getattr(train_cfg, "normuon_beta2", 0.95),
-        eps=getattr(train_cfg, "normuon_eps", 1e-8),
+        beta1=train_cfg.normuon_beta1,
+        beta2=train_cfg.normuon_beta2,
+        eps=train_cfg.normuon_eps,
         ns_eps=train_cfg.muon_eps,
         ns_steps=train_cfg.muon_ns_steps,
         compile_update=compile_update,
@@ -374,13 +375,11 @@ def build_optimizer(
     train_cfg: TrainingConfig,
     device: torch.device,
 ) -> TrainOptimizer:
-    policy_model = getattr(model, "policy_model", None)
-    value_model = getattr(model, "value_model", None)
-    if isinstance(policy_model, nn.Module) and isinstance(value_model, nn.Module):
+    if type(model) is BetterSplitFFN:
         return SplitOptimizer(
             [
-                ("policy", build_optimizer(policy_model, train_cfg, device)),
-                ("value", build_optimizer(value_model, train_cfg, device)),
+                ("policy", build_optimizer(model.policy_model, train_cfg, device)),
+                ("value", build_optimizer(model.value_model, train_cfg, device)),
             ]
         )
 
@@ -444,13 +443,7 @@ def build_optimizer(
             )
         optimizers.append((optimizer_name, matrix_optimizer))
     if policy_head_matrix_params:
-        policy_head_muon_lr = float(
-            getattr(
-                train_cfg,
-                "policy_head_muon_learning_rate",
-                train_cfg.learning_rate,
-            )
-        )
+        policy_head_muon_lr = float(train_cfg.policy_head_muon_learning_rate)
         if policy_head_muon_lr <= 0.0:
             raise ValueError("train.policy_head_muon_learning_rate must be positive")
         if optimizer_name == "muon":
