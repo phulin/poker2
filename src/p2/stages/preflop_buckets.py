@@ -7,6 +7,7 @@ from pathlib import Path
 import hydra
 from omegaconf import DictConfig
 
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
 
 
@@ -69,7 +70,7 @@ def load_base_config(
             config_name=config_name,
             overrides=list(overrides),
         )
-    return Config.from_dict_config(dict_config)
+    return load_rebel_config(dict_config)
 
 
 def build_run_config(

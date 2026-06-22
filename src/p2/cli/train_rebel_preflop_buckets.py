@@ -6,6 +6,7 @@ from __future__ import annotations
 import hydra
 from omegaconf import DictConfig
 
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config, PreflopBucketTrainingConfig
 from p2.stages import preflop_backward_induction as preflop_bi
 from p2.stages.preflop_buckets import PreflopBucketExecutionConfig
@@ -110,7 +111,7 @@ def train_rebel_preflop_buckets(cfg: Config) -> None:
     config_name="config_rebel_preflop_buckets",
 )
 def main(dict_config: DictConfig) -> None:
-    cfg = Config.from_dict_config(dict_config)
+    cfg = load_rebel_config(dict_config)
     train_rebel_preflop_buckets(cfg)
 
 

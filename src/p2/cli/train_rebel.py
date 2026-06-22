@@ -13,6 +13,7 @@ import os
 import hydra
 from omegaconf import DictConfig
 
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_loop import run_training_loop
@@ -57,7 +58,7 @@ def train_rebel(cfg: Config) -> None:
     version_base=None, config_path="../../../conf", config_name="config_rebel_cfr"
 )
 def main(dict_config: DictConfig) -> None:
-    config = Config.from_dict_config(dict_config)
+    config = load_rebel_config(dict_config)
     train_rebel(config)
 
 

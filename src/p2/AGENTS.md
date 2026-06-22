@@ -8,6 +8,7 @@ This is the main Python package for P2. It contains the HUNL environments, neura
 ### Subdirectories
 - `allin/`: Preflop all-in equity model, random data generation, Monte Carlo terminal-value target sampler, and standalone training script.
 - `cli/`: Hydra and command-line entry points for training, tuning, sampling, and demos.
+- `config/`: ReBeL-specific configuration loading/schema boundaries that reject legacy PPO/K-best fields before entry points build trainer configs.
 - `core/`: Shared interfaces and structured configuration dataclasses/enums.
 - `encoding/`: Action-bin encoding and legal-action mask helpers.
 - `env/`: HUNL game state, tensorized environments, hand rules, and analysis helpers.

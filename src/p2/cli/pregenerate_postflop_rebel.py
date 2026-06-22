@@ -13,6 +13,7 @@ import hydra
 import torch
 from omegaconf import DictConfig
 
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
 from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.rl.cfr_trainer import RebelCFRTrainer
@@ -463,7 +464,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
     config_name="config_rebel_pregenerate_postflop",
 )
 def main(dict_config: DictConfig) -> None:
-    config = Config.from_dict_config(dict_config)
+    config = load_rebel_config(dict_config)
     pregenerate_postflop_rebel(config)
 
 
