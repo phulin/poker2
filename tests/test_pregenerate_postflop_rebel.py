@@ -9,6 +9,7 @@ import torch
 from p2.cli import pregenerate_postflop_rebel as pregenerate_cli
 from p2.core.structured_config import Config
 from p2.env.card_utils import NUM_HANDS
+from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
 
@@ -66,16 +67,23 @@ class _FakeEncoder:
 
 
 class _FakeModelComponent(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hidden_dim = 1
+        self.num_players = 2
+        self.num_actions = 2
+        self.enforce_zero_sum = False
+
     def create_feature_encoder(self, env, device=None, dtype=None):
         del env, device, dtype
         return _FakeEncoder()
 
 
-class _FakeSplitModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.policy_model = _FakeModelComponent()
-        self.value_model = _FakeModelComponent()
+def _fake_split_model() -> BetterSplitFFN:
+    return BetterSplitFFN(
+        policy_model=_FakeModelComponent(),
+        value_model=_FakeModelComponent(),
+    )
 
 
 class _FakeTrainer:
@@ -87,8 +95,12 @@ class _FakeTrainer:
         self.device = device
         self.env = object()
         self.float_dtype = torch.float32
-        self.model = _FakeSplitModel()
+        self.model = _fake_split_model()
         self.data_generator = _FakeGenerator()
+        self.synced = False
+
+    def _sync_inference_model(self) -> None:
+        self.synced = True
 
 
 def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, tmp_path):
@@ -215,6 +227,33 @@ def test_policy_generation_cap_tracks_value_policy_ratio():
         generation_batch_size=512,
     )
     assert value_only_cap == 0
+
+
+def test_pregeneration_loads_value_only_split_checkpoint(tmp_path) -> None:
+    trainer = _FakeTrainer(Config(device="cpu"), torch.device("cpu"), True)
+    original_policy = {
+        key: value.clone()
+        for key, value in trainer.model.policy_model.state_dict().items()
+    }
+    model_state = trainer.model.value_model.state_dict()
+    model_state = {
+        key: torch.full_like(value, 9.0) for key, value in model_state.items()
+    }
+    path = tmp_path / "value.pt"
+    torch.save(
+        {
+            "model": model_state,
+            "model_component": "value_model",
+        },
+        path,
+    )
+
+    pregenerate_cli._load_model_weights_for_pregeneration(trainer, str(path))
+
+    for value in trainer.model.value_model.state_dict().values():
+        assert torch.equal(value, torch.full_like(value, 9.0))
+    for key, value in trainer.model.policy_model.state_dict().items():
+        assert torch.equal(value, original_policy[key])
 
 
 def test_pregenerate_postflop_rebel_prints_final_avg_exploitability(

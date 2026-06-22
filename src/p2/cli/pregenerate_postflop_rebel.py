@@ -15,6 +15,7 @@ import torch
 from omegaconf import DictConfig
 
 from p2.core.structured_config import Config
+from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
 from p2.runtime.training_run import device_from_config
@@ -214,32 +215,29 @@ def _code_version_metadata() -> dict[str, object]:
     }
 
 
-def _component_feature_encoder_metadata(trainer: object, component: object) -> dict[str, str | None]:
-    metadata: dict[str, str | None] = {"model": type(component).__name__}
-    create_feature_encoder = getattr(component, "create_feature_encoder", None)
-    env = getattr(trainer, "env", None)
-    if not callable(create_feature_encoder) or env is None:
-        metadata["encoder"] = None
-        return metadata
-    try:
-        encoder = create_feature_encoder(
-            env,
-            device=getattr(trainer, "device", None),
-            dtype=getattr(trainer, "float_dtype", None),
-        )
-    except Exception:
-        metadata["encoder"] = None
-        return metadata
+def _component_feature_encoder_metadata(
+    trainer: RebelCFRTrainer, component: torch.nn.Module
+) -> dict[str, str]:
+    metadata: dict[str, str] = {"model": type(component).__name__}
+    encoder = component.create_feature_encoder(
+        trainer.env,
+        device=trainer.device,
+        dtype=trainer.float_dtype,
+    )
     metadata["encoder"] = type(encoder).__name__
     return metadata
 
 
-def _feature_encoder_metadata(trainer: object) -> dict[str, dict[str, str | None]]:
-    model = getattr(trainer, "model", None)
-    if model is None:
-        return {}
-    policy_model = getattr(model, "policy_model", model)
-    value_model = getattr(model, "value_model", model)
+def _feature_encoder_metadata(
+    trainer: RebelCFRTrainer,
+) -> dict[str, dict[str, str]]:
+    model = trainer.model
+    if type(model) is BetterSplitFFN:
+        policy_model = model.policy_model
+        value_model = model.value_model
+    else:
+        policy_model = model
+        value_model = model
     return {
         "policy": _component_feature_encoder_metadata(trainer, policy_model),
         "value": _component_feature_encoder_metadata(trainer, value_model),
@@ -263,13 +261,15 @@ def _load_model_weights_for_pregeneration(
         }
 
     if checkpoint.get("model_component") == "value_model":
-        value_model = getattr(trainer.model, "value_model", trainer.model)
-        value_model.load_state_dict(model_state, strict=trainer.cfg.strict_model_loading)
+        if type(trainer.model) is not BetterSplitFFN:
+            raise TypeError("value-only checkpoints require a BetterSplitFFN model")
+        trainer.model.value_model.load_state_dict(
+            model_state, strict=trainer.cfg.strict_model_loading
+        )
     else:
         trainer.model.load_state_dict(
             model_state, strict=trainer.cfg.strict_model_loading
         )
-    trainer.model.to(trainer.device)
     trainer._sync_inference_model()
     trainer.model.eval()
 
