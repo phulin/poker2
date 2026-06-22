@@ -510,11 +510,7 @@ class RebelCFRTrainer:
                 num_players=self.num_players,
                 num_actions=self.num_actions,
                 context_length=num_context_features,
-                model_name=(
-                    cfg.model.name.value
-                    if hasattr(cfg.model.name, "value")
-                    else str(cfg.model.name)
-                ),
+                model_name=cfg.model.name.value,
                 action_schedule={
                     "bet_bins": list(cfg.env.bet_bins),
                     "bet_bins_by_depth": cfg.search.bet_bins_by_depth,

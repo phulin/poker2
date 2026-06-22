@@ -107,6 +107,10 @@ torch.serialization.add_safe_globals(NonlinearityType)
 torch.serialization.add_safe_globals(PPOClipping)
 
 
+def _coerce_enum(enum_type, value):
+    return value if type(value) is enum_type else enum_type(value)
+
+
 @dataclass
 class StratifyConfig:
     threshold: int
@@ -232,6 +236,16 @@ class TrainingConfig:
     # If None, EMA is disabled. If float, it's the EMA decay rate (typically 0.999)
     model_ema: float | None = None
 
+    def __post_init__(self) -> None:
+        self.lr_schedule = _coerce_enum(LrSchedule, self.lr_schedule)
+        self.policy_node_weighting = _coerce_enum(
+            PolicyNodeWeighting, self.policy_node_weighting
+        )
+        self.policy_loss_type = _coerce_enum(PolicyLossType, self.policy_loss_type)
+        self.ppo_clipping = _coerce_enum(PPOClipping, self.ppo_clipping)
+        self.kl_type = _coerce_enum(KLType, self.kl_type)
+        self.value_loss_type = _coerce_enum(ValueLossType, self.value_loss_type)
+
 
 @dataclass
 class ModelConfig:
@@ -284,6 +298,14 @@ class ModelConfig:
     num_recursions: int = 6
     num_iterations: int = 3
     num_supervisions: int = 16
+
+    def __post_init__(self) -> None:
+        self.name = _coerce_enum(ModelType, self.name)
+        self.value_head_type = _coerce_enum(ValueHeadType, self.value_head_type)
+        self.nonlinearity = _coerce_enum(NonlinearityType, self.nonlinearity)
+        self.street_value_heads = _coerce_enum(
+            StreetValueHeads, self.street_value_heads
+        )
 
 
 @dataclass
@@ -371,6 +393,11 @@ class SearchConfig:
     continuation_value_target_streets: list[int] = field(default_factory=lambda: [0])
     continuation_value_target_min_depth: int = 1
     continuation_value_target_max_depth: int | None = None
+
+    def __post_init__(self) -> None:
+        self.warm_start_type = _coerce_enum(WarmStartType, self.warm_start_type)
+        self.cfr_type = _coerce_enum(CFRType, self.cfr_type)
+        self.model_scope = _coerce_enum(ModelScope, self.model_scope)
 
 
 @dataclass

@@ -178,11 +178,7 @@ def _root_source_code(root_source: str) -> int:
 def _quality_metadata(cfg: Config) -> dict[str, object]:
     return {
         "cfr_iterations": int(cfg.search.iterations),
-        "cfr_type": (
-            cfg.search.cfr_type.value
-            if hasattr(cfg.search.cfr_type, "value")
-            else str(cfg.search.cfr_type)
-        ),
+        "cfr_type": cfg.search.cfr_type.value,
         "cfr_plus": bool(cfg.search.cfr_plus),
         "sparse": bool(cfg.search.sparse),
         "sparse_fused": bool(cfg.search.sparse_fused),
@@ -440,11 +436,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
                 str(root_source_code): cfg.data.live_root_source,
             },
             "root_streets": _root_streets(cfg.data.live_root_source),
-            "model_family": (
-                cfg.model.name.value
-                if hasattr(cfg.model.name, "value")
-                else str(cfg.model.name)
-            ),
+            "model_family": cfg.model.name.value,
             "feature_encoder": _feature_encoder_metadata(trainer),
             "action_schedule": {
                 "bet_bins": list(cfg.env.bet_bins),

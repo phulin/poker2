@@ -39,11 +39,7 @@ class RebelValueValidationSetEvaluator:
             num_players=trainer.num_players,
             num_actions=trainer.num_actions,
             context_length=int(manifest["context_length"]),
-            model_name=(
-                cfg.model.name.value
-                if hasattr(cfg.model.name, "value")
-                else str(cfg.model.name)
-            ),
+            model_name=cfg.model.name.value,
             action_schedule={
                 "bet_bins": list(cfg.env.bet_bins),
                 "bet_bins_by_depth": cfg.search.bet_bins_by_depth,

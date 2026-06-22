@@ -208,7 +208,7 @@ def _tiny_rebel_cfg() -> Config:
     cfg.num_envs = 1
     cfg.train.batch_size = 1
     cfg.env.bet_bins = [0.5]
-    cfg.model.name = "rebel_ffn"
+    cfg.model.name = ModelType.rebel_ffn
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
     cfg.model.input_dim = 2661
     cfg.model.hidden_dim = 16
@@ -268,11 +268,7 @@ def test_rebel_cfr_trainer_runs_pregenerated_mode_one_step(tmp_path):
         value_batches=[_tiny_solved_batch(cfg, stream="value", start=0, count=4)],
         policy_batches=[_tiny_solved_batch(cfg, stream="policy", start=10, count=4)],
         metadata={
-            "model_family": (
-                cfg.model.name.value
-                if hasattr(cfg.model.name, "value")
-                else str(cfg.model.name)
-            ),
+            "model_family": cfg.model.name.value,
             "action_schedule": {
                 "bet_bins": list(cfg.env.bet_bins),
                 "bet_bins_by_depth": cfg.search.bet_bins_by_depth,
@@ -344,11 +340,7 @@ def test_rebel_cfr_trainer_hybrid_mode_uses_holdout_metrics(tmp_path):
         value_batches=[_tiny_solved_batch(cfg, stream="value", start=0, count=4)],
         policy_batches=[_tiny_solved_batch(cfg, stream="policy", start=10, count=4)],
         metadata={
-            "model_family": (
-                cfg.model.name.value
-                if hasattr(cfg.model.name, "value")
-                else str(cfg.model.name)
-            ),
+            "model_family": cfg.model.name.value,
             "action_schedule": {
                 "bet_bins": list(cfg.env.bet_bins),
                 "bet_bins_by_depth": cfg.search.bet_bins_by_depth,
@@ -381,11 +373,7 @@ def test_rebel_cfr_trainer_pregenerated_resume_matches_uninterrupted(tmp_path):
     cfg.data.pregenerated.value_batch_size = 2
     cfg.data.pregenerated.policy_batch_size = 2
     cfg.data.pregenerated.datasets = [PregeneratedDatasetConfig(path=str(dataset_path))]
-    model_family = (
-        cfg.model.name.value
-        if hasattr(cfg.model.name, "value")
-        else str(cfg.model.name)
-    )
+    model_family = cfg.model.name.value
     action_schedule = {
         "bet_bins": list(cfg.env.bet_bins),
         "bet_bins_by_depth": cfg.search.bet_bins_by_depth,
@@ -1049,7 +1037,7 @@ def test_rebel_cfr_trainer_single_step_cpu():
     cfg.env.sb = 5
     cfg.env.bb = 10
     cfg.env.flop_showdown = False
-    cfg.model.name = "rebel_ffn"
+    cfg.model.name = ModelType.rebel_ffn
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
     cfg.model.input_dim = 2661
     cfg.model.hidden_dim = 16
@@ -1166,7 +1154,7 @@ def test_rebel_cfr_trainer_load_checkpoint_respects_non_strict(tmp_path):
     cfg.num_envs = 1
     cfg.train.batch_size = 1
     cfg.env.bet_bins = [0.5, 1.0]
-    cfg.model.name = "rebel_ffn"
+    cfg.model.name = ModelType.rebel_ffn
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
     cfg.model.input_dim = 2661
     cfg.model.hidden_dim = 16
