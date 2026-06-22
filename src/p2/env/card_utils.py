@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import math
-from functools import lru_cache
 from itertools import combinations, permutations
+from typing import Callable, TypeVar, cast
 
 import torch
 
@@ -25,6 +25,37 @@ HAND_EQUITY_ORDERING = (
     "84s,54o,43o,43s,K3o,K2o,J2s,T2s,93s,92s,82s,73s,62s,52s,42s,32s,A2o,94s,"
     "83s,72s,32o"
 ).split(",")
+
+_T = TypeVar("_T")
+_TENSOR_CACHE: dict[tuple[str, str], torch.Tensor] = {}
+_VALUE_CACHE: dict[str, object] = {}
+
+
+def _device_cache_key(device: torch.device | str | None) -> str:
+    if device is None:
+        return "none"
+    return str(torch.device(device))
+
+
+def _cached_tensor(
+    name: str,
+    device: torch.device | str | None,
+    build: Callable[[torch.device | str | None], torch.Tensor],
+) -> torch.Tensor:
+    key = (name, _device_cache_key(device))
+    cached = _TENSOR_CACHE.get(key)
+    if cached is None:
+        cached = build(device)
+        _TENSOR_CACHE[key] = cached
+    return cached
+
+
+def _cached_value(name: str, build: Callable[[], _T]) -> _T:
+    cached = _VALUE_CACHE.get(name)
+    if cached is None:
+        cached = build()
+        _VALUE_CACHE[name] = cached
+    return cast(_T, cached)
 
 
 def parse_hand_name(hand_name: str) -> tuple[int, int]:
@@ -57,74 +88,82 @@ def parse_hand_name(hand_name: str) -> tuple[int, int]:
         raise ValueError(f"Invalid hand name: {hand_name}")
 
 
-@lru_cache(maxsize=2)
-def hand_combos_tensor(device: torch.device | None = None) -> torch.Tensor:
+def hand_combos_tensor(device: torch.device | str | None = None) -> torch.Tensor:
     """Return [1326, 2] tensor of sorted hole-card index pairs."""
-    combos = []
-    for c1 in range(52):
-        for c2 in range(c1 + 1, 52):
-            combos.append((c1, c2))
-    tensor = torch.tensor(combos, dtype=torch.long)
-    if device is not None:
-        tensor = tensor.to(device)
-    return tensor
+    return _cached_tensor(
+        "hand_combos",
+        device,
+        lambda target_device: torch.tensor(
+            [(c1, c2) for c1 in range(52) for c2 in range(c1 + 1, 52)],
+            dtype=torch.long,
+            device=target_device,
+        ),
+    )
 
 
-@lru_cache(maxsize=2)
-def combo_lookup_tensor(device: torch.device | None = None) -> torch.Tensor:
+def combo_lookup_tensor(device: torch.device | str | None = None) -> torch.Tensor:
     """Return [52, 52] long tensor mapping unordered card pairs to combo indices."""
-    lookup = torch.full((52, 52), -1, dtype=torch.long)
-    combos = hand_combos_tensor(device=device)
-    for idx, (c1, c2) in enumerate(combos.tolist()):
-        lookup[c1, c2] = idx
-        lookup[c2, c1] = idx
-    if device is not None:
-        lookup = lookup.to(device)
-    return lookup
+
+    def build(target_device: torch.device | str | None) -> torch.Tensor:
+        lookup = torch.full((52, 52), -1, dtype=torch.long, device=target_device)
+        combos = hand_combos_tensor(device=target_device).detach().cpu()
+        for idx, (c1, c2) in enumerate(combos.tolist()):
+            lookup[c1, c2] = idx
+            lookup[c2, c1] = idx
+        return lookup
+
+    return _cached_tensor("combo_lookup", device, build)
 
 
-@lru_cache(maxsize=2)
 def combo_to_preflop_class_tensor(
-    device: torch.device | None = None,
+    device: torch.device | str | None = None,
 ) -> torch.Tensor:
     """Return [1326] class ids for the 169 rank/suit preflop abstraction.
 
     Diagonal entries are pairs. For non-pairs, ``hi * 13 + lo`` is suited and
     ``lo * 13 + hi`` is offsuit, matching the conventional 13x13 grid split.
     """
-    combos = hand_combos_tensor(device=device)
-    ranks = combos % 13
-    suits = combos // 13
-    rank_a = ranks[:, 0]
-    rank_b = ranks[:, 1]
-    hi = torch.maximum(rank_a, rank_b)
-    lo = torch.minimum(rank_a, rank_b)
-    suited = suits[:, 0] == suits[:, 1]
-    class_ids = torch.where(suited, hi * 13 + lo, lo * 13 + hi)
-    if device is not None:
-        class_ids = class_ids.to(device)
-    return class_ids.long()
+
+    def build(target_device: torch.device | str | None) -> torch.Tensor:
+        combos = hand_combos_tensor(device=target_device)
+        ranks = combos % 13
+        suits = combos // 13
+        rank_a = ranks[:, 0]
+        rank_b = ranks[:, 1]
+        hi = torch.maximum(rank_a, rank_b)
+        lo = torch.minimum(rank_a, rank_b)
+        suited = suits[:, 0] == suits[:, 1]
+        class_ids = torch.where(suited, hi * 13 + lo, lo * 13 + hi)
+        return class_ids.long()
+
+    return _cached_tensor("combo_to_preflop_class", device, build)
 
 
-@lru_cache(maxsize=2)
 def preflop_class_multiplicity_tensor(
-    device: torch.device | None = None,
+    device: torch.device | str | None = None,
 ) -> torch.Tensor:
     """Return [169] combo counts per preflop rank class.
 
     Pairs have multiplicity 6, suited non-pairs 4, and offsuit non-pairs 12.
     The tensor sums to 1326.
     """
-    class_ids = combo_to_preflop_class_tensor(device=device)
-    weights = torch.ones(NUM_HANDS, dtype=torch.float32, device=device)
-    multiplicity = torch.zeros(PREFLOP_HANDS, dtype=torch.float32, device=device)
-    multiplicity.scatter_add_(0, class_ids, weights)
-    return multiplicity
+
+    def build(target_device: torch.device | str | None) -> torch.Tensor:
+        class_ids = combo_to_preflop_class_tensor(device=target_device)
+        weights = torch.ones(NUM_HANDS, dtype=torch.float32, device=target_device)
+        multiplicity = torch.zeros(
+            PREFLOP_HANDS,
+            dtype=torch.float32,
+            device=target_device,
+        )
+        multiplicity.scatter_add_(0, class_ids, weights)
+        return multiplicity
+
+    return _cached_tensor("preflop_class_multiplicity", device, build)
 
 
-@lru_cache(maxsize=2)
 def preflop_class_compatibility_counts_tensor(
-    device: torch.device | None = None,
+    device: torch.device | str | None = None,
 ) -> torch.Tensor:
     """Return [169, 169] disjoint-combo counts between preflop classes.
 
@@ -134,28 +173,38 @@ def preflop_class_compatibility_counts_tensor(
     hero class, so the table exactly reproduces combo-level unblocked-mass
     projection for class-constant preflop ranges.
     """
-    class_ids = combo_to_preflop_class_tensor(device=device)
-    combo_cards = combo_to_onehot_tensor(device=device).to(torch.float32)
-    compatible = (combo_cards @ combo_cards.T) < 0.5
 
-    opp_class_onehot = torch.zeros(
-        NUM_HANDS, PREFLOP_HANDS, dtype=torch.float32, device=device
-    )
-    opp_class_onehot.scatter_(1, class_ids[:, None], 1.0)
-    per_combo_counts = compatible.to(torch.float32) @ opp_class_onehot
+    def build(target_device: torch.device | str | None) -> torch.Tensor:
+        class_ids = combo_to_preflop_class_tensor(device=target_device)
+        combo_cards = combo_to_onehot_tensor(device=target_device).to(torch.float32)
+        compatible = (combo_cards @ combo_cards.T) < 0.5
 
-    counts = torch.zeros(
-        PREFLOP_HANDS, PREFLOP_HANDS, dtype=torch.float32, device=device
-    )
-    counts.scatter_add_(
-        0,
-        class_ids[:, None].expand(-1, PREFLOP_HANDS),
-        per_combo_counts,
-    )
-    multiplicity = preflop_class_multiplicity_tensor(device=device).to(
-        dtype=counts.dtype
-    )
-    return counts / multiplicity[:, None]
+        opp_class_onehot = torch.zeros(
+            NUM_HANDS,
+            PREFLOP_HANDS,
+            dtype=torch.float32,
+            device=target_device,
+        )
+        opp_class_onehot.scatter_(1, class_ids[:, None], 1.0)
+        per_combo_counts = compatible.to(torch.float32) @ opp_class_onehot
+
+        counts = torch.zeros(
+            PREFLOP_HANDS,
+            PREFLOP_HANDS,
+            dtype=torch.float32,
+            device=target_device,
+        )
+        counts.scatter_add_(
+            0,
+            class_ids[:, None].expand(-1, PREFLOP_HANDS),
+            per_combo_counts,
+        )
+        multiplicity = preflop_class_multiplicity_tensor(device=target_device).to(
+            dtype=counts.dtype
+        )
+        return counts / multiplicity[:, None]
+
+    return _cached_tensor("preflop_class_compatibility_counts", device, build)
 
 
 def preflop_class_unblocked_mass(class_mass: torch.Tensor) -> torch.Tensor:
@@ -199,9 +248,9 @@ def expand_169_to_1326(
     class_ids = combo_to_preflop_class_tensor(device=values_169.device)
     expanded = values_169.index_select(-1, class_ids)
     if divide_by_multiplicity:
-        multiplicity = preflop_class_multiplicity_tensor(
-            device=values_169.device
-        ).to(dtype=values_169.dtype)
+        multiplicity = preflop_class_multiplicity_tensor(device=values_169.device).to(
+            dtype=values_169.dtype
+        )
         expanded = expanded / multiplicity.index_select(0, class_ids)
     return expanded
 
@@ -228,9 +277,9 @@ def collapse_1326_to_169(
     index = class_ids.expand(*values_1326.shape[:-1], NUM_HANDS)
     out.scatter_add_(-1, index, values_1326)
     if reduction == "mean":
-        multiplicity = preflop_class_multiplicity_tensor(
-            device=values_1326.device
-        ).to(dtype=values_1326.dtype)
+        multiplicity = preflop_class_multiplicity_tensor(device=values_1326.device).to(
+            dtype=values_1326.dtype
+        )
         out = out / multiplicity
     return out
 
@@ -299,51 +348,74 @@ def board_allowed_hands(board: torch.Tensor) -> torch.Tensor:
     return allowed.reshape(*board.shape[:-1], NUM_HANDS)
 
 
-@lru_cache(maxsize=2)
-def combo_to_onehot_tensor(device: torch.device | None = None) -> torch.Tensor:
+def combo_to_onehot_tensor(device: torch.device | str | None = None) -> torch.Tensor:
     """Return [1326, 52] bool tensor of one-hot encoded combos."""
-    combos = hand_combos_tensor(device=device)  # [1326, 2]
-    combo_onehot = torch.zeros(1326, 52, dtype=torch.bool, device=device)
-    idx = torch.arange(1326, device=device)
-    combo_onehot[idx, combos[:, 0]] = True
-    combo_onehot[idx, combos[:, 1]] = True
-    return combo_onehot
+
+    def build(target_device: torch.device | str | None) -> torch.Tensor:
+        combos = hand_combos_tensor(device=target_device)  # [1326, 2]
+        combo_onehot = torch.zeros(
+            1326,
+            52,
+            dtype=torch.bool,
+            device=target_device,
+        )
+        idx = torch.arange(1326, device=target_device)
+        combo_onehot[idx, combos[:, 0]] = True
+        combo_onehot[idx, combos[:, 1]] = True
+        return combo_onehot
+
+    return _cached_tensor("combo_to_onehot", device, build)
 
 
-@lru_cache(maxsize=2)
-def combo_to_range_grid(device: torch.device | None = None) -> torch.Tensor:
+def combo_to_range_grid(device: torch.device | str | None = None) -> torch.Tensor:
     """Return [1326, 2] tensor of range grid index (suited/offsuit) for each combo."""
-    combos = hand_combos_tensor(device=device)  # [1326, 2]
-    combos_suited = combos[:, 0] // 13 == combos[:, 1] // 13
-    combo_ranks = combos % 13
-    combo_ranks_lower = combo_ranks.sort(dim=1).values
-    combo_ranks_upper = combo_ranks_lower.flip(dims=(1,))
-    return 12 - torch.where(
-        combos_suited[:, None], combo_ranks_upper, combo_ranks_lower
-    )
+
+    def build(target_device: torch.device | str | None) -> torch.Tensor:
+        combos = hand_combos_tensor(device=target_device)  # [1326, 2]
+        combos_suited = combos[:, 0] // 13 == combos[:, 1] // 13
+        combo_ranks = combos % 13
+        combo_ranks_lower = combo_ranks.sort(dim=1).values
+        combo_ranks_upper = combo_ranks_lower.flip(dims=(1,))
+        return 12 - torch.where(
+            combos_suited[:, None],
+            combo_ranks_upper,
+            combo_ranks_lower,
+        )
+
+    return _cached_tensor("combo_to_range_grid", device, build)
 
 
-@lru_cache(maxsize=2)
-def combo_blocking_tensor(device: torch.device | None = None) -> torch.Tensor:
+def combo_blocking_tensor(device: torch.device | str | None = None) -> torch.Tensor:
     """Return [1326, 1326] tensor of blocked hands for each combo."""
-    combo_onehot = combo_to_onehot_tensor(device=device).float()
-    return (combo_onehot @ combo_onehot.T) > 0.5
+
+    def build(target_device: torch.device | str | None) -> torch.Tensor:
+        combo_onehot = combo_to_onehot_tensor(device=target_device).float()
+        return (combo_onehot @ combo_onehot.T) > 0.5
+
+    return _cached_tensor("combo_blocking", device, build)
 
 
-@lru_cache(maxsize=2)
-def combo_compatible_tensor(device: torch.device | None = None) -> torch.Tensor:
+def combo_compatible_tensor(device: torch.device | str | None = None) -> torch.Tensor:
     """Return [1326, 1326] tensor of blocked hands for each combo."""
-    combo_onehot = combo_to_onehot_tensor(device=device).float()
-    return (combo_onehot @ combo_onehot.T) < 0.5
+
+    def build(target_device: torch.device | str | None) -> torch.Tensor:
+        combo_onehot = combo_to_onehot_tensor(device=target_device).float()
+        return (combo_onehot @ combo_onehot.T) < 0.5
+
+    return _cached_tensor("combo_compatible", device, build)
 
 
-@lru_cache(maxsize=2)
-def suit_permutations_tensor(device: torch.device | None = None) -> torch.Tensor:
+def suit_permutations_tensor(device: torch.device | str | None = None) -> torch.Tensor:
     """Return [24, 4] tensor enumerating all suit permutations."""
-    perms = torch.tensor(tuple(permutations(range(4))), dtype=torch.long)
-    if device is not None:
-        perms = perms.to(device)
-    return perms
+    return _cached_tensor(
+        "suit_permutations",
+        device,
+        lambda target_device: torch.tensor(
+            tuple(permutations(range(4))),
+            dtype=torch.long,
+            device=target_device,
+        ),
+    )
 
 
 def _canonical_suit_key(cards: tuple[int, ...]) -> tuple[int, ...]:
@@ -357,20 +429,23 @@ def _canonical_suit_key(cards: tuple[int, ...]) -> tuple[int, ...]:
     return best
 
 
-@lru_cache(maxsize=1)
 def _canonical_flops_with_weights_cpu() -> tuple[torch.Tensor, torch.Tensor]:
-    counts: dict[tuple[int, ...], int] = {}
-    for flop in combinations(range(52), 3):
-        key = _canonical_suit_key(flop)
-        counts[key] = counts.get(key, 0) + 1
+    def build() -> tuple[torch.Tensor, torch.Tensor]:
+        counts: dict[tuple[int, ...], int] = {}
+        for flop in combinations(range(52), 3):
+            key = _canonical_suit_key(flop)
+            counts[key] = counts.get(key, 0) + 1
 
-    flops = torch.tensor(tuple(sorted(counts)), dtype=torch.long)
-    weights = torch.tensor(
-        [counts[tuple(flop.tolist())] for flop in flops], dtype=torch.float32
-    )
-    if flops.shape != (1755, 3):
-        raise RuntimeError(f"Expected 1755 canonical flops, got {flops.shape[0]}")
-    return flops, weights
+        flops = torch.tensor(tuple(sorted(counts)), dtype=torch.long)
+        weights = torch.tensor(
+            [counts[tuple(flop.tolist())] for flop in flops],
+            dtype=torch.float32,
+        )
+        if flops.shape != (1755, 3):
+            raise RuntimeError(f"Expected 1755 canonical flops, got {flops.shape[0]}")
+        return flops, weights
+
+    return _cached_value("canonical_flops_with_weights_cpu", build)
 
 
 def canonical_flops_with_weights(
@@ -384,52 +459,61 @@ def canonical_flops_with_weights(
     return flops, weights
 
 
-@lru_cache(maxsize=1)
 def _canonical_full_boards_with_weights_cpu() -> tuple[torch.Tensor, torch.Tensor]:
-    counts: dict[tuple[int, ...], int] = {}
-    buf: list[tuple[int, int, int, int, int]] = []
-    suit_perms = suit_permutations_tensor()
-    key_weights = torch.tensor([52**4, 52**3, 52**2, 52, 1], dtype=torch.long)
+    def build() -> tuple[torch.Tensor, torch.Tensor]:
+        counts: dict[tuple[int, ...], int] = {}
+        buf: list[tuple[int, int, int, int, int]] = []
+        suit_perms = suit_permutations_tensor()
+        key_weights = torch.tensor([52**4, 52**3, 52**2, 52, 1], dtype=torch.long)
 
-    def accumulate(chunk: list[tuple[int, int, int, int, int]]) -> None:
-        board_tensor = torch.tensor(chunk, dtype=torch.long)
-        ranks = board_tensor % 13
-        suits = board_tensor // 13
-        mapped_suits = suit_perms[:, None, :].expand(
-            -1, board_tensor.shape[0], -1
-        ).gather(2, suits[None, :, :].expand(suit_perms.shape[0], -1, -1))
-        mapped = (mapped_suits * 13 + ranks[None, :, :]).sort(dim=2).values
-        keys = (mapped * key_weights).sum(dim=2).min(dim=0).values
-        unique, unique_counts = torch.unique(keys, return_counts=True)
-        for key, count in zip(unique.tolist(), unique_counts.tolist(), strict=True):
-            cards: list[int] = []
-            rem = int(key)
-            for weight in key_weights.tolist():
-                card = rem // int(weight)
-                cards.append(card)
-                rem -= card * int(weight)
-            key_tuple = tuple(cards)
-            counts[key_tuple] = counts.get(key_tuple, 0) + int(count)
+        def accumulate(chunk: list[tuple[int, int, int, int, int]]) -> None:
+            board_tensor = torch.tensor(chunk, dtype=torch.long)
+            ranks = board_tensor % 13
+            suits = board_tensor // 13
+            mapped_suits = (
+                suit_perms[:, None, :]
+                .expand(
+                    -1,
+                    board_tensor.shape[0],
+                    -1,
+                )
+                .gather(2, suits[None, :, :].expand(suit_perms.shape[0], -1, -1))
+            )
+            mapped = (mapped_suits * 13 + ranks[None, :, :]).sort(dim=2).values
+            keys = (mapped * key_weights).sum(dim=2).min(dim=0).values
+            unique, unique_counts = torch.unique(keys, return_counts=True)
+            for key, count in zip(unique.tolist(), unique_counts.tolist(), strict=True):
+                cards: list[int] = []
+                rem = int(key)
+                for weight in key_weights.tolist():
+                    card = rem // int(weight)
+                    cards.append(card)
+                    rem -= card * int(weight)
+                key_tuple = tuple(cards)
+                counts[key_tuple] = counts.get(key_tuple, 0) + int(count)
 
-    for board in combinations(range(52), 5):
-        buf.append(board)
-        if len(buf) == 65_536:
+        for board in combinations(range(52), 5):
+            buf.append(board)
+            if len(buf) == 65_536:
+                accumulate(buf)
+                buf.clear()
+        if buf:
             accumulate(buf)
-            buf.clear()
-    if buf:
-        accumulate(buf)
 
-    boards = torch.tensor(tuple(sorted(counts)), dtype=torch.long)
-    weights = torch.tensor(
-        [counts[tuple(board.tolist())] for board in boards], dtype=torch.float32
-    )
-    if boards.shape != (134459, 5):
-        raise RuntimeError(
-            f"Expected 134459 canonical full boards, got {boards.shape[0]}"
+        boards = torch.tensor(tuple(sorted(counts)), dtype=torch.long)
+        weights = torch.tensor(
+            [counts[tuple(board.tolist())] for board in boards],
+            dtype=torch.float32,
         )
-    if int(weights.sum().item()) != math.comb(52, 5):
-        raise RuntimeError("Canonical full-board weights do not sum to C(52, 5)")
-    return boards, weights
+        if boards.shape != (134459, 5):
+            raise RuntimeError(
+                f"Expected 134459 canonical full boards, got {boards.shape[0]}"
+            )
+        if int(weights.sum().item()) != math.comb(52, 5):
+            raise RuntimeError("Canonical full-board weights do not sum to C(52, 5)")
+        return boards, weights
+
+    return _cached_value("canonical_full_boards_with_weights_cpu", build)
 
 
 def canonical_full_boards_with_weights(
@@ -443,39 +527,42 @@ def canonical_full_boards_with_weights(
     return boards, weights
 
 
-@lru_cache(maxsize=2)
-def combo_suit_permutation_tensor(device: torch.device | None = None) -> torch.Tensor:
+def combo_suit_permutation_tensor(
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
     """Return [24, 1326] tensor: hole-card index permutations for each suit permutation."""
-    combos = hand_combos_tensor(device=device)  # [1326, 2]
-    lookup = combo_lookup_tensor(device=device)  # [52, 52]
 
-    ranks = combos % 13  # [1326, 2]
-    suits = combos // 13  # [1326, 2]
+    def build(target_device: torch.device | str | None) -> torch.Tensor:
+        combos = hand_combos_tensor(device=target_device)  # [1326, 2]
+        lookup = combo_lookup_tensor(device=target_device)  # [52, 52]
 
-    suit_perms = suit_permutations_tensor(device=device)  # [24, 4]
-    permuted_suits = suit_perms[:, suits]  # [24, 1326, 2]
-    ranks_expand = ranks.unsqueeze(0).expand(permuted_suits.shape[0], -1, -1)
-    permuted_cards = permuted_suits * 13 + ranks_expand  # [24, 1326, 2]
-    permuted_cards_sorted = permuted_cards.sort(dim=2).values
+        ranks = combos % 13  # [1326, 2]
+        suits = combos // 13  # [1326, 2]
 
-    permuted_indices = lookup[
-        permuted_cards_sorted[:, :, 0],
-        permuted_cards_sorted[:, :, 1],
-    ]
+        suit_perms = suit_permutations_tensor(device=target_device)  # [24, 4]
+        permuted_suits = suit_perms[:, suits]  # [24, 1326, 2]
+        ranks_expand = ranks.unsqueeze(0).expand(permuted_suits.shape[0], -1, -1)
+        permuted_cards = permuted_suits * 13 + ranks_expand  # [24, 1326, 2]
+        permuted_cards_sorted = permuted_cards.sort(dim=2).values
 
-    return permuted_indices
+        return lookup[
+            permuted_cards_sorted[:, :, 0],
+            permuted_cards_sorted[:, :, 1],
+        ]
+
+    return _cached_tensor("combo_suit_permutation", device, build)
 
 
-@lru_cache(maxsize=2)
 def combo_suit_permutation_inverse_tensor(
-    device: torch.device | None = None,
+    device: torch.device | str | None = None,
 ) -> torch.Tensor:
     """Return [24, 1326] tensor mapping canonical combos back to original ordering."""
-    permuted = combo_suit_permutation_tensor()
-    inverse = torch.argsort(permuted, dim=1)
-    if device is not None:
-        inverse = inverse.to(device)
-    return inverse
+
+    def build(target_device: torch.device | str | None) -> torch.Tensor:
+        permuted = combo_suit_permutation_tensor(device=target_device)
+        return torch.argsort(permuted, dim=1)
+
+    return _cached_tensor("combo_suit_permutation_inverse", device, build)
 
 
 def calculate_unblocked_mass(
