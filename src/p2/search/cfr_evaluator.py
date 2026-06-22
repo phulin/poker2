@@ -599,12 +599,8 @@ class CFREvaluator(ABC):
         encoder_kwargs = {
             "env": projected_env,
             "device": self.device,
-            "dtype": getattr(source_encoder, "dtype", self.float_dtype),
+            "dtype": source_encoder.dtype,
         }
-        if hasattr(source_encoder, "legacy_context_features"):
-            encoder_kwargs["legacy_context_features"] = getattr(
-                source_encoder, "legacy_context_features", False
-            )
         projected_encoder = type(source_encoder)(**encoder_kwargs)
         projected_features = projected_encoder.encode(
             selected_beliefs,

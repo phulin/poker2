@@ -22,7 +22,6 @@ from p2.models.mlp.better_features import (
     ChancePhase,
     ValueScalarContext,
     context_length,
-    legacy_context_length,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
@@ -112,7 +111,6 @@ class BetterFFN(BaseMLPModel):
         policy_rank: int = 64,
         policy_hand_bias_rank: int = 32,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
-        legacy_context_features: bool = False,
     ) -> None:
         super().__init__()
         self.num_actions = num_actions
@@ -127,7 +125,6 @@ class BetterFFN(BaseMLPModel):
         self.policy_rank = policy_rank
         self.policy_hand_bias_rank = policy_hand_bias_rank
         self.nonlinearity = nonlinearity
-        self.legacy_context_features = bool(legacy_context_features)
 
         if range_hidden_dim < 0:
             raise ValueError("range_hidden_dim must be non-negative")
@@ -189,11 +186,7 @@ class BetterFFN(BaseMLPModel):
         self.belief_proj = ffn_block(
             belief_in_dim, belief_hidden_dim, hidden_dim, nonlinearity
         )
-        context_in_dim = (
-            legacy_context_length(num_players)
-            if self.legacy_context_features
-            else context_length(num_players)
-        )
+        context_in_dim = context_length(num_players)
         self.context_encoder = ffn_block(
             context_in_dim, hidden_dim, hidden_dim, nonlinearity
         )
@@ -961,7 +954,6 @@ class BetterFFN(BaseMLPModel):
             env=env,
             device=device,
             dtype=dtype,
-            legacy_context_features=self.legacy_context_features,
         )
 
     def repeat(
@@ -1033,7 +1025,6 @@ class BetterPolicyFFN(BetterFFN):
             env=env,
             device=device,
             dtype=dtype,
-            legacy_context_features=self.legacy_context_features,
         )
 
 
@@ -1356,7 +1347,6 @@ class BetterStreetValueFFN(BetterFFN):
             env=env,
             device=device,
             dtype=dtype,
-            legacy_context_features=self.legacy_context_features,
         )
 
 
@@ -1458,7 +1448,6 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
         policy_rank: int = 64,
         policy_hand_bias_rank: int = 32,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
-        legacy_context_features: bool = False,
     ) -> None:
         super().__init__()
         if range_hidden_dim < 0:
@@ -1483,7 +1472,6 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
         self.policy_rank = policy_rank
         self.policy_hand_bias_rank = policy_hand_bias_rank
         self.nonlinearity = nonlinearity
-        self.legacy_context_features = bool(legacy_context_features)
 
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
@@ -1510,11 +1498,7 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
             hidden_dim,
             nonlinearity,
         )
-        context_in_dim = (
-            legacy_context_length(num_players)
-            if self.legacy_context_features
-            else context_length(num_players)
-        )
+        context_in_dim = context_length(num_players)
         self.context_encoder = ffn_block(
             context_in_dim, hidden_dim, hidden_dim, nonlinearity
         )
@@ -1696,7 +1680,6 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         policy_rank: int = 64,
         policy_hand_bias_rank: int = 32,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
-        legacy_context_features: bool = False,
         transformer_heads: int = 8,
     ) -> None:
         super().__init__()
@@ -1728,15 +1711,10 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         self.policy_rank = int(policy_rank)
         self.policy_hand_bias_rank = int(policy_hand_bias_rank)
         self.nonlinearity = nonlinearity
-        self.legacy_context_features = bool(legacy_context_features)
         self.transformer_heads = int(transformer_heads)
 
-        self.scalar_context_dim = (
-            legacy_context_length(num_players) - num_players * 4
-            if self.legacy_context_features
-            else context_length(num_players) - num_players * 13
-        )
-        self.player_context_dim = 4 if self.legacy_context_features else 13
+        self.scalar_context_dim = context_length(num_players) - num_players * 13
+        self.player_context_dim = 13
         hand_embed_dim = (
             max(1, ffn_dim // num_players)
             if range_hidden_dim == 0
@@ -2092,7 +2070,6 @@ class BetterPreflopTransformerValueFFN(_BetterPreflopTransformerBase):
             env=env,
             device=device,
             dtype=dtype,
-            legacy_context_features=self.legacy_context_features,
         )
 
 
@@ -2190,7 +2167,6 @@ class BetterPreflopTransformerPolicyFFN(_BetterPreflopTransformerBase):
             env=env,
             device=device,
             dtype=dtype,
-            legacy_context_features=self.legacy_context_features,
         )
 
 
@@ -2314,7 +2290,6 @@ class BetterPreflopValueFFN(_BetterPreflopCompactFFN):
             env=env,
             device=device,
             dtype=dtype,
-            legacy_context_features=self.legacy_context_features,
         )
 
 
@@ -2402,7 +2377,6 @@ class BetterPreflopPolicyFFN(_BetterPreflopCompactFFN):
             env=env,
             device=device,
             dtype=dtype,
-            legacy_context_features=self.legacy_context_features,
         )
 
 

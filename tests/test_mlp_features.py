@@ -22,7 +22,6 @@ from p2.models.mlp.better_features import (
     PlayerContext,
     ScalarContext,
     ValueScalarContext,
-    legacy_context_length,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
@@ -216,27 +215,6 @@ def test_better_feature_encoder_empty_indices():
     assert features.to_act.shape == (0,)
     assert features.board.shape == (0, 5)
     assert features.beliefs.shape == (0, 2 * NUM_HANDS)
-
-
-def test_better_feature_encoder_legacy_context_switch():
-    env = make_env(2)
-    beliefs = torch.full(
-        (2, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32, device=env.device
-    )
-
-    encoder = BetterPolicyFeatureEncoder(
-        env,
-        device=env.device,
-        dtype=torch.float32,
-        legacy_context_features=True,
-    )
-    features = encoder.encode(beliefs)
-
-    assert features.context.shape == (2, legacy_context_length(2))
-    torch.testing.assert_close(
-        features.context[:, ScalarContext.ACTIONS_ROUND.value],
-        env.actions_this_round.to(torch.float32),
-    )
 
 
 def test_better_policy_and_value_feature_context_slots():

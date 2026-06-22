@@ -6,8 +6,6 @@ from p2.env.card_utils import PREFLOP_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.better_features import (
     ChancePhase,
-    LEGACY_NUM_PLAYER_CONTEXT,
-    LEGACY_NUM_SCALAR_CONTEXT,
     PlayerContext,
     ScalarContext,
     ValueScalarContext,
@@ -25,12 +23,10 @@ class _BetterFeatureEncoderBase:
         env: HUNLTensorEnv,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-        legacy_context_features: bool = False,
     ) -> None:
         self.env = env
         self.device = device or env.device
         self.dtype = dtype or torch.float32
-        self.legacy_context_features = bool(legacy_context_features)
 
     def _pre_chance_mask(
         self, N: int, pre_chance_node: torch.Tensor | bool | None
@@ -89,14 +85,9 @@ class _BetterFeatureEncoderBase:
     ) -> torch.Tensor:
         stacks = self._env_tensor("stacks", indices).to(self.dtype)
         committed = self._env_tensor("committed", indices).to(self.dtype)
-        player_context_count = (
-            LEGACY_NUM_PLAYER_CONTEXT
-            if self.legacy_context_features
-            else PlayerContext.NUM_PLAYER_CONTEXT.value
-        )
         player_context = torch.zeros(
             N,
-            player_context_count,
+            PlayerContext.NUM_PLAYER_CONTEXT.value,
             num_players,
             device=self.device,
             dtype=self.dtype,
@@ -109,8 +100,6 @@ class _BetterFeatureEncoderBase:
         player_context[:, PlayerContext.LOG_COMMITTED_BB.value] = torch.log1p(
             committed / bb
         )
-        if self.legacy_context_features:
-            return player_context.flatten(1)
 
         max_committed = committed.amax(dim=1)
         to_call = (max_committed[:, None] - committed).clamp_min(0.0)
@@ -252,14 +241,9 @@ class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
 
         N = beliefs.shape[0]
         num_players = beliefs.shape[1]
-        scalar_context_count = (
-            LEGACY_NUM_SCALAR_CONTEXT
-            if self.legacy_context_features
-            else ScalarContext.NUM_SCALAR_CONTEXT.value
-        )
         scalar_context = torch.zeros(
             N,
-            scalar_context_count,
+            ScalarContext.NUM_SCALAR_CONTEXT.value,
             device=self.device,
             dtype=self.dtype,
         )
@@ -300,14 +284,13 @@ class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
             )
         )
         scalar_context[:, ScalarContext.LOG_POT_BB.value] = torch.log1p(pot_bb)
-        if not self.legacy_context_features:
-            self._fill_policy_betting_context(
-                scalar_context,
-                to_act,
-                pot_float,
-                scale,
-                indices,
-            )
+        self._fill_policy_betting_context(
+            scalar_context,
+            to_act,
+            pot_float,
+            scale,
+            indices,
+        )
 
         player_context = self._player_context(
             N, num_players, scale, pot_float, bb, indices, to_act, button
@@ -348,14 +331,9 @@ class BetterStreetValueFeatureEncoder(_BetterFeatureEncoderBase):
 
         N = beliefs.shape[0]
         num_players = beliefs.shape[1]
-        scalar_context_count = (
-            LEGACY_NUM_SCALAR_CONTEXT
-            if self.legacy_context_features
-            else ValueScalarContext.NUM_SCALAR_CONTEXT.value
-        )
         scalar_context = torch.zeros(
             N,
-            scalar_context_count,
+            ValueScalarContext.NUM_SCALAR_CONTEXT.value,
             device=self.device,
             dtype=self.dtype,
         )
@@ -404,14 +382,13 @@ class BetterStreetValueFeatureEncoder(_BetterFeatureEncoderBase):
             )
         )
         scalar_context[:, ValueScalarContext.LOG_POT_BB.value] = torch.log1p(pot_bb)
-        if not self.legacy_context_features:
-            self._fill_value_betting_context(
-                scalar_context,
-                to_act,
-                pot_float,
-                scale,
-                indices,
-            )
+        self._fill_value_betting_context(
+            scalar_context,
+            to_act,
+            pot_float,
+            scale,
+            indices,
+        )
 
         player_context = self._player_context(
             N, num_players, scale, pot_float, bb, indices, to_act, button

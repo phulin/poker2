@@ -61,16 +61,8 @@ class PlayerContext(Enum):
     NUM_PLAYER_CONTEXT = 13
 
 
-LEGACY_NUM_SCALAR_CONTEXT = 7
-LEGACY_NUM_PLAYER_CONTEXT = 4
-
-
 def context_length(num_players: int) -> int:
     return policy_context_length(num_players)
-
-
-def legacy_context_length(num_players: int) -> int:
-    return legacy_policy_context_length(num_players)
 
 
 def policy_context_length(num_players: int) -> int:
@@ -80,16 +72,8 @@ def policy_context_length(num_players: int) -> int:
     )
 
 
-def legacy_policy_context_length(num_players: int) -> int:
-    return LEGACY_NUM_SCALAR_CONTEXT + num_players * LEGACY_NUM_PLAYER_CONTEXT
-
-
 def value_context_length(num_players: int) -> int:
     return (
         ValueScalarContext.NUM_SCALAR_CONTEXT.value
         + num_players * PlayerContext.NUM_PLAYER_CONTEXT.value
     )
-
-
-def legacy_value_context_length(num_players: int) -> int:
-    return LEGACY_NUM_SCALAR_CONTEXT + num_players * LEGACY_NUM_PLAYER_CONTEXT

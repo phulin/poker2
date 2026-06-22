@@ -181,7 +181,6 @@ def _load_policy_model(
         nonlinearity=_enum_nonlinearity(
             model_cfg.get("nonlinearity", NonlinearityType.leaky_relu)
         ),
-        legacy_context_features=bool(model_cfg.get("legacy_context_features", False)),
     )
     model_type = str(model_cfg.get("preflop_model_type", "ffn")).lower()
     if model_type in {"transformer", "tokens", "player_transformer"}:

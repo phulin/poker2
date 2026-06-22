@@ -298,7 +298,6 @@ class ModelConfig:
     preflop_hand_dim: int = 1326
     preflop_model_type: PreflopModelType = PreflopModelType.ffn
     preflop_transformer_heads: int = 8
-    legacy_context_features: bool = False
 
     # Better TRM parameters
     num_recursions: int = 6

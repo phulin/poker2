@@ -23,7 +23,7 @@ from p2.env.card_utils import (
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
 from p2.models.mlp import RebelFFN
-from p2.models.mlp.better_features import context_length, legacy_context_length
+from p2.models.mlp.better_features import context_length
 from p2.models.mlp.better_ffn import (
     BetterPolicyFFN,
     BetterPreflopPolicyFFN,
@@ -246,11 +246,7 @@ class RebelCFRTrainer:
         # Model
         if cfg.model.name == ModelType.better_ffn:
             self.model = self._make_better_split_ffn()
-            num_context_features = (
-                legacy_context_length(self.num_players)
-                if cfg.model.legacy_context_features
-                else context_length(self.num_players)
-            )
+            num_context_features = context_length(self.num_players)
         elif cfg.model.name == ModelType.better_trm:
             self.model = BetterTRM(
                 num_actions=self.num_actions,
@@ -655,7 +651,6 @@ class RebelCFRTrainer:
             policy_rank=cfg.model.policy_rank,
             policy_hand_bias_rank=cfg.model.policy_hand_bias_rank,
             nonlinearity=cfg.model.nonlinearity,
-            legacy_context_features=cfg.model.legacy_context_features,
         )
         if int(cfg.model.preflop_hand_dim) == 169:
             if cfg.model.preflop_model_type is PreflopModelType.transformer:
