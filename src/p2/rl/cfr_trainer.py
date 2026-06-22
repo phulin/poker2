@@ -37,6 +37,7 @@ from p2.models.mlp.better_trm import BetterTRM
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput, TRMLatent
 from p2.models.street_model_registry import StreetModelRegistry
+from p2.rl.checkpoint_io import CheckpointIO
 from p2.rl.losses import RebelSupervisedLoss
 from p2.rl.optimizers import build_optimizer
 from p2.rl.rebel_batch import RebelBatch
@@ -583,6 +584,9 @@ class RebelCFRTrainer:
             return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         return nullcontext()
 
+    def model_autocast(self):
+        return self._model_autocast()
+
     def _compute_grad_clip_groups(self) -> None:
         """Partition parameters into policy/value groups for separate gradient
         clipping. Only possible when the two heads have disjoint parameters
@@ -741,17 +745,18 @@ class RebelCFRTrainer:
     def _load_closing_leaf_model(self, checkpoint_path: str) -> nn.Module:
         return self._load_frozen_eval_model(checkpoint_path)
 
+    def load_closing_leaf_model(self, checkpoint_path: str) -> nn.Module:
+        """Load a frozen model for closing-leaf or distillation evaluation."""
+        return self._load_closing_leaf_model(checkpoint_path)
+
     def _load_frozen_eval_model(self, checkpoint_path: str) -> nn.Module:
-        checkpoint = torch.load(
-            checkpoint_path, map_location=self.device, weights_only=False
-        )
+        checkpoint = CheckpointIO.load(checkpoint_path, map_location=self.device)
         model_component = checkpoint.get("model_component")
         model = self._make_eval_twin(compile_model=False)
-        model_state = checkpoint["model"]
-        model_state = {
-            key: value.to(self.float_dtype) if value.dtype.is_floating_point else value
-            for key, value in model_state.items()
-        }
+        model_state = CheckpointIO.cast_floating_state_dict(
+            checkpoint["model"],
+            self.float_dtype,
+        )
         if model_component == "value_model":
             if type(model) is not BetterSplitFFN:
                 raise TypeError("value-only checkpoints require model.name=BetterFFN")
@@ -805,6 +810,10 @@ class RebelCFRTrainer:
         """Copy train or EMA weights into the dedicated inference model."""
         self._sync_eval_model_from_training(self.inference_model)
 
+    def sync_inference_model(self) -> None:
+        """Public wrapper for staged drivers that need fresh inference weights."""
+        self._sync_inference_model()
+
     @torch.no_grad()
     def _sync_cfr_target_model(self, step: int) -> bool:
         """Promote train or EMA weights into the block-frozen CFR target model."""
@@ -813,6 +822,10 @@ class RebelCFRTrainer:
         self._sync_eval_model_from_training(self.cfr_target_model)
         self.cfr_target_model_step = int(step)
         return True
+
+    def sync_cfr_target_model(self, step: int) -> bool:
+        """Public wrapper for staged drivers that advance the CFR target model."""
+        return self._sync_cfr_target_model(step)
 
     def _maybe_promote_cfr_target_model(self, step: int) -> bool:
         if self.cfr_target_model is None or self.target_update_block_batches <= 0:
@@ -2375,6 +2388,34 @@ class RebelCFRTrainer:
             "update_norm": update_norm.detach(),
         }
 
+    def supervise_policy_batch(
+        self,
+        policy_batch: RebelBatch,
+        *,
+        step: int | None = None,
+        policy_latent: TRMLatent | None = None,
+        apply_schedules: bool = False,
+        sync_inference_model: bool = True,
+        sync_cfr_target_model: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        """Run a policy-only supervised update for staged training pathways."""
+        if apply_schedules:
+            if step is None:
+                raise ValueError("step is required when apply_schedules=True")
+            self._apply_schedules(step)
+        self.model.train()
+        stats = self._supervise_policy_only(
+            policy_batch.to(self.device),
+            policy_latent=policy_latent,
+        )
+        if sync_inference_model:
+            self._sync_inference_model()
+        if sync_cfr_target_model:
+            if step is None:
+                raise ValueError("step is required when sync_cfr_target_model=True")
+            self._sync_cfr_target_model(step + 1)
+        return stats
+
     def train_value_batch(
         self,
         value_batch: RebelBatch,
@@ -2835,10 +2876,10 @@ class RebelCFRTrainer:
         # Convert model state to bfloat16 if requested
         model_state = self.model.state_dict()
         if save_dtype is not None:
-            model_state = {
-                k: v.to(save_dtype) if v.dtype.is_floating_point else v
-                for k, v in model_state.items()
-            }
+            model_state = CheckpointIO.cast_floating_state_dict(
+                model_state,
+                save_dtype,
+            )
 
         state = {
             "model": model_state,
@@ -2866,19 +2907,19 @@ class RebelCFRTrainer:
         if self.ema_helper is not None:
             model_avg_state = dict(self.ema_helper.shadow)
             if save_dtype is not None:
-                model_avg_state = {
-                    k: v.to(save_dtype) if v.dtype.is_floating_point else v
-                    for k, v in model_avg_state.items()
-                }
+                model_avg_state = CheckpointIO.cast_floating_state_dict(
+                    model_avg_state,
+                    save_dtype,
+                )
             state["model_avg"] = model_avg_state
 
         if self.cfr_target_model is not None:
             cfr_target_state = self.cfr_target_model.state_dict()
             if save_dtype is not None:
-                cfr_target_state = {
-                    k: v.to(save_dtype) if v.dtype.is_floating_point else v
-                    for k, v in cfr_target_state.items()
-                }
+                cfr_target_state = CheckpointIO.cast_floating_state_dict(
+                    cfr_target_state,
+                    save_dtype,
+                )
             state["cfr_target_model"] = cfr_target_state
             state["cfr_target_model_step"] = self.cfr_target_model_step
             state["cfr_target_update_block_batches"] = (
@@ -2920,10 +2961,10 @@ class RebelCFRTrainer:
 
         model_state = value_model.state_dict()
         if save_dtype is not None:
-            model_state = {
-                k: v.to(save_dtype) if v.dtype.is_floating_point else v
-                for k, v in model_state.items()
-            }
+            model_state = CheckpointIO.cast_floating_state_dict(
+                model_state,
+                save_dtype,
+            )
 
         state = {
             "model": model_state,
@@ -2948,17 +2989,11 @@ class RebelCFRTrainer:
         torch.save(state, path)
 
     def load_checkpoint(self, path: str, load_optimizer: bool = True) -> int:
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        ckpt = CheckpointIO.load(path, map_location=self.device)
 
         # Convert model state back to host dtype if it was saved in bfloat16
         save_dtype_str = ckpt.get("save_dtype")
-        model_state = ckpt["model"]
-        if save_dtype_str is not None and save_dtype_str != str(self.float_dtype):
-            # Convert back to float32 for host dtype
-            model_state = {
-                k: v.to(self.float_dtype) if v.dtype.is_floating_point else v
-                for k, v in model_state.items()
-            }
+        model_state = CheckpointIO.model_state_for_host_dtype(ckpt, self.float_dtype)
 
         if ckpt.get("model_component") == "value_model":
             if type(self.model) is not BetterSplitFFN:
@@ -2975,10 +3010,10 @@ class RebelCFRTrainer:
         if "model_avg" in ckpt and self.ema_helper is not None:
             model_avg_state = ckpt["model_avg"]
             if save_dtype_str is not None and save_dtype_str != str(self.float_dtype):
-                model_avg_state = {
-                    k: v.to(self.float_dtype) if v.dtype.is_floating_point else v
-                    for k, v in model_avg_state.items()
-                }
+                model_avg_state = CheckpointIO.cast_floating_state_dict(
+                    model_avg_state,
+                    self.float_dtype,
+                )
             # Older checkpoints saved a full state_dict (params + buffers); keep
             # only the trainable-param keys that EMAHelper tracks.
             shadow_keys = set(self.ema_helper.shadow.keys())

@@ -256,7 +256,7 @@ def _load_model_weights_for_pregeneration(
         trainer.model.load_state_dict(
             model_state, strict=trainer.cfg.strict_model_loading
         )
-    trainer._sync_inference_model()
+    trainer.sync_inference_model()
     trainer.model.eval()
 
 

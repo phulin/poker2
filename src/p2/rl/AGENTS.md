@@ -5,6 +5,7 @@ Reinforcement learning and ReBeL training support: PPO losses, replay buffers, o
 - `__init__.py`: Package marker.
 - `agent_snapshot.py`: Snapshot wrapper for frozen agents.
 - `cfr_trainer.py`: ReBeL CFR supervised trainer, including split BetterFFN policy/value ownership, compact 169-hand preflop model routing with BF16 CUDA inference twins, optional block-frozen CFR target model promotion, actor-only backup-consistency auxiliary training from stored child features, value-only distillation updates and checkpoints, PBSEnv-backed multiway setup with dedicated preflop sparse evaluator routing, non-fused closing-leaf checkpoint routing, pregeneration-only construction without replay buffers, data-source state checkpointing, and optional replay-buffer sidecar save/load.
+- `checkpoint_io.py`: Shared ReBeL checkpoint helpers for metadata reads, floating tensor dtype restoration, and staged model-weight loading.
 - `rebel_loop.py`: Shared ReBeL training loop runner for step execution, metric printing, checkpoint cadence/cleanup, optional preflop analyzer printing, final checkpointing, and TrueSkill snapshots.
 - `losses.py`: PPO variants, CFR distillation loss, and ReBeL supervised loss with compact 169-hand preflop value/policy branches, including live-player masks for folded-player-aware policy/value weighting.
 - `optimizers.py`: Optimizer construction helpers, including optional Muon or eager NorMuon matrix optimization with AdamW fallback splitting for ReBeL/all-in training and split BetterFFN policy-head grouping.
