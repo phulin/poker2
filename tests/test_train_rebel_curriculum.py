@@ -181,6 +181,11 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
     assert stage_cfg.train.learning_rate == 0.08
     assert stage_cfg.search.iterations == 17
     assert stage_cfg.trueskill.enabled is False
+    resolved_config = json.loads(
+        (tmp_path / "river" / "resolved_config.json").read_text()
+    )
+    assert resolved_config["checkpoint_dir"] == str(tmp_path / "river")
+    assert resolved_config["train"]["batch_size"] == 77
     assert kwargs["start_step"] == 0
     assert kwargs["stop_step"] == 3
     assert kwargs["stage_tag"] == "river"

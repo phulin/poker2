@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import torch
 
 from p2.core.structured_config import Config
@@ -80,6 +82,22 @@ def test_training_run_initializes_wandb_with_resolved_config(
     assert captured["config"]["resolved_config"]["checkpoint_dir"] == str(
         tmp_path / "checkpoints"
     )
+    resolved_config = tmp_path / "checkpoints" / "resolved_config.json"
+    assert resolved_config.exists()
+    assert json.loads(resolved_config.read_text())["checkpoint_dir"] == str(
+        tmp_path / "checkpoints"
+    )
+
+
+def test_write_resolved_config_accepts_explicit_directory(tmp_path) -> None:
+    cfg = Config(device="cpu", checkpoint_dir=str(tmp_path / "checkpoints"))
+
+    path = training_run.write_resolved_config(cfg, tmp_path / "stage")
+
+    assert path == tmp_path / "stage" / "resolved_config.json"
+    payload = json.loads(path.read_text())
+    assert payload["checkpoint_dir"] == str(tmp_path / "checkpoints")
+    assert payload["device"] == "cpu"
 
 
 def test_training_run_context_logs_model_summary(monkeypatch) -> None:

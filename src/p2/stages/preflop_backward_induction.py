@@ -30,7 +30,7 @@ from p2.stages.preflop_buckets import (
     build_run_config,
     load_base_config,
 )
-from p2.runtime.training_run import wandb_run
+from p2.runtime.training_run import wandb_run, write_resolved_config
 from p2.utils.model_utils import compute_masked_logits, count_model_parameters
 
 
@@ -807,6 +807,7 @@ def run_train_specialists(
         num_steps=total_updates_guess,
         num_envs=_max_cfr_batch_size(args),
     )
+    write_resolved_config(base_cfg, output_dir)
     run_cm = _init_wandb(
         args,
         base_cfg,
@@ -842,6 +843,7 @@ def run_train_specialists(
                 num_steps=total_updates_guess,
                 num_envs=cfr_batch_size,
             )
+            write_resolved_config(cfg)
             reader = PublicStateBucketReader(
                 args.state_dataset,
                 bucket_label,
@@ -1233,6 +1235,7 @@ def run_distill(
         checkpoint_dir=output_dir / "checkpoints",
         num_steps=total_updates,
     )
+    write_resolved_config(cfg, output_dir)
     student = RebelCFRTrainer(cfg=copy.deepcopy(cfg), device=device)
     _load_model_weights(student, args.student_init or args.base_checkpoint)
     rng = torch.Generator(device=device)

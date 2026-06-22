@@ -33,6 +33,7 @@ from p2.runtime.training_run import (
     setup_torch_runtime,
     wandb_run,
     watch_model,
+    write_resolved_config,
 )
 from p2.search.chance_node_helper import ChanceNodeHelper
 from p2.search.end_of_street_distillation import build_end_of_street_value_batch
@@ -400,6 +401,7 @@ def _run_train_substep(
             if "model_scope" not in substep.search_overrides:
                 stage_cfg.search.model_scope = ModelScope.end_of_street
     os.makedirs(stage_cfg.checkpoint_dir, exist_ok=True)
+    write_resolved_config(stage_cfg)
     metadata = _checkpoint_metadata(substep_name, substep)
     if stage_cfg.search.closing_leaf_checkpoint is not None:
         metadata["curriculum_closing_checkpoint"] = (
@@ -470,6 +472,7 @@ def _run_distill_substep(
         promoted=promoted,
     )
     os.makedirs(stage_cfg.checkpoint_dir, exist_ok=True)
+    write_resolved_config(stage_cfg)
 
     resume_metadata = (
         _read_checkpoint_metadata(resume_from, device) if resume_from else {}

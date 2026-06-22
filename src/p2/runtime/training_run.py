@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Iterator, Protocol
 
 import torch
@@ -85,6 +87,23 @@ def watch_model(model: torch.nn.Module, run: ActiveRun, *, log_freq: int = 100) 
         run.watch(model, log_freq=log_freq)
 
 
+def write_resolved_config(
+    cfg: Config,
+    directory: str | os.PathLike[str] | None = None,
+    *,
+    filename: str = "resolved_config.json",
+) -> Path:
+    target_dir = Path(cfg.checkpoint_dir if directory is None else directory)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / filename
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(asdict(cfg), fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp_path, path)
+    return path
+
+
 def _wandb_init_kwargs(
     cfg: Config,
     *,
@@ -153,6 +172,7 @@ def training_run(
 ) -> Iterator[TrainingRunContext]:
     if create_checkpoint_dir:
         os.makedirs(cfg.checkpoint_dir, exist_ok=True)
+        write_resolved_config(cfg)
     device = device_from_config(cfg)
     print(f"Using device: {device}")
     if configure_torch:
@@ -173,4 +193,5 @@ __all__ = [
     "wandb_run",
     "wandb_run_id_from_checkpoint",
     "watch_model",
+    "write_resolved_config",
 ]
