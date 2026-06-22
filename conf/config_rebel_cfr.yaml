@@ -118,14 +118,13 @@ env:
 
 search:
   enabled: true
-  depth: 5
+  depth: 4
   bet_bins_by_depth:
     - [0.25, 0.5, 0.75, 1.0, 1.5]
     - [0.5, 1.0]
     - [1.0]
     - [1.0]
-    - []
-  allin_by_depth: [true, true, true, true, false]
+  allin_by_depth: [true, true, true, true]
   preflop_allin_table_path: outputs/preflop_allin_table.pt.zst
   preflop_allin_169_cache_path: outputs/precompute/preflop_allin_169_u16.pt.zst
   preflop_allin_169_model_checkpoint: outputs/checkpoints_allin_169_transformer/allin_256k_xf4_h192_hd128_mainlr00025_adamw0004_bs1024_maskfold_s16384_b1024_min4/latest.pt
