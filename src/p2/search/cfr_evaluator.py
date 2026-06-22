@@ -373,6 +373,10 @@ class CFREvaluator(ABC):
             self.cutoff_indices = empty
             self.new_street_model_positions = empty
             self.cutoff_model_positions = empty
+            self.model_baseline_positions = empty
+            self.model_hu_positions = empty
+            self.new_street_baseline_model_positions = empty
+            self.new_street_hu_model_positions = empty
             return
 
         new_street_at_model = self.new_street_mask[self.model_indices]
@@ -387,6 +391,25 @@ class CFREvaluator(ABC):
         self.cutoff_indices = self.model_indices[
             self.cutoff_model_positions
         ].contiguous()
+        empty = torch.empty(0, dtype=torch.long, device=device)
+        self.model_baseline_positions = empty
+        self.model_hu_positions = positions
+        self.new_street_baseline_model_positions = empty
+        self.new_street_hu_model_positions = self.new_street_model_positions
+        if (
+            getattr(self, "closing_leaf_value_model", None) is not None
+            and self._can_project_heads_up_closing_model()
+        ):
+            live_counts = self._live_counts_for_nodes(self.model_indices)
+            hu_at_model = live_counts >= 2
+            self.model_baseline_positions = positions[~hu_at_model].contiguous()
+            self.model_hu_positions = positions[hu_at_model].contiguous()
+            self.new_street_baseline_model_positions = positions[
+                new_street_at_model & ~hu_at_model
+            ].contiguous()
+            self.new_street_hu_model_positions = positions[
+                new_street_at_model & hu_at_model
+            ].contiguous()
 
     def _refresh_model_indices(self) -> None:
         self.model_indices = self._compute_model_indices()
@@ -398,6 +421,10 @@ class CFREvaluator(ABC):
             or not hasattr(self, "cutoff_indices")
             or not hasattr(self, "new_street_model_positions")
             or not hasattr(self, "cutoff_model_positions")
+            or not hasattr(self, "model_baseline_positions")
+            or not hasattr(self, "model_hu_positions")
+            or not hasattr(self, "new_street_baseline_model_positions")
+            or not hasattr(self, "new_street_hu_model_positions")
             or self.new_street_model_positions.numel()
             + self.cutoff_model_positions.numel()
             != self.model_indices.numel()

@@ -2591,15 +2591,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             if self.new_street_model_positions.numel() > 0:
                 closing_encoder = self.closing_leaf_value_encoder
                 if self._can_project_heads_up_closing_model():
-                    node_indices = self.model_indices[self.new_street_model_positions]
-                    live_counts = self._live_counts_for_nodes(node_indices)
-                    baseline_local = torch.where(live_counts < 2)[0]
-                    if baseline_local.numel() > 0:
-                        baseline_positions = self.new_street_model_positions[
-                            baseline_local
-                        ]
+                    baseline_positions = self.new_street_baseline_model_positions
+                    if baseline_positions.numel() > 0:
+                        baseline_nodes = self.model_indices[baseline_positions]
                         baseline_values = self._stack_value_baseline(
-                            node_indices[baseline_local],
+                            baseline_nodes,
                             self.hand_dim,
                         )
                         hand_values.index_copy_(
@@ -2608,12 +2604,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                             baseline_values.to(dtype=hand_values.dtype),
                         )
                         evaluated_any = True
-                    hu_local = torch.where(live_counts >= 2)[0]
-                    if hu_local.numel() == 0:
+                    hu_positions = self.new_street_hu_model_positions
+                    if hu_positions.numel() == 0:
                         return hand_values, bool(
                             evaluated_any and model_applied_zero_sum
                         )
-                    hu_positions = self.new_street_model_positions[hu_local]
                     closing_features, live_players = (
                         self._heads_up_projected_closing_features(
                             features,
@@ -2670,13 +2665,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if scope != "end_of_street":
             raise ValueError(f"Unknown search.model_scope: {scope!r}")
         if closing_value_model is not None:
-            positions = torch.arange(
-                len(features), dtype=torch.long, device=features.context.device
-            )
+            self._ensure_model_index_partitions()
             closing_encoder = self.closing_leaf_value_encoder
             if self._can_project_heads_up_closing_model():
-                node_indices = self.model_indices[positions]
-                live_counts = self._live_counts_for_nodes(node_indices)
                 projected_values = self.latest_values.new_empty(
                     (
                         len(features),
@@ -2684,20 +2675,19 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         self.hand_dim,
                     )
                 )
-                baseline_local = torch.where(live_counts < 2)[0]
-                if baseline_local.numel() > 0:
+                baseline_positions = self.model_baseline_positions
+                if baseline_positions.numel() > 0:
                     projected_values.index_copy_(
                         0,
-                        baseline_local,
+                        baseline_positions,
                         self._stack_value_baseline(
-                            node_indices[baseline_local],
+                            self.model_indices[baseline_positions],
                             self.hand_dim,
                         ),
                     )
-                hu_local = torch.where(live_counts >= 2)[0]
-                if hu_local.numel() == 0:
+                hu_positions = self.model_hu_positions
+                if hu_positions.numel() == 0:
                     return projected_values, False
-                hu_positions = positions[hu_local]
                 closing_features, live_players = (
                     self._heads_up_projected_closing_features(
                         features,
@@ -2716,8 +2706,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     target_hand_dim=self.hand_dim,
                     node_indices=self.model_indices[hu_positions],
                 )
-                projected_values.index_copy_(0, hu_local, closing_values)
+                projected_values.index_copy_(0, hu_positions, closing_values)
                 return projected_values, model_zero_sum
+            positions = torch.arange(
+                len(features), dtype=torch.long, device=features.context.device
+            )
             features = self._features_for_model_positions(
                 features,
                 positions,
