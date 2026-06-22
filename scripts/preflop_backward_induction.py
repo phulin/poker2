@@ -16,8 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+import hydra
 import torch
 import wandb
+from omegaconf import DictConfig
 from torch.utils.data import DataLoader, TensorDataset
 
 from p2.core.structured_config import Config
@@ -33,6 +35,7 @@ DEFAULT_CHECKPOINT = (
     "/home/user/poker2/checkpoints-rebel-curriculum-preflop_2000_p6_lr0p01_"
     "backupcons_actor_lam01_rb32_from2p_norb/preflop/rebel_latest.pt"
 )
+REPO_ROOT = Path(__file__).resolve().parents[1]
 STATE_FIELDS = (
     "button",
     "street",
@@ -133,16 +136,27 @@ def _init_wandb(args: argparse.Namespace, cfg: Config, *, name: str):
         return nullcontext()
 
 
-def _load_checkpoint_config(
-    checkpoint_path: str,
+def _load_base_config(config_name: str, overrides: list[str]) -> Config:
+    with hydra.initialize_config_dir(
+        config_dir=str(REPO_ROOT / "conf"),
+        version_base=None,
+    ):
+        dict_config: DictConfig = hydra.compose(
+            config_name=config_name,
+            overrides=overrides,
+        )
+    return Config.from_dict_config(dict_config)
+
+
+def _build_run_config(
+    base_cfg: Config,
     *,
     args: argparse.Namespace,
     checkpoint_dir: Path,
     num_steps: int,
     num_envs: int | None = None,
 ) -> Config:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    cfg = Config.from_dict(copy.deepcopy(checkpoint["config"]))
+    cfg = copy.deepcopy(base_cfg)
     cfg.device = args.device
     cfg.num_envs = int(args.cfr_batch_size if num_envs is None else num_envs)
     cfg.num_steps = max(1, int(num_steps))
@@ -832,8 +846,9 @@ def run_train_specialists(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     total_updates_guess = _estimate_train_updates(args)
-    base_cfg = _load_checkpoint_config(
-        args.base_checkpoint,
+    base_template = _load_base_config(args.config_name, list(args.config_override))
+    base_cfg = _build_run_config(
+        base_template,
         args=args,
         checkpoint_dir=output_dir / "checkpoints",
         num_steps=total_updates_guess,
@@ -867,8 +882,8 @@ def run_train_specialists(args: argparse.Namespace) -> None:
                     raise FileExistsError(f"{solved_dir} exists; pass --overwrite")
                 solved_dir.mkdir(parents=True, exist_ok=True)
 
-            cfg = _load_checkpoint_config(
-                previous_value_checkpoint,
+            cfg = _build_run_config(
+                base_template,
                 args=args,
                 checkpoint_dir=bucket_dir / "checkpoints",
                 num_steps=total_updates_guess,
@@ -1248,8 +1263,9 @@ def run_distill(args: argparse.Namespace) -> None:
         * len(BUCKET_ORDER_DEEP_TO_SHALLOW)
         * 2,
     )
-    cfg = _load_checkpoint_config(
-        args.base_checkpoint,
+    base_template = _load_base_config(args.config_name, list(args.config_override))
+    cfg = _build_run_config(
+        base_template,
         args=args,
         checkpoint_dir=output_dir / "checkpoints",
         num_steps=total_updates,
@@ -1269,8 +1285,8 @@ def run_distill(args: argparse.Namespace) -> None:
             if checkpoint is None:
                 raise ValueError(f"missing specialist checkpoint for {bucket_label}")
             include_value = bucket_label != "actions_0_3"
-            teacher_cfg = _load_checkpoint_config(
-                checkpoint,
+            teacher_cfg = _build_run_config(
+                base_template,
                 args=args,
                 checkpoint_dir=output_dir / "teacher_tmp",
                 num_steps=total_updates,
@@ -1365,6 +1381,12 @@ def run_distill(args: argparse.Namespace) -> None:
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config-name", default="config_rebel_cfr")
+    parser.add_argument(
+        "config_override",
+        nargs="*",
+        help="Hydra overrides for the base ReBeL config.",
+    )
     parser.add_argument("--state-dataset", required=True)
     parser.add_argument("--base-checkpoint", default=DEFAULT_CHECKPOINT)
     parser.add_argument("--output-dir", required=True)
