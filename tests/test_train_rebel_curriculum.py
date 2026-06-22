@@ -12,8 +12,10 @@ from p2.core.structured_config import (
     Config,
     CurriculumSubstepConfig,
     ModelScope,
+    ModelType,
     StreetValueHeads,
 )
+from p2.models.mlp.better_ffn import BetterSplitFFN
 
 
 class _FakeTrainer:
@@ -66,23 +68,33 @@ def test_curriculum_train_substeps_do_not_run_preflop_analyzer() -> None:
     assert curriculum_stage._should_print_preflop_analyzer("E_turn") is False
 
 
-class _FakeSplitModel(torch.nn.Module):
+class _FakeSplitLeaf(torch.nn.Linear):
     def __init__(self) -> None:
-        super().__init__()
-        self.policy_model = torch.nn.Linear(1, 1)
-        self.value_model = torch.nn.Linear(1, 1)
+        super().__init__(1, 1)
+        self.hidden_dim = 1
+        self.num_players = 2
+        self.num_actions = 2
+        self.enforce_zero_sum = False
+
+
+def _fake_split_model() -> BetterSplitFFN:
+    return BetterSplitFFN(
+        policy_model=_FakeSplitLeaf(),
+        value_model=_FakeSplitLeaf(),
+    )
 
 
 class _FakeSplitTrainer:
     def __init__(self) -> None:
-        self.model = _FakeSplitModel()
+        self.model = _fake_split_model()
         self.cfg = Config(device="cpu")
+        self.cfg.model.name = ModelType.better_ffn
         self.cfg.strict_model_loading = True
         self.synced = False
 
     def _load_closing_leaf_model(self, checkpoint_path: str) -> torch.nn.Module:
         del checkpoint_path
-        source = _FakeSplitModel()
+        source = _fake_split_model()
         with torch.no_grad():
             source.policy_model.weight.fill_(3.0)
             source.policy_model.bias.fill_(4.0)
@@ -240,6 +252,7 @@ def test_curriculum_train_substep_initializes_policy_from_promoted_source(
 class _FakeSourceValueModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
+        self.enforce_zero_sum = False
         self.stem = torch.nn.Linear(2, 2)
         self.pre_value_head = torch.nn.Linear(2, 2)
 
@@ -247,25 +260,24 @@ class _FakeSourceValueModel(torch.nn.Module):
 class _FakeTargetValueModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
+        self.enforce_zero_sum = False
         self.stem = torch.nn.Linear(2, 2)
         self.pre_value_head = torch.nn.Linear(2, 2)
         self.post_value_head = torch.nn.Linear(2, 2)
 
 
-class _FakeValueInitModel(torch.nn.Module):
-    def __init__(self, value_model: torch.nn.Module) -> None:
-        super().__init__()
-        self.value_model = value_model
+def _fake_value_init_model(value_model: torch.nn.Module) -> BetterSplitFFN:
+    return BetterSplitFFN(policy_model=_FakeSplitLeaf(), value_model=value_model)
 
 
 class _FakeValueInitTrainer:
     def __init__(self) -> None:
-        self.model = _FakeValueInitModel(_FakeTargetValueModel())
+        self.model = _fake_value_init_model(_FakeTargetValueModel())
         self.synced = False
 
     def _load_closing_leaf_model(self, checkpoint_path: str) -> torch.nn.Module:
         assert checkpoint_path == "outputs/E_turn.pt"
-        source = _FakeValueInitModel(_FakeSourceValueModel())
+        source = _fake_value_init_model(_FakeSourceValueModel())
         with torch.no_grad():
             source.value_model.stem.weight.fill_(1.0)
             source.value_model.stem.bias.fill_(2.0)

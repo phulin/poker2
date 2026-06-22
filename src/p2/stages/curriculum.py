@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import time
+from dataclasses import fields
 from typing import Any
 
 import torch
@@ -15,9 +16,11 @@ import torch
 from p2.core.structured_config import (
     Config,
     CurriculumSubstepConfig,
+    ModelType,
     ModelScope,
     StreetValueHeads,
 )
+from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_loop import (
     cleanup_old_checkpoints,
@@ -69,7 +72,7 @@ def _load_curriculum_state(cfg: Config) -> dict[str, str]:
     with open(path, encoding="utf-8") as fh:
         state = json.load(fh)
     promoted = state.get("promoted", {})
-    if not isinstance(promoted, dict):
+    if type(promoted) is not dict:
         return {}
     return {str(key): str(value) for key, value in promoted.items()}
 
@@ -98,8 +101,9 @@ def _should_print_preflop_analyzer(net: str) -> bool:
 
 
 def _apply_overrides(target: object, overrides: dict[str, Any], *, label: str) -> None:
+    field_names = {field.name for field in fields(type(target))}
     for key, value in overrides.items():
-        if not hasattr(target, key):
+        if key not in field_names:
             raise ValueError(f"Unknown {label} override: {key}")
         setattr(target, key, value)
 
@@ -128,7 +132,16 @@ def _read_checkpoint_metadata(path: str, device: torch.device) -> dict[str, Any]
         return {}
     checkpoint = torch.load(path, weights_only=False, map_location=device)
     metadata = checkpoint.get("metadata", {})
-    return dict(metadata) if isinstance(metadata, dict) else {}
+    return dict(metadata) if type(metadata) is dict else {}
+
+
+def _metadata_string(metadata: dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise ValueError(f"Checkpoint metadata field `{key}` must be a string")
+    return value
 
 
 def _stage_names(cfg: Config) -> list[str]:
@@ -144,8 +157,8 @@ def _stage_names(cfg: Config) -> list[str]:
 
 
 def _resume_start_index(stage_names: list[str], metadata: dict[str, Any]) -> int:
-    substep = metadata.get("curriculum_substep")
-    if isinstance(substep, str) and substep in stage_names:
+    substep = _metadata_string(metadata, "curriculum_substep")
+    if substep is not None and substep in stage_names:
         return stage_names.index(substep)
     return 0
 
@@ -159,8 +172,8 @@ def _validate_resume_checkpoint(
         return
     if not os.path.exists(resume_from):
         raise FileNotFoundError(f"resume checkpoint does not exist: {resume_from}")
-    substep = metadata.get("curriculum_substep")
-    if not isinstance(substep, str):
+    substep = _metadata_string(metadata, "curriculum_substep")
+    if substep is None:
         raise ValueError(
             "Curriculum resume checkpoint is missing metadata field "
             "`curriculum_substep`"
@@ -223,8 +236,10 @@ def _source_checkpoint(
     if substep.from_net is not None and substep.from_net in promoted:
         return promoted[substep.from_net]
     if resume_metadata is not None:
-        source_checkpoint = resume_metadata.get("curriculum_source_checkpoint")
-        if isinstance(source_checkpoint, str) and source_checkpoint:
+        source_checkpoint = _metadata_string(
+            resume_metadata, "curriculum_source_checkpoint"
+        )
+        if source_checkpoint:
             return source_checkpoint
     raise ValueError(
         "Distill substep requires either `checkpoint` or a promoted `from_net`; "
@@ -242,12 +257,13 @@ def _closed_street_for_end_net(net: str) -> int:
 
 
 def _value_model(model: torch.nn.Module) -> torch.nn.Module:
-    return getattr(model, "value_model", model)
+    if type(model) is BetterSplitFFN:
+        return model.value_model
+    return model
 
 
-def _policy_model(model: torch.nn.Module) -> torch.nn.Module | None:
-    policy_model = getattr(model, "policy_model", None)
-    return policy_model if isinstance(policy_model, torch.nn.Module) else None
+def _policy_model(model: BetterSplitFFN) -> torch.nn.Module:
+    return model.policy_model
 
 
 def _value_initialization_checkpoint(
@@ -270,19 +286,22 @@ def _initialize_policy_from_checkpoint(
     *,
     substep_name: str,
 ) -> None:
-    target_policy = _policy_model(trainer.model)
-    if target_policy is None:
+    if trainer.cfg.model.name != ModelType.better_ffn:
         raise ValueError(
             f"Curriculum train substep {substep_name} cannot initialize policy: "
-            "target model has no policy_model"
+            "target model must use model.name=BetterFFN"
         )
+    target_model = trainer.model
+    if type(target_model) is not BetterSplitFFN:
+        raise TypeError("model.name=BetterFFN must construct BetterSplitFFN")
+    target_policy = _policy_model(target_model)
     source_model = trainer._load_closing_leaf_model(checkpoint_path)
-    source_policy = _policy_model(source_model)
-    if source_policy is None:
+    if type(source_model) is not BetterSplitFFN:
         raise ValueError(
             f"Curriculum train substep {substep_name} cannot initialize policy "
             f"from value-only checkpoint: {checkpoint_path}"
         )
+    source_policy = _policy_model(source_model)
     target_policy.load_state_dict(
         source_policy.state_dict(), strict=trainer.cfg.strict_model_loading
     )
@@ -373,8 +392,10 @@ def _run_train_substep(
     )
     if stage_cfg.search.closing_leaf_checkpoint is None and resume_from:
         resume_metadata = _read_checkpoint_metadata(resume_from, device)
-        closing_checkpoint = resume_metadata.get("curriculum_closing_checkpoint")
-        if isinstance(closing_checkpoint, str) and closing_checkpoint:
+        closing_checkpoint = _metadata_string(
+            resume_metadata, "curriculum_closing_checkpoint"
+        )
+        if closing_checkpoint:
             stage_cfg.search.closing_leaf_checkpoint = closing_checkpoint
             if "model_scope" not in substep.search_overrides:
                 stage_cfg.search.model_scope = ModelScope.end_of_street
