@@ -209,7 +209,10 @@ def test_pot_relative_value_error_metrics_uses_value_weights() -> None:
     )
     batch = SimpleNamespace(
         value_targets=torch.tensor([[[10.0, 10.0]], [[10.0, 10.0]]]),
-        statistics={"pot": torch.tensor([10.0, 20.0])},
+        statistics={
+            "pot": torch.tensor([10.0, 20.0]),
+            "scale": torch.tensor([100.0, 40.0]),
+        },
     )
     loss_dict = {
         "value_weights": torch.tensor([[[1.0, 0.0]], [[1.0, 1.0]]]),
@@ -217,10 +220,11 @@ def test_pot_relative_value_error_metrics_uses_value_weights() -> None:
 
     metrics = _pot_relative_value_error_metrics(output, batch, loss_dict)
 
-    # Weighted relative absolute errors are 0.2, 0.25, and 0.25.
+    # Weighted relative absolute errors are:
+    # 2 * 100 / 10, 5 * 40 / 20, and 5 * 40 / 20.
     assert torch.allclose(
         metrics["pot_relative_mae"],
-        torch.tensor((0.2 + 0.25 + 0.25) / 3.0),
+        torch.tensor((20.0 + 10.0 + 10.0) / 3.0),
     )
 
 

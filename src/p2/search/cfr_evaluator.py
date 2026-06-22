@@ -2994,6 +2994,7 @@ class CFREvaluator(ABC):
             "stage": 2 * self.env.street,
             "board": self.env.board_indices,
             "pot": self.env.pot,
+            "scale": self.env.scale,
             "node_depth": node_depth,
             "actions_this_round": self.env.actions_this_round,
         }

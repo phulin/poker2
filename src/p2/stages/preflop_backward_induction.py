@@ -566,6 +566,7 @@ def _validation_cache_metadata(
 ) -> dict[str, Any]:
     return {
         "kind": "preflop_backward_induction_validation_cache",
+        "format_version": 2,
         "bucket_label": bucket_label,
         "state_dataset": os.path.realpath(args.state_dataset),
         "cutoff_checkpoint": _checkpoint_signature(cutoff_checkpoint),
@@ -721,7 +722,8 @@ def _pot_relative_value_error_metrics(
     if output.hand_values is None or batch.value_targets is None:
         return {}
     pot = batch.statistics.get("pot")
-    if pot is None:
+    scale = batch.statistics.get("scale")
+    if pot is None or scale is None:
         return {}
 
     predictions = output.hand_values.float()
@@ -729,11 +731,20 @@ def _pot_relative_value_error_metrics(
         device=predictions.device,
         dtype=predictions.dtype,
     )
-    pot_scale = pot.to(device=predictions.device, dtype=predictions.dtype).clamp_min(1.0)
+    scale_tensor = scale.to(
+        device=predictions.device,
+        dtype=predictions.dtype,
+    ).clamp_min(1.0)
+    pot_scale = pot.to(
+        device=predictions.device,
+        dtype=predictions.dtype,
+    ).clamp_min(1.0)
+    while scale_tensor.ndim < predictions.ndim:
+        scale_tensor = scale_tensor.unsqueeze(-1)
     while pot_scale.ndim < predictions.ndim:
         pot_scale = pot_scale.unsqueeze(-1)
 
-    relative_abs_error = (predictions - targets).abs() / pot_scale
+    relative_abs_error = (predictions - targets).abs() * scale_tensor / pot_scale
     relative_sq_error = relative_abs_error.square()
     weights = loss_dict.get("value_weights")
     if isinstance(weights, torch.Tensor):
