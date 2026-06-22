@@ -124,6 +124,10 @@ def test_write_resolved_config_accepts_rebel_experiment_payload(tmp_path) -> Non
     assert payload["run"]["device"] == "cpu"
     assert payload["checkpoint"]["checkpoint_dir"] == str(tmp_path / "checkpoints")
     assert payload["logging"]["wandb_tags"] == ["rebel"]
+    assert payload["train"]["optimizer"] == "adamw"
+    assert "ppo_eps" not in payload["train"]
+    assert "kl_type" not in payload["train"]
+    assert "lr_scaling_init_value" not in payload["train"]
     assert "opponent_pool_type" not in payload
     assert "exploiter" not in payload
 
