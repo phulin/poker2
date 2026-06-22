@@ -7,6 +7,7 @@ import pytest
 from omegaconf import DictConfig
 
 from p2.cli import train_rebel_preflop_buckets as preflop_cli
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
 
 
@@ -38,7 +39,7 @@ def test_config_rebel_preflop_buckets_resolves() -> None:
             ],
         )
 
-    cfg = Config.from_dict_config(dict_config)
+    cfg = load_rebel_config(dict_config)
 
     assert cfg.device == "cpu"
     assert cfg.use_wandb is False

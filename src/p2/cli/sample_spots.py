@@ -27,6 +27,7 @@ import hydra
 import torch
 from omegaconf import DictConfig
 
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.rl.cfr_trainer import RebelCFRTrainer
@@ -284,7 +285,7 @@ def build_pbs_from_spots(
     version_base=None, config_path="../../../conf", config_name="config_rebel_cfr"
 )
 def main(dict_config: DictConfig) -> None:
-    cfg = Config.from_dict_config(dict_config)
+    cfg = load_rebel_config(dict_config)
     output_path = os.environ.get("SPOTS_OUTPUT", "spots.pt")
     num_spots = int(os.environ.get("SPOTS_N", "1024"))
     weights_env = os.environ.get("SPOTS_STREET_WEIGHTS")

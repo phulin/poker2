@@ -7,7 +7,9 @@ import hydra
 import torch
 from omegaconf import DictConfig
 
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
+from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.better_ffn import BetterSplitFFN
 
 
@@ -26,6 +28,8 @@ def _load_script_module():
 
 
 class _FakeSplitLeaf(torch.nn.Linear):
+    hand_dim = NUM_HANDS
+
     def __init__(self) -> None:
         super().__init__(1, 1)
         self.hidden_dim = 1
@@ -101,7 +105,7 @@ def test_config_rebel_evaluate_value_loss_resolves() -> None:
             ],
         )
 
-    cfg = Config.from_dict_config(dict_config)
+    cfg = load_rebel_config(dict_config)
 
     assert cfg.device == "cpu"
     assert cfg.use_wandb is False

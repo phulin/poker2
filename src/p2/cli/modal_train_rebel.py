@@ -9,7 +9,7 @@ dependencies, file uploads, and environment configuration.
 
 import hydra
 import modal
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 # Create Modal app
 app = modal.App("rebel-training")
@@ -61,31 +61,10 @@ def train_rebel_modal(cfg: DictConfig):
 
     # Import training function
     from p2.cli.train_rebel import train_rebel
-    from p2.core.structured_config import (
-        Config,
-        EnvConfig,
-        ModelConfig,
-        SearchConfig,
-        TrainingConfig,
-    )
+    from p2.config.rebel_load import load_rebel_experiment_config
 
-    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
-    train_config = TrainingConfig(**cfg_dict.get("train", {}))
-    model_config = ModelConfig(**cfg_dict.get("model", {}))
-    env_config = EnvConfig(**cfg_dict.get("env", {}))
-    search_config = SearchConfig(**cfg_dict.get("search", {}))
-
-    config = Config(
-        train=train_config,
-        model=model_config,
-        env=env_config,
-        search=search_config,
-        **{
-            k: v
-            for k, v in cfg_dict.items()
-            if k not in ["train", "model", "env", "search"]
-        },
-    )
+    experiment_config = load_rebel_experiment_config(cfg)
+    config = experiment_config.to_trainer_config()
 
     print("Starting ReBeL training in Modal...")
     print(f"PyTorch version: {torch.__version__}")
@@ -102,7 +81,7 @@ def train_rebel_modal(cfg: DictConfig):
     os.makedirs(config.checkpoint_dir, exist_ok=True)
 
     # Start training
-    train_rebel(config)
+    train_rebel(config, experiment_config=experiment_config)
     print("Training completed successfully!")
 
     # Commit volume to persist checkpoints

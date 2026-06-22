@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 from omegaconf import OmegaConf
 
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import (
     Config,
     EnvConfig,
@@ -95,9 +96,7 @@ def test_rebel_curriculum_and_data_config_parse_from_hydra_shape():
 
 
 def test_rebel_curriculum_river_config_loads_from_yaml():
-    cfg = Config.from_dict_config(
-        OmegaConf.load("conf/config_rebel_curriculum_river.yaml")
-    )
+    cfg = load_rebel_config(OmegaConf.load("conf/config_rebel_curriculum_river.yaml"))
 
     assert cfg.data.mode == "live"
     assert cfg.data.live_root_source == "random_river"
@@ -110,10 +109,10 @@ def test_rebel_curriculum_river_config_loads_from_yaml():
 
 
 def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
-    turn_cfg = Config.from_dict_config(
+    turn_cfg = load_rebel_config(
         OmegaConf.load("conf/config_rebel_curriculum_turn.yaml")
     )
-    flop_cfg = Config.from_dict_config(
+    flop_cfg = load_rebel_config(
         OmegaConf.load("conf/config_rebel_curriculum_flop.yaml")
     )
     distill_train_overrides = {
@@ -175,7 +174,7 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
 
 
 def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
-    cfg = Config.from_dict_config(
+    cfg = load_rebel_config(
         OmegaConf.load("conf/config_rebel_curriculum_postflop.yaml")
     )
     distill_train_overrides = {
@@ -238,7 +237,7 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
 
 
 def test_rebel_postflop_hybrid_holdout_config_loads_from_yaml():
-    cfg = Config.from_dict_config(
+    cfg = load_rebel_config(
         OmegaConf.load("conf/config_rebel_postflop_hybrid_holdout.yaml")
     )
 
@@ -253,7 +252,7 @@ def test_rebel_postflop_hybrid_holdout_config_loads_from_yaml():
 
 
 def test_rebel_pregenerate_postflop_config_loads_from_yaml():
-    cfg = Config.from_dict_config(
+    cfg = load_rebel_config(
         OmegaConf.load("conf/config_rebel_pregenerate_postflop.yaml")
     )
 
