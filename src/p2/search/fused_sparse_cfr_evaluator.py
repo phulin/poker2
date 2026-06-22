@@ -2593,10 +2593,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 if self._can_project_heads_up_closing_model():
                     baseline_positions = self.new_street_baseline_model_positions
                     if baseline_positions.numel() > 0:
-                        baseline_nodes = self.model_indices[baseline_positions]
-                        baseline_values = self._stack_value_baseline(
-                            baseline_nodes,
-                            self.hand_dim,
+                        baseline_values = (
+                            self._cached_stack_value_baseline_for_model_positions(
+                                baseline_positions,
+                                self.hand_dim,
+                            )
                         )
                         hand_values.index_copy_(
                             0,
@@ -2629,6 +2630,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         live_players,
                         target_hand_dim=self.hand_dim,
                         node_indices=self.model_indices[hu_positions],
+                        baseline=self._cached_stack_value_baseline_for_model_positions(
+                            hu_positions,
+                            self.hand_dim,
+                        ),
                     )
                     hand_values.index_copy_(
                         0,
@@ -2681,8 +2686,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     projected_values.index_copy_(
                         0,
                         baseline_positions,
-                        self._stack_value_baseline(
-                            self.model_indices[baseline_positions],
+                        self._cached_stack_value_baseline_for_model_positions(
+                            baseline_positions,
                             self.hand_dim,
                         ),
                     )
@@ -2707,6 +2712,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     live_players,
                     target_hand_dim=self.hand_dim,
                     node_indices=self.model_indices[hu_positions],
+                    baseline=self._cached_stack_value_baseline_for_model_positions(
+                        hu_positions,
+                        self.hand_dim,
+                    ),
                 )
                 projected_values.index_copy_(0, hu_positions, closing_values)
                 return projected_values, model_zero_sum

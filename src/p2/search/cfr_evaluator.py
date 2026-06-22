@@ -378,6 +378,7 @@ class CFREvaluator(ABC):
             self.new_street_baseline_model_positions = empty
             self.new_street_hu_model_positions = empty
             self._heads_up_projected_feature_cache = {}
+            self._stack_value_baseline_cache = {}
             return
 
         new_street_at_model = self.new_street_mask[self.model_indices]
@@ -398,6 +399,7 @@ class CFREvaluator(ABC):
         self.new_street_baseline_model_positions = empty
         self.new_street_hu_model_positions = self.new_street_model_positions
         self._heads_up_projected_feature_cache = {}
+        self._stack_value_baseline_cache = {}
         if (
             getattr(self, "closing_leaf_value_model", None) is not None
             and self._can_project_heads_up_closing_model()
@@ -588,12 +590,35 @@ class CFREvaluator(ABC):
         *,
         validate_live: bool = True,
     ) -> tuple[MLPFeatures, torch.Tensor]:
-        node_indices = self.model_indices[positions]
-        live_players = self._heads_up_live_players_for_nodes(
-            node_indices, validate=validate_live
-        )
         source_hand_dim = features.hand_dim
         target_hand_dim = self._closing_model_hand_dim()
+        source_encoder = encoder
+        if source_encoder is None:
+            source_encoder = getattr(
+                self, "value_feature_encoder", getattr(self, "feature_encoder", None)
+            )
+
+        cache = getattr(self, "_heads_up_projected_feature_cache", None)
+        if cache is None:
+            cache = {}
+            self._heads_up_projected_feature_cache = cache
+        cache_key = (
+            type(source_encoder),
+            id(source_encoder),
+            int(positions.data_ptr()),
+            int(positions.numel()),
+            int(source_hand_dim),
+            int(target_hand_dim),
+        )
+        cached = cache.get(cache_key)
+        if cached is None:
+            node_indices = self.model_indices[positions]
+            live_players = self._heads_up_live_players_for_nodes(
+                node_indices, validate=validate_live
+            )
+        else:
+            live_players = cached[-1]
+
         selected_beliefs = features.beliefs[positions].view(
             -1, self.num_players, source_hand_dim
         )
@@ -607,11 +632,6 @@ class CFREvaluator(ABC):
             target_hand_dim=target_hand_dim,
             is_belief=True,
         )
-        source_encoder = encoder
-        if source_encoder is None:
-            source_encoder = getattr(
-                self, "value_feature_encoder", getattr(self, "feature_encoder", None)
-            )
         if source_encoder is None:
             base = features[positions]
             return (
@@ -628,19 +648,6 @@ class CFREvaluator(ABC):
                 live_players,
             )
 
-        cache = getattr(self, "_heads_up_projected_feature_cache", None)
-        if cache is None:
-            cache = {}
-            self._heads_up_projected_feature_cache = cache
-        cache_key = (
-            type(source_encoder),
-            id(source_encoder),
-            int(positions.data_ptr()),
-            int(positions.numel()),
-            int(source_hand_dim),
-            int(target_hand_dim),
-        )
-        cached = cache.get(cache_key)
         if cached is None:
             if (
                 node_indices.is_cuda
@@ -694,6 +701,7 @@ class CFREvaluator(ABC):
         *,
         target_hand_dim: int,
         node_indices: torch.Tensor,
+        baseline: torch.Tensor | None = None,
     ) -> torch.Tensor:
         values = self._hand_dim_convert(
             values,
@@ -701,13 +709,33 @@ class CFREvaluator(ABC):
             target_hand_dim=target_hand_dim,
             is_belief=False,
         )
-        out = self._stack_value_baseline(node_indices, target_hand_dim)
+        out = (
+            baseline.clone()
+            if baseline is not None
+            else self._stack_value_baseline(node_indices, target_hand_dim)
+        )
         out.scatter_(
             1,
             live_players[:, :, None].expand(-1, 2, target_hand_dim),
             values.to(dtype=out.dtype),
         )
         return out
+
+    def _cached_stack_value_baseline_for_model_positions(
+        self, positions: torch.Tensor, hand_dim: int
+    ) -> torch.Tensor:
+        cache = getattr(self, "_stack_value_baseline_cache", None)
+        if cache is None:
+            cache = {}
+            self._stack_value_baseline_cache = cache
+        key = (int(positions.data_ptr()), int(positions.numel()), int(hand_dim))
+        baseline = cache.get(key)
+        if baseline is None:
+            baseline = self._stack_value_baseline(
+                self.model_indices[positions], hand_dim
+            )
+            cache[key] = baseline
+        return baseline
 
     def _stack_value_baseline(
         self, node_indices: torch.Tensor, hand_dim: int
