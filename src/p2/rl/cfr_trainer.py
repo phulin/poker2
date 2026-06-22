@@ -508,7 +508,6 @@ class RebelCFRTrainer:
                 policy_buffer=self.policy_buffer,
                 warmup=cfg.data.warmup_self_play_roots,
                 root_sampler=root_sampler,
-                include_pre_chance_value_batches=cfg.data.include_pre_chance_value_batches,
                 store_replay=not pregeneration_only,
                 sample_continuations=not pregeneration_only,
                 record_batch_diag=not pregeneration_only,

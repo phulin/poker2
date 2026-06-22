@@ -69,7 +69,6 @@ def _load_live_config() -> Config:
         "+curriculum.preflop.search_overrides.model_scope=mixed_street",
         "data.mode=live",
         "data.live_root_source=self_play",
-        "data.include_pre_chance_value_batches=false",
         "+env.num_players=6",
         "num_envs=512",
         "train.batch_size=2048",

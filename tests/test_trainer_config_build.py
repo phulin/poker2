@@ -85,7 +85,6 @@ def test_rebel_curriculum_and_data_config_parse_from_hydra_shape():
 
     assert cfg.data.mode == "pregenerated"
     assert cfg.data.live_root_source == "self_play"
-    assert cfg.data.include_pre_chance_value_batches is False
     assert cfg.data.pregenerated.value_batch_size == 32
     assert cfg.data.pregenerated.direct_sample is True
     assert cfg.data.pregenerated.datasets[0].path == "outputs/rebel_postflop/river_v1"
@@ -100,7 +99,6 @@ def test_rebel_curriculum_river_config_loads_from_yaml():
 
     assert cfg.data.mode == "live"
     assert cfg.data.live_root_source == "random_river"
-    assert cfg.data.include_pre_chance_value_batches is False
     assert cfg.curriculum.stages == ["river"]
     assert cfg.curriculum.substeps["river"].kind == "train"
     assert cfg.curriculum.substeps["river"].net == "S_river"
@@ -124,7 +122,6 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     }
 
     assert turn_cfg.data.live_root_source == "random_turn"
-    assert turn_cfg.data.include_pre_chance_value_batches is False
     assert turn_cfg.curriculum.stages == ["distill_E_turn", "turn"]
     assert turn_cfg.curriculum.substeps["distill_E_turn"].kind == "distill"
     assert turn_cfg.curriculum.substeps["distill_E_turn"].net == "E_turn"
@@ -139,7 +136,6 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert turn_cfg.curriculum.substeps["turn"].closing_checkpoint is None
     assert turn_cfg.curriculum.substeps["turn"].train_overrides == {}
     assert flop_cfg.data.live_root_source == "random_flop"
-    assert flop_cfg.data.include_pre_chance_value_batches is False
     assert flop_cfg.curriculum.stages == [
         "distill_E_flop",
         "flop",
@@ -186,7 +182,6 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
     }
 
     assert cfg.data.mode == "live"
-    assert cfg.data.include_pre_chance_value_batches is False
     assert cfg.curriculum.stages == [
         "river",
         "distill_E_turn",
@@ -258,7 +253,6 @@ def test_rebel_pregenerate_postflop_config_loads_from_yaml():
 
     assert cfg.data.mode == "live"
     assert cfg.data.live_root_source == "random_river"
-    assert cfg.data.include_pre_chance_value_batches is False
     assert cfg.rebel_pregenerate.output_dir == "outputs/rebel_postflop/river_v1"
     assert cfg.rebel_pregenerate.stage == "river"
     assert cfg.rebel_pregenerate.root_source == "random_river"

@@ -166,7 +166,6 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> None:
     cfg.num_envs = args.num_envs
     cfg.data.mode = "live"
     cfg.data.live_root_source = "random_turn"
-    cfg.data.include_pre_chance_value_batches = False
     cfg.search.sparse = True
     cfg.search.sparse_fused = True
     cfg.search.iterations = 1

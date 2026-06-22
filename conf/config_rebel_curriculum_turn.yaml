@@ -15,7 +15,6 @@ wandb_tags: ["rebel", "cfr", "postflop-curriculum", "turn"]
 data:
   mode: live
   live_root_source: random_turn
-  include_pre_chance_value_batches: false
 
 curriculum:
   stages: [distill_E_turn, turn]

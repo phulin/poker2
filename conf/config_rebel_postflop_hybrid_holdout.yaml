@@ -14,7 +14,6 @@ wandb_tags: ["rebel", "cfr", "postflop", "hybrid-holdout"]
 data:
   mode: hybrid
   live_root_source: random_river
-  include_pre_chance_value_batches: false
   pregenerated:
     value_batch_size: 4096
     policy_batch_size: 4096

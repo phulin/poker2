@@ -97,7 +97,6 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
     assert cfg.data.mode == "live"
     assert cfg.data.live_root_source == "self_play"
     assert cfg.data.warmup_self_play_roots is False
-    assert cfg.data.include_pre_chance_value_batches is False
     assert cfg.train.batch_size == 128
     assert cfg.train.episodes_per_step == 1
     assert cfg.train.replay_buffer_batches == 3

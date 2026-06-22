@@ -74,6 +74,9 @@ class DummyBuffer:
     def add_batch(self, batch: RebelBatch) -> None:
         self.batches.append(batch)
 
+    def __len__(self) -> int:
+        return self.total_rows
+
     @property
     def total_rows(self) -> int:
         return sum(len(batch) for batch in self.batches)
@@ -92,11 +95,13 @@ class DummyEvaluator:
         feature_dim: int = 3,
     ):
         self.device = torch.device("cpu")
+        self.float_dtype = torch.float32
         self.search_batch_size = search_batch_size
         self.root_nodes = search_batch_size
         self.total_nodes = total_nodes
         self.num_players = num_players
         self.num_actions = num_actions
+        self.hand_dim = NUM_HANDS
         self.feature_dim = feature_dim
 
         self.env = HUNLTensorEnv.from_proto(env_proto, num_envs=total_nodes)
@@ -132,6 +137,7 @@ class DummyEvaluator:
         self.self_play_calls = 0
         self.sample_calls = 0
         self.self_play_return_none = False
+        self.pre_chance_value_batch_requests: list[bool] = []
 
     def initialize_search(
         self,
@@ -179,8 +185,9 @@ class DummyEvaluator:
         include_pre_chance_value_batch: bool = True,
         include_policy_batch: bool = True,
     ):
-        """Return training data as tuple (value_batch, policy_batch)."""
+        """Return training data as tuple (value, augmented value, policy)."""
         del exclude_start
+        self.pre_chance_value_batch_requests.append(include_pre_chance_value_batch)
 
         count = self.search_batch_size
         indices = torch.arange(count, dtype=torch.long)
@@ -265,18 +272,13 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
         policy_buffer=buffer,
     )
 
-    # generate_data() now returns None and adds data to buffer
     generator.generate_data(2)
 
     # Check that data was added to buffer
-    assert len(buffer.batches) >= 3
-    # Policy batch is added first, followed by start- and end-of-street value batches
+    assert len(buffer.batches) == 2
+    # Policy batch is added first, followed by the value batch
     policy_batch = buffer.batches[0]
     value_batch_start = buffer.batches[1]
-    value_batch_end = buffer.batches[2]
-    assert isinstance(policy_batch, RebelBatch)
-    assert isinstance(value_batch_start, RebelBatch)
-    assert isinstance(value_batch_end, RebelBatch)
 
     torch.testing.assert_close(
         value_batch_start.features.context,
@@ -290,9 +292,6 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
         value_batch_start.value_targets, evaluator.values[: evaluator.search_batch_size]
     )
     torch.testing.assert_close(
-        value_batch_end.value_targets, evaluator.values[: evaluator.search_batch_size]
-    )
-    torch.testing.assert_close(
         policy_batch.policy_targets,
         evaluator.policy_probs_avg[: evaluator.search_batch_size],
     )
@@ -304,9 +303,10 @@ def test_rebel_data_generator_collects_training_data(monkeypatch, env_proto):
         torch.arange(evaluator.search_batch_size),
     )
     assert evaluator.self_play_calls >= 1
+    assert evaluator.pre_chance_value_batch_requests == [False]
 
 
-def test_rebel_data_generator_can_skip_pre_chance_value_batches(monkeypatch, env_proto):
+def test_rebel_data_generator_returns_fresh_batches(monkeypatch, env_proto):
     monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
     evaluator = DummyEvaluator(
         env_proto=env_proto,
@@ -322,7 +322,6 @@ def test_rebel_data_generator_can_skip_pre_chance_value_batches(monkeypatch, env
         evaluator=evaluator,
         value_buffer=buffer,
         policy_buffer=buffer,
-        include_pre_chance_value_batches=False,
     )
 
     fresh_value_batch, fresh_policy_batch = generator.generate_data(2)
@@ -341,6 +340,7 @@ def test_rebel_data_generator_can_skip_pre_chance_value_batches(monkeypatch, env
         policy_batch.policy_targets,
         evaluator.policy_probs_avg[: evaluator.search_batch_size],
     )
+    assert evaluator.pre_chance_value_batch_requests == [False]
 
 
 def test_rebel_data_generator_can_use_sampled_roots(monkeypatch, env_proto):

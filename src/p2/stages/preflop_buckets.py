@@ -71,7 +71,6 @@ def build_run_config(
     cfg.data.mode = "live"
     cfg.data.live_root_source = "self_play"
     cfg.data.warmup_self_play_roots = False
-    cfg.data.include_pre_chance_value_batches = False
     cfg.train.batch_size = int(execution.train_batch_size)
     cfg.train.episodes_per_step = 1
     cfg.train.replay_buffer_batches = max(1, int(execution.replay_buffer_batches))

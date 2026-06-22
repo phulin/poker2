@@ -537,7 +537,6 @@ Add a data subtree to the ReBeL config. `live` is the production default; `prege
 ```yaml
 data:
   mode: live              # live (production) | pregenerated (HP sweeps) | hybrid (live + holdout)
-  include_pre_chance_value_batches: false  # curriculum S_X train stages leave E_X rows to distill sub-steps
   pregenerated:
     value_batch_size: ${train.batch_size}
     policy_batch_size: ${train.batch_size}

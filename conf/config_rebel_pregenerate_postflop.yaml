@@ -11,7 +11,6 @@ checkpoint_dir: checkpoints-rebel-pregenerate
 data:
   mode: live
   live_root_source: random_river
-  include_pre_chance_value_batches: false
 
 rebel_pregenerate:
   output_dir: outputs/rebel_postflop/river_v1

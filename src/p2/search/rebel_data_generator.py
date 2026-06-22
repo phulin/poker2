@@ -53,7 +53,6 @@ class RebelDataGenerator:
         policy_buffer: RebelReplayBuffer | None,
         warmup: bool = True,
         root_sampler: Callable[[int], PublicBeliefState] | None = None,
-        include_pre_chance_value_batches: bool = True,
         store_replay: bool = True,
         sample_continuations: bool = True,
         record_batch_diag: bool = True,
@@ -65,7 +64,6 @@ class RebelDataGenerator:
         self.device = evaluator.device
         self.target_batch_size = int(evaluator.root_nodes)
         self.root_sampler = root_sampler
-        self.include_pre_chance_value_batches = bool(include_pre_chance_value_batches)
         self.store_replay = bool(store_replay)
         self.sample_continuations = bool(sample_continuations)
         self.record_batch_diag = bool(record_batch_diag)
@@ -157,7 +155,7 @@ class RebelDataGenerator:
         hand_dim = self.evaluator.hand_dim
         if hand_dim == PREFLOP_HANDS:
             prior = preflop_class_multiplicity_tensor(device=self.device).to(
-                dtype=getattr(self.evaluator, "float_dtype", torch.float32)
+                dtype=self.evaluator.float_dtype
             )
             prior = prior / prior.sum().clamp(min=1.0)
             beliefs = prior.expand(
@@ -331,15 +329,10 @@ class RebelDataGenerator:
                 trace("record_batch_diag done")
 
             need_policy_batch = self.store_replay or return_policy_batch
-            need_pre_chance_value_batch = self.include_pre_chance_value_batches and (
-                self.store_replay or return_value_batch
-            )
             trace("training_data start")
-            value_batch, augmented_value_batch, policy_batch = (
-                self.evaluator.training_data(
-                    include_pre_chance_value_batch=need_pre_chance_value_batch,
-                    include_policy_batch=need_policy_batch,
-                )
+            value_batch, _, policy_batch = self.evaluator.training_data(
+                include_pre_chance_value_batch=False,
+                include_policy_batch=need_policy_batch,
             )
             trace(
                 "training_data done "
@@ -369,13 +362,6 @@ class RebelDataGenerator:
                     f"value_buffer={len(self.value_buffer)} "
                     f"policy_buffer={len(self.policy_buffer)}"
                 )
-                if self.include_pre_chance_value_batches:
-                    if augmented_value_batch is None:
-                        raise RuntimeError(
-                            "include_pre_chance_value_batches=True requires "
-                            "augmented value batch"
-                        )
-                    self.value_buffer.add_batch(augmented_value_batch)
 
             if return_policy_batch and policy_batch is not None:
                 remaining = (
@@ -395,13 +381,6 @@ class RebelDataGenerator:
                     returned_policy_samples += len(policy_batch)
             if return_value_batch:
                 value_batches.append(value_batch)
-                if self.include_pre_chance_value_batches:
-                    if augmented_value_batch is None:
-                        raise RuntimeError(
-                            "include_pre_chance_value_batches=True requires "
-                            "augmented value batch"
-                        )
-                    value_batches.append(augmented_value_batch)
 
             collected += len(value_batch)
             trace(f"generate loop collected={collected}")
