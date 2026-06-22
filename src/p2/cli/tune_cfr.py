@@ -10,6 +10,7 @@ Inputs:
   --spots          path to a spots.pt produced by sample_spots.py
   --trials         JSON file describing the trials
   --out            JSON path for results
+  --config         ReBeL Hydra config for evaluator/trainer settings
   --checkpoint     model checkpoint (default: payload["source_checkpoint"])
   --batch-size     spots per evaluator pass (default: 256). Spots are
                    truncated to a multiple of batch-size.
@@ -40,7 +41,6 @@ here — they'd require rebuilding the trainer. Run separately for those.
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import os
 import time
@@ -50,6 +50,7 @@ from typing import Any
 import torch
 
 from p2.cli.sample_spots import build_pbs_from_spots, load_spots
+from p2.config.rebel_load import load_rebel_config_file
 from p2.core.structured_config import CFRType, Config, WarmStartType
 from p2.rl.cfr_trainer import RebelCFRTrainer
 
@@ -189,11 +190,23 @@ def _aggregate_trial(
     return out
 
 
+def load_tuning_base_config(
+    config_path: str,
+    checkpoint_path: str,
+    batch_size: int,
+) -> Config:
+    cfg = load_rebel_config_file(config_path)
+    cfg.num_envs = batch_size
+    cfg.resume_from = checkpoint_path
+    return cfg
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--spots", required=True)
     ap.add_argument("--trials", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--config", default="conf/config_rebel_cfr.yaml")
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--device", default="cuda")
@@ -212,19 +225,16 @@ def main() -> None:
     checkpoint = args.checkpoint or payload.get("source_checkpoint")
     if not checkpoint or not os.path.exists(checkpoint):
         raise ValueError(f"Checkpoint not found: {checkpoint!r}. Pass --checkpoint.")
-    print(f"Loading checkpoint config: {checkpoint}")
-    ckpt = torch.load(checkpoint, weights_only=False, map_location="cpu")
-    base_cfg = Config.from_dict(copy.deepcopy(ckpt["config"]))
 
     with open(args.trials) as f:
         trial_spec = json.load(f)
     batch_size = int(trial_spec.get("batch_size", args.batch_size))
     trials = trial_spec["trials"]
     print(f"Running {len(trials)} trial(s) with batch_size={batch_size}")
+    print(f"Loading ReBeL config: {args.config}")
+    base_cfg = load_tuning_base_config(args.config, checkpoint, batch_size)
 
     # Build trainer ONCE.
-    base_cfg.num_envs = batch_size
-    base_cfg.resume_from = checkpoint
     print("Building trainer (one-time compile)…")
     t0 = time.time()
     trainer = RebelCFRTrainer(cfg=base_cfg, device=device)

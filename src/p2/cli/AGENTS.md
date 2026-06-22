@@ -9,8 +9,8 @@ CLI entry points for training, search tuning, model inspection, sampling public 
 - `train_kbest.py`: PPO self-play trainer using K-best/DReD-style opponent pools and tensorized environments.
 - `modal_train_rebel.py`: Modal wrapper for launching ReBeL training remotely through the shared ReBeL config loader.
 - `sample_spots.py`: Samples and serializes public belief states from ReBeL data generation using the shared ReBeL config loader.
-- `tune_cfr.py`: Local parameter sweep utility for CFR evaluator settings.
-- `tune_cfr_search.py`: Search-oriented CFR tuning runner with parameter grids.
+- `tune_cfr.py`: Local parameter sweep utility for CFR evaluator settings using current ReBeL Hydra config plus checkpoint weights.
+- `tune_cfr_search.py`: Search-oriented CFR tuning runner with parameter grids using the shared current-config tuning setup.
 - `demo_kbest.py`: Demonstrates K-best concepts and configured training behavior.
 - `param_count.py`: Prints model parameter counts for a Hydra config.
 

@@ -5,10 +5,10 @@ Coordinate-descent CFR-param search driver.
 For each `iterations` budget we want to compare, greedily locks in the
 best value for each search-time parameter (single pass through the
 parameter list, in fixed order). The trainer + evaluator (FusedSparse
-by default — comes from the checkpoint config) is built once.
+by default — comes from the current ReBeL config) is built once.
 
 Inputs:
-  --spots, --checkpoint, --batch-size, --device   (same as tune_cfr.py)
+  --spots, --config, --checkpoint, --batch-size, --device   (same as tune_cfr.py)
   --out                JSON results path
   --iterations         comma-sep list, e.g. "500,1000,2000"
   --n-spots            cap on spots used per trial (default 1024)
@@ -16,7 +16,6 @@ Inputs:
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import os
 import time
@@ -34,8 +33,8 @@ from p2.cli.tune_cfr import (
     _device_from_str,
     _restore_eval_params,
     _snapshot_eval_params,
+    load_tuning_base_config,
 )
-from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 
 def param_grid(iters: int) -> list[tuple[str, list[Any]]]:
@@ -105,6 +104,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--spots", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--config", default="conf/config_rebel_cfr.yaml")
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--device", default="cuda")
@@ -138,14 +138,13 @@ def main() -> None:
     print(f"Spots: {n_total} available, using first {n_used} (batch_size={args.batch_size}).")
 
     checkpoint = args.checkpoint or payload.get("source_checkpoint")
-    ckpt = torch.load(checkpoint, weights_only=False, map_location="cpu")
-    base_cfg = Config.from_dict(copy.deepcopy(ckpt["config"]))
-    print(f"Checkpoint search config (from ckpt): sparse={base_cfg.search.sparse}, "
+    if not checkpoint or not os.path.exists(checkpoint):
+        raise ValueError(f"Checkpoint not found: {checkpoint!r}. Pass --checkpoint.")
+    base_cfg = load_tuning_base_config(args.config, checkpoint, args.batch_size)
+    print(f"ReBeL search config: sparse={base_cfg.search.sparse}, "
           f"sparse_fused={base_cfg.search.sparse_fused}, "
           f"cfr_type={base_cfg.search.cfr_type}, depth={base_cfg.search.depth}")
 
-    base_cfg.num_envs = args.batch_size
-    base_cfg.resume_from = checkpoint
     print("Building trainer (one-time compile)…")
     t0 = time.time()
     trainer = RebelCFRTrainer(cfg=base_cfg, device=device)
@@ -163,7 +162,7 @@ def main() -> None:
 
     src_indices = torch.arange(args.batch_size, device=device)
     base_snap = _snapshot_eval_params(trainer.cfr_evaluator)
-    print(f"Baseline evaluator params (from checkpoint): {base_snap}")
+    print(f"Baseline evaluator params: {base_snap}")
 
     history: list[dict[str, Any]] = []
     per_iter_best: dict[int, dict[str, Any]] = {}
