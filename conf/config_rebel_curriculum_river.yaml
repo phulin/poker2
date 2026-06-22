@@ -25,7 +25,8 @@ curriculum:
   stages: [river]
   wandb_group: rebel_postflop_curriculum
   promote_dir: checkpoints-rebel-curriculum/promoted
-  river:
-    kind: train
-    net: S_river
-    num_steps: ${num_steps}
+  substeps:
+    river:
+      kind: train
+      net: S_river
+      num_steps: ${num_steps}

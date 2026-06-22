@@ -616,31 +616,7 @@ class Config:
             for config in train_container.get("stratify_streets", [])
         ]
         container["train"] = TrainingConfig(**train_container)
-        model_container = container.get("model", {})
-        if "board_interaction_dim" not in model_container:
-            rank_interaction_dim = model_container.pop(
-                "rank_board_interaction_dim", None
-            )
-            suit_interaction_dim = model_container.pop(
-                "suit_board_interaction_dim", None
-            )
-            if rank_interaction_dim is not None or suit_interaction_dim is not None:
-                rank_interaction_dim = rank_interaction_dim or 0
-                suit_interaction_dim = suit_interaction_dim or 0
-                if rank_interaction_dim != suit_interaction_dim:
-                    raise ValueError(
-                        "rank_board_interaction_dim and suit_board_interaction_dim "
-                        "must match; use board_interaction_dim"
-                    )
-                model_container["board_interaction_dim"] = rank_interaction_dim
-        else:
-            model_container.pop("rank_board_interaction_dim", None)
-            model_container.pop("suit_board_interaction_dim", None)
-        compile_setting = model_container.get("compile", "default")
-        if isinstance(compile_setting, bool):
-            model_container["compile"] = "default" if compile_setting else "off"
-        model_container.pop("policy_factor_scale", None)
-        container["model"] = ModelConfig(**model_container)
+        container["model"] = ModelConfig(**(container.get("model", {})))
         container["env"] = EnvConfig(**(container.get("env", {})))
         container["exploiter"] = ExploiterConfig(**(container.get("exploiter", {})))
         container["search"] = SearchConfig(**(container.get("search", {})))
@@ -656,22 +632,14 @@ class Config:
         )
         container["data"] = DataConfig(**data_container)
         curriculum_container = container.get("curriculum", {})
-        known_curriculum_keys = {"stages", "wandb_group", "promote_dir", "substeps"}
         substep_containers = dict(curriculum_container.get("substeps", {}))
-        for key, value in list(curriculum_container.items()):
-            if key not in known_curriculum_keys and isinstance(value, dict):
-                substep_containers[key] = value
         substeps = {}
         for name, substep_container in substep_containers.items():
             substep_container = dict(substep_container)
             if "from" in substep_container:
                 substep_container["from_net"] = substep_container.pop("from")
             substeps[name] = CurriculumSubstepConfig(**substep_container)
-        curriculum_clean = {
-            key: value
-            for key, value in curriculum_container.items()
-            if key in known_curriculum_keys
-        }
+        curriculum_clean = dict(curriculum_container)
         curriculum_clean["substeps"] = substeps
         container["curriculum"] = CurriculumConfig(**curriculum_clean)
         container["rebel_pregenerate"] = RebelPregenerateConfig(

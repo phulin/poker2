@@ -42,7 +42,10 @@ def test_config_derives_action_space_from_depth_schedule() -> None:
     assert cfg.search.depth == 6
 
 
-def test_config_ignores_removed_policy_factor_scale() -> None:
-    cfg = Config.from_dict({"model": {"policy_factor_scale": 0.05}})
-
-    assert not hasattr(cfg.model, "policy_factor_scale")
+def test_config_rejects_removed_policy_factor_scale() -> None:
+    try:
+        Config.from_dict({"model": {"policy_factor_scale": 0.05}})
+    except TypeError as exc:
+        assert "policy_factor_scale" in str(exc)
+    else:
+        raise AssertionError("removed model fields should fail fast")
