@@ -14,6 +14,7 @@ class PreflopBucketExecutionConfig:
     base_checkpoint: str
     output_dir: str
     presolve_bucket: str
+    train_bucket: str | None
     device: str
     seed: int
     depth: int

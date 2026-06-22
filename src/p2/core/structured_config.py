@@ -550,6 +550,7 @@ class PreflopBucketTrainingConfig:
     base_checkpoint: str | None = None
     output_dir: str = "outputs/preflop_backward_induction"
     presolve_bucket: str = "actions_12_15"
+    train_bucket: str | None = None
     belief_mode: str = "random"
     states_per_bucket: int = 100_000
     train_batch_size: int = 1024

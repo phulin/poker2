@@ -18,6 +18,7 @@ preflop_buckets:
   base_checkpoint: null
   output_dir: outputs/preflop_backward_induction
   presolve_bucket: actions_12_15
+  train_bucket: null
   belief_mode: random
   states_per_bucket: 100000
   train_batch_size: 1024

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import torch
 
@@ -11,6 +12,7 @@ from p2.stages.preflop_backward_induction import (
     _estimate_train_updates,
     _init_wandb,
     _load_model_weights,
+    _pot_relative_value_error_metrics,
 )
 from p2.stages.preflop_buckets import (
     PreflopBucketExecutionConfig,
@@ -25,6 +27,7 @@ def _execution_config(**overrides) -> PreflopBucketExecutionConfig:
         "base_checkpoint": "/tmp/base.pt",
         "output_dir": "/tmp/out",
         "presolve_bucket": "actions_12_15",
+        "train_bucket": None,
         "device": "cpu",
         "seed": 123,
         "depth": 4,
@@ -149,6 +152,17 @@ def test_estimate_train_updates_uses_train_batch_size(tmp_path) -> None:
     # once, and actions_0_3 only trains policy: 8*2*2 + 8*2 + 8*2 + 8.
     assert _estimate_train_updates(args) == 72
 
+    # Restricting the specialist run to one bucket estimates only that bucket.
+    assert _estimate_train_updates(
+        _execution_config(
+            state_dataset=str(tmp_path),
+            train_bucket="actions_12_15",
+            states_per_bucket=1024,
+            train_batch_size=128,
+            actions_12_15_epochs=2,
+        )
+    ) == 32
+
 
 def test_preflop_wandb_init_passes_stage_payload(monkeypatch, tmp_path) -> None:
     captured = {}
@@ -187,6 +201,27 @@ def test_preflop_wandb_init_passes_stage_payload(monkeypatch, tmp_path) -> None:
     assert captured["name"] == "preflop-run"
     assert captured["stage"] == "preflop_bucket_specialists"
     assert captured["resolved_config"].run.num_envs == 2
+
+
+def test_pot_relative_value_error_metrics_uses_value_weights() -> None:
+    output = SimpleNamespace(
+        hand_values=torch.tensor([[[12.0, 8.0]], [[15.0, 5.0]]])
+    )
+    batch = SimpleNamespace(
+        value_targets=torch.tensor([[[10.0, 10.0]], [[10.0, 10.0]]]),
+        statistics={"pot": torch.tensor([10.0, 20.0])},
+    )
+    loss_dict = {
+        "value_weights": torch.tensor([[[1.0, 0.0]], [[1.0, 1.0]]]),
+    }
+
+    metrics = _pot_relative_value_error_metrics(output, batch, loss_dict)
+
+    # Weighted relative absolute errors are 0.2, 0.25, and 0.25.
+    assert torch.allclose(
+        metrics["pot_relative_mae"],
+        torch.tensor((0.2 + 0.25 + 0.25) / 3.0),
+    )
 
 
 class _FakeSplitLeaf(torch.nn.Linear):

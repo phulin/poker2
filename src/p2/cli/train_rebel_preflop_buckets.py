@@ -45,6 +45,7 @@ def _execution_config_from_config(cfg: Config) -> PreflopBucketExecutionConfig:
         base_checkpoint=base_checkpoint,
         output_dir=preflop.output_dir,
         presolve_bucket=preflop.presolve_bucket,
+        train_bucket=preflop.train_bucket,
         device=cfg.device,
         seed=cfg.seed,
         depth=preflop.depth,

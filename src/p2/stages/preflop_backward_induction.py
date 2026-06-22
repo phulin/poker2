@@ -498,6 +498,14 @@ def _bucket_spec(label: str):
     raise KeyError(label)
 
 
+def _train_bucket_labels(args: PreflopBucketExecutionConfig) -> tuple[str, ...]:
+    if args.train_bucket is None:
+        return BUCKET_ORDER_DEEP_TO_SHALLOW
+    label = str(args.train_bucket)
+    _bucket_spec(label)
+    return (label,)
+
+
 def _checkpoint_signature(checkpoint_path: str) -> dict[str, Any]:
     path = Path(checkpoint_path)
     stat = path.stat()
@@ -530,9 +538,7 @@ def _bucket_cfr_batch_size(
 
 
 def _max_cfr_batch_size(args: PreflopBucketExecutionConfig) -> int:
-    return max(
-        _bucket_cfr_batch_size(args, label) for label in BUCKET_ORDER_DEEP_TO_SHALLOW
-    )
+    return max(_bucket_cfr_batch_size(args, label) for label in _train_bucket_labels(args))
 
 
 def _estimate_train_updates(args: PreflopBucketExecutionConfig) -> int:
@@ -541,7 +547,7 @@ def _estimate_train_updates(args: PreflopBucketExecutionConfig) -> int:
     )
     total_updates = 0
     train_batch_size = max(1, int(args.train_batch_size))
-    for bucket_label in BUCKET_ORDER_DEEP_TO_SHALLOW:
+    for bucket_label in _train_bucket_labels(args):
         _, rows, _ = _bucket_shards(manifest, Path(args.state_dataset), bucket_label)
         rows = min(int(args.states_per_bucket), int(rows))
         batches = math.ceil(rows / train_batch_size)
@@ -692,6 +698,11 @@ def _evaluate_validation_split(
                 if include_value
                 else trainer.loss_fn._call_forward_policy(output, part)
             )
+            if include_value:
+                loss_dict = {
+                    **loss_dict,
+                    **_pot_relative_value_error_metrics(output, part, loss_dict),
+                }
             metrics = _float_metrics(loss_dict)
             for key, value in metrics.items():
                 if key.endswith("_all") or key.endswith("_weights"):
@@ -700,6 +711,42 @@ def _evaluate_validation_split(
             total_rows += rows
     trainer.model.train()
     return {key: value / max(1, total_rows) for key, value in totals.items()}
+
+
+def _pot_relative_value_error_metrics(
+    output: Any,
+    batch: RebelBatch,
+    loss_dict: dict[str, Any],
+) -> dict[str, torch.Tensor]:
+    if output.hand_values is None or batch.value_targets is None:
+        return {}
+    pot = batch.statistics.get("pot")
+    if pot is None:
+        return {}
+
+    predictions = output.hand_values.float()
+    targets = batch.value_targets.to(
+        device=predictions.device,
+        dtype=predictions.dtype,
+    )
+    pot_scale = pot.to(device=predictions.device, dtype=predictions.dtype).clamp_min(1.0)
+    while pot_scale.ndim < predictions.ndim:
+        pot_scale = pot_scale.unsqueeze(-1)
+
+    relative_abs_error = (predictions - targets).abs() / pot_scale
+    relative_sq_error = relative_abs_error.square()
+    weights = loss_dict.get("value_weights")
+    if isinstance(weights, torch.Tensor):
+        value_weights = weights.to(device=predictions.device, dtype=predictions.dtype)
+    else:
+        value_weights = torch.ones_like(relative_abs_error)
+    denom = value_weights.sum().clamp_min(1.0e-8)
+    relative_mse = (relative_sq_error * value_weights).sum() / denom
+    return {
+        "pot_relative_mae": (relative_abs_error * value_weights).sum() / denom,
+        "pot_relative_mse": relative_mse,
+        "pot_relative_rmse": relative_mse.sqrt(),
+    }
 
 
 def _evaluate_validation_set(
@@ -1075,7 +1122,7 @@ def run_train_specialists(
         previous_value_checkpoint = args.base_checkpoint
         global_step = 0
         specialist_paths: dict[str, str] = {}
-        for bucket_index, bucket_label in enumerate(BUCKET_ORDER_DEEP_TO_SHALLOW):
+        for bucket_index, bucket_label in enumerate(_train_bucket_labels(args)):
             spec = _bucket_spec(bucket_label)
             train_value = bucket_label != "actions_0_3"
             cfr_batch_size = _bucket_cfr_batch_size(args, bucket_label)

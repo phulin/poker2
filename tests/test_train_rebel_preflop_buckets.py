@@ -46,6 +46,7 @@ def test_config_rebel_preflop_buckets_resolves() -> None:
     assert cfg.wandb_project == "poker-rebel-preflop-backward-induction"
     assert cfg.preflop_buckets.command == "train_specialists"
     assert cfg.preflop_buckets.presolve_bucket == "actions_12_15"
+    assert cfg.preflop_buckets.train_bucket is None
     assert cfg.preflop_buckets.state_dataset == "/tmp/states"
     assert cfg.preflop_buckets.base_checkpoint == "/tmp/base.pt"
     assert cfg.preflop_buckets.distill_checkpoints.checkpoint_12_15 is None
@@ -60,6 +61,7 @@ def test_preflop_hydra_cli_dispatches_train_specialists(monkeypatch, tmp_path) -
     monkeypatch.setattr(preflop_cli.preflop_bi, "run_train_specialists", fake_train)
     cfg = _base_config(tmp_path)
     cfg.preflop_buckets.command = "train_specialists"
+    cfg.preflop_buckets.train_bucket = "actions_12_15"
     cfg.preflop_buckets.cfr_batch_size = 17
     cfg.preflop_buckets.actions_12_15_cfr_batch_size = 9
 
@@ -72,6 +74,7 @@ def test_preflop_hydra_cli_dispatches_train_specialists(monkeypatch, tmp_path) -
     assert args.command == "train-specialists"
     assert args.state_dataset == str(tmp_path / "states")
     assert args.base_checkpoint == str(tmp_path / "base.pt")
+    assert args.train_bucket == "actions_12_15"
     assert args.cfr_batch_size == 17
     assert args.actions_12_15_cfr_batch_size == 9
     assert args.use_wandb is False
