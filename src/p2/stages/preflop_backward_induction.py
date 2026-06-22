@@ -25,6 +25,7 @@ from p2.env.pbs_env import PBSEnv
 from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
+from p2.search.cfr_evaluator import CFREvaluator
 from p2.search.rebel_solved_dataset import RebelSolvedDatasetWriter
 from p2.stages.preflop_buckets import (
     PreflopBucketExecutionConfig,
