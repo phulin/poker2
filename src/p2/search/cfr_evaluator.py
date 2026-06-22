@@ -487,13 +487,13 @@ class CFREvaluator(ABC):
         )
 
     def _heads_up_live_players_for_nodes(
-        self, node_indices: torch.Tensor
+        self, node_indices: torch.Tensor, *, validate: bool = True
     ) -> torch.Tensor:
         if not isinstance(self.env, PBSEnv):
             raise TypeError("heads-up closing projection requires PBSEnv nodes")
         live = ~self.env.has_folded[node_indices]
         live_count = live.sum(dim=1)
-        if not (live_count >= 2).all():
+        if validate and not (live_count >= 2).all():
             raise RuntimeError(
                 "2-player closing model projection requires at least two live players"
             )
@@ -583,9 +583,13 @@ class CFREvaluator(ABC):
         features: MLPFeatures,
         positions: torch.Tensor,
         encoder: RebelFeatureEncoder | BetterFeatureEncoder | None,
+        *,
+        validate_live: bool = True,
     ) -> tuple[MLPFeatures, torch.Tensor]:
         node_indices = self.model_indices[positions]
-        live_players = self._heads_up_live_players_for_nodes(node_indices)
+        live_players = self._heads_up_live_players_for_nodes(
+            node_indices, validate=validate_live
+        )
         source_hand_dim = features.hand_dim
         target_hand_dim = self._closing_model_hand_dim()
         selected_beliefs = features.beliefs[positions].view(

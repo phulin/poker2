@@ -2614,6 +2614,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                             features,
                             hu_positions,
                             closing_encoder,
+                            validate_live=False,
                         )
                     )
                     closing_values, closing_zero_sum = (
@@ -2693,6 +2694,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         features,
                         hu_positions,
                         closing_encoder,
+                        validate_live=False,
                     )
                 )
                 closing_values, model_zero_sum = self._eval_model_for_fused_writeback(
