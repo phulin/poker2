@@ -11,13 +11,12 @@ import math
 import os
 import time
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 import torch
-import wandb
 from torch.utils.data import DataLoader, TensorDataset
 
 from p2.core.structured_config import Config
@@ -31,6 +30,7 @@ from p2.stages.preflop_buckets import (
     build_run_config,
     load_base_config,
 )
+from p2.runtime.training_run import wandb_run
 from p2.utils.model_utils import compute_masked_logits, count_model_parameters
 
 
@@ -116,27 +116,9 @@ def _jsonable(value: Any) -> Any:
 
 
 def _init_wandb(args: argparse.Namespace, cfg: Config, *, name: str):
-    if not args.use_wandb:
-        return nullcontext()
-    project: str = str(args.wandb_project)
     run_name: str = str(args.wandb_name or name)
     group: str | None = None if args.wandb_group is None else str(args.wandb_group)
-    tags = [str(tag) for tag in args.wandb_tags]
-    config: dict[str, Any] = {
-        "args": vars(args),
-        "trainer_config": _jsonable(asdict(cfg)),
-    }
-    try:
-        return wandb.init(
-            project=project,
-            name=run_name,
-            group=group,
-            tags=tags,
-            config=config,
-        )
-    except Exception as exc:
-        print(f"W&B init failed ({exc}); continuing without W&B.", flush=True)
-        return nullcontext()
+    return wandb_run(cfg, group=group, name=run_name)
 
 
 def _run_config_from_args(args: argparse.Namespace) -> PreflopBucketRunConfig:
