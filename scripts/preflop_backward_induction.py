@@ -16,10 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-import hydra
 import torch
 import wandb
-from omegaconf import DictConfig
 from torch.utils.data import DataLoader, TensorDataset
 
 from p2.core.structured_config import Config
@@ -28,6 +26,11 @@ from p2.env.pbs_env import PBSEnv
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
 from p2.search.rebel_solved_dataset import RebelSolvedDatasetWriter
+from p2.stages.preflop_buckets import (
+    PreflopBucketRunConfig,
+    build_run_config,
+    load_base_config,
+)
 from p2.utils.model_utils import compute_masked_logits, count_model_parameters
 
 
@@ -136,53 +139,24 @@ def _init_wandb(args: argparse.Namespace, cfg: Config, *, name: str):
         return nullcontext()
 
 
-def _load_base_config(config_name: str, overrides: list[str]) -> Config:
-    with hydra.initialize_config_dir(
-        config_dir=str(REPO_ROOT / "conf"),
-        version_base=None,
-    ):
-        dict_config: DictConfig = hydra.compose(
-            config_name=config_name,
-            overrides=overrides,
-        )
-    return Config.from_dict_config(dict_config)
-
-
-def _build_run_config(
-    base_cfg: Config,
-    *,
-    args: argparse.Namespace,
-    checkpoint_dir: Path,
-    num_steps: int,
-    num_envs: int | None = None,
-) -> Config:
-    cfg = copy.deepcopy(base_cfg)
-    cfg.device = args.device
-    cfg.num_envs = int(args.cfr_batch_size if num_envs is None else num_envs)
-    cfg.num_steps = max(1, int(num_steps))
-    cfg.checkpoint_dir = str(checkpoint_dir)
-    cfg.use_wandb = bool(args.use_wandb)
-    cfg.wandb_project = args.wandb_project
-    cfg.wandb_name = args.wandb_name
-    cfg.wandb_tags = list(args.wandb_tags)
-    cfg.resume_from = None
-    cfg.data.mode = "live"
-    cfg.data.live_root_source = "self_play"
-    cfg.data.warmup_self_play_roots = False
-    cfg.data.include_pre_chance_value_batches = False
-    cfg.train.batch_size = int(args.train_batch_size)
-    cfg.train.episodes_per_step = 1
-    cfg.train.replay_buffer_batches = max(1, int(args.replay_buffer_batches))
-    cfg.train.save_replay_buffers = False
-    cfg.search.depth = int(args.depth)
-    cfg.search.iterations = int(args.cfr_iterations)
-    cfg.search.iterations_final = None
-    cfg.search.warm_start_iterations = int(args.warm_start_iterations)
-    cfg.search.sparse = True
-    cfg.search.sparse_fused = bool(args.sparse_fused)
-    if args.compile is not None:
-        cfg.model.compile = args.compile
-    return cfg
+def _run_config_from_args(args: argparse.Namespace) -> PreflopBucketRunConfig:
+    return PreflopBucketRunConfig(
+        config_name=args.config_name,
+        config_overrides=tuple(args.config_override),
+        device=args.device,
+        cfr_batch_size=int(args.cfr_batch_size),
+        use_wandb=bool(args.use_wandb),
+        wandb_project=args.wandb_project,
+        wandb_name=args.wandb_name,
+        wandb_tags=tuple(args.wandb_tags),
+        train_batch_size=int(args.train_batch_size),
+        replay_buffer_batches=int(args.replay_buffer_batches),
+        depth=int(args.depth),
+        cfr_iterations=int(args.cfr_iterations),
+        warm_start_iterations=int(args.warm_start_iterations),
+        sparse_fused=bool(args.sparse_fused),
+        compile=args.compile,
+    )
 
 
 @torch.no_grad()
@@ -846,10 +820,15 @@ def run_train_specialists(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     total_updates_guess = _estimate_train_updates(args)
-    base_template = _load_base_config(args.config_name, list(args.config_override))
-    base_cfg = _build_run_config(
+    run_cfg = _run_config_from_args(args)
+    base_template = load_base_config(
+        repo_root=REPO_ROOT,
+        config_name=run_cfg.config_name,
+        overrides=run_cfg.config_overrides,
+    )
+    base_cfg = build_run_config(
         base_template,
-        args=args,
+        run_cfg,
         checkpoint_dir=output_dir / "checkpoints",
         num_steps=total_updates_guess,
         num_envs=_max_cfr_batch_size(args),
@@ -882,9 +861,9 @@ def run_train_specialists(args: argparse.Namespace) -> None:
                     raise FileExistsError(f"{solved_dir} exists; pass --overwrite")
                 solved_dir.mkdir(parents=True, exist_ok=True)
 
-            cfg = _build_run_config(
+            cfg = build_run_config(
                 base_template,
-                args=args,
+                run_cfg,
                 checkpoint_dir=bucket_dir / "checkpoints",
                 num_steps=total_updates_guess,
                 num_envs=cfr_batch_size,
@@ -1263,10 +1242,15 @@ def run_distill(args: argparse.Namespace) -> None:
         * len(BUCKET_ORDER_DEEP_TO_SHALLOW)
         * 2,
     )
-    base_template = _load_base_config(args.config_name, list(args.config_override))
-    cfg = _build_run_config(
+    run_cfg = _run_config_from_args(args)
+    base_template = load_base_config(
+        repo_root=REPO_ROOT,
+        config_name=run_cfg.config_name,
+        overrides=run_cfg.config_overrides,
+    )
+    cfg = build_run_config(
         base_template,
-        args=args,
+        run_cfg,
         checkpoint_dir=output_dir / "checkpoints",
         num_steps=total_updates,
     )
@@ -1285,9 +1269,9 @@ def run_distill(args: argparse.Namespace) -> None:
             if checkpoint is None:
                 raise ValueError(f"missing specialist checkpoint for {bucket_label}")
             include_value = bucket_label != "actions_0_3"
-            teacher_cfg = _build_run_config(
+            teacher_cfg = build_run_config(
                 base_template,
-                args=args,
+                run_cfg,
                 checkpoint_dir=output_dir / "teacher_tmp",
                 num_steps=total_updates,
             )

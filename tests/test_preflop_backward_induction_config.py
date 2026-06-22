@@ -1,25 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
-import sys
 from pathlib import Path
 
 from p2.core.structured_config import Config
-
-
-_SCRIPT_PATH = (
-    Path(__file__).resolve().parents[1] / "scripts" / "preflop_backward_induction.py"
+from p2.stages.preflop_buckets import (
+    PreflopBucketRunConfig,
+    build_run_config,
+    load_base_config,
 )
-_SPEC = importlib.util.spec_from_file_location(
-    "preflop_backward_induction",
-    _SCRIPT_PATH,
-)
-assert _SPEC is not None
-assert _SPEC.loader is not None
-preflop_bi = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = preflop_bi
-_SPEC.loader.exec_module(preflop_bi)
 
 
 def _args(**overrides) -> argparse.Namespace:
@@ -42,6 +31,27 @@ def _args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
+def _run_config(**overrides) -> PreflopBucketRunConfig:
+    args = _args(**overrides)
+    return PreflopBucketRunConfig(
+        config_name="config_rebel_cfr",
+        config_overrides=(),
+        device=args.device,
+        cfr_batch_size=args.cfr_batch_size,
+        use_wandb=args.use_wandb,
+        wandb_project=args.wandb_project,
+        wandb_name=args.wandb_name,
+        wandb_tags=tuple(args.wandb_tags),
+        train_batch_size=args.train_batch_size,
+        replay_buffer_batches=args.replay_buffer_batches,
+        depth=args.depth,
+        cfr_iterations=args.cfr_iterations,
+        warm_start_iterations=args.warm_start_iterations,
+        sparse_fused=args.sparse_fused,
+        compile=args.compile,
+    )
+
+
 def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
     base = Config(device="cuda", num_envs=999, num_steps=999)
     base.data.mode = "pregenerated"
@@ -56,9 +66,9 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
     base.search.sparse_fused = False
     base.model.compile = "default"
 
-    cfg = preflop_bi._build_run_config(
+    cfg = build_run_config(
         base,
-        args=_args(),
+        _run_config(),
         checkpoint_dir=tmp_path / "checkpoints",
         num_steps=42,
         num_envs=64,
@@ -95,9 +105,10 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
 
 
 def test_load_base_config_accepts_hydra_overrides() -> None:
-    cfg = preflop_bi._load_base_config(
-        "config_rebel_cfr",
-        ["device=cpu", "train.batch_size=321", "search.iterations=77"],
+    cfg = load_base_config(
+        repo_root=Path(__file__).resolve().parents[1],
+        config_name="config_rebel_cfr",
+        overrides=("device=cpu", "train.batch_size=321", "search.iterations=77"),
     )
 
     assert cfg.device == "cpu"

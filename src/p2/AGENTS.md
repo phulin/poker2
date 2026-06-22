@@ -14,5 +14,6 @@ This is the main Python package for P2. It contains the HUNL environments, neura
 - `models/`: Shared model utilities plus CNN, MLP/TRM, and transformer model families.
 - `rl/`: PPO/self-play, ReBeL training buffers, opponent pools, losses, and rating helpers.
 - `search/`: CFR/DCFR evaluators, public belief states, chance handling, and Triton fused kernels.
+- `stages/`: Shared staged-training helpers for ReBeL workflows, including typed preflop bucket configuration.
 - `showdown/`: Reusable exact, approximate, and Monte Carlo multiway showdown equity evaluators copied from benchmark prototypes.
 - `utils/`: Training, model, config, EMA, KL, profiling, and context-manager utilities.
