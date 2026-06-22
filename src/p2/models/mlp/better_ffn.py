@@ -1448,6 +1448,7 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
         policy_rank: int = 64,
         policy_hand_bias_rank: int = 32,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
+        context_in_dim: int | None = None,
     ) -> None:
         super().__init__()
         if range_hidden_dim < 0:
@@ -1498,9 +1499,12 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
             hidden_dim,
             nonlinearity,
         )
-        context_in_dim = context_length(num_players)
+        context_in_dim = (
+            context_length(num_players) if context_in_dim is None else context_in_dim
+        )
+        self.context_in_dim = int(context_in_dim)
         self.context_encoder = ffn_block(
-            context_in_dim, hidden_dim, hidden_dim, nonlinearity
+            self.context_in_dim, hidden_dim, hidden_dim, nonlinearity
         )
 
         alpha = 1 / math.sqrt(num_hidden_layers + max(1, num_value_layers))
@@ -1562,6 +1566,13 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
         self, context: torch.Tensor, street: torch.Tensor
     ) -> torch.Tensor:
         context = context.to(dtype=self.street_embedding.weight.dtype)
+        if context.shape[-1] > self.context_in_dim:
+            context = context[..., : self.context_in_dim]
+        elif context.shape[-1] < self.context_in_dim:
+            pad = context.new_zeros(
+                *context.shape[:-1], self.context_in_dim - context.shape[-1]
+            )
+            context = torch.cat((context, pad), dim=-1)
         return self.street_embedding(street) + self.context_encoder(context)
 
     def static_feature_base_from_prefix(

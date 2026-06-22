@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import copy
 import math
 import os
 from contextlib import nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from typing import Any
 
 import torch
@@ -12,7 +13,18 @@ import torch.nn.functional as F
 
 from p2.core.action_schedule import apply_action_schedule_to_config
 from p2.config.rebel_load import validate_rebel_config
-from p2.core.structured_config import Config, LrSchedule, ModelType, PreflopModelType
+from p2.core.structured_config import (
+    Config,
+    DataConfig,
+    EnvConfig,
+    LrSchedule,
+    ModelConfig,
+    ModelType,
+    PregeneratedDataConfig,
+    PreflopModelType,
+    SearchConfig,
+    TrainingConfig,
+)
 from p2.env.aggression_analyzer import AggressionAnalyzer
 from p2.env.card_utils import (
     NUM_HANDS,
@@ -69,6 +81,46 @@ def _value_samples_per_step(batch_size: int, value_reuse_goal: float) -> int:
             f"train.value_reuse_goal must be positive; got {value_reuse_goal}"
         )
     return max(1, int(round(batch_size / value_reuse_goal)))
+
+
+def _known_dataclass_fields(cls: type) -> set[str]:
+    return {field.name for field in fields(cls)}
+
+
+def _filter_dataclass_config(cls: type, values: Any) -> dict[str, Any]:
+    if not isinstance(values, dict):
+        return {}
+    known = _known_dataclass_fields(cls)
+    return {key: value for key, value in values.items() if key in known}
+
+
+def _minimal_frozen_model_config_dict(config_dict: dict[str, Any]) -> dict[str, Any]:
+    data = _filter_dataclass_config(DataConfig, config_dict.get("data", {}))
+    pregenerated = _filter_dataclass_config(
+        PregeneratedDataConfig, data.get("pregenerated", {})
+    )
+    if pregenerated:
+        data["pregenerated"] = pregenerated
+    elif "pregenerated" in data:
+        data.pop("pregenerated")
+
+    return {
+        "train": _filter_dataclass_config(TrainingConfig, config_dict.get("train", {})),
+        "model": _filter_dataclass_config(ModelConfig, config_dict.get("model", {})),
+        "env": _filter_dataclass_config(EnvConfig, config_dict.get("env", {})),
+        "search": _filter_dataclass_config(SearchConfig, config_dict.get("search", {})),
+        "data": data,
+    }
+
+
+def _preflop_context_in_dim_from_state(
+    model_state: dict[str, torch.Tensor],
+) -> int | None:
+    suffix = "context_encoder.norm.weight"
+    for key, value in model_state.items():
+        if key.endswith(suffix) and hasattr(value, "shape") and value.dim() == 1:
+            return int(value.shape[0])
+    return None
 
 
 def _scheduled_learning_rate(
@@ -633,8 +685,17 @@ class RebelCFRTrainer:
             return torch.sqrt(policy_norm.square() + value_norm.square())
         return self._clip_grad_group(list(self.model.parameters()), self.grad_clip)
 
-    def _make_better_split_ffn(self) -> BetterSplitFFN:
-        cfg = self.cfg
+    def _make_better_split_ffn(
+        self,
+        cfg: Config | None = None,
+        *,
+        num_players: int | None = None,
+        num_actions: int | None = None,
+        preflop_context_in_dim: int | None = None,
+    ) -> BetterSplitFFN:
+        cfg = self.cfg if cfg is None else cfg
+        model_num_players = self.num_players if num_players is None else num_players
+        model_num_actions = self.num_actions if num_actions is None else num_actions
         common = dict(
             hidden_dim=cfg.model.hidden_dim,
             range_hidden_dim=cfg.model.range_hidden_dim,
@@ -642,7 +703,7 @@ class RebelCFRTrainer:
             num_hidden_layers=cfg.model.num_hidden_layers,
             num_policy_layers=cfg.model.num_policy_layers,
             num_value_layers=cfg.model.num_value_layers,
-            num_players=self.num_players,
+            num_players=model_num_players,
             shared_trunk=cfg.model.shared_trunk,
             enforce_zero_sum=cfg.model.enforce_zero_sum,
             board_interaction_dim=cfg.model.board_interaction_dim,
@@ -651,6 +712,8 @@ class RebelCFRTrainer:
             nonlinearity=cfg.model.nonlinearity,
         )
         if int(cfg.model.preflop_hand_dim) == 169:
+            if preflop_context_in_dim is not None:
+                common["context_in_dim"] = int(preflop_context_in_dim)
             if cfg.model.preflop_model_type is PreflopModelType.transformer:
                 transformer_common = dict(
                     common,
@@ -658,7 +721,7 @@ class RebelCFRTrainer:
                 )
                 return BetterSplitFFN(
                     policy_model=BetterPreflopTransformerPolicyFFN(
-                        num_actions=self.num_actions, **transformer_common
+                        num_actions=model_num_actions, **transformer_common
                     ),
                     value_model=BetterPreflopTransformerValueFFN(
                         num_actions=1,
@@ -668,7 +731,7 @@ class RebelCFRTrainer:
                 )
             return BetterSplitFFN(
                 policy_model=BetterPreflopPolicyFFN(
-                    num_actions=self.num_actions, **common
+                    num_actions=model_num_actions, **common
                 ),
                 value_model=BetterPreflopValueFFN(
                     num_actions=1,
@@ -677,7 +740,7 @@ class RebelCFRTrainer:
                 ),
             )
         return BetterSplitFFN(
-            policy_model=BetterPolicyFFN(num_actions=self.num_actions, **common),
+            policy_model=BetterPolicyFFN(num_actions=model_num_actions, **common),
             value_model=BetterStreetValueFFN(
                 num_actions=1,
                 value_heads=cfg.model.street_value_heads,
@@ -685,22 +748,35 @@ class RebelCFRTrainer:
             ),
         )
 
-    def _make_eval_twin(self, compile_model: bool = True) -> nn.Module:
+    def _make_eval_twin(
+        self,
+        compile_model: bool = True,
+        *,
+        cfg: Config | None = None,
+        preflop_context_in_dim: int | None = None,
+    ) -> nn.Module:
         """Create a second compiled model instance with the same architecture
         as ``self.model``, used as the opponent side for TrueSkill matchups."""
-        cfg = self.cfg
+        cfg = self.cfg if cfg is None else cfg
+        model_num_players = int(cfg.env.num_players)
+        model_num_actions = int(cfg.model.num_actions)
         if cfg.model.name == ModelType.better_ffn:
-            twin: nn.Module = self._make_better_split_ffn()
+            twin: nn.Module = self._make_better_split_ffn(
+                cfg,
+                num_players=model_num_players,
+                num_actions=model_num_actions,
+                preflop_context_in_dim=preflop_context_in_dim,
+            )
         elif cfg.model.name == ModelType.better_trm:
             twin = BetterTRM(
-                num_actions=self.num_actions,
+                num_actions=model_num_actions,
                 hidden_dim=cfg.model.hidden_dim,
                 range_hidden_dim=cfg.model.range_hidden_dim,
                 ffn_dim=cfg.model.ffn_dim,
                 num_hidden_layers=cfg.model.num_hidden_layers,
                 num_policy_layers=cfg.model.num_policy_layers,
                 num_value_layers=cfg.model.num_value_layers,
-                num_players=self.num_players,
+                num_players=model_num_players,
                 num_recursions=cfg.model.num_recursions,
                 num_iterations=cfg.model.num_iterations,
                 shared_trunk=cfg.model.shared_trunk,
@@ -710,11 +786,11 @@ class RebelCFRTrainer:
         else:
             twin = RebelFFN(
                 input_dim=cfg.model.input_dim,
-                num_actions=self.num_actions,
+                num_actions=model_num_actions,
                 hidden_dim=cfg.model.hidden_dim,
                 num_hidden_layers=cfg.model.num_hidden_layers,
                 detach_value_head=cfg.model.detach_value_head,
-                num_players=self.num_players,
+                num_players=model_num_players,
                 nonlinearity=cfg.model.nonlinearity,
                 enforce_zero_sum=cfg.model.enforce_zero_sum,
             )
@@ -739,13 +815,38 @@ class RebelCFRTrainer:
     def _load_closing_leaf_model(self, checkpoint_path: str) -> nn.Module:
         return self._load_frozen_eval_model(checkpoint_path)
 
+    def _config_for_frozen_checkpoint(self, checkpoint: dict[str, Any]) -> Config:
+        checkpoint_config = checkpoint.get("config")
+        if checkpoint_config is None:
+            return self.cfg
+        if isinstance(checkpoint_config, Config):
+            return copy.deepcopy(checkpoint_config)
+        if isinstance(checkpoint_config, dict):
+            config_dict = _minimal_frozen_model_config_dict(
+                copy.deepcopy(checkpoint_config)
+            )
+            model_config = config_dict.get("model", {})
+            if model_config.get("preflop_model_type") is None:
+                model_config["preflop_model_type"] = PreflopModelType.ffn
+            return Config.from_dict(config_dict)
+        raise TypeError(
+            "checkpoint config must be a Config, a dict, or absent; "
+            f"got {type(checkpoint_config).__name__}"
+        )
+
     def _load_frozen_eval_model(self, checkpoint_path: str) -> nn.Module:
         checkpoint = torch.load(
             checkpoint_path, map_location=self.device, weights_only=False
         )
+        frozen_cfg = self._config_for_frozen_checkpoint(checkpoint)
         model_component = checkpoint.get("model_component")
-        model = self._make_eval_twin(compile_model=False)
         model_state = checkpoint["model"]
+        preflop_context_in_dim = _preflop_context_in_dim_from_state(model_state)
+        model = self._make_eval_twin(
+            compile_model=False,
+            cfg=frozen_cfg,
+            preflop_context_in_dim=preflop_context_in_dim,
+        )
         model_state = {
             key: value.to(self.float_dtype) if value.dtype.is_floating_point else value
             for key, value in model_state.items()
@@ -758,8 +859,8 @@ class RebelCFRTrainer:
         model.eval()
         for param in model.parameters():
             param.requires_grad = False
-        if self.device.type == "cuda" and _compile_setting(self.cfg) != "off":
-            model.compile_forward_modes(**_compile_kwargs(self.cfg))
+        if self.device.type == "cuda" and _compile_setting(frozen_cfg) != "off":
+            model.compile_forward_modes(**_compile_kwargs(frozen_cfg))
         return model
 
     def _load_street_model_registry(

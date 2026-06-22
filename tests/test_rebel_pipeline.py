@@ -175,33 +175,38 @@ def test_rebel_cfr_trainer_loads_frozen_checkpoint_with_source_player_count(tmp_
     cfg.model.street_value_heads = StreetValueHeads.both
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
 
-    with pytest.raises(RuntimeError, match="size mismatch"):
-        trainer._load_closing_leaf_model(str(checkpoint_path))
+    frozen = trainer._load_closing_leaf_model(str(checkpoint_path))
+
+    assert frozen.num_players == 2
+    assert hasattr(frozen, "pre_value_head")
 
 
-def test_rebel_cfr_trainer_uses_current_config_for_compact_value_checkpoint(tmp_path):
-    from p2.models.mlp.better_ffn import BetterPreflopTransformerValueFFN
+def test_rebel_cfr_trainer_uses_checkpoint_config_for_compact_value_checkpoint(
+    tmp_path,
+):
+    from p2.models.mlp.better_ffn import BetterPreflopValueFFN
 
     source_cfg = _tiny_rebel_cfg()
     source_cfg.model.name = ModelType.better_ffn
     source_cfg.model.preflop_hand_dim = 169
-    source_cfg.model.preflop_model_type = PreflopModelType.transformer
+    source_cfg.model.preflop_model_type = PreflopModelType.ffn
+    source_cfg.model.hidden_dim = 12
+    source_cfg.model.ffn_dim = 16
     source_trainer = RebelCFRTrainer(source_cfg, torch.device("cpu"))
     checkpoint_path = tmp_path / "E_preflop_169.pt"
     source_trainer.save_value_checkpoint(checkpoint_path, step=7, save_optimizer=False)
-
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    checkpoint["config"]["model"]["preflop_model_type"] = "ffn"
-    torch.save(checkpoint, checkpoint_path)
 
     cfg = _tiny_rebel_cfg()
     cfg.model.name = ModelType.better_ffn
     cfg.model.preflop_hand_dim = 169
     cfg.model.preflop_model_type = PreflopModelType.transformer
+    cfg.model.hidden_dim = 32
+    cfg.model.ffn_dim = 64
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
     frozen = trainer._load_closing_leaf_model(str(checkpoint_path))
 
-    assert type(frozen) is BetterPreflopTransformerValueFFN
+    assert type(frozen) is BetterPreflopValueFFN
+    assert frozen.hidden_dim == 12
 
 
 def _tiny_rebel_cfg() -> Config:
