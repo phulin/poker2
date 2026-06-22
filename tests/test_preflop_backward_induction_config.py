@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 
 from p2.core.structured_config import Config
+from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.stages.preflop_backward_induction import _load_model_weights
 from p2.stages.preflop_buckets import (
@@ -78,7 +79,7 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
 
     cfg = build_run_config(
         base,
-        _execution_config().run_config(),
+        _execution_config(),
         checkpoint_dir=tmp_path / "checkpoints",
         num_steps=42,
         num_envs=64,
@@ -127,6 +128,8 @@ def test_load_base_config_accepts_hydra_overrides() -> None:
 
 
 class _FakeSplitLeaf(torch.nn.Linear):
+    hand_dim = NUM_HANDS
+
     def __init__(self) -> None:
         super().__init__(1, 1)
         self.hidden_dim = 1

@@ -27,7 +27,6 @@ from p2.rl.rebel_batch import RebelBatch
 from p2.search.rebel_solved_dataset import RebelSolvedDatasetWriter
 from p2.stages.preflop_buckets import (
     PreflopBucketExecutionConfig,
-    PreflopBucketRunConfig,
     build_run_config,
     load_base_config,
 )
@@ -796,16 +795,15 @@ def run_train_specialists(
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     total_updates_guess = _estimate_train_updates(args)
-    run_cfg = args.run_config()
     if base_template is None:
         base_template = load_base_config(
             repo_root=REPO_ROOT,
-            config_name=run_cfg.config_name,
-            overrides=run_cfg.config_overrides,
+            config_name=args.config_name,
+            overrides=args.config_overrides,
         )
     base_cfg = build_run_config(
         base_template,
-        run_cfg,
+        args,
         checkpoint_dir=output_dir / "checkpoints",
         num_steps=total_updates_guess,
         num_envs=_max_cfr_batch_size(args),
@@ -841,7 +839,7 @@ def run_train_specialists(
 
             cfg = build_run_config(
                 base_template,
-                run_cfg,
+                args,
                 checkpoint_dir=bucket_dir / "checkpoints",
                 num_steps=total_updates_guess,
                 num_envs=cfr_batch_size,
@@ -1225,16 +1223,15 @@ def run_distill(
         * len(BUCKET_ORDER_DEEP_TO_SHALLOW)
         * 2,
     )
-    run_cfg = args.run_config()
     if base_template is None:
         base_template = load_base_config(
             repo_root=REPO_ROOT,
-            config_name=run_cfg.config_name,
-            overrides=run_cfg.config_overrides,
+            config_name=args.config_name,
+            overrides=args.config_overrides,
         )
     cfg = build_run_config(
         base_template,
-        run_cfg,
+        args,
         checkpoint_dir=output_dir / "checkpoints",
         num_steps=total_updates,
     )
@@ -1262,7 +1259,7 @@ def run_distill(
             include_value = bucket_label != "actions_0_3"
             teacher_cfg = build_run_config(
                 base_template,
-                run_cfg,
+                args,
                 checkpoint_dir=output_dir / "teacher_tmp",
                 num_steps=total_updates,
             )
