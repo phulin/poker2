@@ -23,11 +23,19 @@ Hydra-based configuration lives in `conf/`, and `model.name` selects the archite
 ## Quickstart (Training)
 ```bash
 # PPO self-play (CNN or transformer, via Hydra configs)
-python src/p2/cli/train_kbest.py --config-name=config
-python src/p2/cli/train_kbest.py --config-name=config_transformer
+uv run python src/p2/cli/train_kbest.py --config-name=config
+uv run python src/p2/cli/train_kbest.py --config-name=config_transformer
 
 # ReBeL CFR training (MLP/TRM)
-python src/p2/cli/train_rebel.py --config-name=config_rebel_cfr
+uv run python -m p2.cli.train_rebel --config-name=config_rebel_cfr
+
+# Staged postflop ReBeL curriculum
+uv run python -m p2.cli.train_rebel_curriculum --config-name=config_rebel_curriculum_postflop
+
+# Preflop backward-induction bucket stages
+uv run python -m p2.cli.train_rebel_preflop_buckets \
+  preflop_buckets.state_dataset=/path/to/states \
+  preflop_buckets.base_checkpoint=/path/to/base.pt
 ```
 
 ## Repository Structure

@@ -55,6 +55,22 @@ This directory contains Hydra configuration files for P2 training. Each file is 
 - **Device**: CUDA/CPU (override as needed)
 - **Checkpoint Dir**: `checkpoints-rebel-debug`
 
+### `config_rebel_curriculum_postflop.yaml` - Staged Postflop ReBeL Curriculum
+- **Purpose**: Hydra-first river->turn->flop staged training and value-only end-of-street distillation
+- **Stages**: Ordered under `curriculum.stages`
+- **Substeps**: Typed under `curriculum.substeps`
+- **Promotion Dir**: `checkpoints-rebel-curriculum/promoted`
+
+### `config_rebel_preflop_buckets.yaml` - Preflop Bucket Backward Induction
+- **Purpose**: Hydra-first preflop depth-bucket specialist training and distillation
+- **Source Paths**: `preflop_buckets.state_dataset` and `preflop_buckets.base_checkpoint`
+- **Command**: `preflop_buckets.command=train_specialists` or `distill`
+
+### `config_rebel_evaluate_value_loss.yaml` - ReBeL Value-Loss Evaluation
+- **Purpose**: Evaluate a checkpoint value head against a solved dataset using current Hydra config
+- **Checkpoint**: `resume_from`
+- **Dataset**: `validation_set.dataset`
+
 ### `allin/config.yaml` - All-In Equity Training Configuration
 - **Purpose**: Standalone preflop all-in equity model training
 - **Batch Size**: 64
@@ -66,28 +82,43 @@ This directory contains Hydra configuration files for P2 training. Each file is 
 ### Basic Usage
 ```bash
 # Use default configuration
-python src/p2/cli/train_kbest.py --config-name=config
+uv run python src/p2/cli/train_kbest.py --config-name=config
 
 # Transformer PPO training
-python src/p2/cli/train_kbest.py --config-name=config_transformer
+uv run python src/p2/cli/train_kbest.py --config-name=config_transformer
 
 # Use high-performance configuration
-python src/p2/cli/train_kbest.py --config-name=config_high_perf
+uv run python src/p2/cli/train_kbest.py --config-name=config_high_perf
 
 # Use fast configuration
-python src/p2/cli/train_kbest.py --config-name=config_fast
+uv run python src/p2/cli/train_kbest.py --config-name=config_fast
 
 # ReBeL CFR training
-python src/p2/cli/train_rebel.py --config-name=config_rebel_cfr
+uv run python -m p2.cli.train_rebel --config-name=config_rebel_cfr
+
+# Staged postflop ReBeL curriculum
+uv run python -m p2.cli.train_rebel_curriculum \
+    --config-name=config_rebel_curriculum_postflop
+
+# Preflop bucket specialist training
+uv run python -m p2.cli.train_rebel_preflop_buckets \
+    preflop_buckets.state_dataset=/path/to/states \
+    preflop_buckets.base_checkpoint=/path/to/base.pt
+
+# Value-loss evaluation
+uv run python scripts/evaluate_rebel_value_loss.py \
+    resume_from=/path/to/rebel_final.pt \
+    validation_set.dataset=/path/to/solved_dataset \
+    device=cpu
 
 # All-in equity training
-python -m p2.allin.train
+uv run python -m p2.allin.train
 ```
 
 ### Parameter Overrides
 ```bash
 # Override specific parameters
-python src/p2/cli/train_kbest.py \
+uv run python src/p2/cli/train_kbest.py \
     --config-name=config_high_perf \
     num_steps=1000 \
     train.batch_size=1536 \
@@ -96,7 +127,7 @@ python src/p2/cli/train_kbest.py \
 
 ### Resume Training
 ```bash
-python src/p2/cli/train_kbest.py \
+uv run python src/p2/cli/train_kbest.py \
     --config-name=config_high_perf \
     resume_from=checkpoints/checkpoint_step_1000.pt
 ```
