@@ -624,7 +624,7 @@ class RebelCFRTrainer:
             self._grad_clip_value_params = list(model.value_model.parameters())
             self._split_grad_clip = True
             return
-        if isinstance(model, BetterTRM) and not model.shared_trunk:
+        if type(model) is BetterTRM and not model.shared_trunk:
             policy_params = list(model.policy_head.parameters())
             policy_ids = {id(p) for p in policy_params}
             self._grad_clip_policy_params = policy_params
@@ -976,7 +976,7 @@ class RebelCFRTrainer:
         zero = torch.zeros((), device=device)
         if self._backup_consistency_coef() <= 0.0:
             return zero, zero
-        if isinstance(self.model, BetterTRM):
+        if type(self.model) is BetterTRM:
             return zero, zero
         if value_output.hand_values is None:
             return zero, zero
@@ -2223,7 +2223,7 @@ class RebelCFRTrainer:
         value_loss_update, policy_loss_update = None, None
 
         with self._model_autocast():
-            if isinstance(self.model, BetterTRM):
+            if type(self.model) is BetterTRM:
                 value_output_orig = self.model(
                     value_batch.features,
                     include_policy=False,
@@ -2268,7 +2268,7 @@ class RebelCFRTrainer:
         total_loss = total_loss + backup_consistency_weighted_loss
 
         with self._model_autocast():
-            if isinstance(self.model, BetterTRM):
+            if type(self.model) is BetterTRM:
                 policy_output = self.model(
                     policy_batch.features,
                     include_policy=True,
@@ -2362,7 +2362,7 @@ class RebelCFRTrainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         with self._model_autocast():
-            if isinstance(self.model, BetterTRM):
+            if type(self.model) is BetterTRM:
                 policy_output = self.model(
                     policy_batch.features,
                     include_policy=True,
@@ -2443,7 +2443,7 @@ class RebelCFRTrainer:
 
         self.optimizer.zero_grad(set_to_none=True)
         with self._model_autocast():
-            if isinstance(self.model, BetterTRM):
+            if type(self.model) is BetterTRM:
                 value_output_orig = self.model(
                     value_batch.features,
                     include_policy=False,
@@ -2547,7 +2547,7 @@ class RebelCFRTrainer:
         trace("ensure_min_samples done")
 
         supervisions = (
-            self.cfg.model.num_supervisions if isinstance(self.model, BetterTRM) else 1
+            self.cfg.model.num_supervisions if type(self.model) is BetterTRM else 1
         )
         if self.stream_live_batches:
             episodes = 1
