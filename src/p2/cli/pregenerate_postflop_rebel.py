@@ -8,7 +8,6 @@ import math
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
 import hydra
 import torch
@@ -19,6 +18,7 @@ from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
 from p2.runtime.training_run import device_from_config
+from p2.search.cfr_evaluator import CFREvaluator
 from p2.search.postflop_spot_sampler import postflop_spot_sampler_metadata
 from p2.search.rebel_solved_dataset import RebelSolvedDatasetWriter
 from p2.utils.profiling import install_triton_compile_logger_from_env
@@ -82,25 +82,22 @@ class _ExploitabilityAccumulator:
 
 
 @torch.no_grad()
-def _final_average_policy_exploitability_mbbg(evaluator: object) -> torch.Tensor:
+def _final_average_policy_exploitability_mbbg(evaluator: CFREvaluator) -> torch.Tensor:
     """Measure final average-policy local exploitability without changing targets."""
 
     latest_values = evaluator.latest_values.clone()
     values_avg = evaluator.values_avg.clone()
     last_model_values = (
         evaluator.last_model_values.clone()
-        if getattr(evaluator, "last_model_values", None) is not None
+        if evaluator.last_model_values is not None
         else None
     )
-    if hasattr(evaluator, "_exploitability_cache_key"):
-        evaluator._exploitability_cache_key = None
-    if hasattr(evaluator, "_exploitability_cache"):
-        evaluator._exploitability_cache = None
+    evaluator._exploitability_cache_key = None
+    evaluator._exploitability_cache = None
 
     try:
         evaluator.update_average_values_final()
-        if hasattr(evaluator, "_exploitability_cache_key"):
-            evaluator._exploitability_cache_key = None
+        evaluator._exploitability_cache_key = None
         stats = evaluator._compute_exploitability()
         mbbg = evaluator._local_exploitability_mbbg(stats.local_exploitability)
         return mbbg.detach().float().cpu()
@@ -108,10 +105,8 @@ def _final_average_policy_exploitability_mbbg(evaluator: object) -> torch.Tensor
         evaluator.latest_values = latest_values
         evaluator.values_avg = values_avg
         evaluator.last_model_values = last_model_values
-        if hasattr(evaluator, "_exploitability_cache_key"):
-            evaluator._exploitability_cache_key = None
-        if hasattr(evaluator, "_exploitability_cache"):
-            evaluator._exploitability_cache = None
+        evaluator._exploitability_cache_key = None
+        evaluator._exploitability_cache = None
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -122,15 +117,9 @@ def _sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _checkpoint_metadata(path: str | Path) -> dict[str, Any]:
-    try:
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    except Exception:
-        return {}
-    if not isinstance(checkpoint, dict):
-        return {}
-    metadata = checkpoint.get("metadata", {})
-    return dict(metadata) if isinstance(metadata, dict) else {}
+def _checkpoint_metadata(path: str | Path) -> dict[str, object]:
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    return dict(checkpoint["metadata"])
 
 
 def _maybe_sha256_file(path: str | Path | None) -> str | None:
@@ -153,14 +142,14 @@ def _target_model_metadata(cfg: Config) -> dict:
         "sha256": _sha256_file(checkpoint),
     }
     source_checkpoint = checkpoint_metadata.get("curriculum_source_checkpoint")
-    if isinstance(source_checkpoint, str):
+    if source_checkpoint:
         metadata["distilled_from_checkpoint"] = source_checkpoint
         metadata["distilled_from_sha256"] = _maybe_sha256_file(source_checkpoint)
     source_net = checkpoint_metadata.get("curriculum_from_net")
-    if isinstance(source_net, str):
+    if source_net:
         metadata["distilled_from_net"] = source_net
     target_net = checkpoint_metadata.get("curriculum_net")
-    if isinstance(target_net, str):
+    if target_net:
         metadata["net"] = target_net
     return metadata
 

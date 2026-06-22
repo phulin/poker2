@@ -124,7 +124,7 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
     cfg.rebel_pregenerate.storage_dtype = "float16"
     cfg.search.iterations = 17
     checkpoint = tmp_path / "closing.pt"
-    checkpoint.write_bytes(b"closing leaf checkpoint")
+    torch.save({"model": {}, "metadata": {}}, checkpoint)
     cfg.search.closing_leaf_checkpoint = str(checkpoint)
 
     manifest = pregenerate_cli.pregenerate_postflop_rebel(cfg)
@@ -166,7 +166,7 @@ def test_pregenerate_postflop_rebel_writes_trimmed_solved_batches(monkeypatch, t
     assert manifest["target_model"] == {
         "role": "closing_leaf",
         "checkpoint": str(checkpoint),
-        "sha256": hashlib.sha256(b"closing leaf checkpoint").hexdigest(),
+        "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
     }
     assert manifest["feature_encoder"] == {
         "policy": {"model": "_FakeModelComponent", "encoder": "_FakeEncoder"},

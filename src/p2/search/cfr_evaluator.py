@@ -226,6 +226,8 @@ class CFREvaluator(ABC):
     _warm_start_ftrl_tau_scale: float
     _warm_start_ftrl_horizon: int
     _warm_start_ftrl_floor: float
+    _exploitability_cache_key: object | None = None
+    _exploitability_cache: ExploitabilityStats | None = None
 
     # ============================================================================
     # Abstract Methods (must be implemented by subclasses)
