@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+
 import torch
 
 from p2.core.structured_config import Config
 from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.better_ffn import BetterSplitFFN
-from p2.stages.preflop_backward_induction import _load_model_weights
+from p2.stages.preflop_backward_induction import (
+    _estimate_train_updates,
+    _load_model_weights,
+)
 from p2.stages.preflop_buckets import (
     PreflopBucketExecutionConfig,
     build_run_config,
@@ -108,6 +113,41 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
     assert base.data.mode == "pregenerated"
     assert base.search.iterations_final == 5678
     assert base.model.compile == "default"
+
+
+def test_estimate_train_updates_uses_train_batch_size(tmp_path) -> None:
+    manifest = {
+        "buckets": [
+            {
+                "label": label,
+                "num_rows": 1024,
+                "shards": [{"path": f"{label}.pt"}],
+            }
+            for label in (
+                "actions_12_15",
+                "actions_8_11",
+                "actions_4_7",
+                "actions_0_3",
+            )
+        ]
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+
+    args = _execution_config(
+        state_dataset=str(tmp_path),
+        states_per_bucket=1024,
+        train_batch_size=128,
+        cfr_batch_size=512,
+        actions_12_15_cfr_batch_size=8192,
+        actions_8_11_cfr_batch_size=2048,
+        actions_12_15_epochs=2,
+    )
+
+    # 1024 rows / 128 train batch = 8 minibatches. The deepest bucket has
+    # value+policy updates over two epochs, middle buckets have value+policy
+    # once, and actions_0_3 only trains policy: 8*2*2 + 8*2 + 8*2 + 8.
+    assert _estimate_train_updates(args) == 72
+
 
 class _FakeSplitLeaf(torch.nn.Linear):
     hand_dim = NUM_HANDS

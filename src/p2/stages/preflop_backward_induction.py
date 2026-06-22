@@ -531,10 +531,11 @@ def _estimate_train_updates(args: PreflopBucketExecutionConfig) -> int:
         Path(args.state_dataset), allow_partial=args.allow_partial
     )
     total_updates = 0
+    train_batch_size = max(1, int(args.train_batch_size))
     for bucket_label in BUCKET_ORDER_DEEP_TO_SHALLOW:
         _, rows, _ = _bucket_shards(manifest, Path(args.state_dataset), bucket_label)
         rows = min(int(args.states_per_bucket), int(rows))
-        batches = math.ceil(rows / _bucket_cfr_batch_size(args, bucket_label))
+        batches = math.ceil(rows / train_batch_size)
         updates_per_batch = 1 if bucket_label == "actions_0_3" else 2
         total_updates += (
             batches * updates_per_batch * _bucket_epochs(args, bucket_label)
@@ -582,6 +583,75 @@ def _validation_cache_path(
 
 def _slice_batch(batch: RebelBatch, start: int, end: int) -> RebelBatch:
     return batch[slice(start, end)]
+
+
+def _aggregate_minibatch_stats(
+    weighted_stats: list[tuple[int, dict[str, Any]]],
+) -> dict[str, float]:
+    if not weighted_stats:
+        return {}
+    total_rows = sum(rows for rows, _ in weighted_stats)
+    out: dict[str, float] = {
+        "minibatch_updates": float(len(weighted_stats)),
+        "minibatch_examples": float(total_rows),
+    }
+    keys = set().union(*(stats.keys() for _, stats in weighted_stats))
+    for key in keys:
+        values: list[tuple[int, float]] = []
+        for rows, stats in weighted_stats:
+            value = _float_metrics(stats).get(key)
+            if value is not None:
+                values.append((rows, value))
+        if not values:
+            continue
+        if key in {"learning_rate", "step"}:
+            out[key] = values[-1][1]
+            continue
+        denom = sum(rows for rows, _ in values)
+        out[key] = sum(rows * value for rows, value in values) / max(1, denom)
+    return out
+
+
+def _train_value_minibatches(
+    trainer: RebelCFRTrainer,
+    batch: RebelBatch,
+    *,
+    step: int,
+    batch_size: int,
+) -> tuple[int, dict[str, float], int]:
+    weighted_stats: list[tuple[int, dict[str, Any]]] = []
+    current_step = int(step)
+    for start in range(0, len(batch), batch_size):
+        part = _slice_batch(batch, start, min(start + batch_size, len(batch)))
+        stats = trainer.train_value_batch(
+            part,
+            current_step,
+            sync_inference_model=True,
+        )
+        weighted_stats.append((len(part), stats))
+        current_step += 1
+    return current_step, _aggregate_minibatch_stats(weighted_stats), len(weighted_stats)
+
+
+def _train_policy_minibatches(
+    trainer: RebelCFRTrainer,
+    batch: RebelBatch,
+    *,
+    step: int,
+    batch_size: int,
+) -> tuple[int, dict[str, float], int]:
+    weighted_stats: list[tuple[int, dict[str, Any]]] = []
+    current_step = int(step)
+    for start in range(0, len(batch), batch_size):
+        part = _slice_batch(batch, start, min(start + batch_size, len(batch)))
+        stats = _policy_update(
+            trainer,
+            part,
+            step=current_step,
+        )
+        weighted_stats.append((len(part), stats))
+        current_step += 1
+    return current_step, _aggregate_minibatch_stats(weighted_stats), len(weighted_stats)
 
 
 def _evaluate_validation_split(
@@ -890,9 +960,11 @@ def run_train_specialists(
             value_examples = 0
             value_step = 0
             policy_examples = 0
+            policy_step = 0
             bucket_step = 0
             bucket_epochs = _bucket_epochs(args, bucket_label)
             bucket_start = time.time()
+            train_batch_size = max(1, int(args.train_batch_size))
             progress_interval = max(int(args.progress_roots), cfr_batch_size)
             next_progress_roots = progress_interval
             last_tree_stats: dict[str, float] = {}
@@ -912,6 +984,7 @@ def run_train_specialists(
                     f"{bucket_label}/roots_solved": roots_solved,
                     f"{bucket_label}/global_step": global_step,
                     f"{bucket_label}/value_step": value_step,
+                    f"{bucket_label}/policy_step": policy_step,
                     "global_step": global_step,
                 }
                 payload.update(
@@ -939,7 +1012,7 @@ def run_train_specialists(
                     f"value={value_examples:,} policy={policy_examples:,} "
                     f"nodes={int(last_tree_stats.get('evaluator_total_nodes', 0)):,} "
                     f"cfr_batch={cfr_batch_size} step={global_step} "
-                    f"bucket_step={bucket_step} "
+                    f"bucket_step={bucket_step} train_batch={train_batch_size} "
                     f"roots/s={roots_per_s:.2f} elapsed={elapsed:.1f}s",
                     flush=True,
                 )
@@ -986,25 +1059,34 @@ def run_train_specialists(
                         if writer is not None:
                             writer.append("value", value_stream)
                         value_examples += len(value_stream)
-                        value_stats = trainer.train_value_batch(
-                            value_stream,
+                        (
                             global_step,
-                            sync_inference_model=True,
+                            value_stats,
+                            value_updates,
+                        ) = _train_value_minibatches(
+                            trainer,
+                            value_stream,
+                            step=global_step,
+                            batch_size=train_batch_size,
                         )
-                        value_step += 1
-                        global_step += 1
+                        value_step += value_updates
                     else:
                         value_stats = {}
                     if policy_stream is not None:
                         if writer is not None:
                             writer.append("policy", policy_stream)
                         policy_examples += len(policy_stream)
-                        policy_stats = _policy_update(
+                        (
+                            global_step,
+                            policy_stats,
+                            policy_updates,
+                        ) = _train_policy_minibatches(
                             trainer,
                             policy_stream,
                             step=global_step,
+                            batch_size=train_batch_size,
                         )
-                        global_step += 1
+                        policy_step += policy_updates
                     else:
                         policy_stats = {}
 
@@ -1018,8 +1100,10 @@ def run_train_specialists(
                         f"{bucket_label}/epoch_roots": epoch_roots,
                         f"{bucket_label}/bucket_step": bucket_step,
                         f"{bucket_label}/cfr_batch_size": cfr_batch_size,
+                        f"{bucket_label}/train_batch_size": train_batch_size,
                         f"{bucket_label}/global_step": global_step,
                         f"{bucket_label}/value_step": value_step,
+                        f"{bucket_label}/policy_step": policy_step,
                         f"{bucket_label}/value_examples": value_examples,
                         f"{bucket_label}/policy_examples": policy_examples,
                         f"{bucket_label}/elapsed_s": elapsed,
