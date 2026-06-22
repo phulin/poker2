@@ -1,0 +1,49 @@
+# Hydra-first preflop backward-induction bucket training and distillation.
+#
+# The checkpoint paths provide model weights only. Run configuration comes from
+# this resolved Hydra config plus command-line overrides.
+
+defaults:
+  - config_rebel_cfr
+  - _self_
+
+checkpoint_dir: checkpoints-rebel-preflop-buckets
+use_wandb: true
+wandb_project: poker-rebel-preflop-backward-induction
+wandb_tags: ["rebel", "cfr", "preflop", "backward-induction"]
+
+preflop_buckets:
+  command: train_specialists
+  state_dataset: null
+  base_checkpoint: null
+  output_dir: outputs/preflop_backward_induction
+  belief_mode: random
+  states_per_bucket: 100000
+  train_batch_size: 1024
+  cfr_batch_size: 512
+  actions_12_15_cfr_batch_size: null
+  actions_8_11_cfr_batch_size: null
+  actions_12_15_epochs: 1
+  depth: 4
+  cfr_iterations: 400
+  warm_start_iterations: 0
+  sparse_fused: true
+  compile: null
+  validation_items: 4096
+  validation_cfr_iterations: 10000
+  validation_interval_steps: 10
+  validation_eval_batch_size: 1024
+  replay_buffer_batches: 1
+  storage_dtype: bfloat16
+  write_solved_shards: true
+  allow_partial: false
+  overwrite: false
+  progress_roots: 10000
+  wandb_group: null
+  student_init: null
+  distill_batch_size: 1024
+  distill_checkpoints:
+    checkpoint_12_15: null
+    checkpoint_8_11: null
+    checkpoint_4_7: null
+    checkpoint_0_3: null

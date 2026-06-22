@@ -502,6 +502,50 @@ class PreflopValidationConfig:
 
 
 @dataclass
+class PreflopBucketDistillCheckpointsConfig:
+    checkpoint_12_15: str | None = None
+    checkpoint_8_11: str | None = None
+    checkpoint_4_7: str | None = None
+    checkpoint_0_3: str | None = None
+
+
+@dataclass
+class PreflopBucketTrainingConfig:
+    command: str = "train_specialists"
+    state_dataset: str | None = None
+    base_checkpoint: str | None = None
+    output_dir: str = "outputs/preflop_backward_induction"
+    belief_mode: str = "random"
+    states_per_bucket: int = 100_000
+    train_batch_size: int = 1024
+    cfr_batch_size: int = 512
+    actions_12_15_cfr_batch_size: int | None = None
+    actions_8_11_cfr_batch_size: int | None = None
+    actions_12_15_epochs: int = 1
+    depth: int = 4
+    cfr_iterations: int = 400
+    warm_start_iterations: int = 0
+    sparse_fused: bool = True
+    compile: str | None = None
+    validation_items: int = 4096
+    validation_cfr_iterations: int = 10_000
+    validation_interval_steps: int = 10
+    validation_eval_batch_size: int = 1024
+    replay_buffer_batches: int = 1
+    storage_dtype: str = "bfloat16"
+    write_solved_shards: bool = True
+    allow_partial: bool = False
+    overwrite: bool = False
+    progress_roots: int = 10_000
+    wandb_group: str | None = None
+    student_init: str | None = None
+    distill_batch_size: int = 1024
+    distill_checkpoints: PreflopBucketDistillCheckpointsConfig = field(
+        default_factory=PreflopBucketDistillCheckpointsConfig
+    )
+
+
+@dataclass
 class Config:
     # Training parameters
     num_steps: int = 2000
@@ -546,6 +590,9 @@ class Config:
     validation_set: ValidationSetConfig = field(default_factory=ValidationSetConfig)
     preflop_validation: PreflopValidationConfig = field(
         default_factory=PreflopValidationConfig
+    )
+    preflop_buckets: PreflopBucketTrainingConfig = field(
+        default_factory=PreflopBucketTrainingConfig
     )
 
     def __post_init__(self):
@@ -635,6 +682,16 @@ class Config:
         )
         container["preflop_validation"] = PreflopValidationConfig(
             **container.get("preflop_validation", {})
+        )
+        preflop_buckets_container = container.get("preflop_buckets", {})
+        distill_checkpoints_container = preflop_buckets_container.get(
+            "distill_checkpoints", {}
+        )
+        preflop_buckets_container["distill_checkpoints"] = (
+            PreflopBucketDistillCheckpointsConfig(**distill_checkpoints_container)
+        )
+        container["preflop_buckets"] = PreflopBucketTrainingConfig(
+            **preflop_buckets_container
         )
         return cls(**container)
 

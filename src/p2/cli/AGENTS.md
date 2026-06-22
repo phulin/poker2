@@ -4,6 +4,7 @@ CLI entry points for training, search tuning, model inspection, sampling public 
 ### Source files
 - `train_rebel.py`: Hydra entry point for ReBeL-style CFR training; builds config/WandB/trainer setup and delegates the shared step loop to `p2.rl.rebel_loop`.
 - `train_rebel_curriculum.py`: Staged postflop ReBeL curriculum orchestrator that runs configured train and end-of-street value-only distill substeps with per-substep checkpoints, promotion, metadata, substep model overrides, compact `E_preflop` validation metrics, S_i policy warm-starts from promoted S_{i+1} checkpoints, S_i value initialization from E_i checkpoints with pre-to-post value-head mapping, and validated substep-aware resume.
+- `train_rebel_preflop_buckets.py`: Hydra entry point for preflop backward-induction bucket specialist training and distillation using the typed `preflop_buckets` config section.
 - `pregenerate_postflop_rebel.py`: Bounded postflop ReBeL solved-example dataset writer for HP sweeps/holdouts, reusing live CFR generation, tensor-only shard output with optional compressed float storage, per-row root-source tagging, sampler metadata, normalized root-street metadata, feature-encoder metadata, static CFR quality metadata, and closing-leaf/distillation-source checkpoint provenance.
 - `train_kbest.py`: PPO self-play trainer using K-best/DReD-style opponent pools and tensorized environments.
 - `modal_train_rebel.py`: Modal wrapper for launching ReBeL training remotely.

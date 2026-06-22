@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Hydra entry point for preflop backward-induction bucket stages."""
+
+from __future__ import annotations
+
+import argparse
+
+import hydra
+from omegaconf import DictConfig
+
+from p2.core.structured_config import Config, PreflopBucketTrainingConfig
+from p2.stages import preflop_backward_induction as preflop_bi
+
+
+def _required(value: str | None, field: str) -> str:
+    if value is None or value == "":
+        raise ValueError(f"preflop_buckets.{field} is required")
+    return value
+
+
+def _command_name(command: str) -> str:
+    if command == "train_specialists":
+        return "train-specialists"
+    if command in {"train-specialists", "distill"}:
+        return command
+    raise ValueError(
+        "preflop_buckets.command must be 'train_specialists' or 'distill'; "
+        f"got {command!r}"
+    )
+
+
+def _args_from_config(cfg: Config) -> argparse.Namespace:
+    preflop = cfg.preflop_buckets
+    command = _command_name(preflop.command)
+    base_checkpoint = _required(preflop.base_checkpoint, "base_checkpoint")
+    state_dataset = _required(preflop.state_dataset, "state_dataset")
+    checkpoint_args = _distill_checkpoint_args(preflop)
+
+    return argparse.Namespace(
+        command=command,
+        config_name="",
+        config_override=(),
+        state_dataset=state_dataset,
+        base_checkpoint=base_checkpoint,
+        output_dir=preflop.output_dir,
+        device=cfg.device,
+        seed=cfg.seed,
+        depth=preflop.depth,
+        cfr_iterations=preflop.cfr_iterations,
+        warm_start_iterations=preflop.warm_start_iterations,
+        sparse_fused=preflop.sparse_fused,
+        compile=preflop.compile,
+        belief_mode=preflop.belief_mode,
+        states_per_bucket=preflop.states_per_bucket,
+        train_batch_size=preflop.train_batch_size,
+        cfr_batch_size=preflop.cfr_batch_size,
+        actions_12_15_cfr_batch_size=preflop.actions_12_15_cfr_batch_size,
+        actions_8_11_cfr_batch_size=preflop.actions_8_11_cfr_batch_size,
+        actions_12_15_epochs=preflop.actions_12_15_epochs,
+        validation_items=preflop.validation_items,
+        validation_cfr_iterations=preflop.validation_cfr_iterations,
+        validation_interval_steps=preflop.validation_interval_steps,
+        validation_eval_batch_size=preflop.validation_eval_batch_size,
+        replay_buffer_batches=preflop.replay_buffer_batches,
+        storage_dtype=preflop.storage_dtype,
+        write_solved_shards=preflop.write_solved_shards,
+        allow_partial=preflop.allow_partial,
+        overwrite=preflop.overwrite,
+        progress_roots=preflop.progress_roots,
+        use_wandb=cfg.use_wandb,
+        wandb_project=cfg.wandb_project,
+        wandb_name=cfg.wandb_name,
+        wandb_group=preflop.wandb_group,
+        wandb_tags=cfg.wandb_tags,
+        student_init=preflop.student_init,
+        distill_batch_size=preflop.distill_batch_size,
+        **checkpoint_args,
+    )
+
+
+def _distill_checkpoint_args(preflop: PreflopBucketTrainingConfig) -> dict[str, str | None]:
+    checkpoints = preflop.distill_checkpoints
+    return {
+        "checkpoint_12_15": checkpoints.checkpoint_12_15,
+        "checkpoint_8_11": checkpoints.checkpoint_8_11,
+        "checkpoint_4_7": checkpoints.checkpoint_4_7,
+        "checkpoint_0_3": checkpoints.checkpoint_0_3,
+    }
+
+
+def train_rebel_preflop_buckets(cfg: Config) -> None:
+    args = _args_from_config(cfg)
+    if args.command == "train-specialists":
+        preflop_bi.run_train_specialists(args, base_template=cfg)
+        return
+    missing = [
+        key for key, value in _distill_checkpoint_args(cfg.preflop_buckets).items()
+        if value is None
+    ]
+    if missing:
+        raise ValueError(
+            "preflop_buckets.distill_checkpoints missing required fields: "
+            f"{', '.join(missing)}"
+        )
+    preflop_bi.run_distill(args, base_template=cfg)
+
+
+@hydra.main(
+    version_base=None,
+    config_path="../../../conf",
+    config_name="config_rebel_preflop_buckets",
+)
+def main(dict_config: DictConfig) -> None:
+    cfg = Config.from_dict_config(dict_config)
+    train_rebel_preflop_buckets(cfg)
+
+
+if __name__ == "__main__":
+    main()
