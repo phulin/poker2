@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Any, Iterator
 
@@ -51,18 +51,26 @@ class TrainingRunContext:
         return self.run.id if isinstance(self.run, wandb.Run) else None
 
     def log_model_parameter_summary(self, model: torch.nn.Module) -> None:
-        metrics = count_model_parameters(model)
-        print(
-            "Model parameters: "
-            f"total={metrics['total_parameters']:,}; "
-            f"trainable={metrics['trainable_parameters']:,}"
-        )
-        if isinstance(self.run, wandb.Run):
-            self.run.summary.update(metrics)
+        log_model_parameter_summary(model, self.run)
 
     def watch_model(self, model: torch.nn.Module, *, log_freq: int = 100) -> None:
-        if isinstance(self.run, wandb.Run):
-            self.run.watch(model, log_freq=log_freq)
+        watch_model(model, self.run, log_freq=log_freq)
+
+
+def log_model_parameter_summary(model: torch.nn.Module, run: Any) -> None:
+    metrics = count_model_parameters(model)
+    print(
+        "Model parameters: "
+        f"total={metrics['total_parameters']:,}; "
+        f"trainable={metrics['trainable_parameters']:,}"
+    )
+    if isinstance(run, wandb.Run):
+        run.summary.update(metrics)
+
+
+def watch_model(model: torch.nn.Module, run: Any, *, log_freq: int = 100) -> None:
+    if isinstance(run, wandb.Run):
+        run.watch(model, log_freq=log_freq)
 
 
 def _wandb_init_kwargs(
@@ -96,6 +104,31 @@ def _wandb_init_kwargs(
 
 
 @contextmanager
+def wandb_run(
+    cfg: Config,
+    *,
+    group: str | None = None,
+    name: str | None = None,
+    stage: str | None = None,
+) -> Iterator[Any]:
+    if not cfg.use_wandb:
+        yield None
+        return
+    try:
+        run_cm = wandb.init(
+            **_wandb_init_kwargs(cfg, group=group, name=name, stage=stage)
+        )
+    except Exception as exc:
+        print(f"Wandb init failed ({exc}); continuing without logging.")
+        cfg.use_wandb = False
+        yield None
+        return
+
+    with run_cm as run:
+        yield run
+
+
+@contextmanager
 def training_run(
     cfg: Config,
     *,
@@ -113,25 +146,17 @@ def training_run(
     if configure_torch:
         setup_torch_runtime(cfg, device, recompile_limit=recompile_limit)
 
-    run_cm: Any = nullcontext()
-    if cfg.use_wandb:
-        try:
-            run_cm = wandb.init(
-                **_wandb_init_kwargs(cfg, group=group, name=name, stage=stage)
-            )
-        except Exception as exc:
-            print(f"Wandb init failed ({exc}); continuing without logging.")
-            cfg.use_wandb = False
-            run_cm = nullcontext()
-
-    with run_cm as run:
+    with wandb_run(cfg, group=group, name=name, stage=stage) as run:
         yield TrainingRunContext(cfg=cfg, device=device, run=run)
 
 
 __all__ = [
     "TrainingRunContext",
     "device_from_config",
+    "log_model_parameter_summary",
     "setup_torch_runtime",
     "training_run",
+    "wandb_run",
     "wandb_run_id_from_checkpoint",
+    "watch_model",
 ]
