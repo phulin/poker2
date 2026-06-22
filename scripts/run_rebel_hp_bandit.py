@@ -10,7 +10,6 @@ import itertools
 import json
 import math
 import os
-import random
 import re
 import time
 from dataclasses import dataclass
@@ -152,225 +151,6 @@ def _make_trial_config(
         cfg.checkpoint_dir = str(output_dir / "scratch_checkpoints" / f"trial_{trial_index:04d}")
 
     return cfg
-
-
-def _candidate_arms(
-    rng: random.Random,
-    max_arms: int,
-    *,
-    arch_set: str = "all",
-    arch_names: list[str] | None = None,
-    lr_starts: list[float] | None = None,
-    adamw_lr_factors: list[float] | None = None,
-    policy_head_muon_learning_rate: float | None = None,
-    schedules: list[str] | None = None,
-) -> list[Arm]:
-    standard_architectures = [
-        (
-            "compact",
-            {
-                "model.hidden_dim": 384,
-                "model.range_hidden_dim": 192,
-                "model.ffn_dim": 768,
-                "model.num_hidden_layers": 2,
-                "model.num_value_layers": 2,
-                "model.num_policy_layers": 4,
-                "model.policy_rank": 96,
-                "model.policy_hand_bias_rank": 24,
-            },
-        ),
-        (
-            "base",
-            {
-                "model.hidden_dim": 512,
-                "model.range_hidden_dim": 256,
-                "model.ffn_dim": 1024,
-                "model.num_hidden_layers": 3,
-                "model.num_value_layers": 3,
-                "model.num_policy_layers": 5,
-                "model.policy_rank": 128,
-                "model.policy_hand_bias_rank": 32,
-            },
-        ),
-        (
-            "wide",
-            {
-                "model.hidden_dim": 512,
-                "model.range_hidden_dim": 256,
-                "model.ffn_dim": 1536,
-                "model.num_hidden_layers": 3,
-                "model.num_value_layers": 3,
-                "model.num_policy_layers": 5,
-                "model.policy_rank": 128,
-                "model.policy_hand_bias_rank": 32,
-            },
-        ),
-        (
-            "range512",
-            {
-                "model.hidden_dim": 512,
-                "model.range_hidden_dim": 384,
-                "model.ffn_dim": 1024,
-                "model.num_hidden_layers": 3,
-                "model.num_value_layers": 3,
-                "model.num_policy_layers": 5,
-                "model.policy_rank": 128,
-                "model.policy_hand_bias_rank": 32,
-            },
-        ),
-        (
-            "deep_value",
-            {
-                "model.hidden_dim": 512,
-                "model.range_hidden_dim": 256,
-                "model.ffn_dim": 1024,
-                "model.num_hidden_layers": 3,
-                "model.num_value_layers": 5,
-                "model.num_policy_layers": 4,
-                "model.policy_rank": 128,
-                "model.policy_hand_bias_rank": 32,
-            },
-        ),
-    ]
-    small_architectures = [
-        (
-            "tiny",
-            {
-                "model.hidden_dim": 256,
-                "model.range_hidden_dim": 128,
-                "model.ffn_dim": 512,
-                "model.num_hidden_layers": 2,
-                "model.num_value_layers": 2,
-                "model.num_policy_layers": 3,
-                "model.policy_rank": 64,
-                "model.policy_hand_bias_rank": 16,
-            },
-        ),
-        (
-            "small",
-            {
-                "model.hidden_dim": 320,
-                "model.range_hidden_dim": 160,
-                "model.ffn_dim": 640,
-                "model.num_hidden_layers": 2,
-                "model.num_value_layers": 3,
-                "model.num_policy_layers": 4,
-                "model.policy_rank": 80,
-                "model.policy_hand_bias_rank": 20,
-            },
-        ),
-        (
-            "compact",
-            {
-                "model.hidden_dim": 384,
-                "model.range_hidden_dim": 192,
-                "model.ffn_dim": 768,
-                "model.num_hidden_layers": 2,
-                "model.num_value_layers": 2,
-                "model.num_policy_layers": 4,
-                "model.policy_rank": 96,
-                "model.policy_hand_bias_rank": 24,
-            },
-        ),
-        (
-            "compact_deep_value",
-            {
-                "model.hidden_dim": 384,
-                "model.range_hidden_dim": 192,
-                "model.ffn_dim": 768,
-                "model.num_hidden_layers": 2,
-                "model.num_value_layers": 5,
-                "model.num_policy_layers": 4,
-                "model.policy_rank": 96,
-                "model.policy_hand_bias_rank": 24,
-            },
-        ),
-        (
-            "compact_deep_value_no_trunk",
-            {
-                "model.hidden_dim": 384,
-                "model.range_hidden_dim": 192,
-                "model.ffn_dim": 768,
-                "model.num_hidden_layers": 0,
-                "model.num_value_layers": 7,
-                "model.num_policy_layers": 6,
-                "model.policy_rank": 96,
-                "model.policy_hand_bias_rank": 24,
-            },
-        ),
-    ]
-    if arch_set == "all":
-        architectures = standard_architectures
-    elif arch_set == "small":
-        architectures = small_architectures
-    elif arch_set == "all_plus_small":
-        architectures = small_architectures + standard_architectures
-    else:
-        raise ValueError(f"unsupported arch_set: {arch_set}")
-    if arch_names is not None:
-        requested = set(arch_names)
-        architectures = [(name, arch) for name, arch in architectures if name in requested]
-        found = {name for name, _ in architectures}
-        missing = sorted(requested - found)
-        if missing:
-            raise ValueError(
-                f"unknown architecture(s) for arch_set={arch_set}: {', '.join(missing)}"
-            )
-    if lr_starts is None:
-        lr_starts = [0.006, 0.01, 0.016]
-    if adamw_lr_factors is None:
-        adamw_lr_factors = [0.2]
-    if schedules is None:
-        schedules = ["cosine", "linear", "wsd"]
-
-    arms: list[Arm] = []
-    for (arch_name, arch), lr, adamw_factor, schedule in itertools.product(
-        architectures, lr_starts, adamw_lr_factors, schedules
-    ):
-        overrides = dict(arch)
-        overrides.update(
-            {
-                "train.learning_rate": lr,
-                "train.adamw_learning_rate": lr * adamw_factor,
-                "train.lr_schedule": schedule,
-                "train.lr_wsd_decay_fraction": 0.2,
-            }
-        )
-        name = f"{arch_name}_lr{lr:g}_adamw{lr * adamw_factor:g}_{schedule}"
-        if policy_head_muon_learning_rate is not None:
-            overrides["train.policy_head_muon_learning_rate"] = policy_head_muon_learning_rate
-            name = f"{name}_phm{policy_head_muon_learning_rate:g}"
-        arms.append(Arm(name, overrides))
-    rng.shuffle(arms)
-    return arms[:max_arms]
-
-
-def _parse_float_list(value: str) -> list[float]:
-    items = [item.strip() for item in value.split(",") if item.strip()]
-    if not items:
-        raise argparse.ArgumentTypeError("expected at least one comma-separated float")
-    try:
-        return [float(item) for item in items]
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(str(exc)) from exc
-
-
-def _parse_schedule_list(value: str) -> list[str]:
-    allowed = {"cosine", "linear", "wsd"}
-    items = [item.strip() for item in value.split(",") if item.strip()]
-    if not items:
-        raise argparse.ArgumentTypeError("expected at least one comma-separated schedule")
-    unknown = sorted(set(items) - allowed)
-    if unknown:
-        raise argparse.ArgumentTypeError(f"unknown schedule(s): {', '.join(unknown)}")
-    return items
-
-
-def _parse_string_list(value: str) -> list[str]:
-    items = [item.strip() for item in value.split(",") if item.strip()]
-    if not items:
-        raise argparse.ArgumentTypeError("expected at least one comma-separated item")
-    return items
 
 
 def _grid_values(value: Any) -> list[Any]:
@@ -561,52 +341,11 @@ def main() -> None:
         help="YAML trial spec. Each trial params map may contain scalar values or arrays.",
     )
     parser.add_argument(
-        "--legacy-candidate-grid",
-        action="store_true",
-        help="Use the historical CLI-generated candidate grid instead of --trial-spec.",
-    )
-    parser.add_argument(
         "--arm-name-regex",
         default=None,
         help="Optional regex used to filter expanded arm names before running.",
     )
     parser.add_argument("--max-arms", type=int, default=None)
-    parser.add_argument(
-        "--arch-set",
-        default="all",
-        choices=["all", "small", "all_plus_small"],
-        help="Architecture candidate family to sample.",
-    )
-    parser.add_argument(
-        "--arch-names",
-        type=_parse_string_list,
-        default=None,
-        help="Optional comma-separated architecture names to keep from the selected family.",
-    )
-    parser.add_argument(
-        "--lr-starts",
-        type=_parse_float_list,
-        default=_parse_float_list("0.006,0.01,0.016"),
-        help="Comma-separated learning-rate starts to include in candidates.",
-    )
-    parser.add_argument(
-        "--adamw-lr-factors",
-        type=_parse_float_list,
-        default=_parse_float_list("0.2"),
-        help="Comma-separated AdamW LR factors relative to each learning-rate start.",
-    )
-    parser.add_argument(
-        "--policy-head-muon-learning-rate",
-        type=float,
-        default=None,
-        help="Optional fixed policy-head Muon LR for all candidates.",
-    )
-    parser.add_argument(
-        "--schedules",
-        type=_parse_schedule_list,
-        default=_parse_schedule_list("cosine,linear,wsd"),
-        help="Comma-separated LR schedules to include in candidates.",
-    )
     parser.add_argument("--trials", type=int, default=None)
     parser.add_argument("--epochs", type=float, default=5.0)
     parser.add_argument("--steps-per-trial", type=int, default=None)
@@ -636,29 +375,15 @@ def main() -> None:
         min_steps=args.min_steps,
         explicit_steps=args.steps_per_trial,
     )
-    rng = random.Random(args.seed)
-    if args.legacy_candidate_grid:
-        arms = _candidate_arms(
-            rng,
-            args.max_arms or 12,
-            arch_set=args.arch_set,
-            arch_names=args.arch_names,
-            lr_starts=args.lr_starts,
-            adamw_lr_factors=args.adamw_lr_factors,
-            policy_head_muon_learning_rate=args.policy_head_muon_learning_rate,
-            schedules=args.schedules,
-        )
-        trial_count = args.trials if args.trials is not None else 18
-    else:
-        arms = _load_trial_spec(args.trial_spec)
-        if args.arm_name_regex is not None:
-            pattern = re.compile(args.arm_name_regex)
-            arms = [arm for arm in arms if pattern.search(arm.name)]
-        if args.max_arms is not None:
-            arms = arms[: args.max_arms]
-        if not arms:
-            raise ValueError("no arms selected from trial spec")
-        trial_count = args.trials if args.trials is not None else len(arms)
+    arms = _load_trial_spec(args.trial_spec)
+    if args.arm_name_regex is not None:
+        pattern = re.compile(args.arm_name_regex)
+        arms = [arm for arm in arms if pattern.search(arm.name)]
+    if args.max_arms is not None:
+        arms = arms[: args.max_arms]
+    if not arms:
+        raise ValueError("no arms selected from trial spec")
+    trial_count = args.trials if args.trials is not None else len(arms)
     states = {arm.name: ArmState() for arm in arms}
     args.output_dir.mkdir(parents=True, exist_ok=True)
     print(
@@ -666,8 +391,7 @@ def main() -> None:
         f"steps_per_trial={steps} arms={len(arms)} trials={trial_count}",
         flush=True,
     )
-    if not args.legacy_candidate_grid:
-        print(f"trial_spec={args.trial_spec}", flush=True)
+    print(f"trial_spec={args.trial_spec}", flush=True)
     for arm in arms:
         print(f"arm {arm.name}: {arm.overrides}", flush=True)
     if args.dry_run:
