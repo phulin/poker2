@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 import torch
 
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import NUM_HANDS, PREFLOP_HANDS
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
 from p2.rl.target_provenance import (
@@ -28,6 +28,7 @@ SUPPORTED_STORAGE_FLOAT_DTYPES = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
 }
+SUPPORTED_HAND_DIMS = (NUM_HANDS, PREFLOP_HANDS)
 
 
 def _storage_dtype_name(dtype: torch.dtype | str | None) -> str | None:
@@ -59,6 +60,49 @@ def _move_tensor(
     if tensor.dtype.is_floating_point and float_dtype is not None:
         return tensor.to(device=device, dtype=float_dtype)
     return tensor.to(device=device)
+
+
+def _infer_hand_dim_from_tensors(
+    tensors: Mapping[str, torch.Tensor],
+    *,
+    hand_dim: int | None = None,
+) -> int:
+    beliefs = tensors["features.beliefs"]
+    if beliefs.dim() != 2:
+        raise ValueError(f"features.beliefs must be 2-D, got {tuple(beliefs.shape)}")
+    width = int(beliefs.shape[1])
+    candidates: list[int] = []
+    if hand_dim is not None:
+        candidates.append(int(hand_dim))
+    candidates.extend(SUPPORTED_HAND_DIMS)
+
+    seen: set[int] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate not in SUPPORTED_HAND_DIMS or width % candidate != 0:
+            continue
+        value_targets = tensors.get("value_targets")
+        if (
+            isinstance(value_targets, torch.Tensor)
+            and value_targets.dim() >= 3
+            and int(value_targets.shape[-1]) != candidate
+        ):
+            continue
+        policy_targets = tensors.get("policy_targets")
+        if (
+            isinstance(policy_targets, torch.Tensor)
+            and policy_targets.dim() >= 3
+            and int(policy_targets.shape[-2]) != candidate
+        ):
+            continue
+        return candidate
+
+    raise ValueError(
+        "cannot infer solved dataset hand dimension from features.beliefs "
+        f"width {width}; expected a multiple of one of {SUPPORTED_HAND_DIMS}"
+    )
 
 
 def rebel_batch_to_tensors(
@@ -99,11 +143,13 @@ def rebel_batch_from_tensors(
     *,
     device: torch.device | None = None,
     float_dtype: torch.dtype | None = torch.float32,
+    hand_dim: int | None = None,
 ) -> RebelBatch:
     """Deserialize a tensor-only shard payload into a RebelBatch."""
 
     if device is None:
         device = torch.device("cpu")
+    inferred_hand_dim = _infer_hand_dim_from_tensors(tensors, hand_dim=hand_dim)
     statistics_prefix = "statistics."
     statistics = {
         key[len(statistics_prefix) :]: _move_tensor(
@@ -123,6 +169,7 @@ def rebel_batch_from_tensors(
             beliefs=_move_tensor(
                 tensors["features.beliefs"], device=device, float_dtype=float_dtype
             ),
+            hand_dim=inferred_hand_dim,
         ),
         legal_masks=tensors["legal_masks"].to(device),
         value_targets=(
@@ -363,7 +410,7 @@ class RebelSolvedDatasetWriter:
         manifest: dict[str, Any] = {
             "format": FORMAT_VERSION,
             "num_players": example_batch.features.num_players,
-            "hands": NUM_HANDS,
+            "hands": example_batch.features.hand_dim,
             "num_actions": int(example_batch.legal_masks.shape[-1]),
             "context_length": int(example_batch.features.context.shape[-1]),
             "street_support": sorted(self.street_values),
@@ -407,6 +454,7 @@ class RebelSolvedDatasetWriter:
         }
         if metadata is not None:
             manifest.update(dict(metadata))
+            manifest["hands"] = example_batch.features.hand_dim
         self.manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         return manifest
 
@@ -509,8 +557,12 @@ class RebelSolvedDataset:
     ) -> None:
         if self.manifest.get("format") != FORMAT_VERSION:
             raise ValueError(f"unsupported solved dataset format in {manifest_path}")
-        if int(self.manifest.get("hands", -1)) != NUM_HANDS:
-            raise ValueError(f"expected {NUM_HANDS} hands")
+        manifest_hands = int(self.manifest.get("hands", -1))
+        if manifest_hands not in SUPPORTED_HAND_DIMS:
+            raise ValueError(
+                f"manifest hands must be one of {SUPPORTED_HAND_DIMS}, "
+                f"got {manifest_hands}"
+            )
         storage_float_dtype = str(self.manifest.get("storage_float_dtype", "float32"))
         if storage_float_dtype not in SUPPORTED_STORAGE_FLOAT_DTYPES:
             raise ValueError(
@@ -662,7 +714,10 @@ class RebelSolvedDataset:
             self.prefetch_shard_for_row(stream, cursor % total)
         tensors = chunks[0] if len(chunks) == 1 else _concat_tensors(chunks)
         return rebel_batch_from_tensors(
-            tensors, device=device, float_dtype=float_dtype
+            tensors,
+            device=device,
+            float_dtype=float_dtype,
+            hand_dim=int(self.manifest.get("hands", NUM_HANDS)),
         )
 
     def sample_batch(
@@ -691,5 +746,8 @@ class RebelSolvedDataset:
             chunks.append(_index_tensors(self._load_shard(stream, shard_idx), local_rows))
         tensors = chunks[0] if len(chunks) == 1 else _concat_tensors(chunks)
         return rebel_batch_from_tensors(
-            tensors, device=device, float_dtype=float_dtype
+            tensors,
+            device=device,
+            float_dtype=float_dtype,
+            hand_dim=int(self.manifest.get("hands", NUM_HANDS)),
         )

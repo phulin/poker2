@@ -5,7 +5,7 @@ import json
 import pytest
 import torch
 
-from p2.env.card_utils import NUM_HANDS
+from p2.env.card_utils import NUM_HANDS, PREFLOP_HANDS
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
 from p2.rl.target_provenance import (
@@ -76,6 +76,38 @@ def _value_batch(start: int, count: int) -> RebelBatch:
     )
 
 
+def _preflop_value_batch(start: int, count: int) -> RebelBatch:
+    rows = torch.arange(start, start + count)
+    beliefs = torch.zeros(count, 2, PREFLOP_HANDS)
+    beliefs[:, :, rows.remainder(PREFLOP_HANDS)] = 1.0
+    features = MLPFeatures(
+        context=torch.stack(
+            [
+                rows.to(torch.float32),
+                rows.to(torch.float32) + 0.5,
+                torch.full((count,), 8.0),
+            ],
+            dim=1,
+        ),
+        street=torch.zeros(count, dtype=torch.long),
+        to_act=rows.remainder(2).to(torch.long),
+        board=torch.full((count, 5), -1, dtype=torch.long),
+        beliefs=beliefs.reshape(count, -1),
+        hand_dim=PREFLOP_HANDS,
+    )
+    value_targets = torch.arange(
+        start * 2 * PREFLOP_HANDS,
+        (start + count) * 2 * PREFLOP_HANDS,
+        dtype=torch.float32,
+    ).reshape(count, 2, PREFLOP_HANDS)
+    return RebelBatch(
+        features=features,
+        legal_masks=torch.ones(count, 8, dtype=torch.bool),
+        value_targets=value_targets,
+        statistics={"node_depth": torch.arange(start, start + count)},
+    )
+
+
 def _policy_batch(start: int, count: int) -> RebelBatch:
     features = _features(start, count)
     policy_targets = torch.zeros(count, NUM_HANDS, 5)
@@ -102,6 +134,23 @@ def test_rebel_batch_tensor_serialization_round_trips():
     torch.testing.assert_close(restored.value_targets, batch.value_targets)
     assert restored.policy_targets is None
     assert torch.equal(restored.statistics["node_depth"], batch.statistics["node_depth"])
+
+
+def test_rebel_solved_dataset_preserves_preflop_hand_dim(tmp_path):
+    manifest = write_rebel_solved_dataset(
+        tmp_path,
+        value_batches=[_preflop_value_batch(0, 3)],
+        metadata={"hands": NUM_HANDS},
+    )
+
+    assert manifest["hands"] == PREFLOP_HANDS
+    dataset = RebelSolvedDataset(tmp_path)
+    batch = dataset.get_batch("value", 0, 3)
+
+    assert batch.features.hand_dim == PREFLOP_HANDS
+    assert batch.features.num_players == 2
+    assert batch.value_targets is not None
+    assert batch.value_targets.shape == (3, 2, PREFLOP_HANDS)
 
 
 def test_rebel_solved_dataset_reads_wrapped_batches(tmp_path):
