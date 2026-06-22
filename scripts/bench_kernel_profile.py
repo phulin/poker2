@@ -33,6 +33,7 @@ from torch.profiler import ProfilerActivity, profile, record_function
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from p2.config.rebel_load import load_rebel_config  # noqa: E402
 from p2.core.structured_config import Config  # noqa: E402
 from p2.rl.cfr_trainer import RebelCFRTrainer  # noqa: E402
 
@@ -134,7 +135,7 @@ def _load_live_config() -> Config:
             config_name="config_rebel_curriculum_flop",
             overrides=[o for o in overrides if not o.startswith("config_name=")],
         )
-    cfg = Config.from_dict_config(dict_config)
+    cfg = load_rebel_config(dict_config)
     cfg.use_wandb = False
     cfg.trueskill.enabled = False
     cfg.num_steps = 50

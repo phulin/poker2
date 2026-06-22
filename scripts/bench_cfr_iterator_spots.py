@@ -26,6 +26,7 @@ from omegaconf import DictConfig
 from torch.profiler import ProfilerActivity, profile, record_function
 
 from p2.cli.sample_spots import build_pbs_from_spots, load_spots
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import CFRType, Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.search.fused_cfr_triton import (
@@ -258,7 +259,7 @@ def _load_cfg(args: argparse.Namespace) -> Config:
             config_name="config_rebel_cfr",
             overrides=args.hydra_override,
         )
-    cfg = Config.from_dict_config(dc)
+    cfg = load_rebel_config(dc)
     _apply_overrides(cfg, args)
     return cfg
 

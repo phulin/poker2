@@ -36,6 +36,7 @@ import torch
 from omegaconf import DictConfig
 
 from p2.cli.sample_spots import build_pbs_from_spots, load_spots
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 
@@ -115,7 +116,7 @@ def _load_cfg(hydra_overrides: list[str]) -> Config:
         dc: DictConfig = hydra.compose(
             config_name="config_rebel_cfr", overrides=hydra_overrides
         )
-    return Config.from_dict_config(dc)
+    return load_rebel_config(dc)
 
 
 def _set_schedule(ev, iterations: int) -> None:

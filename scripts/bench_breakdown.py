@@ -25,6 +25,7 @@ import torch
 from omegaconf import DictConfig
 from torch.profiler import ProfilerActivity, profile, record_function
 
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 
@@ -81,7 +82,7 @@ def _wrap_chance_node(helper) -> None:
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config_rebel_cfr")
 def main(dict_config: DictConfig) -> None:
-    cfg = Config.from_dict_config(dict_config)
+    cfg = load_rebel_config(dict_config)
     cfg.use_wandb = False
     cfg.num_steps = max(cfg.num_steps, NUM_WARMUP + NUM_ACTIVE + 1)
 

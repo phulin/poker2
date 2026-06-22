@@ -31,6 +31,7 @@ import torch
 from omegaconf import DictConfig
 from torch.profiler import ProfilerActivity, profile, record_function
 
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
 from p2.env.card_utils import suit_permutations_tensor
 from p2.rl.cfr_trainer import RebelCFRTrainer
@@ -565,7 +566,7 @@ def _load_config(args: argparse.Namespace) -> Config:
             config_name="config_rebel_cfr",
             overrides=args.hydra_override,
         )
-    cfg = Config.from_dict_config(dict_config)
+    cfg = load_rebel_config(dict_config)
     _apply_realistic_overrides(cfg, args)
     return cfg
 

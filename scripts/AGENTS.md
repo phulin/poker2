@@ -1,5 +1,5 @@
 ## Directory summary
-Reusable profiling and benchmark scripts that are broader than a single repro but are not package modules.
+Reusable profiling and benchmark scripts that are broader than a single repro but are not package modules. Scripts that compose ReBeL Hydra configs should use the shared ReBeL config loader rather than parsing directly into `Config`.
 
 ### Source files
 - `profile_train_rebel.py`: Profiles the ReBeL training loop.

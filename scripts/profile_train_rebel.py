@@ -16,6 +16,7 @@ import torch
 from omegaconf import DictConfig
 from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
 
+from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 
@@ -26,7 +27,7 @@ NUM_ACTIVE = 3     # iterations to actively record
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config_rebel_cfr")
 def main(dict_config: DictConfig) -> None:
-    cfg = Config.from_dict_config(dict_config)
+    cfg = load_rebel_config(dict_config)
     cfg.use_wandb = False
     # Just ensure the loop doesn't try anything fancy in our few iters
     cfg.num_steps = max(cfg.num_steps, NUM_WARMUP + NUM_ACTIVE + 1)
