@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from p2.core.action_schedule import apply_action_schedule_to_config
+from p2.config.rebel_load import validate_rebel_config
 from p2.core.structured_config import Config, LrSchedule, ModelType, PreflopModelType
 from p2.env.aggression_analyzer import AggressionAnalyzer
 from p2.env.card_utils import (
@@ -144,11 +145,7 @@ class RebelCFRTrainer:
         init_trace("start")
         self.cfg = cfg
         apply_action_schedule_to_config(cfg)
-        if cfg.data.mode not in {"live", "pregenerated", "hybrid"}:
-            raise NotImplementedError(
-                "RebelCFRTrainer supports data.mode=live, "
-                "data.mode=pregenerated, or data.mode=hybrid."
-            )
+        validate_rebel_config(cfg)
         self.device = device
         self.rng = torch.Generator(device=self.device)
         self.float_dtype = torch.float32
@@ -169,21 +166,12 @@ class RebelCFRTrainer:
             self.buffer_rng.manual_seed(int(cfg.seed))
         self.num_actions = len(self.bet_bins) + 3
         self.num_players = int(cfg.env.num_players)
-        if self.num_players < 2:
-            raise ValueError("env.num_players must be at least 2")
         if self.num_players != 2 and cfg.model.enforce_zero_sum:
             print(
                 "[RebelCFRTrainer] Disabling model.enforce_zero_sum for multiway "
                 "training; multiway constant-sum projection needs joint blockers."
             )
             cfg.model.enforce_zero_sum = False
-        if self.num_players != 2 and cfg.data.live_root_source == "self_play":
-            if cfg.model.name != ModelType.better_ffn:
-                raise ValueError(
-                    "Multiway preflop self-play requires model.name=better_ffn "
-                    "so the evaluator can use compact 169-hand preflop models."
-                )
-            cfg.model.preflop_hand_dim = 169
         self.policy_extra_updates_per_step = cfg.train.policy_extra_updates_per_step
         if self.policy_extra_updates_per_step < 0:
             raise ValueError("train.policy_extra_updates_per_step must be >= 0")
@@ -236,11 +224,6 @@ class RebelCFRTrainer:
                 high_stack_mass_ratio=cfg.env.high_stack_mass_ratio,
             )
         else:
-            if cfg.search.sparse_fused and cfg.data.live_root_source != "self_play":
-                raise ValueError(
-                    "Multiway fused sparse CFR is only available for preflop "
-                    "self-play roots."
-                )
             self.env = PBSEnv(
                 num_envs=self.cfg.num_envs,
                 num_players=self.num_players,
@@ -484,14 +467,6 @@ class RebelCFRTrainer:
                     street=street,
                     generator=self.rng,
                 )
-
-        elif cfg.data.live_root_source != "self_play":
-            raise ValueError(
-                "data.live_root_source must be 'self_play', 'random_flop', "
-                "'random_turn', 'random_river', 'random_flop_prefix', "
-                "'random_turn_prefix', or 'random_river_prefix'; "
-                f"got {cfg.data.live_root_source!r}"
-            )
 
         def make_pregenerated_source(
             value_buffer: RebelValueBuffer,
