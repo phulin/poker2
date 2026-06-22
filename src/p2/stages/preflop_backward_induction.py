@@ -546,15 +546,11 @@ def _estimate_train_updates(args: PreflopBucketExecutionConfig) -> int:
         Path(args.state_dataset), allow_partial=args.allow_partial
     )
     total_updates = 0
-    train_batch_size = max(1, int(args.train_batch_size))
     for bucket_label in _train_bucket_labels(args):
         _, rows, _ = _bucket_shards(manifest, Path(args.state_dataset), bucket_label)
         rows = min(int(args.states_per_bucket), int(rows))
-        batches = math.ceil(rows / train_batch_size)
-        updates_per_batch = 1 if bucket_label == "actions_0_3" else 2
-        total_updates += (
-            batches * updates_per_batch * _bucket_epochs(args, bucket_label)
-        )
+        cfr_batches = math.ceil(rows / _bucket_cfr_batch_size(args, bucket_label))
+        total_updates += cfr_batches * _bucket_epochs(args, bucket_label)
     return max(1, total_updates)
 
 
@@ -634,19 +630,18 @@ def _train_value_minibatches(
     *,
     step: int,
     batch_size: int,
-) -> tuple[int, dict[str, float], int]:
+) -> tuple[dict[str, float], int]:
     weighted_stats: list[tuple[int, dict[str, Any]]] = []
-    current_step = int(step)
+    schedule_step = int(step)
     for start in range(0, len(batch), batch_size):
         part = _slice_batch(batch, start, min(start + batch_size, len(batch)))
         stats = trainer.train_value_batch(
             part,
-            current_step,
+            schedule_step,
             sync_inference_model=True,
         )
         weighted_stats.append((len(part), stats))
-        current_step += 1
-    return current_step, _aggregate_minibatch_stats(weighted_stats), len(weighted_stats)
+    return _aggregate_minibatch_stats(weighted_stats), len(weighted_stats)
 
 
 def _train_policy_minibatches(
@@ -655,19 +650,18 @@ def _train_policy_minibatches(
     *,
     step: int,
     batch_size: int,
-) -> tuple[int, dict[str, float], int]:
+) -> tuple[dict[str, float], int]:
     weighted_stats: list[tuple[int, dict[str, Any]]] = []
-    current_step = int(step)
+    schedule_step = int(step)
     for start in range(0, len(batch), batch_size):
         part = _slice_batch(batch, start, min(start + batch_size, len(batch)))
         stats = _policy_update(
             trainer,
             part,
-            step=current_step,
+            step=schedule_step,
         )
         weighted_stats.append((len(part), stats))
-        current_step += 1
-    return current_step, _aggregate_minibatch_stats(weighted_stats), len(weighted_stats)
+    return _aggregate_minibatch_stats(weighted_stats), len(weighted_stats)
 
 
 def _evaluate_validation_split(
@@ -1202,9 +1196,7 @@ def run_train_specialists(
             )
             roots_solved = 0
             value_examples = 0
-            value_step = 0
             policy_examples = 0
-            policy_step = 0
             bucket_step = 0
             bucket_epochs = _bucket_epochs(args, bucket_label)
             bucket_start = time.time()
@@ -1227,8 +1219,6 @@ def run_train_specialists(
                     f"{bucket_label}/epoch_roots": epoch_roots,
                     f"{bucket_label}/roots_solved": roots_solved,
                     f"{bucket_label}/global_step": global_step,
-                    f"{bucket_label}/value_step": value_step,
-                    f"{bucket_label}/policy_step": policy_step,
                     "global_step": global_step,
                 }
                 payload.update(
@@ -1299,40 +1289,38 @@ def run_train_specialists(
                     )
                     value_stream = _value_only(value_batch) if train_value else None
                     policy_stream = _policy_only(policy_batch)
+                    step_before_updates = global_step
+                    trained_this_step = False
                     if value_stream is not None:
                         if writer is not None:
                             writer.append("value", value_stream)
                         value_examples += len(value_stream)
-                        (
-                            global_step,
-                            value_stats,
-                            value_updates,
-                        ) = _train_value_minibatches(
+                        value_stats, value_minibatches = _train_value_minibatches(
                             trainer,
                             value_stream,
-                            step=global_step,
+                            step=step_before_updates,
                             batch_size=train_batch_size,
                         )
-                        value_step += value_updates
+                        trained_this_step = True
                     else:
                         value_stats = {}
+                        value_minibatches = 0
                     if policy_stream is not None:
                         if writer is not None:
                             writer.append("policy", policy_stream)
                         policy_examples += len(policy_stream)
-                        (
-                            global_step,
-                            policy_stats,
-                            policy_updates,
-                        ) = _train_policy_minibatches(
+                        policy_stats, policy_minibatches = _train_policy_minibatches(
                             trainer,
                             policy_stream,
-                            step=global_step,
+                            step=step_before_updates,
                             batch_size=train_batch_size,
                         )
-                        policy_step += policy_updates
+                        trained_this_step = True
                     else:
                         policy_stats = {}
+                        policy_minibatches = 0
+                    if trained_this_step:
+                        global_step += 1
 
                     roots_solved += rows
                     epoch_roots += rows
@@ -1346,10 +1334,10 @@ def run_train_specialists(
                         f"{bucket_label}/cfr_batch_size": cfr_batch_size,
                         f"{bucket_label}/train_batch_size": train_batch_size,
                         f"{bucket_label}/global_step": global_step,
-                        f"{bucket_label}/value_step": value_step,
-                        f"{bucket_label}/policy_step": policy_step,
                         f"{bucket_label}/value_examples": value_examples,
                         f"{bucket_label}/policy_examples": policy_examples,
+                        f"{bucket_label}/value_minibatches": value_minibatches,
+                        f"{bucket_label}/policy_minibatches": policy_minibatches,
                         f"{bucket_label}/elapsed_s": elapsed,
                         f"{bucket_label}/roots_per_s": roots_solved
                         / max(elapsed, 1.0e-9),
@@ -1549,8 +1537,7 @@ def run_distill(
     total_updates = max(
         1,
         math.ceil(args.states_per_bucket / max(1, args.distill_batch_size))
-        * len(BUCKET_ORDER_DEEP_TO_SHALLOW)
-        * 2,
+        * len(BUCKET_ORDER_DEEP_TO_SHALLOW),
     )
     cfg = build_run_config(
         base_template,
@@ -1616,7 +1603,6 @@ def run_distill(
                 seed=args.seed + 1000,
             )
             roots = 0
-            value_step = 0
             for states in reader.iter_state_batches(
                 batch_size=args.distill_batch_size,
                 max_rows=args.states_per_bucket,
@@ -1635,23 +1621,27 @@ def run_distill(
                     beliefs,
                     include_value=include_value,
                 )
+                step_before_updates = global_step
+                trained_this_step = False
                 if value_batch is not None:
                     value_stats = student.train_value_batch(
                         value_batch,
-                        global_step,
+                        step_before_updates,
                         sync_inference_model=True,
                     )
-                    value_step += 1
-                    global_step += 1
+                    trained_this_step = True
                 else:
                     value_stats = {}
-                policy_stats = _policy_update(student, policy_batch, step=global_step)
-                global_step += 1
+                policy_stats = _policy_update(
+                    student, policy_batch, step=step_before_updates
+                )
+                trained_this_step = True
+                if trained_this_step:
+                    global_step += 1
                 roots += rows
                 payload = {
                     f"distill/{bucket_label}/roots": roots,
                     f"distill/{bucket_label}/global_step": global_step,
-                    f"distill/{bucket_label}/value_step": value_step,
                     "global_step": global_step,
                 }
                 payload.update(

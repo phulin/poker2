@@ -100,9 +100,7 @@ def _scheduled_learning_rate(
         if t <= stable_until:
             return lr_start
         decay_t = min(1.0, (t - stable_until) / decay_fraction)
-        return lr_final + 0.5 * (lr_start - lr_final) * (
-            1.0 + math.cos(math.pi * decay_t)
-        )
+        return lr_start + (lr_final - lr_start) * decay_t
     return lr_start
 
 

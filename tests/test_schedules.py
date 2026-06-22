@@ -440,7 +440,7 @@ def test_rebel_zero_warmup_matches_existing_schedule():
     )
 
 
-def test_rebel_wsd_holds_then_cosine_decays():
+def test_rebel_wsd_holds_then_linear_decays():
     lr_start = 1e-3
     lr_final = 1e-4
     total_steps = 100
@@ -475,7 +475,7 @@ def test_rebel_wsd_holds_then_cosine_decays():
     )
     assert math.isclose(
         _scheduled_learning_rate(
-            step=90,
+            step=85,
             total_steps=total_steps,
             lr_start=lr_start,
             lr_final=lr_final,
@@ -483,7 +483,7 @@ def test_rebel_wsd_holds_then_cosine_decays():
             warmup_steps=0,
             wsd_decay_fraction=0.2,
         ),
-        lr_final + 0.5 * (lr_start - lr_final),
+        lr_start + (lr_final - lr_start) * 0.25,
         rel_tol=1e-9,
         abs_tol=1e-12,
     )

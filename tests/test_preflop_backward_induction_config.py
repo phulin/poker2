@@ -119,7 +119,7 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
     assert base.model.compile == "default"
 
 
-def test_estimate_train_updates_uses_train_batch_size(tmp_path) -> None:
+def test_estimate_train_updates_counts_cfr_root_batches(tmp_path) -> None:
     manifest = {
         "buckets": [
             {
@@ -147,10 +147,10 @@ def test_estimate_train_updates_uses_train_batch_size(tmp_path) -> None:
         actions_12_15_epochs=2,
     )
 
-    # 1024 rows / 128 train batch = 8 minibatches. The deepest bucket has
-    # value+policy updates over two epochs, middle buckets have value+policy
-    # once, and actions_0_3 only trains policy: 8*2*2 + 8*2 + 8*2 + 8.
-    assert _estimate_train_updates(args) == 72
+    # One logical training step is one solved CFR-root batch. The deepest and
+    # 8-11 buckets fit in one override batch, while 4-7 and 0-3 use two 512-root
+    # batches: 1*2 + 1 + 2 + 2.
+    assert _estimate_train_updates(args) == 7
 
     # Restricting the specialist run to one bucket estimates only that bucket.
     assert _estimate_train_updates(
@@ -159,9 +159,10 @@ def test_estimate_train_updates_uses_train_batch_size(tmp_path) -> None:
             train_bucket="actions_12_15",
             states_per_bucket=1024,
             train_batch_size=128,
+            actions_12_15_cfr_batch_size=8192,
             actions_12_15_epochs=2,
         )
-    ) == 32
+    ) == 2
 
 
 def test_preflop_wandb_init_passes_stage_payload(monkeypatch, tmp_path) -> None:
