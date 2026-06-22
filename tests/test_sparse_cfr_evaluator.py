@@ -408,6 +408,7 @@ def test_model_leaf_values_use_closing_model_when_model_leaves_close_street() ->
     evaluator.model = current_model
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
+    evaluator.closing_leaf_value_encoder = None
     evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="end_of_street"))
     evaluator.float_dtype = torch.float32
     evaluator.num_players = 2
@@ -650,6 +651,7 @@ def test_fused_model_leaf_values_use_closing_model_when_model_leaves_close_stree
     evaluator.model = current_model
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
+    evaluator.closing_leaf_value_encoder = None
     evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="end_of_street"))
     evaluator.float_dtype = torch.float32
     evaluator.num_players = 2

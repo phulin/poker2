@@ -196,7 +196,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self._static_model_feature_key != key
             or self._static_model_feature_fields is None
         ):
-            value_encoder = getattr(self, "value_feature_encoder", self.feature_encoder)
+            value_encoder = self.value_feature_encoder
             static_features = value_encoder.encode(
                 self.beliefs,
                 pre_chance_node=self.new_street_mask,

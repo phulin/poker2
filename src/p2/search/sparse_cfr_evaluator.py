@@ -12,6 +12,7 @@ from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
 from p2.models.base_mlp_model import BaseMLPModel
 from p2.models.mlp.better_feature_encoder import BetterFeatureEncoder
+from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from p2.search.cfr_evaluator import (
     CFREvaluator,
@@ -24,6 +25,22 @@ from p2.search.chance_node_helper import ChanceNodeHelper
 from p2.utils.profiling import profile
 
 
+def _policy_value_models(
+    model: BaseMLPModel,
+) -> tuple[BaseMLPModel, BaseMLPModel]:
+    if type(model) is BetterSplitFFN:
+        return model.policy_model, model.value_model
+    return model, model
+
+
+def _value_model(model: BaseMLPModel | None) -> BaseMLPModel | None:
+    if model is None:
+        return None
+    if type(model) is BetterSplitFFN:
+        return model.value_model
+    return model
+
+
 class SparseCFREvaluator(CFREvaluator):
     def __init__(
         self,
@@ -34,13 +51,8 @@ class SparseCFREvaluator(CFREvaluator):
         closing_leaf_model: BaseMLPModel | None = None,
     ) -> None:
         self.model = model
-        self.policy_model = getattr(model, "policy_model", model)
-        self.value_model = getattr(model, "value_model", model)
-        self.closing_leaf_value_model = (
-            getattr(closing_leaf_model, "value_model", closing_leaf_model)
-            if closing_leaf_model is not None
-            else None
-        )
+        self.policy_model, self.value_model = _policy_value_models(model)
+        self.closing_leaf_value_model = _value_model(closing_leaf_model)
         self.closing_leaf_value_encoder = None
         self.device = device
         self.cfg = cfg
@@ -142,8 +154,7 @@ class SparseCFREvaluator(CFREvaluator):
         self.root_nodes = cfg.num_envs
         self.depth_offsets = [0]
         self.env: HUNLTensorEnv | PBSEnv | None = None
-        policy_model = getattr(model, "policy_model", model)
-        self.hand_dim = int(getattr(policy_model, "hand_dim", NUM_HANDS))
+        self.hand_dim = int(getattr(self.policy_model, "hand_dim", NUM_HANDS))
 
         self.leaf_mask = torch.empty(0, dtype=torch.bool, device=self.device)
         self.new_street_mask = torch.empty(0, dtype=torch.bool, device=self.device)
@@ -455,8 +466,6 @@ class SparseCFREvaluator(CFREvaluator):
                         device=self.device,
                         dtype=self.float_dtype,
                     )
-                    if hasattr(self.closing_leaf_value_model, "create_feature_encoder")
-                    else None
                 )
             else:
                 self.closing_leaf_value_encoder = (

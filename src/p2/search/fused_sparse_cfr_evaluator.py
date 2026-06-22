@@ -1311,8 +1311,6 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         device=self.device,
                         dtype=self.float_dtype,
                     )
-                    if hasattr(self.closing_leaf_value_model, "create_feature_encoder")
-                    else None
                 )
             else:
                 self.closing_leaf_value_encoder = (
@@ -1760,7 +1758,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._static_model_feature_key != key
             or self._static_model_feature_fields is None
         ):
-            value_encoder = getattr(self, "value_feature_encoder", self.feature_encoder)
+            value_encoder = self.value_feature_encoder
             static_features = value_encoder.encode(
                 self.beliefs,
                 pre_chance_node=self.new_street_mask,
@@ -2484,7 +2482,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             model = value_model
             base_model = getattr(model, "_orig_mod", model)
-            if isinstance(base_model, BetterTRM):
+            if type(base_model) is BetterTRM:
                 model_output = model(features, include_policy=False, latent=self.latent)
                 self.latent = model_output.latent
                 model_applied_zero_sum = bool(base_model.enforce_zero_sum)
@@ -2561,8 +2559,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     def _model_leaf_values_for_fused_writeback(
         self, features: MLPFeatures
     ) -> tuple[torch.Tensor, bool]:
-        value_model = getattr(self, "value_model", self.model)
-        closing_value_model = getattr(self, "closing_leaf_value_model", None)
+        value_model = self.value_model
+        closing_value_model = self.closing_leaf_value_model
         scope = self._model_scope()
         if scope == "mixed_street" and closing_value_model is not None:
             self._ensure_model_index_partitions()
@@ -2591,7 +2589,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 model_applied_zero_sum = model_applied_zero_sum and cutoff_zero_sum
                 evaluated_any = True
             if self.new_street_model_positions.numel() > 0:
-                closing_encoder = getattr(self, "closing_leaf_value_encoder", None)
+                closing_encoder = self.closing_leaf_value_encoder
                 if self._can_project_heads_up_closing_model():
                     node_indices = self.model_indices[self.new_street_model_positions]
                     live_counts = self._live_counts_for_nodes(node_indices)
@@ -2675,7 +2673,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             positions = torch.arange(
                 len(features), dtype=torch.long, device=features.context.device
             )
-            closing_encoder = getattr(self, "closing_leaf_value_encoder", None)
+            closing_encoder = self.closing_leaf_value_encoder
             if self._can_project_heads_up_closing_model():
                 node_indices = self.model_indices[positions]
                 live_counts = self._live_counts_for_nodes(node_indices)

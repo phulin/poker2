@@ -419,11 +419,11 @@ class CFREvaluator(ABC):
         return encoded
 
     def _closing_model_num_players(self) -> int:
-        model = getattr(self, "closing_leaf_value_model", None)
+        model = self.closing_leaf_value_model
         return int(getattr(model, "num_players", self.num_players))
 
     def _closing_model_hand_dim(self) -> int:
-        model = getattr(self, "closing_leaf_value_model", None)
+        model = self.closing_leaf_value_model
         return int(getattr(model, "hand_dim", NUM_HANDS))
 
     def _can_project_heads_up_closing_model(self) -> bool:
@@ -1227,11 +1227,11 @@ class CFREvaluator(ABC):
     @torch.no_grad()
     def _get_model_policy_probs(self, indices: torch.Tensor) -> torch.Tensor:
         """Get policy probabilities from model for given indices."""
-        policy_encoder = getattr(self, "policy_feature_encoder", self.feature_encoder)
-        policy_model = getattr(self, "policy_model", self.model)
+        policy_encoder = self.policy_feature_encoder
+        policy_model = self.policy_model
         features = policy_encoder.encode(self.beliefs, indices=indices)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            if isinstance(policy_model, BetterTRM):
+            if type(policy_model) is BetterTRM:
                 latent = None
                 for supervision in range(self.num_supervisions):
                     model_output = policy_model(
@@ -1723,12 +1723,7 @@ class CFREvaluator(ABC):
         return (numer / denom).clamp(min=0.0, max=1.0)
 
     def _should_record_policy_node_reach(self) -> bool:
-        cfg = getattr(self, "cfg", None)
-        train_cfg = getattr(cfg, "train", None)
-        mode = getattr(train_cfg, "policy_node_weighting", None)
-        if mode is None:
-            return True
-        return getattr(mode, "value", mode) != "uniform"
+        return self.cfg.train.policy_node_weighting.value != "uniform"
 
     # ============================================================================
     # Core Logic Methods (in order called by cfr_iteration and evaluate_cfr)
@@ -2195,7 +2190,7 @@ class CFREvaluator(ABC):
         self, value_model, features: MLPFeatures, *, use_pre_head: bool
     ) -> torch.Tensor:
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            if isinstance(value_model, BetterTRM):
+            if type(value_model) is BetterTRM:
                 # Note self.latent gets reinitialized for each subgame.
                 model_output = value_model(
                     features,
@@ -2212,8 +2207,8 @@ class CFREvaluator(ABC):
         return hand_values
 
     def _model_leaf_values(self, features: MLPFeatures) -> torch.Tensor:
-        value_model = getattr(self, "value_model", self.model)
-        closing_value_model = getattr(self, "closing_leaf_value_model", None)
+        value_model = self.value_model
+        closing_value_model = self.closing_leaf_value_model
         scope = self._model_scope()
         if scope == "mixed_street" and closing_value_model is not None:
             self._ensure_model_index_partitions()
@@ -2234,7 +2229,7 @@ class CFREvaluator(ABC):
                 )
                 hand_values.index_copy_(0, self.cutoff_model_positions, cutoff_values)
             if self.new_street_model_positions.numel() > 0:
-                closing_encoder = getattr(self, "closing_leaf_value_encoder", None)
+                closing_encoder = self.closing_leaf_value_encoder
                 if self._can_project_heads_up_closing_model():
                     node_indices = self.model_indices[self.new_street_model_positions]
                     live_counts = self._live_counts_for_nodes(node_indices)
@@ -2297,7 +2292,7 @@ class CFREvaluator(ABC):
             positions = torch.arange(
                 len(features), dtype=torch.long, device=features.context.device
             )
-            closing_encoder = getattr(self, "closing_leaf_value_encoder", None)
+            closing_encoder = self.closing_leaf_value_encoder
             if self._can_project_heads_up_closing_model():
                 node_indices = self.model_indices[positions]
                 live_counts = self._live_counts_for_nodes(node_indices)
@@ -2397,7 +2392,7 @@ class CFREvaluator(ABC):
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         if self.model_indices.numel() > 0:
-            value_encoder = getattr(self, "value_feature_encoder", self.feature_encoder)
+            value_encoder = self.value_feature_encoder
             features = value_encoder.encode(
                 beliefs, pre_chance_node=self.new_street_mask
             )
@@ -2809,10 +2804,7 @@ class CFREvaluator(ABC):
             self.update_average_values(t)
 
     def _backup_consistency_enabled(self) -> bool:
-        train_cfg = getattr(getattr(self, "cfg", None), "train", None)
-        if train_cfg is None:
-            return False
-        return float(getattr(train_cfg, "backup_consistency_coef", 0.0) or 0.0) > 0.0
+        return float(self.cfg.train.backup_consistency_coef or 0.0) > 0.0
 
     def _backup_feature_storage_dtype(self, dtype: torch.dtype) -> torch.dtype:
         if self.device.type == "cuda" and dtype in {
@@ -2978,8 +2970,8 @@ class CFREvaluator(ABC):
         value_roots_only = True
         value_targets = source_values[value_node_indices].clamp(-1.0, 1.0)
 
-        policy_encoder = getattr(self, "policy_feature_encoder", self.feature_encoder)
-        value_encoder = getattr(self, "value_feature_encoder", self.feature_encoder)
+        policy_encoder = self.policy_feature_encoder
+        value_encoder = self.value_feature_encoder
         if include_policy_batch:
             actor_top = self.env.to_act[:top]
             valid_actor_top = (actor_top >= 0) & (actor_top < self.num_players)
