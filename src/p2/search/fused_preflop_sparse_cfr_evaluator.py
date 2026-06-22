@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import torch
 
 from p2.core.structured_config import CFRType
@@ -14,6 +16,7 @@ from p2.rl.target_provenance import (
 )
 from p2.search.cfr_evaluator import CFREvaluator, ExploitabilityStats, PublicBeliefState
 from p2.search.fused_cfr_triton import (
+    GraphedCFRIteration,
     fused_average_policy_mix_multiway_with_tensors_,
     fused_average_policy_reach_beliefs_depth_preflop_multiway_,
     fused_avg_values_multiway_,
@@ -290,6 +293,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
 
     def _refresh_fused_t_scalars(self, t: int) -> None:
         self._ensure_fused_attrs()
+        if self._skip_t_scalars_update:
+            return
         mix_old, mix_new = self._get_mixing_weights(t)
         self._t_scalars.update(
             t=t,
@@ -790,6 +795,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             set_allin(beliefs)
 
     def cfr_iteration(self, t: int) -> None:
+        self._ensure_fused_attrs()
         if self.cfr_type == CFRType.linear or (
             self.cfr_type in (CFRType.pcfr, CFRType.sapcfr)
             and not self._predictive_cfr_uses_dcfr()
@@ -797,10 +803,11 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             CFREvaluator.cfr_iteration(self, t)
             return
 
-        self.apply_schedules(t)
+        if not self._skip_t_scalars_update:
+            self.apply_schedules(t)
         self._refresh_fused_t_scalars(t)
 
-        sample_mask = self.t_sample == t
+        sample_mask = self.t_sample == self._t_scalars.t_tensor
         torch.where(
             sample_mask[:, None],
             self.policy_probs,
@@ -956,7 +963,77 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def evaluate_cfr(
         self, training_mode: bool = True, sample_continuation: bool = True
     ):
-        return CFREvaluator.evaluate_cfr(self, training_mode, sample_continuation)
+        if not self._preflop_cuda_graph_evaluate_enabled():
+            return CFREvaluator.evaluate_cfr(self, training_mode, sample_continuation)
+
+        self._ensure_fused_attrs()
+        self.model.eval()
+
+        self.initialize_policy_and_beliefs()
+        if self.warm_start_iterations > 0:
+            self.warm_start()
+
+        # Use t=0 here so set_leaf_values doesn't do CFR-AVG de-averaging.
+        self.set_leaf_values(0)
+        self.compute_expected_values()
+        self.values_avg[:] = self.latest_values
+
+        self.t_sample = self._get_sampling_schedule()
+        start = self.warm_start_iterations
+        end = self.cfr_iterations
+        stat_iters = self._record_stats_percentile_ts()
+
+        runners: dict[str, GraphedCFRIteration] = {}
+        t = start
+        while t < end:
+            self.profiler_step()
+            regime = self._graph_capture_regime(t)
+            can_capture = (
+                regime is not None
+                and regime not in runners
+                and t + 1 < end
+                and self._graph_capture_regime(t + 1) == regime
+                and t not in stat_iters
+                and (t + 1) not in stat_iters
+            )
+            if can_capture:
+                runner = GraphedCFRIteration(self)
+                runner.capture(t_warmup=t, t_capture=t + 1)
+                runners[regime] = runner
+                t += 1
+                continue
+
+            runner = runners.get(regime) if regime is not None else None
+            if runner is not None and t not in stat_iters:
+                runner.replay(t=t)
+            else:
+                self.cfr_iteration(t)
+            t += 1
+
+        if self.use_final_policy_values:
+            self.update_average_values_final()
+
+        self._record_action_mix()
+        self._record_cfr_entropy()
+        self._record_cumulative_regret()
+
+        if not sample_continuation:
+            return None
+        return self.sample_leaves(training_mode)
+
+    def _preflop_cuda_graph_evaluate_enabled(self) -> bool:
+        graph_flag = os.environ.get("P2_PREFLOP_CUDA_GRAPH_EVALUATE")
+        if graph_flag is not None and graph_flag.lower() in {"0", "false", "no", "off"}:
+            return False
+        if self.device.type != "cuda":
+            return False
+        return not (
+            self.cfr_type == CFRType.linear
+            or (
+                self.cfr_type in (CFRType.pcfr, CFRType.sapcfr)
+                and not self._predictive_cfr_uses_dcfr()
+            )
+        )
 
     def _compute_exploitability(self) -> ExploitabilityStats:
         local = torch.zeros(self.root_nodes, dtype=self.float_dtype, device=self.device)
