@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import torch
 
+from p2.core.structured_config import Config
 from p2.rl import rebel_loop
 
 
@@ -83,6 +82,23 @@ class _FakeRun:
         self.logged.append((dict(metrics), step))
 
 
+def _loop_cfg(
+    tmp_path,
+    *,
+    use_wandb: bool = False,
+    checkpoint_interval: int = 2,
+) -> Config:
+    return Config(
+        device="cpu",
+        use_wandb=use_wandb,
+        wandb_project="unused",
+        wandb_name=None,
+        checkpoint_dir=str(tmp_path),
+        checkpoint_interval=checkpoint_interval,
+        economize_checkpoints=False,
+    )
+
+
 def test_run_training_loop_preserves_checkpoint_and_snapshot_flow(
     monkeypatch, tmp_path
 ) -> None:
@@ -94,14 +110,7 @@ def test_run_training_loop_preserves_checkpoint_and_snapshot_flow(
     )
 
     trainer = _FakeTrainer()
-    cfg = SimpleNamespace(
-        use_wandb=False,
-        wandb_project="unused",
-        wandb_name=None,
-        checkpoint_dir=str(tmp_path),
-        checkpoint_interval=2,
-        economize_checkpoints=False,
-    )
+    cfg = _loop_cfg(tmp_path)
 
     last_step = rebel_loop.run_training_loop(
         trainer,
@@ -156,14 +165,7 @@ def test_run_training_loop_can_skip_preflop_analyzer(monkeypatch, tmp_path) -> N
     )
 
     trainer = _FakeTrainer()
-    cfg = SimpleNamespace(
-        use_wandb=False,
-        wandb_project="unused",
-        wandb_name=None,
-        checkpoint_dir=str(tmp_path),
-        checkpoint_interval=1,
-        economize_checkpoints=False,
-    )
+    cfg = _loop_cfg(tmp_path, checkpoint_interval=1)
 
     last_step = rebel_loop.run_training_loop(
         trainer,
@@ -189,10 +191,7 @@ def test_run_training_loop_can_skip_preflop_analyzer(monkeypatch, tmp_path) -> N
 def test_value_checkpoint_pair_uses_value_only_saver(tmp_path) -> None:
     trainer = _FakeTrainer()
     run = _FakeRun()
-    cfg = SimpleNamespace(
-        checkpoint_dir=str(tmp_path),
-        economize_checkpoints=False,
-    )
+    cfg = _loop_cfg(tmp_path)
 
     path = rebel_loop.save_rebel_checkpoint_pair(
         trainer,
@@ -265,22 +264,12 @@ def test_run_training_loop_logs_validation_set_metrics(monkeypatch, tmp_path) ->
 
     trainer = _FakeTrainer()
     run = _FakeRun()
-    validation_cfg = SimpleNamespace(
-        enabled=True,
-        dataset="validation-data",
-        interval=2,
-        batch_size=8,
-        max_examples=16,
-    )
-    cfg = SimpleNamespace(
-        use_wandb=True,
-        wandb_project="unused",
-        wandb_name=None,
-        checkpoint_dir=str(tmp_path),
-        checkpoint_interval=10,
-        economize_checkpoints=False,
-        validation_set=validation_cfg,
-    )
+    cfg = _loop_cfg(tmp_path, use_wandb=True, checkpoint_interval=10)
+    cfg.validation_set.enabled = True
+    cfg.validation_set.dataset = "validation-data"
+    cfg.validation_set.interval = 2
+    cfg.validation_set.batch_size = 8
+    cfg.validation_set.max_examples = 16
 
     rebel_loop.run_training_loop(
         trainer,

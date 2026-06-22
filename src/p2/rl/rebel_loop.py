@@ -184,8 +184,8 @@ def run_training_loop(
     training_start = time.time()
     last_completed_step = start_step - 1
     validation_evaluator = None
-    validation_cfg = getattr(cfg, "validation_set", None)
-    if validation_cfg is not None and validation_cfg.enabled:
+    validation_cfg = cfg.validation_set
+    if validation_cfg.enabled:
         if validation_cfg.dataset is None:
             raise ValueError("validation_set.dataset is required when validation is enabled")
         if validation_cfg.interval <= 0:
