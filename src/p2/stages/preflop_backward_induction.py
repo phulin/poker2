@@ -435,9 +435,9 @@ def _policy_update(
     return _float_metrics(stats)
 
 
-def _evaluator_tree_stats(evaluator: Any) -> dict[str, float]:
-    root_nodes = int(getattr(evaluator, "root_nodes", 0))
-    total_nodes = int(getattr(evaluator, "total_nodes", 0))
+def _evaluator_tree_stats(evaluator: CFREvaluator) -> dict[str, float]:
+    root_nodes = int(evaluator.root_nodes)
+    total_nodes = int(evaluator.total_nodes)
     return {
         "evaluator_total_nodes": float(total_nodes),
         "evaluator_root_nodes": float(root_nodes),
