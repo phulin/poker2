@@ -23,7 +23,7 @@ from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.rebel_feature_encoder import RebelFeatureEncoder
 from p2.models.model_output import ModelOutput
 from p2.models.street_model_registry import StreetModelRegistry
-from p2.cli.train_rebel_curriculum import _value_initialization_checkpoint
+from p2.stages.curriculum import _value_initialization_checkpoint
 from p2.rl.cfr_trainer import RebelCFRTrainer, _value_samples_per_step
 from p2.rl.losses import RebelSupervisedLoss
 from p2.rl.rebel_batch import RebelBatch

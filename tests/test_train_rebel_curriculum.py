@@ -7,7 +7,7 @@ import os
 import pytest
 import torch
 
-from p2.cli import train_rebel_curriculum as curriculum_cli
+from p2.stages import curriculum as curriculum_stage
 from p2.core.structured_config import (
     Config,
     CurriculumSubstepConfig,
@@ -30,10 +30,10 @@ class _FakeTrainer:
 
 def test_stage_wandb_name_only_uses_explicit_base_name() -> None:
     cfg = Config(wandb_name=None)
-    assert curriculum_cli._stage_wandb_name(cfg, "river") is None
+    assert curriculum_stage._stage_wandb_name(cfg, "river") is None
 
     cfg.wandb_name = "postflop"
-    assert curriculum_cli._stage_wandb_name(cfg, "river") == "postflop-river"
+    assert curriculum_stage._stage_wandb_name(cfg, "river") == "postflop-river"
 
 
 def test_curriculum_distill_substep_uses_pre_only_value_head() -> None:
@@ -45,7 +45,7 @@ def test_curriculum_distill_substep_uses_pre_only_value_head() -> None:
         num_steps=1,
     )
 
-    stage_cfg = curriculum_cli._stage_config(
+    stage_cfg = curriculum_stage._stage_config(
         cfg,
         "distill_E_turn",
         substep,
@@ -57,13 +57,13 @@ def test_curriculum_distill_substep_uses_pre_only_value_head() -> None:
 
 
 def test_curriculum_train_substeps_do_not_run_preflop_analyzer() -> None:
-    assert curriculum_cli._should_print_preflop_analyzer("E_preflop") is False
-    assert curriculum_cli._should_print_preflop_analyzer("S_0") is False
-    assert curriculum_cli._should_print_preflop_analyzer("S_preflop") is True
-    assert curriculum_cli._should_print_preflop_analyzer("S_river") is False
-    assert curriculum_cli._should_print_preflop_analyzer("S_turn") is False
-    assert curriculum_cli._should_print_preflop_analyzer("S_flop") is False
-    assert curriculum_cli._should_print_preflop_analyzer("E_turn") is False
+    assert curriculum_stage._should_print_preflop_analyzer("E_preflop") is False
+    assert curriculum_stage._should_print_preflop_analyzer("S_0") is False
+    assert curriculum_stage._should_print_preflop_analyzer("S_preflop") is True
+    assert curriculum_stage._should_print_preflop_analyzer("S_river") is False
+    assert curriculum_stage._should_print_preflop_analyzer("S_turn") is False
+    assert curriculum_stage._should_print_preflop_analyzer("S_flop") is False
+    assert curriculum_stage._should_print_preflop_analyzer("E_turn") is False
 
 
 class _FakeSplitModel(torch.nn.Module):
@@ -99,7 +99,7 @@ def test_initialize_policy_from_checkpoint_copies_only_policy() -> None:
         for key, value in trainer.model.value_model.state_dict().items()
     }
 
-    curriculum_cli._initialize_policy_from_checkpoint(
+    curriculum_stage._initialize_policy_from_checkpoint(
         trainer,
         "unused.pt",
         substep_name="turn",
@@ -132,13 +132,13 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
         )
         return cfg.num_steps - 1
 
-    monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
-    monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
-    monkeypatch.setattr(curriculum_cli, "wandb_run", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(curriculum_stage, "RebelCFRTrainer", _FakeTrainer)
+    monkeypatch.setattr(curriculum_stage, "run_training_loop", fake_run_loop)
+    monkeypatch.setattr(curriculum_stage, "wandb_run", lambda *a, **k: nullcontext())
     monkeypatch.setattr(
-        curriculum_cli, "log_model_parameter_summary", lambda model, run: None
+        curriculum_stage, "log_model_parameter_summary", lambda model, run: None
     )
-    monkeypatch.setattr(curriculum_cli, "watch_model", lambda model, run, **k: None)
+    monkeypatch.setattr(curriculum_stage, "watch_model", lambda model, run, **k: None)
 
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     cfg.curriculum.stages = ["river"]
@@ -155,7 +155,7 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
         )
     }
 
-    curriculum_cli.train_rebel_curriculum(cfg)
+    curriculum_stage.train_rebel_curriculum(cfg)
 
     assert len(calls) == 1
     _, stage_cfg, run, kwargs = calls[0]
@@ -206,23 +206,23 @@ def test_curriculum_train_substep_initializes_policy_from_promoted_source(
     source_path.parent.mkdir()
     source_path.write_bytes(b"checkpoint")
 
-    monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
-    monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
-    monkeypatch.setattr(curriculum_cli, "wandb_run", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(curriculum_stage, "RebelCFRTrainer", _FakeTrainer)
+    monkeypatch.setattr(curriculum_stage, "run_training_loop", fake_run_loop)
+    monkeypatch.setattr(curriculum_stage, "wandb_run", lambda *a, **k: nullcontext())
     monkeypatch.setattr(
-        curriculum_cli, "_initialize_policy_from_checkpoint", fake_init_policy
+        curriculum_stage, "_initialize_policy_from_checkpoint", fake_init_policy
     )
     monkeypatch.setattr(
-        curriculum_cli, "log_model_parameter_summary", lambda model, run: None
+        curriculum_stage, "log_model_parameter_summary", lambda model, run: None
     )
-    monkeypatch.setattr(curriculum_cli, "watch_model", lambda model, run, **k: None)
+    monkeypatch.setattr(curriculum_stage, "watch_model", lambda model, run, **k: None)
 
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     substep = CurriculumSubstepConfig(
         kind="train", net="S_turn", from_net="S_river", num_steps=2
     )
 
-    curriculum_cli._run_train_substep(
+    curriculum_stage._run_train_substep(
         cfg,
         "turn",
         substep,
@@ -280,7 +280,7 @@ class _FakeValueInitTrainer:
 def test_initialize_value_from_checkpoint_maps_pre_head_to_post_head() -> None:
     trainer = _FakeValueInitTrainer()
 
-    loaded = curriculum_cli._initialize_value_from_checkpoint(
+    loaded = curriculum_stage._initialize_value_from_checkpoint(
         trainer,
         "outputs/E_turn.pt",
         substep_name="turn",
@@ -336,19 +336,19 @@ def test_curriculum_train_substep_initializes_value_from_closing_checkpoint(
     source_path.write_bytes(b"source")
     closing_path.write_bytes(b"closing")
 
-    monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
-    monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
-    monkeypatch.setattr(curriculum_cli, "wandb_run", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(curriculum_stage, "RebelCFRTrainer", _FakeTrainer)
+    monkeypatch.setattr(curriculum_stage, "run_training_loop", fake_run_loop)
+    monkeypatch.setattr(curriculum_stage, "wandb_run", lambda *a, **k: nullcontext())
     monkeypatch.setattr(
-        curriculum_cli, "_initialize_policy_from_checkpoint", fake_init_policy
+        curriculum_stage, "_initialize_policy_from_checkpoint", fake_init_policy
     )
     monkeypatch.setattr(
-        curriculum_cli, "_initialize_value_from_checkpoint", fake_init_value
+        curriculum_stage, "_initialize_value_from_checkpoint", fake_init_value
     )
     monkeypatch.setattr(
-        curriculum_cli, "log_model_parameter_summary", lambda model, run: None
+        curriculum_stage, "log_model_parameter_summary", lambda model, run: None
     )
-    monkeypatch.setattr(curriculum_cli, "watch_model", lambda model, run, **k: None)
+    monkeypatch.setattr(curriculum_stage, "watch_model", lambda model, run, **k: None)
 
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     substep = CurriculumSubstepConfig(
@@ -359,7 +359,7 @@ def test_curriculum_train_substep_initializes_value_from_closing_checkpoint(
         num_steps=2,
     )
 
-    curriculum_cli._run_train_substep(
+    curriculum_stage._run_train_substep(
         cfg,
         "turn",
         substep,
@@ -389,13 +389,13 @@ def test_curriculum_train_substep_allows_hybrid_holdout_mode(
         )
         return cfg.num_steps - 1
 
-    monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
-    monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
-    monkeypatch.setattr(curriculum_cli, "wandb_run", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(curriculum_stage, "RebelCFRTrainer", _FakeTrainer)
+    monkeypatch.setattr(curriculum_stage, "run_training_loop", fake_run_loop)
+    monkeypatch.setattr(curriculum_stage, "wandb_run", lambda *a, **k: nullcontext())
     monkeypatch.setattr(
-        curriculum_cli, "log_model_parameter_summary", lambda model, run: None
+        curriculum_stage, "log_model_parameter_summary", lambda model, run: None
     )
-    monkeypatch.setattr(curriculum_cli, "watch_model", lambda model, run, **k: None)
+    monkeypatch.setattr(curriculum_stage, "watch_model", lambda model, run, **k: None)
 
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     cfg.data.mode = "hybrid"
@@ -409,7 +409,7 @@ def test_curriculum_train_substep_allows_hybrid_holdout_mode(
         )
     }
 
-    curriculum_cli.train_rebel_curriculum(cfg)
+    curriculum_stage.train_rebel_curriculum(cfg)
 
     assert len(calls) == 1
     _, stage_cfg = calls[0]
@@ -435,7 +435,7 @@ def test_curriculum_distill_substep_uses_promoted_source_checkpoint(
         promoted_path.write_bytes(b"distilled")
         return str(promoted_path)
 
-    monkeypatch.setattr(curriculum_cli, "_run_distill_substep", fake_run_distill)
+    monkeypatch.setattr(curriculum_stage, "_run_distill_substep", fake_run_distill)
 
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     cfg.curriculum.stages = ["distill_E_turn"]
@@ -449,7 +449,7 @@ def test_curriculum_distill_substep_uses_promoted_source_checkpoint(
         )
     }
 
-    curriculum_cli.train_rebel_curriculum(cfg)
+    curriculum_stage.train_rebel_curriculum(cfg)
 
     assert len(calls) == 1
     _, substep_name, substep, kwargs = calls[0]
@@ -491,9 +491,9 @@ def test_curriculum_resume_restarts_recorded_substep(monkeypatch, tmp_path) -> N
         promoted_path.write_bytes(b"promoted")
         return str(promoted_path)
 
-    monkeypatch.setattr(curriculum_cli, "_run_train_substep", fake_run_train)
+    monkeypatch.setattr(curriculum_stage, "_run_train_substep", fake_run_train)
     monkeypatch.setattr(
-        curriculum_cli,
+        curriculum_stage,
         "_run_distill_substep",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("resume should skip earlier distill substeps")
@@ -523,7 +523,7 @@ def test_curriculum_resume_restarts_recorded_substep(monkeypatch, tmp_path) -> N
         ),
     }
 
-    curriculum_cli.train_rebel_curriculum(cfg)
+    curriculum_stage.train_rebel_curriculum(cfg)
 
     assert calls == [("turn", str(resume_path), promoted)]
 
@@ -552,13 +552,13 @@ def test_curriculum_train_resume_recovers_closing_checkpoint_from_metadata(
         torch.save({"model": trainer.model.state_dict(), "step": 5}, final_path)
         return 4
 
-    monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
-    monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
-    monkeypatch.setattr(curriculum_cli, "wandb_run", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(curriculum_stage, "RebelCFRTrainer", _FakeTrainer)
+    monkeypatch.setattr(curriculum_stage, "run_training_loop", fake_run_loop)
+    monkeypatch.setattr(curriculum_stage, "wandb_run", lambda *a, **k: nullcontext())
     monkeypatch.setattr(
-        curriculum_cli, "log_model_parameter_summary", lambda model, run: None
+        curriculum_stage, "log_model_parameter_summary", lambda model, run: None
     )
-    monkeypatch.setattr(curriculum_cli, "watch_model", lambda model, run, **k: None)
+    monkeypatch.setattr(curriculum_stage, "watch_model", lambda model, run, **k: None)
 
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     substep = CurriculumSubstepConfig(
@@ -568,7 +568,7 @@ def test_curriculum_train_resume_recovers_closing_checkpoint_from_metadata(
         num_steps=5,
     )
 
-    curriculum_cli._run_train_substep(
+    curriculum_stage._run_train_substep(
         cfg,
         "turn",
         substep,
@@ -594,7 +594,7 @@ def test_curriculum_distill_resume_recovers_source_checkpoint_from_metadata() ->
         num_steps=5,
     )
 
-    source = curriculum_cli._source_checkpoint(
+    source = curriculum_stage._source_checkpoint(
         substep,
         promoted={},
         resume_metadata={"curriculum_source_checkpoint": "outputs/S_river.pt"},
@@ -619,7 +619,7 @@ def test_curriculum_resume_rejects_non_curriculum_checkpoint(tmp_path) -> None:
     }
 
     with pytest.raises(ValueError, match="missing metadata field"):
-        curriculum_cli.train_rebel_curriculum(cfg)
+        curriculum_stage.train_rebel_curriculum(cfg)
 
 
 def test_curriculum_substep_rejects_unknown_overrides(tmp_path) -> None:
@@ -634,7 +634,7 @@ def test_curriculum_substep_rejects_unknown_overrides(tmp_path) -> None:
     }
 
     with pytest.raises(ValueError, match="Unknown river.data override"):
-        curriculum_cli._stage_config(
+        curriculum_stage._stage_config(
             cfg,
             "river",
             cfg.curriculum.substeps["river"],
@@ -651,7 +651,7 @@ def test_curriculum_substep_rejects_unknown_overrides(tmp_path) -> None:
     }
 
     with pytest.raises(ValueError, match="Unknown river.train override"):
-        curriculum_cli._stage_config(
+        curriculum_stage._stage_config(
             cfg,
             "river",
             cfg.curriculum.substeps["river"],
