@@ -1,33 +1,29 @@
 # P2: Fast NN-Based HUNL Solver
 
-P2 is a fast, neural-network-driven solver for Heads-Up No-Limit Texas Hold'em (HUNL). The codebase focuses on high-throughput training loops, tensorized environments, and multiple model families for self-play and CFR-style search.
+P2 is a fast, neural-network-driven solver for Heads-Up No-Limit Texas Hold'em (HUNL). The current training path focuses on ReBeL-style public-belief-state CFR with high-throughput tensorized environments.
 
 ## Project Goals
-- Train strong HUNL policies quickly with tensorized environments and efficient data generation.
-- Support multiple neural architectures (CNN, transformer, MLP, TRM) under a unified config system.
-- Provide both RL self-play (PPO + K-best/DReD pools) and ReBeL-style CFR training pipelines.
-- Keep experiments reproducible via Hydra configs and checkpoint management.
+- Train strong HUNL policies quickly with tensorized environments and efficient ReBeL data generation.
+- Support current MLP/TRM ReBeL model families under Hydra configs.
+- Run staged postflop curriculum, preflop bucket specialist training, and main ReBeL CFR training from one ReBeL-first config surface.
+- Keep experiments reproducible via Hydra configs, resolved-config artifacts, W&B metadata, and checkpoint management.
 
 ## Main Training Entry Points
-- `src/p2/cli/train_kbest.py`: PPO self-play with K-Best/DReD opponent pools. Used for CNN and transformer models. Model returns a policy (no search) at any given game state.
 - `src/p2/cli/train_rebel.py`: ReBeL-style CFR training with search supervision. Used for MLP/TRM models. Uses search to the end of the street with neural value function approximation at the cutoff. Represents games as public belief states (2x1326 range vectors).
+- `src/p2/cli/train_rebel_curriculum.py`: Staged postflop ReBeL curriculum runner.
+- `src/p2/cli/train_rebel_preflop_buckets.py`: Preflop bucket specialist training and distillation.
+- `src/p2/cli/train_kbest.py`: Legacy PPO self-play with K-Best/DReD opponent pools.
 
-## Model Architectures (4 Families)
-1. **CNN (SiameseConvNetV1)**: Convolutional encoders over card/action tensors for fast self-play.
-2. **Transformer (PokerTransformerV1)**: Sequence model over action histories and public state for richer temporal context.
-3. **MLP (RebelFFN / BetterFFN)**: Flat feature encoders with feed-forward heads for CFR supervision.
-4. **TRM (BetterTRM)**: Recursive trunk model with iterative refinement for CFR-based training.
+## Current Model Families
+1. **MLP (BetterFFN)**: Flat feature encoders with feed-forward policy/value heads for CFR supervision.
+2. **TRM (BetterTRM)**: Recursive trunk model with iterative refinement for CFR-based training.
 
-Hydra-based configuration lives in `conf/`, and `model.name` selects the architecture (see `conf/README.md`).
+Hydra-based configuration lives in `conf/`. ReBeL entry points default to explicit `config_rebel_*` files, and `model.name` selects the current ReBeL architecture.
 
 ## Quickstart (Training)
 ```bash
-# PPO self-play (CNN or transformer, via Hydra configs)
-uv run python src/p2/cli/train_kbest.py --config-name=config
-uv run python src/p2/cli/train_kbest.py --config-name=config_transformer
-
-# ReBeL CFR training (MLP/TRM)
-uv run python -m p2.cli.train_rebel --config-name=config_rebel_cfr
+# ReBeL CFR training (train_rebel defaults to config_rebel_cfr.yaml)
+uv run python -m p2.cli.train_rebel
 
 # Staged postflop ReBeL curriculum
 uv run python -m p2.cli.train_rebel_curriculum --config-name=config_rebel_curriculum_postflop
@@ -36,6 +32,9 @@ uv run python -m p2.cli.train_rebel_curriculum --config-name=config_rebel_curric
 uv run python -m p2.cli.train_rebel_preflop_buckets \
   preflop_buckets.state_dataset=/path/to/states \
   preflop_buckets.base_checkpoint=/path/to/base.pt
+
+# Legacy PPO self-play, kept outside the current ReBeL config surface
+uv run python src/p2/cli/train_kbest.py --config-name=config_transformer
 ```
 
 ## Repository Structure

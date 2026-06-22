@@ -124,6 +124,15 @@ def test_load_rebel_config_file_composes_defaults() -> None:
     assert cfg.search.iterations == 20
 
 
+def test_main_rebel_config_file_composes_as_current_training_config() -> None:
+    cfg = load_rebel_config_file("conf/config_rebel_cfr.yaml")
+
+    assert cfg.model.name.value == "BetterFFN"
+    assert cfg.wandb_project == "poker-rebel-cfr"
+    assert cfg.checkpoint_dir == "checkpoints-rebel"
+    assert cfg.search.enabled is True
+
+
 def test_river_trajectory_probe_uses_current_config_not_checkpoint_config() -> None:
     module = _load_river_probe_module()
     cfg = module._build_config(

@@ -1,210 +1,59 @@
-# P2 Configuration Files
+# P2 Hydra Configs
 
-This directory contains Hydra configuration files for P2 training. Each file is a complete, self-contained configuration that can be used independently.
+The current training configs use explicit `config_rebel_*` files. ReBeL entry
+points should use the shared loader in
+`p2.config.rebel_load`, which applies ReBeL defaults, rejects legacy PPO/K-best
+top-level fields, and projects the resolved payload into the typed ReBeL config
+view used for artifacts and W&B.
 
-## Available Configurations
+## Current ReBeL Configs
 
-### `config.yaml` - Default Configuration
-- **Purpose**: Balanced configuration for general training
-- **Steps**: 2000
-- **Batch Size**: 1024
-- **Learning Rate**: 1e-4
-- **Device**: CUDA (auto-detects)
-- **Environments**: 512 (tensorized)
-- **K-Best Pool**: 10 opponents
+- `config_rebel_cfr.yaml`: Main live ReBeL CFR training config.
+- `config_rebel_debug.yaml`: Small ReBeL debug config.
+- `config_rebel_curriculum_postflop.yaml`: Full river-to-turn-to-flop staged postflop curriculum.
+- `config_rebel_curriculum_river.yaml`: River-only staged curriculum.
+- `config_rebel_curriculum_turn.yaml`: Turn staged curriculum with E_turn distillation.
+- `config_rebel_curriculum_flop.yaml`: Flop staged curriculum with downstream E_preflop distillation.
+- `config_rebel_preflop_buckets.yaml`: Preflop bucket specialist training and distillation.
+- `config_rebel_pregenerate_postflop.yaml`: Bounded solved-example pregeneration.
+- `config_rebel_evaluate_value_loss.yaml`: Hydra-first checkpoint value-loss evaluation.
+- `config_rebel_postflop_hybrid_holdout.yaml`: Live training with pregenerated holdout validation.
+- `rebel_hp_trials.yaml`: Trial definitions for the bounded ReBeL HP runner.
 
-### `config_transformer.yaml` - Transformer PPO Configuration
-- **Purpose**: PokerTransformerV1 PPO training with tensorized envs
-- **Steps**: 2000
-- **Batch Size**: 512
-- **Device**: MPS (default)
-- **Environments**: 512 (tensorized)
-- **Opponent Pool**: DReD/K-Best with exploiter support
+`allin/config.yaml` is the standalone preflop all-in equity model config.
 
-### `config_high_perf.yaml` - High-Performance Configuration
-- **Purpose**: Optimized for vast.ai GPUs (RTX 4090/4080)
-- **Steps**: 5000
-- **Batch Size**: 2048
-- **Learning Rate**: 5e-5
-- **Device**: CUDA
-- **Environments**: 1024 (tensorized)
-- **K-Best Pool**: 20 opponents
-- **Wandb**: Enabled with vast.ai tags
+## Commands
 
-### `config_fast.yaml` - Fast Testing Configuration
-- **Purpose**: Fast testing and development
-- **Steps**: 500
-- **Batch Size**: 256
-- **Learning Rate**: 1e-3
-- **Device**: CPU
-- **Environments**: 64 (non-tensorized)
-- **K-Best Pool**: 5 opponents
-- **Wandb**: Disabled
-- **Model**: Smaller architecture for speed
-
-### `config_rebel_cfr.yaml` - ReBeL CFR (TRM/MLP) Configuration
-- **Purpose**: ReBeL-style CFR training with search supervision
-- **Steps**: 15000
-- **Batch Size**: 512
-- **Device**: CUDA
-- **Environments**: 192 (tensorized)
-- **Search**: DCFR with warm-starting and preflop all-in terminal table lookup
-
-### `config_rebel_debug.yaml` - ReBeL CFR Debug Configuration
-- **Purpose**: Faster iteration/debugging for ReBeL training
-- **Device**: CUDA/CPU (override as needed)
-- **Checkpoint Dir**: `checkpoints-rebel-debug`
-
-### `config_rebel_curriculum_postflop.yaml` - Staged Postflop ReBeL Curriculum
-- **Purpose**: Hydra-first river->turn->flop staged training and value-only end-of-street distillation
-- **Stages**: Ordered under `curriculum.stages`
-- **Substeps**: Typed under `curriculum.substeps`
-- **Promotion Dir**: `checkpoints-rebel-curriculum/promoted`
-
-### `config_rebel_preflop_buckets.yaml` - Preflop Bucket Backward Induction
-- **Purpose**: Hydra-first preflop depth-bucket specialist training and distillation
-- **Source Paths**: `preflop_buckets.state_dataset` and `preflop_buckets.base_checkpoint`
-- **Command**: `preflop_buckets.command=train_specialists` or `distill`
-
-### `config_rebel_evaluate_value_loss.yaml` - ReBeL Value-Loss Evaluation
-- **Purpose**: Evaluate a checkpoint value head against a solved dataset using current Hydra config
-- **Checkpoint**: `resume_from`
-- **Dataset**: `validation_set.dataset`
-
-### `allin/config.yaml` - All-In Equity Training Configuration
-- **Purpose**: Standalone preflop all-in equity model training
-- **Batch Size**: 64
-- **Optimizer**: Muon or NorMuon with AdamW fallback parameter groups
-- **Wandb**: Enabled by default under `p2-allin-equity`
-
-## Usage
-
-### Basic Usage
 ```bash
-# Use default configuration
-uv run python src/p2/cli/train_kbest.py --config-name=config
+# Main ReBeL CFR training; train_rebel defaults to config_rebel_cfr.yaml.
+uv run python -m p2.cli.train_rebel
 
-# Transformer PPO training
-uv run python src/p2/cli/train_kbest.py --config-name=config_transformer
-
-# Use high-performance configuration
-uv run python src/p2/cli/train_kbest.py --config-name=config_high_perf
-
-# Use fast configuration
-uv run python src/p2/cli/train_kbest.py --config-name=config_fast
-
-# ReBeL CFR training
+# Explicit main config.
 uv run python -m p2.cli.train_rebel --config-name=config_rebel_cfr
 
-# Staged postflop ReBeL curriculum
+# Staged postflop curriculum.
 uv run python -m p2.cli.train_rebel_curriculum \
-    --config-name=config_rebel_curriculum_postflop
+  --config-name=config_rebel_curriculum_postflop
 
-# Preflop bucket specialist training
+# Preflop bucket specialist training or distillation.
 uv run python -m p2.cli.train_rebel_preflop_buckets \
-    preflop_buckets.state_dataset=/path/to/states \
-    preflop_buckets.base_checkpoint=/path/to/base.pt
+  --config-name=config_rebel_preflop_buckets \
+  preflop_buckets.state_dataset=/path/to/states \
+  preflop_buckets.base_checkpoint=/path/to/base.pt
 
-# Value-loss evaluation
+# Value-loss evaluation. The checkpoint supplies weights only.
 uv run python scripts/evaluate_rebel_value_loss.py \
-    resume_from=/path/to/rebel_final.pt \
-    validation_set.dataset=/path/to/solved_dataset \
-    device=cpu
+  --config-name=config_rebel_evaluate_value_loss \
+  resume_from=/path/to/rebel_final.pt \
+  validation_set.dataset=/path/to/solved_dataset \
+  device=cpu
 
-# All-in equity training
+# Standalone all-in equity model.
 uv run python -m p2.allin.train
 ```
 
-### Parameter Overrides
-```bash
-# Override specific parameters
-uv run python src/p2/cli/train_kbest.py \
-    --config-name=config_high_perf \
-    num_steps=1000 \
-    train.batch_size=1536 \
-    train.learning_rate=1e-4
-```
+## Legacy PPO/K-Best
 
-### Resume Training
-```bash
-uv run python src/p2/cli/train_kbest.py \
-    --config-name=config_high_perf \
-    resume_from=checkpoints/checkpoint_step_1000.pt
-```
-
-## Configuration Structure
-
-Each configuration file contains:
-
-- **Training Parameters**: Learning rate, batch size, epochs, PPO settings
-- **Model Configuration**: Architecture, channels, hidden layers, policy
-- **Environment Settings**: Game rules, betting bins, encoders
-- **RL Parameters**: K-Best pool size, evaluation intervals
-- **Device Settings**: GPU/CPU selection, tensorized environments
-- **Logging**: Wandb project, tags, checkpoint settings
-
-## Creating Custom Configurations
-
-To create a custom configuration:
-
-1. Copy an existing config file
-2. Modify the parameters as needed
-3. Use it with `--config-name=your_config`
-
-Example:
-```bash
-cp config.yaml config_custom.yaml
-# Edit config_custom.yaml
-python src/p2/cli/train_kbest.py --config-name=config_custom
-```
-
-## Parameter Reference
-
-### Training Parameters (`train:` section)
-- `learning_rate`: Learning rate for optimizer
-- `warmup_steps`: Linear learning-rate warmup steps before the configured decay schedule; `0` disables warmup
-- `optimizer`: ReBeL trainer optimizer backend (`adamw`, `muon`, or `normuon` to use matrix-only Muon/NorMuon with AdamW for the remaining parameters)
-- `adamw_learning_rate`: Optional initial learning rate for all AdamW parameter groups; `null` uses `learning_rate`
-- `policy_head_muon_learning_rate`: Initial ReBeL `muon` mode learning rate for policy-head 2D linear weights; scaled by the main learning-rate schedule during training
-- `replay_buffer_underfull_evict_fraction`: Fraction of each incoming batch size to evict from the oldest replay entries while the ReBeL buffer is not full
-- `policy_depth_stratify_decimate`: Preserve policy replay depth mix during decimation using policy node depth
-- `policy_depth_stratify_sample`: Sample policy minibatches stratified by policy node depth
-- `policy_depth_stratify_probs`: Optional target probabilities for policy node-depth buckets; `null` uses uniform available depths
-- `batch_size`: Batch size for training
-- `episodes_per_step`: PPO epochs per step
-- `ppo_eps`: PPO clipping parameter
-- `ppo_delta1`: Trinal-clip PPO parameter
-- `gae_lambda`: GAE lambda parameter
-- `gamma`: Discount factor
-- `entropy_coef`: Entropy coefficient
-- `value_coef`: Value loss coefficient
-- `grad_clip`: Gradient clipping threshold
-
-### Model Parameters (`model:` section)
-- `name`: Model architecture name
-- `cards_channels`: Number of card channels (CNN)
-- `actions_channels`: Number of action channels (CNN)
-- `fusion_hidden`: Hidden layer sizes (CNN)
-- `num_actions`: Number of possible actions
-- `max_sequence_length`: Sequence length (transformer)
-
-### Environment Parameters (`env:` section)
-- `stack`: Starting stack size
-- `sb`: Small blind
-- `bb`: Big blind
-- `bet_bins`: Betting size multipliers
-
-### Search Parameters (`search:` section, ReBeL)
-- `enabled`: Toggle CFR search supervision
-- `depth`: Search depth
-- `iterations`: CFR iterations per step
-- `cfr_type`: CFR variant (standard/discounted/etc.)
-
-### RL Parameters (top level)
-- `num_steps`: Total training steps
-- `k_best_pool_size`: Size of K-Best opponent pool
-- `min_elo_diff`: Minimum ELO difference for pool updates
-- `checkpoint_interval`: Checkpoint save frequency
-- `eval_interval`: Evaluation frequency
-- `use_tensor_env`: Enable tensorized environments
-- `num_envs`: Number of parallel environments
+`config_transformer.yaml` remains for `src/p2/cli/train_kbest.py`. It is not
+part of the current ReBeL config surface, and ReBeL loaders reject PPO/K-best
+fields such as `opponent_pool_type` and `k_best_pool_size`.
