@@ -13,17 +13,18 @@ import os
 import random
 import re
 import time
-from contextlib import nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
-import wandb
 from omegaconf import OmegaConf
 
+from p2.config.rebel_load import load_rebel_config
+from p2.config.rebel_schema import RebelExperimentConfig
 from p2.core.structured_config import Config, PregeneratedDatasetConfig
 from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.runtime.training_run import wandb_run
 from p2.search.rebel_solved_dataset import MANIFEST_NAME
 
 
@@ -81,10 +82,7 @@ def _steps_from_epochs(
 
 
 def _load_base_config(config_path: Path) -> Config:
-    container = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
-    if not isinstance(container, dict):
-        raise TypeError(f"expected mapping config at {config_path}")
-    return Config.from_dict(container)
+    return load_rebel_config(OmegaConf.load(config_path))
 
 
 def _set_nested(obj: Any, dotted_key: str, value: Any) -> None:
@@ -401,25 +399,6 @@ def _wandb_trial_name(group: str | None, trial_index: int, arm_name: str) -> str
     return f"{prefix}/trial_{trial_index:04d}/{arm_name}"[:255]
 
 
-def _init_wandb_run(cfg: Config, *, group: str | None) -> Any:
-    if not cfg.use_wandb:
-        return nullcontext()
-    init_kwargs: dict[str, Any] = {
-        "project": cfg.wandb_project,
-        "name": cfg.wandb_name,
-        "tags": cfg.wandb_tags or [],
-        "config": asdict(cfg),
-    }
-    if group is not None:
-        init_kwargs["group"] = group
-    try:
-        return wandb.init(**init_kwargs)
-    except Exception as exc:
-        print(f"Wandb init failed ({exc}); continuing without logging.", flush=True)
-        cfg.use_wandb = False
-        return nullcontext()
-
-
 def _load_trial_spec(path: Path) -> list[Arm]:
     raw = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
     if isinstance(raw, list):
@@ -510,7 +489,11 @@ def _run_trial(
         torch.set_float32_matmul_precision("high")
     torch.manual_seed(int(cfg.seed))
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
-    run_cm = _init_wandb_run(cfg, group=wandb_group)
+    run_cm = wandb_run(
+        cfg,
+        group=wandb_group,
+        resolved_config=RebelExperimentConfig.from_trainer_config(cfg),
+    )
     with run_cm as run:
         trainer = RebelCFRTrainer(cfg=cfg, device=device)
         history: list[dict[str, float]] = []
