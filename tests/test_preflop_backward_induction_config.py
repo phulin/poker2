@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import torch
 
 from p2.core.structured_config import Config
@@ -11,15 +9,12 @@ from p2.stages.preflop_backward_induction import _load_model_weights
 from p2.stages.preflop_buckets import (
     PreflopBucketExecutionConfig,
     build_run_config,
-    load_base_config,
 )
 
 
 def _execution_config(**overrides) -> PreflopBucketExecutionConfig:
     values = {
         "command": "train-specialists",
-        "config_name": "config_rebel_cfr",
-        "config_overrides": (),
         "state_dataset": "/tmp/states",
         "base_checkpoint": "/tmp/base.pt",
         "output_dir": "/tmp/out",
@@ -113,19 +108,6 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
     assert base.data.mode == "pregenerated"
     assert base.search.iterations_final == 5678
     assert base.model.compile == "default"
-
-
-def test_load_base_config_accepts_hydra_overrides() -> None:
-    cfg = load_base_config(
-        repo_root=Path(__file__).resolve().parents[1],
-        config_name="config_rebel_cfr",
-        overrides=("device=cpu", "train.batch_size=321", "search.iterations=77"),
-    )
-
-    assert cfg.device == "cpu"
-    assert cfg.train.batch_size == 321
-    assert cfg.search.iterations == 77
-
 
 class _FakeSplitLeaf(torch.nn.Linear):
     hand_dim = NUM_HANDS

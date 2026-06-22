@@ -38,8 +38,6 @@ def _execution_config_from_config(cfg: Config) -> PreflopBucketExecutionConfig:
 
     return PreflopBucketExecutionConfig(
         command=command,
-        config_name="",
-        config_overrides=(),
         state_dataset=state_dataset,
         base_checkpoint=base_checkpoint,
         output_dir=preflop.output_dir,

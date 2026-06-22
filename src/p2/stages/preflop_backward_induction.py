@@ -29,17 +29,11 @@ from p2.search.rebel_solved_dataset import RebelSolvedDatasetWriter
 from p2.stages.preflop_buckets import (
     PreflopBucketExecutionConfig,
     build_run_config,
-    load_base_config,
 )
 from p2.runtime.training_run import wandb_run, write_resolved_config
 from p2.utils.model_utils import compute_masked_logits, count_model_parameters
 
 
-DEFAULT_CHECKPOINT = (
-    "/home/user/poker2/checkpoints-rebel-curriculum-preflop_2000_p6_lr0p01_"
-    "backupcons_actor_lam01_rb32_from2p_norb/preflop/rebel_latest.pt"
-)
-REPO_ROOT = Path(__file__).resolve().parents[3]
 STATE_FIELDS = (
     "button",
     "street",
@@ -793,7 +787,7 @@ def _build_validation_cache(
 def run_train_specialists(
     args: PreflopBucketExecutionConfig,
     *,
-    base_template: Config | None = None,
+    base_template: Config,
 ) -> None:
     device = _device(args.device)
     if device.type == "cuda":
@@ -801,12 +795,6 @@ def run_train_specialists(
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     total_updates_guess = _estimate_train_updates(args)
-    if base_template is None:
-        base_template = load_base_config(
-            repo_root=REPO_ROOT,
-            config_name=args.config_name,
-            overrides=args.config_overrides,
-        )
     base_cfg = build_run_config(
         base_template,
         args,
@@ -1223,7 +1211,7 @@ def _distill_batch_from_teacher(
 def run_distill(
     args: PreflopBucketExecutionConfig,
     *,
-    base_template: Config | None = None,
+    base_template: Config,
 ) -> None:
     device = _device(args.device)
     if device.type == "cuda":
@@ -1236,12 +1224,6 @@ def run_distill(
         * len(BUCKET_ORDER_DEEP_TO_SHALLOW)
         * 2,
     )
-    if base_template is None:
-        base_template = load_base_config(
-            repo_root=REPO_ROOT,
-            config_name=args.config_name,
-            overrides=args.config_overrides,
-        )
     cfg = build_run_config(
         base_template,
         args,

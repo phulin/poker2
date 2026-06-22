@@ -4,18 +4,12 @@ import copy
 from dataclasses import dataclass
 from pathlib import Path
 
-import hydra
-from omegaconf import DictConfig
-
-from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
 
 
 @dataclass(frozen=True)
 class PreflopBucketExecutionConfig:
     command: str
-    config_name: str
-    config_overrides: tuple[str, ...]
     state_dataset: str
     base_checkpoint: str
     output_dir: str
@@ -54,23 +48,6 @@ class PreflopBucketExecutionConfig:
     checkpoint_8_11: str | None
     checkpoint_4_7: str | None
     checkpoint_0_3: str | None
-
-
-def load_base_config(
-    *,
-    repo_root: Path,
-    config_name: str,
-    overrides: tuple[str, ...],
-) -> Config:
-    with hydra.initialize_config_dir(
-        config_dir=str(repo_root / "conf"),
-        version_base=None,
-    ):
-        dict_config: DictConfig = hydra.compose(
-            config_name=config_name,
-            overrides=list(overrides),
-        )
-    return load_rebel_config(dict_config)
 
 
 def build_run_config(
@@ -113,5 +90,4 @@ def build_run_config(
 __all__ = [
     "PreflopBucketExecutionConfig",
     "build_run_config",
-    "load_base_config",
 ]
