@@ -1,0 +1,26 @@
+# Evaluate a ReBeL checkpoint's value head on a solved dataset.
+#
+# Required overrides:
+#   resume_from=/path/to/checkpoint.pt
+#   validation_set.dataset=/path/to/solved_dataset
+
+defaults:
+  - config_rebel_cfr
+  - _self_
+
+use_wandb: false
+device: cuda
+resume_from: null
+
+validation_set:
+  enabled: true
+  dataset: null
+  batch_size: 1024
+  max_examples: null
+
+model:
+  compile: "off"
+
+train:
+  replay_buffer_device: cpu
+  replay_buffer_batches: 1
