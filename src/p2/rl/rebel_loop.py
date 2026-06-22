@@ -99,6 +99,65 @@ def print_rebel_training_stats(
     )
 
 
+def _checkpoint_saver(trainer: RebelCFRTrainer, *, value_only: bool):
+    return trainer.save_value_checkpoint if value_only else trainer.save_checkpoint
+
+
+def save_rebel_checkpoint_pair(
+    trainer: RebelCFRTrainer,
+    cfg: Config,
+    run: Any,
+    *,
+    step: int,
+    checkpoint_metadata: dict[str, object] | None = None,
+    value_only: bool = False,
+) -> str:
+    ckpt_path = os.path.join(cfg.checkpoint_dir, f"rebel_step_{step + 1}.pt")
+    wandb_run_id = run.id if run else None
+    save_checkpoint = _checkpoint_saver(trainer, value_only=value_only)
+    save_checkpoint(
+        ckpt_path,
+        step,
+        wandb_run_id=wandb_run_id,
+        save_optimizer=False,
+        save_dtype=torch.bfloat16,
+        metadata=checkpoint_metadata,
+    )
+    save_checkpoint(
+        os.path.join(cfg.checkpoint_dir, "rebel_latest.pt"),
+        step,
+        wandb_run_id=wandb_run_id,
+        save_optimizer=True,
+        save_dtype=None,
+        metadata=checkpoint_metadata,
+    )
+
+    if cfg.economize_checkpoints:
+        cleanup_old_checkpoints(cfg.checkpoint_dir, ckpt_path)
+
+    print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
+    return ckpt_path
+
+
+def save_rebel_final_checkpoint(
+    trainer: RebelCFRTrainer,
+    cfg: Config,
+    *,
+    step: int,
+    checkpoint_metadata: dict[str, object] | None = None,
+    value_only: bool = False,
+) -> str:
+    final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
+    _checkpoint_saver(trainer, value_only=value_only)(
+        final_path,
+        step,
+        save_optimizer=False,
+        save_dtype=None,
+        metadata=checkpoint_metadata,
+    )
+    return final_path
+
+
 def run_training_loop(
     trainer: RebelCFRTrainer,
     cfg: Config,
@@ -175,29 +234,13 @@ def run_training_loop(
             run.log(metrics, step=metrics["step"])
 
         if (step + 1) % cfg.checkpoint_interval == 0:
-            ckpt_path = os.path.join(cfg.checkpoint_dir, f"rebel_step_{step + 1}.pt")
-            wandb_run_id = run.id if run else None
-            trainer.save_checkpoint(
-                ckpt_path,
-                step,
-                wandb_run_id=wandb_run_id,
-                save_optimizer=False,
-                save_dtype=torch.bfloat16,
-                metadata=checkpoint_metadata,
+            save_rebel_checkpoint_pair(
+                trainer,
+                cfg,
+                run,
+                step=step,
+                checkpoint_metadata=checkpoint_metadata,
             )
-            trainer.save_checkpoint(
-                os.path.join(cfg.checkpoint_dir, "rebel_latest.pt"),
-                step,
-                wandb_run_id=wandb_run_id,
-                save_optimizer=True,
-                save_dtype=None,
-                metadata=checkpoint_metadata,
-            )
-
-            if cfg.economize_checkpoints:
-                cleanup_old_checkpoints(cfg.checkpoint_dir, ckpt_path)
-
-            print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
             if print_preflop_analyzer:
                 print_preflop_range_grid(trainer, step, rebel=True)
 
@@ -214,13 +257,11 @@ def run_training_loop(
 
         last_completed_step = step
 
-    final_path = os.path.join(cfg.checkpoint_dir, "rebel_final.pt")
-    trainer.save_checkpoint(
-        final_path,
-        stop_step,
-        save_optimizer=False,
-        save_dtype=None,
-        metadata=checkpoint_metadata,
+    final_path = save_rebel_final_checkpoint(
+        trainer,
+        cfg,
+        step=stop_step,
+        checkpoint_metadata=checkpoint_metadata,
     )
     total_elapsed = time.time() - training_start
     print(
@@ -238,4 +279,6 @@ __all__ = [
     "cleanup_old_checkpoints",
     "print_rebel_training_stats",
     "run_training_loop",
+    "save_rebel_checkpoint_pair",
+    "save_rebel_final_checkpoint",
 ]

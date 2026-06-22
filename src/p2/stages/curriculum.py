@@ -23,9 +23,10 @@ from p2.core.structured_config import (
 from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_loop import (
-    cleanup_old_checkpoints,
     print_rebel_training_stats,
     run_training_loop,
+    save_rebel_checkpoint_pair,
+    save_rebel_final_checkpoint,
 )
 from p2.runtime.training_run import (
     device_from_config,
@@ -567,37 +568,21 @@ def _run_distill_substep(
                 stage_cfg.checkpoint_interval > 0
                 and (step + 1) % stage_cfg.checkpoint_interval == 0
             ):
-                ckpt_path = os.path.join(
-                    stage_cfg.checkpoint_dir, f"rebel_step_{step + 1}.pt"
+                save_rebel_checkpoint_pair(
+                    trainer,
+                    stage_cfg,
+                    run,
+                    step=step,
+                    checkpoint_metadata=metadata,
+                    value_only=True,
                 )
-                wandb_run_id = run.id if run else None
-                trainer.save_value_checkpoint(
-                    ckpt_path,
-                    step,
-                    wandb_run_id=wandb_run_id,
-                    save_optimizer=False,
-                    save_dtype=torch.bfloat16,
-                    metadata=metadata,
-                )
-                trainer.save_value_checkpoint(
-                    os.path.join(stage_cfg.checkpoint_dir, "rebel_latest.pt"),
-                    step,
-                    wandb_run_id=wandb_run_id,
-                    save_optimizer=True,
-                    save_dtype=None,
-                    metadata=metadata,
-                )
-                if stage_cfg.economize_checkpoints:
-                    cleanup_old_checkpoints(stage_cfg.checkpoint_dir, ckpt_path)
-                print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
 
-        final_path = os.path.join(stage_cfg.checkpoint_dir, "rebel_final.pt")
-        trainer.save_value_checkpoint(
-            final_path,
-            stage_cfg.num_steps,
-            save_optimizer=False,
-            save_dtype=None,
-            metadata=metadata,
+        final_path = save_rebel_final_checkpoint(
+            trainer,
+            stage_cfg,
+            step=stage_cfg.num_steps,
+            checkpoint_metadata=metadata,
+            value_only=True,
         )
 
     promoted_path = _promote_checkpoint(cfg, substep, final_path)

@@ -49,6 +49,26 @@ class _FakeTrainer:
             (path, step, wandb_run_id, save_optimizer, save_dtype, metadata)
         )
 
+    def save_value_checkpoint(
+        self,
+        path: str,
+        step: int,
+        wandb_run_id: str | None = None,
+        save_optimizer: bool = True,
+        save_dtype: torch.dtype | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        self.saved.append(
+            (
+                f"value:{path}",
+                step,
+                wandb_run_id,
+                save_optimizer,
+                save_dtype,
+                metadata,
+            )
+        )
+
     def trueskill_snapshot_weights(self) -> dict:
         return {"weight": 1.0}
 
@@ -164,6 +184,44 @@ def test_run_training_loop_can_skip_preflop_analyzer(monkeypatch, tmp_path) -> N
         str(tmp_path / "rebel_final.pt"),
     ]
     assert grid_calls == []
+
+
+def test_value_checkpoint_pair_uses_value_only_saver(tmp_path) -> None:
+    trainer = _FakeTrainer()
+    run = _FakeRun()
+    cfg = SimpleNamespace(
+        checkpoint_dir=str(tmp_path),
+        economize_checkpoints=False,
+    )
+
+    path = rebel_loop.save_rebel_checkpoint_pair(
+        trainer,
+        cfg,
+        run,
+        step=4,
+        checkpoint_metadata={"curriculum_kind": "distill"},
+        value_only=True,
+    )
+
+    assert path == str(tmp_path / "rebel_step_5.pt")
+    assert trainer.saved == [
+        (
+            f"value:{tmp_path / 'rebel_step_5.pt'}",
+            4,
+            "fake-run",
+            False,
+            torch.bfloat16,
+            {"curriculum_kind": "distill"},
+        ),
+        (
+            f"value:{tmp_path / 'rebel_latest.pt'}",
+            4,
+            "fake-run",
+            True,
+            None,
+            {"curriculum_kind": "distill"},
+        ),
+    ]
 
 
 def test_run_training_loop_logs_validation_set_metrics(monkeypatch, tmp_path) -> None:
