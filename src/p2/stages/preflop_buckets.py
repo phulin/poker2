@@ -13,6 +13,7 @@ class PreflopBucketExecutionConfig:
     state_dataset: str
     base_checkpoint: str
     output_dir: str
+    presolve_bucket: str
     device: str
     seed: int
     depth: int

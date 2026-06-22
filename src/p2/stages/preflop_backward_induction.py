@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -860,6 +861,182 @@ def _build_validation_cache(
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return validation
+
+
+def run_presolve_values(
+    args: PreflopBucketExecutionConfig,
+    *,
+    base_template: Config,
+) -> None:
+    device = _device(args.device)
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
+    bucket_label = str(args.presolve_bucket)
+    spec = _bucket_spec(bucket_label)
+    cfr_batch_size = _bucket_cfr_batch_size(args, bucket_label)
+    output_dir = Path(args.output_dir)
+    bucket_dir = output_dir / bucket_label
+    solved_dir = bucket_dir / "solved"
+    if solved_dir.exists() and any(solved_dir.iterdir()):
+        if not args.overwrite:
+            raise FileExistsError(f"{solved_dir} exists; pass overwrite=true")
+        shutil.rmtree(solved_dir)
+    solved_dir.mkdir(parents=True, exist_ok=True)
+    cfg = build_run_config(
+        base_template,
+        args,
+        checkpoint_dir=bucket_dir / "checkpoints",
+        num_steps=1,
+        num_envs=cfr_batch_size,
+    )
+    write_resolved_config(
+        cfg,
+        output_dir,
+        resolved_config=RebelExperimentConfig.from_trainer_config(cfg),
+    )
+    run_cm = _init_wandb(
+        args,
+        cfg,
+        name=f"preflop-bi-presolve-values-{bucket_label}-{_now_slug()}",
+        stage="preflop_bucket_presolve_values",
+    )
+    reader = PublicStateBucketReader(
+        args.state_dataset,
+        bucket_label,
+        allow_partial=args.allow_partial,
+        seed=args.seed,
+    )
+    solver = RebelCFRTrainer(cfg=copy.deepcopy(cfg), device=device, pregeneration_only=True)
+    _load_model_weights(solver, args.base_checkpoint)
+    env = _make_env_from_manifest(
+        reader.manifest,
+        num_envs=cfr_batch_size,
+        device=device,
+        seed=args.seed + 100,
+    )
+    rng = torch.Generator(device=device)
+    rng.manual_seed(_seed_for_label(args.seed, bucket_label, salt=500_000))
+    writer = RebelSolvedDatasetWriter(
+        solved_dir,
+        storage_float_dtype=args.storage_dtype,
+    )
+    roots_solved = 0
+    value_examples = 0
+    solve_batches = 0
+    total_nodes_sum = 0.0
+    root_nodes_sum = 0.0
+    max_total_nodes = 0.0
+    progress_interval = max(int(args.progress_roots), cfr_batch_size)
+    next_progress_roots = progress_interval
+    start_time = time.time()
+
+    with run_cm as run:
+        for states in reader.iter_state_batches(
+            batch_size=cfr_batch_size,
+            max_rows=args.states_per_bucket,
+            seed=_seed_for_label(args.seed, bucket_label, salt=600_000),
+        ):
+            rows = _copy_public_states_to_env(env, states)
+            beliefs = _random_beliefs(
+                rows,
+                solver.num_players,
+                device=device,
+                rng=rng,
+                mode=args.belief_mode,
+            )
+            value_batch, _, tree_stats = _solve_public_state_batch(
+                solver,
+                env,
+                beliefs,
+                include_policy=False,
+            )
+            value_batch = _filter_batch_by_action_bucket(
+                value_batch,
+                low=spec.low,
+                high=spec.high,
+            )
+            value_stream = _value_only(value_batch)
+            if value_stream is not None:
+                writer.append("value", value_stream)
+                value_examples += len(value_stream)
+            roots_solved += rows
+            solve_batches += 1
+            total_nodes = float(tree_stats["evaluator_total_nodes"])
+            root_nodes = float(tree_stats["evaluator_root_nodes"])
+            total_nodes_sum += total_nodes
+            root_nodes_sum += root_nodes
+            max_total_nodes = max(max_total_nodes, total_nodes)
+            elapsed = time.time() - start_time
+            if run is not None:
+                run.log(
+                    {
+                        f"{bucket_label}/roots_solved": roots_solved,
+                        f"{bucket_label}/value_examples": value_examples,
+                        f"{bucket_label}/solve_batches": solve_batches,
+                        f"{bucket_label}/cfr_batch_size": cfr_batch_size,
+                        f"{bucket_label}/elapsed_s": elapsed,
+                        f"{bucket_label}/roots_per_s": roots_solved
+                        / max(elapsed, 1.0e-9),
+                        f"{bucket_label}/evaluator_total_nodes": total_nodes,
+                        f"{bucket_label}/evaluator_root_nodes": root_nodes,
+                        "roots_solved": roots_solved,
+                    },
+                    step=roots_solved,
+                )
+            if roots_solved >= next_progress_roots:
+                print(
+                    f"{bucket_label}: presolve progress roots={roots_solved:,} "
+                    f"value={value_examples:,} nodes={int(total_nodes):,} "
+                    f"cfr_batch={cfr_batch_size} roots/s={roots_solved / max(elapsed, 1.0e-9):.2f} "
+                    f"elapsed={elapsed:.1f}s",
+                    flush=True,
+                )
+                while next_progress_roots <= roots_solved:
+                    next_progress_roots += progress_interval
+            if roots_solved >= args.states_per_bucket:
+                break
+
+        if value_examples == 0:
+            raise RuntimeError(f"No value examples produced for {bucket_label}")
+        summary = {
+            "format_note": "preflop backward-induction value-only presolve bucket",
+            "bucket_label": bucket_label,
+            "bucket_low": spec.low,
+            "bucket_high": spec.high,
+            "root_states_solved": roots_solved,
+            "value_examples": value_examples,
+            "policy_examples": 0,
+            "source_state_dataset": os.path.realpath(args.state_dataset),
+            "solver_checkpoint": os.path.realpath(args.base_checkpoint),
+            "depth": args.depth,
+            "cfr_iterations": args.cfr_iterations,
+            "cfr_batch_size": cfr_batch_size,
+            "belief_mode": args.belief_mode,
+            "storage_dtype": args.storage_dtype,
+            "solve_batches": solve_batches,
+            "evaluator_total_nodes_mean": total_nodes_sum / max(1, solve_batches),
+            "evaluator_total_nodes_max": max_total_nodes,
+            "evaluator_root_nodes_mean": root_nodes_sum / max(1, solve_batches),
+            "evaluator_nodes_per_root_mean": total_nodes_sum / max(1.0, root_nodes_sum),
+        }
+        manifest = writer.finalize(summary)
+        summary["solved_dataset"] = manifest
+        summary["solved_manifest"] = str(solved_dir / "manifest.json")
+        summary_path = bucket_dir / "presolve_summary.json"
+        summary_path.write_text(
+            json.dumps(_jsonable(summary), indent=2, sort_keys=True) + "\n"
+        )
+        if run is not None:
+            run.summary[f"{bucket_label}/roots_solved"] = roots_solved
+            run.summary[f"{bucket_label}/value_examples"] = value_examples
+            run.summary[f"{bucket_label}/solved_manifest"] = str(
+                solved_dir / "manifest.json"
+            )
+    print(
+        f"completed {bucket_label} value presolve: manifest={solved_dir / 'manifest.json'} "
+        f"roots={roots_solved:,} value={value_examples:,}",
+        flush=True,
+    )
 
 
 def run_train_specialists(

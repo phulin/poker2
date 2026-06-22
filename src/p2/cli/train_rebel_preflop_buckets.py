@@ -21,10 +21,13 @@ def _required(value: str | None, field: str) -> str:
 def _command_name(command: str) -> str:
     if command == "train_specialists":
         return "train-specialists"
-    if command in {"train-specialists", "distill"}:
+    if command == "presolve_values":
+        return "presolve-values"
+    if command in {"train-specialists", "distill", "presolve-values"}:
         return command
     raise ValueError(
-        "preflop_buckets.command must be 'train_specialists' or 'distill'; "
+        "preflop_buckets.command must be 'train_specialists', "
+        "'presolve_values', or 'distill'; "
         f"got {command!r}"
     )
 
@@ -41,6 +44,7 @@ def _execution_config_from_config(cfg: Config) -> PreflopBucketExecutionConfig:
         state_dataset=state_dataset,
         base_checkpoint=base_checkpoint,
         output_dir=preflop.output_dir,
+        presolve_bucket=preflop.presolve_bucket,
         device=cfg.device,
         seed=cfg.seed,
         depth=preflop.depth,
@@ -90,6 +94,9 @@ def train_rebel_preflop_buckets(cfg: Config) -> None:
     execution = _execution_config_from_config(cfg)
     if execution.command == "train-specialists":
         preflop_bi.run_train_specialists(execution, base_template=cfg)
+        return
+    if execution.command == "presolve-values":
+        preflop_bi.run_presolve_values(execution, base_template=cfg)
         return
     missing = [
         key for key, value in _distill_checkpoint_args(cfg.preflop_buckets).items()

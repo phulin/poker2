@@ -24,6 +24,7 @@ def _execution_config(**overrides) -> PreflopBucketExecutionConfig:
         "state_dataset": "/tmp/states",
         "base_checkpoint": "/tmp/base.pt",
         "output_dir": "/tmp/out",
+        "presolve_bucket": "actions_12_15",
         "device": "cpu",
         "seed": 123,
         "depth": 4,

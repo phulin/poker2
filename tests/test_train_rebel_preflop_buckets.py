@@ -45,6 +45,7 @@ def test_config_rebel_preflop_buckets_resolves() -> None:
     assert cfg.use_wandb is False
     assert cfg.wandb_project == "poker-rebel-preflop-backward-induction"
     assert cfg.preflop_buckets.command == "train_specialists"
+    assert cfg.preflop_buckets.presolve_bucket == "actions_12_15"
     assert cfg.preflop_buckets.state_dataset == "/tmp/states"
     assert cfg.preflop_buckets.base_checkpoint == "/tmp/base.pt"
     assert cfg.preflop_buckets.distill_checkpoints.checkpoint_12_15 is None
@@ -102,6 +103,33 @@ def test_preflop_hydra_cli_dispatches_distill(monkeypatch, tmp_path) -> None:
     assert args.checkpoint_8_11 == "ckpt-8.pt"
     assert args.checkpoint_4_7 == "ckpt-4.pt"
     assert args.checkpoint_0_3 == "ckpt-0.pt"
+
+
+def test_preflop_hydra_cli_dispatches_presolve_values(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+
+    def fake_presolve(args, *, base_template):
+        calls.append(("presolve", args, base_template))
+
+    monkeypatch.setattr(
+        preflop_cli.preflop_bi,
+        "run_presolve_values",
+        fake_presolve,
+    )
+    cfg = _base_config(tmp_path)
+    cfg.preflop_buckets.command = "presolve_values"
+    cfg.preflop_buckets.presolve_bucket = "actions_8_11"
+
+    preflop_cli.train_rebel_preflop_buckets(cfg)
+
+    assert len(calls) == 1
+    kind, args, base_template = calls[0]
+    assert kind == "presolve"
+    assert base_template is cfg
+    assert args.command == "presolve-values"
+    assert args.presolve_bucket == "actions_8_11"
 
 
 def test_preflop_hydra_cli_requires_distill_checkpoints(tmp_path) -> None:
