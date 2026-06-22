@@ -12,13 +12,14 @@ def test_load_rebel_config_applies_rebel_logging_defaults() -> None:
         OmegaConf.create(
             {
                 "device": "cpu",
-                "model": {"name": "BetterFFN"},
                 "search": {"enabled": True},
             }
         )
     )
 
     assert cfg.wandb_tags == ["rebel", "cfr"]
+    assert cfg.wandb_project == "poker-rebel-cfr"
+    assert cfg.checkpoint_dir == "checkpoints-rebel"
     assert cfg.device == "cpu"
     assert cfg.model.name.value == "BetterFFN"
     assert cfg.search.enabled is True

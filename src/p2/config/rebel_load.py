@@ -55,8 +55,13 @@ def _reject_legacy_rebel_keys(container: Mapping[str, Any]) -> None:
 
 def _apply_rebel_loader_defaults(container: dict[str, Any]) -> dict[str, Any]:
     clean = dict(container)
+    clean.setdefault("checkpoint_dir", "checkpoints-rebel")
+    clean.setdefault("wandb_project", "poker-rebel-cfr")
     if clean.get("wandb_tags") is None:
         clean["wandb_tags"] = ["rebel", "cfr"]
+    model = dict(clean.get("model", {}))
+    model.setdefault("name", "BetterFFN")
+    clean["model"] = model
     return clean
 
 
