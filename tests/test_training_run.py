@@ -109,6 +109,7 @@ def test_write_resolved_config_accepts_rebel_experiment_payload(tmp_path) -> Non
                 "device": "cpu",
                 "checkpoint_dir": str(tmp_path / "checkpoints"),
                 "wandb_tags": ["rebel"],
+                "model": {"name": "BetterFFN"},
             }
         )
     )
@@ -128,6 +129,11 @@ def test_write_resolved_config_accepts_rebel_experiment_payload(tmp_path) -> Non
     assert "ppo_eps" not in payload["train"]
     assert "kl_type" not in payload["train"]
     assert "lr_scaling_init_value" not in payload["train"]
+    assert payload["model"]["name"] == "BetterFFN"
+    assert payload["model"]["preflop_model_type"] == "ffn"
+    assert "cards_channels" not in payload["model"]
+    assert "max_sequence_length" not in payload["model"]
+    assert "value_rank" not in payload["model"]
     assert "opponent_pool_type" not in payload
     assert "exploiter" not in payload
 

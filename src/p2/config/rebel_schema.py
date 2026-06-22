@@ -10,16 +10,21 @@ from p2.core.structured_config import (
     EnvConfig,
     LrSchedule,
     ModelConfig,
+    ModelType,
+    NonlinearityType,
     PolicyLossType,
     PolicyNodeWeighting,
     PreflopBucketTrainingConfig,
     PreflopValidationConfig,
+    PreflopModelType,
     RebelPregenerateConfig,
     SearchConfig,
     StratifyConfig,
+    StreetValueHeads,
     TrainingConfig,
     TrueSkillConfig,
     ValidationSetConfig,
+    ValueHeadType,
 )
 
 
@@ -212,12 +217,100 @@ class RebelTrainingConfig:
 
 
 @dataclass(frozen=True)
+class RebelModelConfig:
+    name: ModelType
+    compile: str
+    value_head_type: ValueHeadType
+    detach_value_head: bool
+    nonlinearity: NonlinearityType
+    num_actions: int
+    input_dim: int
+    hidden_dim: int
+    num_hidden_layers: int
+    num_policy_layers: int
+    num_value_layers: int
+    range_hidden_dim: int
+    ffn_dim: int
+    shared_trunk: bool
+    enforce_zero_sum: bool
+    board_interaction_dim: int
+    policy_rank: int
+    policy_hand_bias_rank: int
+    street_value_heads: StreetValueHeads
+    preflop_hand_dim: int
+    preflop_model_type: PreflopModelType
+    preflop_transformer_heads: int
+    num_recursions: int
+    num_iterations: int
+    num_supervisions: int
+
+    @classmethod
+    def from_model_config(cls, cfg: ModelConfig) -> RebelModelConfig:
+        return cls(
+            name=cfg.name,
+            compile=cfg.compile,
+            value_head_type=cfg.value_head_type,
+            detach_value_head=cfg.detach_value_head,
+            nonlinearity=cfg.nonlinearity,
+            num_actions=cfg.num_actions,
+            input_dim=cfg.input_dim,
+            hidden_dim=cfg.hidden_dim,
+            num_hidden_layers=cfg.num_hidden_layers,
+            num_policy_layers=cfg.num_policy_layers,
+            num_value_layers=cfg.num_value_layers,
+            range_hidden_dim=cfg.range_hidden_dim,
+            ffn_dim=cfg.ffn_dim,
+            shared_trunk=cfg.shared_trunk,
+            enforce_zero_sum=cfg.enforce_zero_sum,
+            board_interaction_dim=cfg.board_interaction_dim,
+            policy_rank=cfg.policy_rank,
+            policy_hand_bias_rank=cfg.policy_hand_bias_rank,
+            street_value_heads=cfg.street_value_heads,
+            preflop_hand_dim=cfg.preflop_hand_dim,
+            preflop_model_type=cfg.preflop_model_type,
+            preflop_transformer_heads=cfg.preflop_transformer_heads,
+            num_recursions=cfg.num_recursions,
+            num_iterations=cfg.num_iterations,
+            num_supervisions=cfg.num_supervisions,
+        )
+
+    def to_model_config(self) -> ModelConfig:
+        cfg = ModelConfig()
+        cfg.name = self.name
+        cfg.compile = self.compile
+        cfg.value_head_type = self.value_head_type
+        cfg.detach_value_head = self.detach_value_head
+        cfg.nonlinearity = self.nonlinearity
+        cfg.num_actions = self.num_actions
+        cfg.input_dim = self.input_dim
+        cfg.hidden_dim = self.hidden_dim
+        cfg.num_hidden_layers = self.num_hidden_layers
+        cfg.num_policy_layers = self.num_policy_layers
+        cfg.num_value_layers = self.num_value_layers
+        cfg.range_hidden_dim = self.range_hidden_dim
+        cfg.ffn_dim = self.ffn_dim
+        cfg.shared_trunk = self.shared_trunk
+        cfg.enforce_zero_sum = self.enforce_zero_sum
+        cfg.board_interaction_dim = self.board_interaction_dim
+        cfg.policy_rank = self.policy_rank
+        cfg.policy_hand_bias_rank = self.policy_hand_bias_rank
+        cfg.street_value_heads = self.street_value_heads
+        cfg.preflop_hand_dim = self.preflop_hand_dim
+        cfg.preflop_model_type = self.preflop_model_type
+        cfg.preflop_transformer_heads = self.preflop_transformer_heads
+        cfg.num_recursions = self.num_recursions
+        cfg.num_iterations = self.num_iterations
+        cfg.num_supervisions = self.num_supervisions
+        return cfg
+
+
+@dataclass(frozen=True)
 class RebelExperimentConfig:
     run: RebelRunConfig
     checkpoint: RebelCheckpointConfig
     logging: RebelLoggingConfig
     train: RebelTrainingConfig
-    model: ModelConfig
+    model: RebelModelConfig
     env: EnvConfig
     search: SearchConfig
     trueskill: TrueSkillConfig
@@ -254,7 +347,7 @@ class RebelExperimentConfig:
                 wandb_run_id=cfg.wandb_run_id,
             ),
             train=RebelTrainingConfig.from_training_config(cfg.train),
-            model=copy.deepcopy(cfg.model),
+            model=RebelModelConfig.from_model_config(cfg.model),
             env=copy.deepcopy(cfg.env),
             search=copy.deepcopy(cfg.search),
             trueskill=copy.deepcopy(cfg.trueskill),
@@ -285,7 +378,7 @@ class RebelExperimentConfig:
             economize_checkpoints=self.checkpoint.economize_checkpoints,
             strict_model_loading=self.checkpoint.strict_model_loading,
             train=self.train.to_training_config(),
-            model=copy.deepcopy(self.model),
+            model=self.model.to_model_config(),
             env=copy.deepcopy(self.env),
             search=copy.deepcopy(self.search),
             trueskill=copy.deepcopy(self.trueskill),
@@ -302,6 +395,7 @@ __all__ = [
     "RebelCheckpointConfig",
     "RebelExperimentConfig",
     "RebelLoggingConfig",
+    "RebelModelConfig",
     "RebelRunConfig",
     "RebelTrainingConfig",
 ]
