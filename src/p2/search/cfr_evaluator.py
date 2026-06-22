@@ -661,9 +661,7 @@ class CFREvaluator(ABC):
         )
 
     def _model_scope(self) -> str:
-        search_cfg = getattr(getattr(self, "cfg", None), "search", None)
-        scope = getattr(search_cfg, "model_scope", "mixed_street")
-        return getattr(scope, "value", scope)
+        return self.cfg.search.model_scope.value
 
     def _validate_model_leaf_phases(self) -> None:
         if self.model_indices.numel() == 0:
@@ -685,34 +683,20 @@ class CFREvaluator(ABC):
             )
 
     def _allin_abstraction_enabled(self) -> bool:
-        cfg = getattr(self, "cfg", None)
-        search_cfg = getattr(cfg, "search", None)
-        return bool(
-            getattr(
-                search_cfg,
-                "allin_call_terminal_abstraction",
-                getattr(self, "allin_call_terminal_abstraction", False),
-            )
-        )
+        return bool(self.cfg.search.allin_call_terminal_abstraction)
 
     def _continuation_value_target_sampling_enabled(self) -> bool:
-        cfg = getattr(self, "cfg", None)
-        search_cfg = getattr(cfg, "search", None)
-        return bool(getattr(search_cfg, "continuation_value_target_sampling", False))
+        return bool(self.cfg.search.continuation_value_target_sampling)
 
     def _continuation_value_target_streets(self) -> tuple[int, ...]:
-        cfg = getattr(self, "cfg", None)
-        search_cfg = getattr(cfg, "search", None)
-        streets = getattr(search_cfg, "continuation_value_target_streets", (0,))
+        streets = self.cfg.search.continuation_value_target_streets
         if streets is None:
             return ()
         return tuple(int(street) for street in streets)
 
     def _continuation_value_target_depth_bounds(self) -> tuple[int, int] | None:
-        cfg = getattr(self, "cfg", None)
-        search_cfg = getattr(cfg, "search", None)
-        min_depth = int(getattr(search_cfg, "continuation_value_target_min_depth", 0))
-        max_depth_cfg = getattr(search_cfg, "continuation_value_target_max_depth", None)
+        min_depth = int(self.cfg.search.continuation_value_target_min_depth)
+        max_depth_cfg = self.cfg.search.continuation_value_target_max_depth
         max_depth = self.tree_depth if max_depth_cfg is None else int(max_depth_cfg)
         min_depth = max(0, min_depth)
         max_depth = min(self.tree_depth, max_depth)
@@ -729,14 +713,9 @@ class CFREvaluator(ABC):
     def _ensure_allin_payoff_resolver(self) -> AllInPayoffResolver:
         resolver = getattr(self, "allin_payoff_resolver", None)
         if resolver is None:
-            search_cfg = getattr(getattr(self, "cfg", None), "search", None)
             resolver = AllInPayoffResolver(
                 device=self.device,
-                preflop_table_path=getattr(
-                    search_cfg,
-                    "preflop_allin_table_path",
-                    getattr(self, "preflop_allin_table_path", None),
-                ),
+                preflop_table_path=self.cfg.search.preflop_allin_table_path,
             )
             self.allin_payoff_resolver = resolver
         return resolver

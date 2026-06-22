@@ -11,6 +11,7 @@ from p2.core.structured_config import (
     Config,
     EnvConfig,
     ModelConfig,
+    ModelScope,
     ModelType,
     SearchConfig,
     TrainingConfig,
@@ -42,6 +43,12 @@ STREET_CUTOFF_SCHEDULE = [
     [1.0],
     [],
 ]
+
+
+def _scope_cfg(scope: ModelScope = ModelScope.mixed_street) -> Config:
+    cfg = Config(device="cpu")
+    cfg.search.model_scope = scope
+    return cfg
 
 
 def get_device() -> torch.device:
@@ -409,7 +416,7 @@ def test_model_leaf_values_use_closing_model_when_model_leaves_close_street() ->
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
     evaluator.closing_leaf_value_encoder = None
-    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="end_of_street"))
+    evaluator.cfg = _scope_cfg(ModelScope.end_of_street)
     evaluator.float_dtype = torch.float32
     evaluator.num_players = 2
     evaluator.cfr_avg = False
@@ -454,7 +461,7 @@ def test_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() -> Non
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
     evaluator.closing_leaf_value_encoder = OffsetFeatureEncoder(100.0)
-    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="mixed_street"))
+    evaluator.cfg = _scope_cfg()
     evaluator.float_dtype = torch.float32
     evaluator.num_players = 2
     evaluator.cfr_avg = False
@@ -501,7 +508,7 @@ def test_model_leaf_values_project_multiway_heads_up_closing_leaf() -> None:
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
     evaluator.closing_leaf_value_encoder = None
-    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="mixed_street"))
+    evaluator.cfg = _scope_cfg()
     evaluator.float_dtype = torch.float32
     evaluator.num_players = 4
     evaluator.hand_dim = PREFLOP_HANDS
@@ -554,7 +561,7 @@ def test_fused_model_leaf_values_mixed_scope_splits_cutoff_and_closing_leaves() 
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
     evaluator.closing_leaf_value_encoder = OffsetFeatureEncoder(100.0)
-    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="mixed_street"))
+    evaluator.cfg = _scope_cfg()
     evaluator.float_dtype = torch.float32
     evaluator.num_players = 2
     evaluator.latest_values = torch.zeros(3, 2, NUM_HANDS)
@@ -600,7 +607,7 @@ def test_fused_model_leaf_values_project_multiway_heads_up_closing_leaf() -> Non
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
     evaluator.closing_leaf_value_encoder = None
-    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="mixed_street"))
+    evaluator.cfg = _scope_cfg()
     evaluator.float_dtype = torch.float32
     evaluator.num_players = 4
     evaluator.hand_dim = PREFLOP_HANDS
@@ -652,7 +659,7 @@ def test_fused_model_leaf_values_use_closing_model_when_model_leaves_close_stree
     evaluator.value_model = current_model
     evaluator.closing_leaf_value_model = closing_model
     evaluator.closing_leaf_value_encoder = None
-    evaluator.cfg = SimpleNamespace(search=SimpleNamespace(model_scope="end_of_street"))
+    evaluator.cfg = _scope_cfg(ModelScope.end_of_street)
     evaluator.float_dtype = torch.float32
     evaluator.num_players = 2
     evaluator.latest_values = torch.zeros(3, 2, NUM_HANDS)
@@ -688,18 +695,14 @@ def test_fused_model_leaf_values_use_closing_model_when_model_leaves_close_stree
 
 def test_mid_street_value_roots_expected_only_in_mixed_continuation_mode() -> None:
     evaluator = object.__new__(SparseCFREvaluator)
-    evaluator.cfg = SimpleNamespace(
-        search=SimpleNamespace(
-            model_scope="mixed_street",
-            continuation_value_target_sampling=True,
-        )
-    )
+    evaluator.cfg = _scope_cfg()
+    evaluator.cfg.search.continuation_value_target_sampling = True
     assert evaluator._mid_street_value_roots_are_expected()
 
-    evaluator.cfg.search.model_scope = "single_street"
+    evaluator.cfg.search.model_scope = ModelScope.single_street
     assert not evaluator._mid_street_value_roots_are_expected()
 
-    evaluator.cfg.search.model_scope = "mixed_street"
+    evaluator.cfg.search.model_scope = ModelScope.mixed_street
     evaluator.cfg.search.continuation_value_target_sampling = False
     assert not evaluator._mid_street_value_roots_are_expected()
 
@@ -2306,7 +2309,7 @@ def test_street_cutoff_depth_five_expands_fold_call_only() -> None:
 def test_street_cutoff_model_leaves_use_configured_end_model() -> None:
     device = get_device()
     cfg = make_street_cutoff_config()
-    cfg.search.model_scope = "end_of_street"
+    cfg.search.model_scope = ModelScope.end_of_street
     env = make_env(1, device=device)
     env.default_bet_bins = cfg.env.bet_bins
     env.num_bet_bins = cfg.model.num_actions
