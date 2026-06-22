@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from p2.core.structured_config import Config
 from p2.env.card_utils import PREFLOP_HANDS, preflop_class_multiplicity_tensor
 from p2.env.pbs_env import PBSEnv
+from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
 from p2.search.rebel_solved_dataset import RebelSolvedDatasetWriter
@@ -141,7 +142,9 @@ def _load_model_weights(
             for key, value in model_state.items()
         }
     if checkpoint.get("model_component") == "value_model":
-        value_model = getattr(trainer.model, "value_model", trainer.model)
+        if type(trainer.model) is not BetterSplitFFN:
+            raise TypeError("value-only checkpoints require a BetterSplitFFN model")
+        value_model = trainer.model.value_model
         value_model.load_state_dict(
             model_state,
             strict=trainer.cfg.strict_model_loading if strict is None else strict,

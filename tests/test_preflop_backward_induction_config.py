@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import torch
+
 from p2.core.structured_config import Config
+from p2.models.mlp.better_ffn import BetterSplitFFN
+from p2.stages.preflop_backward_induction import _load_model_weights
 from p2.stages.preflop_buckets import (
     PreflopBucketExecutionConfig,
     build_run_config,
@@ -120,3 +124,63 @@ def test_load_base_config_accepts_hydra_overrides() -> None:
     assert cfg.device == "cpu"
     assert cfg.train.batch_size == 321
     assert cfg.search.iterations == 77
+
+
+class _FakeSplitLeaf(torch.nn.Linear):
+    def __init__(self) -> None:
+        super().__init__(1, 1)
+        self.hidden_dim = 1
+        self.num_players = 2
+        self.num_actions = 2
+        self.enforce_zero_sum = False
+
+
+class _FakeTrainer:
+    def __init__(self) -> None:
+        self.device = torch.device("cpu")
+        self.float_dtype = torch.float32
+        self.cfg = Config(device="cpu")
+        self.cfg.strict_model_loading = True
+        self.model = BetterSplitFFN(
+            policy_model=_FakeSplitLeaf(),
+            value_model=_FakeSplitLeaf(),
+        )
+        self.synced = False
+        self.target_step = None
+
+    def _sync_inference_model(self) -> None:
+        self.synced = True
+
+    def _sync_cfr_target_model(self, step: int) -> None:
+        self.target_step = step
+
+
+def test_load_model_weights_loads_value_only_split_checkpoint(tmp_path) -> None:
+    trainer = _FakeTrainer()
+    original_policy = {
+        key: value.clone()
+        for key, value in trainer.model.policy_model.state_dict().items()
+    }
+    model_state = trainer.model.value_model.state_dict()
+    model_state = {
+        key: torch.full_like(value, 5.0) for key, value in model_state.items()
+    }
+    path = tmp_path / "value.pt"
+    torch.save(
+        {
+            "model": model_state,
+            "model_component": "value_model",
+            "step": 12,
+        },
+        path,
+    )
+
+    step = _load_model_weights(trainer, str(path))
+
+    assert step == 12
+    for value in trainer.model.value_model.state_dict().values():
+        assert torch.equal(value, torch.full_like(value, 5.0))
+    for key, value in trainer.model.policy_model.state_dict().items():
+        assert torch.equal(value, original_policy[key])
+    assert trainer.synced is True
+    assert trainer.target_step == 12
