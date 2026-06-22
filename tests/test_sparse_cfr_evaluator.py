@@ -1215,7 +1215,7 @@ def test_preflop_sparse_allin_call_mask_requires_no_other_betting_player() -> No
         device=device,
     )
     env.stacks[:] = torch.tensor(
-        [[200, 0, 0, 1000], [200, 0, 0, 900]],
+        [[100, 0, 0, 1000], [200, 0, 0, 900]],
         dtype=torch.long,
         device=device,
     )
@@ -1249,7 +1249,7 @@ def test_preflop_sparse_allin_call_mask_requires_no_other_betting_player() -> No
     assert mask.tolist() == [True, False]
 
 
-def test_preflop_sparse_allin_call_leaf_marked_during_construction() -> None:
+def test_preflop_sparse_allin_call_leaves_match_terminal_runouts() -> None:
     device = get_device()
     num_players = 4
     cfg = make_config([0.5])
@@ -1311,10 +1311,29 @@ def test_preflop_sparse_allin_call_leaf_marked_during_construction() -> None:
 
     evaluator.initialize_subgame(env, torch.arange(1, device=device))
 
-    assert evaluator.allin_call_indices.tolist() == [2]
-    assert evaluator.preflop_allin_indices_by_live_count[3].tolist() == [2]
-    assert evaluator.leaf_mask[2]
-    assert not evaluator.new_street_mask[2]
+    child_indices = torch.arange(
+        evaluator.root_nodes, evaluator.total_nodes, device=device
+    )
+    parent, _ = evaluator._parent_action_for_nodes(child_indices)
+    live = ~evaluator.env.has_folded[child_indices]
+    eligible = (
+        live
+        & ~evaluator.env.is_allin[child_indices]
+        & (evaluator.env.stacks[child_indices] > 0)
+    )
+    terminal_runouts = child_indices[
+        evaluator.env.done[child_indices]
+        & (evaluator.env.street[child_indices] == 4)
+        & (evaluator.env.street[parent] == 0)
+        & (live.sum(dim=1) > 1)
+        & ~eligible.any(dim=1)
+    ]
+
+    assert terminal_runouts.numel() > 0
+    assert evaluator.allin_call_indices.tolist() == terminal_runouts.tolist()
+    assert evaluator.preflop_allin_indices_by_live_count[2].tolist() == [1]
+    assert evaluator.leaf_mask[terminal_runouts].all()
+    assert not evaluator.new_street_mask[terminal_runouts].any()
 
 
 def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:

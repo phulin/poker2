@@ -352,7 +352,6 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         actor_onehot = torch.zeros_like(live)
         actor_onehot[rows, actor] = True
         other_live = live & ~actor_onehot
-        other_allin = other_live & parent_env.is_allin[parent_local_indices]
         other_betting_eligible = (
             other_live
             & ~parent_env.is_allin[parent_local_indices]
@@ -360,14 +359,18 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         )
         max_committed = parent_env.committed[parent_local_indices].amax(dim=1)
         actor_committed = parent_env.committed[parent_local_indices, actor]
+        actor_stack = parent_env.stacks[parent_local_indices, actor]
         parent_to_call = max_committed - actor_committed
         parent_street = parent_env.street[parent_local_indices]
+        all_in_bin = int(getattr(parent_env, "num_bet_bins", self.num_actions)) - 1
+        actor_becomes_ineligible = (
+            (action_bins == 1) & (parent_to_call > 0) & (actor_stack <= parent_to_call)
+        ) | (action_bins == all_in_bin)
         return (
-            (action_bins == 1)
-            & actor_onehot.any(dim=1)
-            & other_allin.any(dim=1)
+            actor_onehot.any(dim=1)
+            & other_live.any(dim=1)
+            & actor_becomes_ineligible
             & ~other_betting_eligible.any(dim=1)
-            & (parent_to_call > 0)
             & (parent_street == 0)
         )
 
@@ -380,7 +383,20 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             self.root_nodes, self.total_nodes, device=self.device
         )
         parent, action = self._parent_action_for_nodes(child_indices)
-        mask = self._allin_call_child_mask(self.env, parent, action)
+        live = ~self.env.has_folded[child_indices]
+        eligible = (
+            live
+            & ~self.env.is_allin[child_indices]
+            & (self.env.stacks[child_indices] > 0)
+        )
+        parent_street = self.env.street[parent]
+        mask = (
+            self.env.done[child_indices]
+            & (self.env.street[child_indices] == 4)
+            & (parent_street == 0)
+            & (live.sum(dim=1) > 1)
+            & ~eligible.any(dim=1)
+        )
         indices = child_indices[mask]
         if indices.numel() == 0:
             self._cache_preflop_allin_live_partitions()
@@ -391,8 +407,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         self.allin_call_mask[self.allin_call_indices] = True
         self.leaf_mask[self.allin_call_indices] = True
         self.new_street_mask[self.allin_call_indices] = False
-        parent_street = self.env.street[self.allin_call_parent_indices].contiguous()
-        self._cache_allin_call_street_partitions(parent_street)
+        self._cache_allin_call_street_partitions(parent_street[mask].contiguous())
         self._prune_allin_call_descendants()
 
     def _ensure_preflop_allin_169_oracle(self) -> PreflopAllIn169Oracle:
