@@ -12,14 +12,8 @@ from typing import Any
 
 import hydra
 import torch
-import wandb
 from omegaconf import DictConfig
 
-from p2.cli.train_rebel import (
-    _device_from_config,
-    _init_wandb,
-    _log_model_parameter_summary,
-)
 from p2.core.structured_config import (
     Config,
     CurriculumSubstepConfig,
@@ -31,6 +25,13 @@ from p2.rl.rebel_loop import (
     cleanup_old_checkpoints,
     print_rebel_training_stats,
     run_training_loop,
+)
+from p2.runtime.training_run import (
+    device_from_config,
+    log_model_parameter_summary,
+    setup_torch_runtime,
+    wandb_run,
+    watch_model,
 )
 from p2.search.chance_node_helper import ChanceNodeHelper
 from p2.search.end_of_street_distillation import build_end_of_street_value_batch
@@ -389,17 +390,16 @@ def _run_train_substep(
     if value_checkpoint is not None:
         metadata["curriculum_value_checkpoint"] = value_checkpoint
 
-    run_cm = _init_wandb(
+    run_cm = wandb_run(
         stage_cfg,
-        device,
         group=cfg.curriculum.wandb_group,
         name=stage_cfg.wandb_name,
+        stage=substep_name,
     )
     with run_cm as run:
         trainer = RebelCFRTrainer(cfg=stage_cfg, device=device)
-        _log_model_parameter_summary(trainer.model, run)
-        if isinstance(run, wandb.Run):
-            run.watch(trainer.model, log_freq=100)
+        log_model_parameter_summary(trainer.model, run)
+        watch_model(trainer.model, run, log_freq=100)
 
         start_step = 0
         if resume_from and os.path.exists(resume_from):
@@ -465,17 +465,16 @@ def _run_distill_substep(
     metadata = _checkpoint_metadata(substep_name, substep)
     metadata["curriculum_source_checkpoint"] = source_checkpoint
 
-    run_cm = _init_wandb(
+    run_cm = wandb_run(
         stage_cfg,
-        device,
         group=cfg.curriculum.wandb_group,
         name=stage_cfg.wandb_name,
+        stage=substep_name,
     )
     with run_cm as run:
         trainer = RebelCFRTrainer(cfg=stage_cfg, device=device)
-        _log_model_parameter_summary(trainer.model, run)
-        if isinstance(run, wandb.Run):
-            run.watch(trainer.model, log_freq=100)
+        log_model_parameter_summary(trainer.model, run)
+        watch_model(trainer.model, run, log_freq=100)
 
         start_step = 0
         if resume_from and os.path.exists(resume_from):
@@ -658,14 +657,9 @@ def train_rebel_curriculum(cfg: Config) -> None:
     if install_triton_compile_logger_from_env():
         print("Triton compile logging enabled via P2_TRITON_COMPILE_LOG=1")
 
-    device = _device_from_config(cfg)
+    device = device_from_config(cfg)
     print(f"Using device: {device}")
-
-    if device.type == "cuda":
-        torch.set_float32_matmul_precision("high")
-
-    torch._dynamo.config.recompile_limit = 16
-    torch.manual_seed(cfg.seed)
+    setup_torch_runtime(cfg, device, recompile_limit=16)
 
     stage_names = _stage_names(cfg)
     resume_metadata = _read_checkpoint_metadata(cfg.resume_from or "", device)

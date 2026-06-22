@@ -3,13 +3,25 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from typing import Any, Iterator
+from typing import Any, Iterator, Protocol
 
 import torch
 import wandb
 
 from p2.core.structured_config import Config
 from p2.utils.model_utils import count_model_parameters
+
+
+class WandbLikeRun(Protocol):
+    id: str
+    summary: Any
+
+    def log(self, metrics: dict, step: int) -> None: ...
+
+    def watch(self, model: torch.nn.Module, *, log_freq: int) -> None: ...
+
+
+ActiveRun = WandbLikeRun | None
 
 
 def device_from_config(cfg: Config) -> torch.device:
@@ -44,11 +56,11 @@ def wandb_run_id_from_checkpoint(path: str | None) -> str | None:
 class TrainingRunContext:
     cfg: Config
     device: torch.device
-    run: Any
+    run: ActiveRun
 
     @property
     def wandb_run_id(self) -> str | None:
-        return self.run.id if isinstance(self.run, wandb.Run) else None
+        return None if self.run is None else self.run.id
 
     def log_model_parameter_summary(self, model: torch.nn.Module) -> None:
         log_model_parameter_summary(model, self.run)
@@ -57,19 +69,19 @@ class TrainingRunContext:
         watch_model(model, self.run, log_freq=log_freq)
 
 
-def log_model_parameter_summary(model: torch.nn.Module, run: Any) -> None:
+def log_model_parameter_summary(model: torch.nn.Module, run: ActiveRun) -> None:
     metrics = count_model_parameters(model)
     print(
         "Model parameters: "
         f"total={metrics['total_parameters']:,}; "
         f"trainable={metrics['trainable_parameters']:,}"
     )
-    if isinstance(run, wandb.Run):
+    if run is not None:
         run.summary.update(metrics)
 
 
-def watch_model(model: torch.nn.Module, run: Any, *, log_freq: int = 100) -> None:
-    if isinstance(run, wandb.Run):
+def watch_model(model: torch.nn.Module, run: ActiveRun, *, log_freq: int = 100) -> None:
+    if run is not None:
         run.watch(model, log_freq=log_freq)
 
 
@@ -152,6 +164,8 @@ def training_run(
 
 __all__ = [
     "TrainingRunContext",
+    "ActiveRun",
+    "WandbLikeRun",
     "device_from_config",
     "log_model_parameter_summary",
     "setup_torch_runtime",

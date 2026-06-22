@@ -134,10 +134,11 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
 
     monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
     monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
-    monkeypatch.setattr(curriculum_cli, "_init_wandb", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(curriculum_cli, "wandb_run", lambda *a, **k: nullcontext())
     monkeypatch.setattr(
-        curriculum_cli, "_log_model_parameter_summary", lambda model, run: None
+        curriculum_cli, "log_model_parameter_summary", lambda model, run: None
     )
+    monkeypatch.setattr(curriculum_cli, "watch_model", lambda model, run, **k: None)
 
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     cfg.curriculum.stages = ["river"]
@@ -207,13 +208,14 @@ def test_curriculum_train_substep_initializes_policy_from_promoted_source(
 
     monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
     monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
-    monkeypatch.setattr(curriculum_cli, "_init_wandb", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(curriculum_cli, "wandb_run", lambda *a, **k: nullcontext())
     monkeypatch.setattr(
         curriculum_cli, "_initialize_policy_from_checkpoint", fake_init_policy
     )
     monkeypatch.setattr(
-        curriculum_cli, "_log_model_parameter_summary", lambda model, run: None
+        curriculum_cli, "log_model_parameter_summary", lambda model, run: None
     )
+    monkeypatch.setattr(curriculum_cli, "watch_model", lambda model, run, **k: None)
 
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     substep = CurriculumSubstepConfig(
@@ -336,7 +338,7 @@ def test_curriculum_train_substep_initializes_value_from_closing_checkpoint(
 
     monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
     monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
-    monkeypatch.setattr(curriculum_cli, "_init_wandb", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(curriculum_cli, "wandb_run", lambda *a, **k: nullcontext())
     monkeypatch.setattr(
         curriculum_cli, "_initialize_policy_from_checkpoint", fake_init_policy
     )
@@ -344,8 +346,9 @@ def test_curriculum_train_substep_initializes_value_from_closing_checkpoint(
         curriculum_cli, "_initialize_value_from_checkpoint", fake_init_value
     )
     monkeypatch.setattr(
-        curriculum_cli, "_log_model_parameter_summary", lambda model, run: None
+        curriculum_cli, "log_model_parameter_summary", lambda model, run: None
     )
+    monkeypatch.setattr(curriculum_cli, "watch_model", lambda model, run, **k: None)
 
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     substep = CurriculumSubstepConfig(
@@ -388,10 +391,11 @@ def test_curriculum_train_substep_allows_hybrid_holdout_mode(
 
     monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
     monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
-    monkeypatch.setattr(curriculum_cli, "_init_wandb", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(curriculum_cli, "wandb_run", lambda *a, **k: nullcontext())
     monkeypatch.setattr(
-        curriculum_cli, "_log_model_parameter_summary", lambda model, run: None
+        curriculum_cli, "log_model_parameter_summary", lambda model, run: None
     )
+    monkeypatch.setattr(curriculum_cli, "watch_model", lambda model, run, **k: None)
 
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     cfg.data.mode = "hybrid"
@@ -550,10 +554,11 @@ def test_curriculum_train_resume_recovers_closing_checkpoint_from_metadata(
 
     monkeypatch.setattr(curriculum_cli, "RebelCFRTrainer", _FakeTrainer)
     monkeypatch.setattr(curriculum_cli, "run_training_loop", fake_run_loop)
-    monkeypatch.setattr(curriculum_cli, "_init_wandb", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(curriculum_cli, "wandb_run", lambda *a, **k: nullcontext())
     monkeypatch.setattr(
-        curriculum_cli, "_log_model_parameter_summary", lambda model, run: None
+        curriculum_cli, "log_model_parameter_summary", lambda model, run: None
     )
+    monkeypatch.setattr(curriculum_cli, "watch_model", lambda model, run, **k: None)
 
     cfg = Config(device="cpu", checkpoint_dir=str(tmp_path), use_wandb=False)
     substep = CurriculumSubstepConfig(

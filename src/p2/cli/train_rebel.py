@@ -9,41 +9,15 @@ search-driven supervision metrics to Weights & Biases.
 from __future__ import annotations
 
 import os
-from typing import Any
 
 import hydra
-import torch
 from omegaconf import DictConfig
 
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_loop import run_training_loop
-from p2.runtime.training_run import (
-    device_from_config,
-    log_model_parameter_summary,
-    training_run,
-    wandb_run,
-)
+from p2.runtime.training_run import training_run
 from p2.utils.profiling import install_triton_compile_logger_from_env
-
-
-def _device_from_config(cfg: Config) -> torch.device:
-    return device_from_config(cfg)
-
-
-def _init_wandb(
-    cfg: Config,
-    device: torch.device,
-    *,
-    group: str | None = None,
-    name: str | None = None,
-) -> Any:
-    del device
-    return wandb_run(cfg, group=group, name=name)
-
-
-def _log_model_parameter_summary(model: torch.nn.Module, run: Any) -> None:
-    log_model_parameter_summary(model, run)
 
 
 def train_rebel(cfg: Config) -> None:

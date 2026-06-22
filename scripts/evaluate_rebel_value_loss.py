@@ -8,10 +8,10 @@ import json
 
 import torch
 
-from p2.cli.train_rebel import _device_from_config
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.validation_set import RebelValueValidationSetEvaluator
+from p2.runtime.training_run import device_from_config
 
 
 def _load_model_weights(trainer: RebelCFRTrainer, checkpoint_path: str) -> None:
@@ -59,7 +59,7 @@ def evaluate_value_loss(
     cfg.train.replay_buffer_device = "cpu"
     cfg.train.replay_buffer_batches = 1
 
-    device = _device_from_config(cfg)
+    device = device_from_config(cfg)
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
     trainer = RebelCFRTrainer(cfg=cfg, device=device, pregeneration_only=True)

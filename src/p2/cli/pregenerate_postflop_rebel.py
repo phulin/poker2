@@ -14,10 +14,10 @@ import hydra
 import torch
 from omegaconf import DictConfig
 
-from p2.cli.train_rebel import _device_from_config
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
+from p2.runtime.training_run import device_from_config
 from p2.search.postflop_spot_sampler import postflop_spot_sampler_metadata
 from p2.search.rebel_solved_dataset import RebelSolvedDatasetWriter
 from p2.utils.profiling import install_triton_compile_logger_from_env
@@ -330,7 +330,7 @@ def pregenerate_postflop_rebel(cfg: Config) -> dict:
         cfg.data.live_root_source = pregenerate_cfg.root_source
     root_source_code = _root_source_code(cfg.data.live_root_source)
 
-    device = _device_from_config(cfg)
+    device = device_from_config(cfg)
     print(f"Using device: {device}")
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
