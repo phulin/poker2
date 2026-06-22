@@ -29,6 +29,70 @@ class PreflopBucketRunConfig:
     compile: str | None
 
 
+@dataclass(frozen=True)
+class PreflopBucketExecutionConfig:
+    command: str
+    config_name: str
+    config_overrides: tuple[str, ...]
+    state_dataset: str
+    base_checkpoint: str
+    output_dir: str
+    device: str
+    seed: int
+    depth: int
+    cfr_iterations: int
+    warm_start_iterations: int
+    sparse_fused: bool
+    compile: str | None
+    belief_mode: str
+    states_per_bucket: int
+    train_batch_size: int
+    cfr_batch_size: int
+    actions_12_15_cfr_batch_size: int | None
+    actions_8_11_cfr_batch_size: int | None
+    actions_12_15_epochs: int
+    validation_items: int
+    validation_cfr_iterations: int
+    validation_interval_steps: int
+    validation_eval_batch_size: int
+    replay_buffer_batches: int
+    storage_dtype: str
+    write_solved_shards: bool
+    allow_partial: bool
+    overwrite: bool
+    progress_roots: int
+    use_wandb: bool
+    wandb_project: str
+    wandb_name: str | None
+    wandb_group: str | None
+    wandb_tags: tuple[str, ...]
+    student_init: str | None
+    distill_batch_size: int
+    checkpoint_12_15: str | None
+    checkpoint_8_11: str | None
+    checkpoint_4_7: str | None
+    checkpoint_0_3: str | None
+
+    def run_config(self) -> PreflopBucketRunConfig:
+        return PreflopBucketRunConfig(
+            config_name=self.config_name,
+            config_overrides=self.config_overrides,
+            device=self.device,
+            cfr_batch_size=self.cfr_batch_size,
+            use_wandb=self.use_wandb,
+            wandb_project=self.wandb_project,
+            wandb_name=self.wandb_name,
+            wandb_tags=self.wandb_tags,
+            train_batch_size=self.train_batch_size,
+            replay_buffer_batches=self.replay_buffer_batches,
+            depth=self.depth,
+            cfr_iterations=self.cfr_iterations,
+            warm_start_iterations=self.warm_start_iterations,
+            sparse_fused=self.sparse_fused,
+            compile=self.compile,
+        )
+
+
 def load_base_config(
     *,
     repo_root: Path,
@@ -84,6 +148,7 @@ def build_run_config(
 
 
 __all__ = [
+    "PreflopBucketExecutionConfig",
     "PreflopBucketRunConfig",
     "build_run_config",
     "load_base_config",

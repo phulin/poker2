@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import copy
 import hashlib
 import json
@@ -26,6 +25,7 @@ from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
 from p2.search.rebel_solved_dataset import RebelSolvedDatasetWriter
 from p2.stages.preflop_buckets import (
+    PreflopBucketExecutionConfig,
     PreflopBucketRunConfig,
     build_run_config,
     load_base_config,
@@ -115,30 +115,10 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _init_wandb(args: argparse.Namespace, cfg: Config, *, name: str):
+def _init_wandb(args: PreflopBucketExecutionConfig, cfg: Config, *, name: str):
     run_name: str = str(args.wandb_name or name)
     group: str | None = None if args.wandb_group is None else str(args.wandb_group)
     return wandb_run(cfg, group=group, name=run_name)
-
-
-def _run_config_from_args(args: argparse.Namespace) -> PreflopBucketRunConfig:
-    return PreflopBucketRunConfig(
-        config_name=args.config_name,
-        config_overrides=tuple(args.config_override),
-        device=args.device,
-        cfr_batch_size=int(args.cfr_batch_size),
-        use_wandb=bool(args.use_wandb),
-        wandb_project=args.wandb_project,
-        wandb_name=args.wandb_name,
-        wandb_tags=tuple(args.wandb_tags),
-        train_batch_size=int(args.train_batch_size),
-        replay_buffer_batches=int(args.replay_buffer_batches),
-        depth=int(args.depth),
-        cfr_iterations=int(args.cfr_iterations),
-        warm_start_iterations=int(args.warm_start_iterations),
-        sparse_fused=bool(args.sparse_fused),
-        compile=args.compile,
-    )
 
 
 @torch.no_grad()
@@ -517,27 +497,34 @@ def _checkpoint_signature(checkpoint_path: str) -> dict[str, Any]:
     }
 
 
-def _bucket_epochs(args: argparse.Namespace, bucket_label: str) -> int:
+def _bucket_epochs(args: PreflopBucketExecutionConfig, bucket_label: str) -> int:
     if bucket_label == "actions_12_15":
         return max(1, int(args.actions_12_15_epochs))
     return 1
 
 
-def _bucket_cfr_batch_size(args: argparse.Namespace, bucket_label: str) -> int:
-    attr = f"{bucket_label}_cfr_batch_size"
-    override = getattr(args, attr, None)
+def _bucket_cfr_batch_size(
+    args: PreflopBucketExecutionConfig, bucket_label: str
+) -> int:
+    overrides = {
+        "actions_12_15": args.actions_12_15_cfr_batch_size,
+        "actions_8_11": args.actions_8_11_cfr_batch_size,
+        "actions_4_7": None,
+        "actions_0_3": None,
+    }
+    override = overrides[bucket_label]
     if override is not None:
         return max(1, int(override))
     return max(1, int(args.cfr_batch_size))
 
 
-def _max_cfr_batch_size(args: argparse.Namespace) -> int:
+def _max_cfr_batch_size(args: PreflopBucketExecutionConfig) -> int:
     return max(
         _bucket_cfr_batch_size(args, label) for label in BUCKET_ORDER_DEEP_TO_SHALLOW
     )
 
 
-def _estimate_train_updates(args: argparse.Namespace) -> int:
+def _estimate_train_updates(args: PreflopBucketExecutionConfig) -> int:
     manifest = _load_state_manifest(
         Path(args.state_dataset), allow_partial=args.allow_partial
     )
@@ -554,7 +541,7 @@ def _estimate_train_updates(args: argparse.Namespace) -> int:
 
 
 def _validation_cache_metadata(
-    args: argparse.Namespace,
+    args: PreflopBucketExecutionConfig,
     *,
     bucket_label: str,
     cutoff_checkpoint: str,
@@ -669,7 +656,7 @@ def _evaluate_validation_set(
 
 def _build_validation_cache(
     *,
-    args: argparse.Namespace,
+    args: PreflopBucketExecutionConfig,
     bucket_label: str,
     spec: BucketSpec,
     bucket_dir: Path,
@@ -796,7 +783,7 @@ def _build_validation_cache(
 
 
 def run_train_specialists(
-    args: argparse.Namespace,
+    args: PreflopBucketExecutionConfig,
     *,
     base_template: Config | None = None,
 ) -> None:
@@ -806,7 +793,7 @@ def run_train_specialists(
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     total_updates_guess = _estimate_train_updates(args)
-    run_cfg = _run_config_from_args(args)
+    run_cfg = args.run_config()
     if base_template is None:
         base_template = load_base_config(
             repo_root=REPO_ROOT,
@@ -1218,7 +1205,7 @@ def _distill_batch_from_teacher(
 
 
 def run_distill(
-    args: argparse.Namespace,
+    args: PreflopBucketExecutionConfig,
     *,
     base_template: Config | None = None,
 ) -> None:
@@ -1233,7 +1220,7 @@ def run_distill(
         * len(BUCKET_ORDER_DEEP_TO_SHALLOW)
         * 2,
     )
-    run_cfg = _run_config_from_args(args)
+    run_cfg = args.run_config()
     if base_template is None:
         base_template = load_base_config(
             repo_root=REPO_ROOT,
@@ -1257,7 +1244,13 @@ def run_distill(
             run.summary.update(count_model_parameters(student.model))
         global_step = 0
         for bucket_label in BUCKET_ORDER_DEEP_TO_SHALLOW:
-            checkpoint = getattr(args, bucket_label.replace("actions_", "checkpoint_"))
+            checkpoints = {
+                "actions_12_15": args.checkpoint_12_15,
+                "actions_8_11": args.checkpoint_8_11,
+                "actions_4_7": args.checkpoint_4_7,
+                "actions_0_3": args.checkpoint_0_3,
+            }
+            checkpoint = checkpoints[bucket_label]
             if checkpoint is None:
                 raise ValueError(f"missing specialist checkpoint for {bucket_label}")
             include_value = bucket_label != "actions_0_3"
@@ -1348,8 +1341,10 @@ def run_distill(
                 "kind": "preflop_backward_induction_distilled_model",
                 "state_dataset": os.path.realpath(args.state_dataset),
                 "specialist_checkpoints": {
-                    label: getattr(args, label.replace("actions_", "checkpoint_"))
-                    for label in BUCKET_ORDER_DEEP_TO_SHALLOW
+                    "actions_12_15": args.checkpoint_12_15,
+                    "actions_8_11": args.checkpoint_8_11,
+                    "actions_4_7": args.checkpoint_4_7,
+                    "actions_0_3": args.checkpoint_0_3,
                 },
             },
         )

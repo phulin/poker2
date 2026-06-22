@@ -3,13 +3,12 @@
 
 from __future__ import annotations
 
-import argparse
-
 import hydra
 from omegaconf import DictConfig
 
 from p2.core.structured_config import Config, PreflopBucketTrainingConfig
 from p2.stages import preflop_backward_induction as preflop_bi
+from p2.stages.preflop_buckets import PreflopBucketExecutionConfig
 
 
 def _required(value: str | None, field: str) -> str:
@@ -29,17 +28,17 @@ def _command_name(command: str) -> str:
     )
 
 
-def _args_from_config(cfg: Config) -> argparse.Namespace:
+def _execution_config_from_config(cfg: Config) -> PreflopBucketExecutionConfig:
     preflop = cfg.preflop_buckets
     command = _command_name(preflop.command)
     base_checkpoint = _required(preflop.base_checkpoint, "base_checkpoint")
     state_dataset = _required(preflop.state_dataset, "state_dataset")
     checkpoint_args = _distill_checkpoint_args(preflop)
 
-    return argparse.Namespace(
+    return PreflopBucketExecutionConfig(
         command=command,
         config_name="",
-        config_override=(),
+        config_overrides=(),
         state_dataset=state_dataset,
         base_checkpoint=base_checkpoint,
         output_dir=preflop.output_dir,
@@ -89,9 +88,9 @@ def _distill_checkpoint_args(preflop: PreflopBucketTrainingConfig) -> dict[str, 
 
 
 def train_rebel_preflop_buckets(cfg: Config) -> None:
-    args = _args_from_config(cfg)
-    if args.command == "train-specialists":
-        preflop_bi.run_train_specialists(args, base_template=cfg)
+    execution = _execution_config_from_config(cfg)
+    if execution.command == "train-specialists":
+        preflop_bi.run_train_specialists(execution, base_template=cfg)
         return
     missing = [
         key for key, value in _distill_checkpoint_args(cfg.preflop_buckets).items()
@@ -102,7 +101,7 @@ def train_rebel_preflop_buckets(cfg: Config) -> None:
             "preflop_buckets.distill_checkpoints missing required fields: "
             f"{', '.join(missing)}"
         )
-    preflop_bi.run_distill(args, base_template=cfg)
+    preflop_bi.run_distill(execution, base_template=cfg)
 
 
 @hydra.main(

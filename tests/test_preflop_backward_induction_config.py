@@ -1,55 +1,61 @@
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 from p2.core.structured_config import Config
 from p2.stages.preflop_buckets import (
-    PreflopBucketRunConfig,
+    PreflopBucketExecutionConfig,
     build_run_config,
     load_base_config,
 )
 
 
-def _args(**overrides) -> argparse.Namespace:
+def _execution_config(**overrides) -> PreflopBucketExecutionConfig:
     values = {
+        "command": "train-specialists",
+        "config_name": "config_rebel_cfr",
+        "config_overrides": (),
+        "state_dataset": "/tmp/states",
+        "base_checkpoint": "/tmp/base.pt",
+        "output_dir": "/tmp/out",
         "device": "cpu",
-        "cfr_batch_size": 512,
-        "use_wandb": False,
-        "wandb_project": "preflop-project",
-        "wandb_name": "preflop-run",
-        "wandb_tags": ["preflop", "test"],
-        "train_batch_size": 128,
-        "replay_buffer_batches": 3,
+        "seed": 123,
         "depth": 4,
         "cfr_iterations": 400,
         "warm_start_iterations": 0,
         "sparse_fused": True,
         "compile": "off",
+        "belief_mode": "random",
+        "states_per_bucket": 100_000,
+        "train_batch_size": 128,
+        "cfr_batch_size": 512,
+        "actions_12_15_cfr_batch_size": None,
+        "actions_8_11_cfr_batch_size": None,
+        "actions_12_15_epochs": 1,
+        "validation_items": 4096,
+        "validation_cfr_iterations": 10_000,
+        "validation_interval_steps": 10,
+        "validation_eval_batch_size": 1024,
+        "replay_buffer_batches": 3,
+        "storage_dtype": "bfloat16",
+        "write_solved_shards": True,
+        "allow_partial": False,
+        "overwrite": False,
+        "progress_roots": 10_000,
+        "use_wandb": False,
+        "wandb_project": "preflop-project",
+        "wandb_name": "preflop-run",
+        "wandb_group": None,
+        "wandb_tags": ("preflop", "test"),
+        "student_init": None,
+        "distill_batch_size": 1024,
+        "checkpoint_12_15": None,
+        "checkpoint_8_11": None,
+        "checkpoint_4_7": None,
+        "checkpoint_0_3": None,
     }
     values.update(overrides)
-    return argparse.Namespace(**values)
-
-
-def _run_config(**overrides) -> PreflopBucketRunConfig:
-    args = _args(**overrides)
-    return PreflopBucketRunConfig(
-        config_name="config_rebel_cfr",
-        config_overrides=(),
-        device=args.device,
-        cfr_batch_size=args.cfr_batch_size,
-        use_wandb=args.use_wandb,
-        wandb_project=args.wandb_project,
-        wandb_name=args.wandb_name,
-        wandb_tags=tuple(args.wandb_tags),
-        train_batch_size=args.train_batch_size,
-        replay_buffer_batches=args.replay_buffer_batches,
-        depth=args.depth,
-        cfr_iterations=args.cfr_iterations,
-        warm_start_iterations=args.warm_start_iterations,
-        sparse_fused=args.sparse_fused,
-        compile=args.compile,
-    )
+    return PreflopBucketExecutionConfig(**values)
 
 
 def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
@@ -68,7 +74,7 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
 
     cfg = build_run_config(
         base,
-        _run_config(),
+        _execution_config().run_config(),
         checkpoint_dir=tmp_path / "checkpoints",
         num_steps=42,
         num_envs=64,
