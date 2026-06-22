@@ -18,6 +18,7 @@ from typing import Any, Iterator
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
+from p2.config.rebel_schema import RebelExperimentConfig
 from p2.core.structured_config import Config
 from p2.env.card_utils import PREFLOP_HANDS, preflop_class_multiplicity_tensor
 from p2.env.pbs_env import PBSEnv
@@ -118,7 +119,12 @@ def _jsonable(value: Any) -> Any:
 def _init_wandb(args: PreflopBucketExecutionConfig, cfg: Config, *, name: str):
     run_name: str = str(args.wandb_name or name)
     group: str | None = None if args.wandb_group is None else str(args.wandb_group)
-    return wandb_run(cfg, group=group, name=run_name)
+    return wandb_run(
+        cfg,
+        group=group,
+        name=run_name,
+        resolved_config=RebelExperimentConfig.from_trainer_config(cfg),
+    )
 
 
 @torch.no_grad()
@@ -808,7 +814,11 @@ def run_train_specialists(
         num_steps=total_updates_guess,
         num_envs=_max_cfr_batch_size(args),
     )
-    write_resolved_config(base_cfg, output_dir)
+    write_resolved_config(
+        base_cfg,
+        output_dir,
+        resolved_config=RebelExperimentConfig.from_trainer_config(base_cfg),
+    )
     run_cm = _init_wandb(
         args,
         base_cfg,
@@ -844,7 +854,10 @@ def run_train_specialists(
                 num_steps=total_updates_guess,
                 num_envs=cfr_batch_size,
             )
-            write_resolved_config(cfg)
+            write_resolved_config(
+                cfg,
+                resolved_config=RebelExperimentConfig.from_trainer_config(cfg),
+            )
             reader = PublicStateBucketReader(
                 args.state_dataset,
                 bucket_label,
@@ -1235,7 +1248,11 @@ def run_distill(
         checkpoint_dir=output_dir / "checkpoints",
         num_steps=total_updates,
     )
-    write_resolved_config(cfg, output_dir)
+    write_resolved_config(
+        cfg,
+        output_dir,
+        resolved_config=RebelExperimentConfig.from_trainer_config(cfg),
+    )
     student = RebelCFRTrainer(cfg=copy.deepcopy(cfg), device=device)
     _load_model_weights(student, args.student_init or args.base_checkpoint)
     rng = torch.Generator(device=device)

@@ -13,7 +13,8 @@ import os
 import hydra
 from omegaconf import DictConfig
 
-from p2.config.rebel_load import load_rebel_config
+from p2.config.rebel_load import load_rebel_experiment_config
+from p2.config.rebel_schema import RebelExperimentConfig
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_loop import run_training_loop
@@ -21,11 +22,15 @@ from p2.runtime.training_run import training_run
 from p2.utils.profiling import install_triton_compile_logger_from_env
 
 
-def train_rebel(cfg: Config) -> None:
+def train_rebel(
+    cfg: Config,
+    *,
+    experiment_config: RebelExperimentConfig | None = None,
+) -> None:
     if install_triton_compile_logger_from_env():
         print("Triton compile logging enabled via P2_TRITON_COMPILE_LOG=1")
 
-    with training_run(cfg) as runtime:
+    with training_run(cfg, resolved_config=experiment_config) as runtime:
         device = runtime.device
         run = runtime.run
         trainer = RebelCFRTrainer(cfg=cfg, device=device)
@@ -58,8 +63,11 @@ def train_rebel(cfg: Config) -> None:
     version_base=None, config_path="../../../conf", config_name="config_rebel_cfr"
 )
 def main(dict_config: DictConfig) -> None:
-    config = load_rebel_config(dict_config)
-    train_rebel(config)
+    experiment_config = load_rebel_experiment_config(dict_config)
+    train_rebel(
+        experiment_config.to_trainer_config(),
+        experiment_config=experiment_config,
+    )
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from typing import Any
 
 import torch
 
+from p2.config.rebel_schema import RebelExperimentConfig
 from p2.core.structured_config import (
     Config,
     CurriculumSubstepConfig,
@@ -40,6 +41,10 @@ from p2.search.chance_node_helper import ChanceNodeHelper
 from p2.search.end_of_street_distillation import build_end_of_street_value_batch
 from p2.search.postflop_spot_sampler import sample_end_of_street_chance_roots
 from p2.utils.profiling import install_triton_compile_logger_from_env
+
+
+def _resolved_rebel_config(cfg: Config) -> RebelExperimentConfig:
+    return RebelExperimentConfig.from_trainer_config(cfg)
 
 
 def _stage_checkpoint_dir(cfg: Config, substep_name: str) -> str:
@@ -402,7 +407,8 @@ def _run_train_substep(
             if "model_scope" not in substep.search_overrides:
                 stage_cfg.search.model_scope = ModelScope.end_of_street
     os.makedirs(stage_cfg.checkpoint_dir, exist_ok=True)
-    write_resolved_config(stage_cfg)
+    resolved_config = _resolved_rebel_config(stage_cfg)
+    write_resolved_config(stage_cfg, resolved_config=resolved_config)
     metadata = _checkpoint_metadata(substep_name, substep)
     if stage_cfg.search.closing_leaf_checkpoint is not None:
         metadata["curriculum_closing_checkpoint"] = (
@@ -417,6 +423,7 @@ def _run_train_substep(
         group=cfg.curriculum.wandb_group,
         name=stage_cfg.wandb_name,
         stage=substep_name,
+        resolved_config=resolved_config,
     )
     with run_cm as run:
         trainer = RebelCFRTrainer(cfg=stage_cfg, device=device)
@@ -473,7 +480,8 @@ def _run_distill_substep(
         promoted=promoted,
     )
     os.makedirs(stage_cfg.checkpoint_dir, exist_ok=True)
-    write_resolved_config(stage_cfg)
+    resolved_config = _resolved_rebel_config(stage_cfg)
+    write_resolved_config(stage_cfg, resolved_config=resolved_config)
 
     resume_metadata = (
         _read_checkpoint_metadata(resume_from, device) if resume_from else {}
@@ -493,6 +501,7 @@ def _run_distill_substep(
         group=cfg.curriculum.wandb_group,
         name=stage_cfg.wandb_name,
         stage=substep_name,
+        resolved_config=resolved_config,
     )
     with run_cm as run:
         trainer = RebelCFRTrainer(cfg=stage_cfg, device=device)

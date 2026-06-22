@@ -15,6 +15,7 @@ from p2.core.structured_config import (
     ModelType,
     StreetValueHeads,
 )
+from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.better_ffn import BetterSplitFFN
 
 
@@ -69,6 +70,8 @@ def test_curriculum_train_substeps_do_not_run_preflop_analyzer() -> None:
 
 
 class _FakeSplitLeaf(torch.nn.Linear):
+    hand_dim = NUM_HANDS
+
     def __init__(self) -> None:
         super().__init__(1, 1)
         self.hidden_dim = 1
@@ -184,8 +187,9 @@ def test_curriculum_train_substep_uses_stage_dir_and_metadata(
     resolved_config = json.loads(
         (tmp_path / "river" / "resolved_config.json").read_text()
     )
-    assert resolved_config["checkpoint_dir"] == str(tmp_path / "river")
+    assert resolved_config["checkpoint"]["checkpoint_dir"] == str(tmp_path / "river")
     assert resolved_config["train"]["batch_size"] == 77
+    assert "opponent_pool_type" not in resolved_config
     assert kwargs["start_step"] == 0
     assert kwargs["stop_step"] == 3
     assert kwargs["stage_tag"] == "river"
@@ -255,6 +259,8 @@ def test_curriculum_train_substep_initializes_policy_from_promoted_source(
 
 
 class _FakeSourceValueModel(torch.nn.Module):
+    hand_dim = NUM_HANDS
+
     def __init__(self) -> None:
         super().__init__()
         self.enforce_zero_sum = False
@@ -263,6 +269,8 @@ class _FakeSourceValueModel(torch.nn.Module):
 
 
 class _FakeTargetValueModel(torch.nn.Module):
+    hand_dim = NUM_HANDS
+
     def __init__(self) -> None:
         super().__init__()
         self.enforce_zero_sum = False

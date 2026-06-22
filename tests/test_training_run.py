@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 
 import torch
+from omegaconf import OmegaConf
 
+from p2.config.rebel_load import load_rebel_experiment_config
 from p2.core.structured_config import Config
 from p2.runtime import training_run
 
@@ -98,6 +100,32 @@ def test_write_resolved_config_accepts_explicit_directory(tmp_path) -> None:
     payload = json.loads(path.read_text())
     assert payload["checkpoint_dir"] == str(tmp_path / "checkpoints")
     assert payload["device"] == "cpu"
+
+
+def test_write_resolved_config_accepts_rebel_experiment_payload(tmp_path) -> None:
+    experiment = load_rebel_experiment_config(
+        OmegaConf.create(
+            {
+                "device": "cpu",
+                "checkpoint_dir": str(tmp_path / "checkpoints"),
+                "wandb_tags": ["rebel"],
+            }
+        )
+    )
+    cfg = experiment.to_trainer_config()
+
+    path = training_run.write_resolved_config(
+        cfg,
+        tmp_path / "stage",
+        resolved_config=experiment,
+    )
+
+    payload = json.loads(path.read_text())
+    assert payload["run"]["device"] == "cpu"
+    assert payload["checkpoint"]["checkpoint_dir"] == str(tmp_path / "checkpoints")
+    assert payload["logging"]["wandb_tags"] == ["rebel"]
+    assert "opponent_pool_type" not in payload
+    assert "exploiter" not in payload
 
 
 def test_training_run_context_logs_model_summary(monkeypatch) -> None:

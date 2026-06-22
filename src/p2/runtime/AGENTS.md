@@ -5,7 +5,7 @@ metadata.
 
 ### Source files
 - `__init__.py`: Package marker.
-- `training_run.py`: ReBeL training runtime context manager and W&B/model-summary helpers used by CLI orchestrators.
+- `training_run.py`: ReBeL training runtime context manager, resolved-config artifact writer, W&B payload setup, and model-summary helpers used by CLI orchestrators.
 
 ### Subdirectories
 There are no child source directories.

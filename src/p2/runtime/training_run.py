@@ -10,6 +10,7 @@ from typing import Any, Iterator, Protocol
 import torch
 import wandb
 
+from p2.config.rebel_schema import RebelExperimentConfig
 from p2.core.structured_config import Config
 from p2.utils.model_utils import count_model_parameters
 
@@ -24,6 +25,7 @@ class WandbLikeRun(Protocol):
 
 
 ActiveRun = WandbLikeRun | None
+ResolvedConfig = Config | RebelExperimentConfig
 
 
 def device_from_config(cfg: Config) -> torch.device:
@@ -92,13 +94,15 @@ def write_resolved_config(
     directory: str | os.PathLike[str] | None = None,
     *,
     filename: str = "resolved_config.json",
+    resolved_config: ResolvedConfig | None = None,
 ) -> Path:
     target_dir = Path(cfg.checkpoint_dir if directory is None else directory)
     target_dir.mkdir(parents=True, exist_ok=True)
     path = target_dir / filename
     tmp_path = path.with_suffix(path.suffix + ".tmp")
+    payload = cfg if resolved_config is None else resolved_config
     with open(tmp_path, "w", encoding="utf-8") as fh:
-        json.dump(asdict(cfg), fh, indent=2, sort_keys=True)
+        json.dump(asdict(payload), fh, indent=2, sort_keys=True)
         fh.write("\n")
     os.replace(tmp_path, path)
     return path
@@ -110,8 +114,10 @@ def _wandb_init_kwargs(
     group: str | None,
     name: str | None,
     stage: str | None,
+    resolved_config: ResolvedConfig | None,
 ) -> dict[str, Any]:
-    config_payload: dict[str, Any] = {"resolved_config": asdict(cfg)}
+    payload = cfg if resolved_config is None else resolved_config
+    config_payload: dict[str, Any] = {"resolved_config": asdict(payload)}
     if stage is not None:
         config_payload["stage"] = {"name": stage}
 
@@ -141,13 +147,20 @@ def wandb_run(
     group: str | None = None,
     name: str | None = None,
     stage: str | None = None,
+    resolved_config: ResolvedConfig | None = None,
 ) -> Iterator[Any]:
     if not cfg.use_wandb:
         yield None
         return
     try:
         run_cm = wandb.init(
-            **_wandb_init_kwargs(cfg, group=group, name=name, stage=stage)
+            **_wandb_init_kwargs(
+                cfg,
+                group=group,
+                name=name,
+                stage=stage,
+                resolved_config=resolved_config,
+            )
         )
     except Exception as exc:
         print(f"Wandb init failed ({exc}); continuing without logging.")
@@ -169,16 +182,23 @@ def training_run(
     create_checkpoint_dir: bool = True,
     configure_torch: bool = True,
     recompile_limit: int = 16,
+    resolved_config: ResolvedConfig | None = None,
 ) -> Iterator[TrainingRunContext]:
     if create_checkpoint_dir:
         os.makedirs(cfg.checkpoint_dir, exist_ok=True)
-        write_resolved_config(cfg)
+        write_resolved_config(cfg, resolved_config=resolved_config)
     device = device_from_config(cfg)
     print(f"Using device: {device}")
     if configure_torch:
         setup_torch_runtime(cfg, device, recompile_limit=recompile_limit)
 
-    with wandb_run(cfg, group=group, name=name, stage=stage) as run:
+    with wandb_run(
+        cfg,
+        group=group,
+        name=name,
+        stage=stage,
+        resolved_config=resolved_config,
+    ) as run:
         yield TrainingRunContext(cfg=cfg, device=device, run=run)
 
 
