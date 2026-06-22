@@ -195,7 +195,7 @@ class RebelCFRTrainer:
         if self.policy_extra_batch_size <= 0:
             raise ValueError("train.policy_extra_batch_size must be positive")
         self.target_update_block_batches = int(
-            getattr(cfg.train, "target_update_block_batches", 0) or 0
+            cfg.train.target_update_block_batches or 0
         )
         if self.target_update_block_batches < 0:
             raise ValueError("train.target_update_block_batches must be >= 0")
@@ -1442,7 +1442,7 @@ class RebelCFRTrainer:
             numer, denom = self._bucket_sum_parts(
                 policy_target_model_kl_all,
                 depth,
-                int(getattr(self.cfg.search, "depth", 0)) + 1,
+                int(self.cfg.search.depth) + 1,
                 weights=node_weights,
             )
             self._accumulate_ratio(
@@ -1701,7 +1701,7 @@ class RebelCFRTrainer:
                 "policy_target_model_kl_depth",
                 [
                     f"depth_{i}"
-                    for i in range(int(getattr(self.cfg.search, "depth", 0)) + 1)
+                    for i in range(int(self.cfg.search.depth) + 1)
                 ],
             ),
             "policy_target_model_kl_reach_bucket": ratio_vector(
@@ -1832,7 +1832,7 @@ class RebelCFRTrainer:
             depth = batch.statistics.get("node_depth")
             if depth is None:
                 return {}
-            max_depth = int(getattr(self.cfg.search, "depth", 0))
+            max_depth = int(self.cfg.search.depth)
             names = [f"depth_{i}" for i in range(max_depth + 1)]
             masks = [depth == i for i in range(max_depth + 1)]
             weights = policy_node_weights(batch, tensor.dtype)
