@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Per-CUDA-kernel self-time profiler for the live CFR training config.
 
-Matches the live run: preflop curriculum, 6 players, compact 169-hand,
-depth-4 sparse_fused sapcfr, 400 iterations, BetterFFN h256 compile=default
-transformer-169, num_envs=512.
+Matches the ongoing actions_4_7 preflop run shape: 6 players, compact
+169-hand, depth-4 sparse_fused sapcfr, 300 iterations, BetterFFN h192
+compile=default transformer-169, cfr batch/root batch 512.
 
 Usage:
     uv run python scripts/bench_kernel_profile.py --no-pause \
@@ -60,34 +60,34 @@ def _find_train_rebel(pattern: str) -> list[int]:
 def _load_live_config() -> Config:
     overrides = [
         "curriculum.stages=[preflop]",
-        "+curriculum.preflop.kind=train",
-        "+curriculum.preflop.net=S_preflop",
-        "+curriculum.preflop.num_steps=2000",
-        "+curriculum.preflop.closing_net=E_preflop",
-        f"+curriculum.preflop.closing_checkpoint={REPO_ROOT}/checkpoints-epreflop-distill-100k-lr2e4-sample256-from-sflop2000-169/promoted/E_preflop.pt",
-        "+curriculum.preflop.value_checkpoint=off",
-        "+curriculum.preflop.search_overrides.model_scope=mixed_street",
+        "+curriculum.substeps.preflop.kind=train",
+        "+curriculum.substeps.preflop.net=S_preflop",
+        "+curriculum.substeps.preflop.num_steps=2000",
+        "+curriculum.substeps.preflop.closing_net=E_preflop",
+        f"+curriculum.substeps.preflop.closing_checkpoint={REPO_ROOT}/checkpoints-epreflop-distill-100k-lr2e4-sample256-from-sflop2000-169/promoted/E_preflop.pt",
+        "+curriculum.substeps.preflop.value_checkpoint=off",
+        "+curriculum.substeps.preflop.search_overrides.model_scope=mixed_street",
         "data.mode=live",
         "data.live_root_source=self_play",
         "+env.num_players=6",
         "num_envs=512",
-        "train.batch_size=2048",
+        "train.batch_size=256",
         "train.episodes_per_step=5",
         "train.replay_buffer_batches=128",
         "train.value_reuse_goal=2",
         "train.policy_capacity_factor=4",
         "model.name=BetterFFN",
-        "model.hidden_dim=256",
+        "model.hidden_dim=192",
         "model.range_hidden_dim=256",
-        "model.ffn_dim=768",
+        "model.ffn_dim=256",
         "model.board_interaction_dim=0",
         "model.policy_rank=96",
         "model.policy_hand_bias_rank=24",
         "model.street_value_heads=both",
         "model.shared_trunk=true",
         "model.num_hidden_layers=0",
-        "model.num_value_layers=7",
-        "model.num_policy_layers=6",
+        "model.num_value_layers=5",
+        "model.num_policy_layers=4",
         "model.compile=default",
         "++model.preflop_hand_dim=169",
         "++model.preflop_model_type=transformer",
@@ -104,9 +104,9 @@ def _load_live_config() -> Config:
         "search.predictive_cfr_delay=40",
         "search.cfr_avg=false",
         "search.cfr_plus=false",
-        "search.iterations=400",
-        "search.iterations_final=400",
-        "search.warm_start_iterations=15",
+        "search.iterations=300",
+        "search.iterations_final=300",
+        "search.warm_start_iterations=0",
         "search.warm_start_type=model_br",
         "search.warm_start_multiplier=2",
         "search.dcfr_plus_delay=80",
@@ -294,9 +294,9 @@ def main():
                 "warmup_steps": args.warmup_steps,
                 "active_steps": args.active_steps,
                 "num_envs": 512,
-                "iterations": 400,
+                "iterations": 300,
                 "depth": 4,
-                "model": "BetterFFN-h256-transformer-169",
+                "model": "BetterFFN-h192-transformer-169",
             },
             "wall_mean_ms": wall_mean_ms,
             "active_wall_s": active_walls,

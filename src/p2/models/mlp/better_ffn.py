@@ -1481,11 +1481,6 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
         self.register_buffer("class_hi_rank", hi, persistent=False)
         self.register_buffer("class_lo_rank", lo, persistent=False)
         self.register_buffer("class_suited", suited, persistent=False)
-        self.class_hi_embedding = nn.Embedding(13, hidden_dim)
-        self.class_lo_embedding = nn.Embedding(13, hidden_dim)
-        self.class_type_embedding = nn.Embedding(3, hidden_dim)
-        self.class_feature_proj = nn.Linear(HAND_STATIC_FEATURE_DIM, hidden_dim)
-
         if range_hidden_dim == 0 and ffn_dim % num_players != 0:
             raise ValueError(
                 "ffn_dim must be divisible by num_players when range_hidden_dim is 0"
@@ -1493,11 +1488,16 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
         effective_range_hidden_dim = (
             ffn_dim // num_players if range_hidden_dim == 0 else range_hidden_dim
         )
-        self.belief_proj = ffn_block(
-            num_players * hidden_dim,
-            num_players * effective_range_hidden_dim,
+        self.range_summary_dim = int(effective_range_hidden_dim)
+        self.class_hi_embedding = nn.Embedding(13, self.range_summary_dim)
+        self.class_lo_embedding = nn.Embedding(13, self.range_summary_dim)
+        self.class_type_embedding = nn.Embedding(3, self.range_summary_dim)
+        self.class_feature_proj = nn.Linear(
+            HAND_STATIC_FEATURE_DIM, self.range_summary_dim
+        )
+        self.belief_proj = output_projection(
+            num_players * self.range_summary_dim,
             hidden_dim,
-            nonlinearity,
         )
         context_in_dim = (
             context_length(num_players) if context_in_dim is None else context_in_dim
@@ -2325,18 +2325,20 @@ class BetterPreflopPolicyFFN(_BetterPreflopCompactFFN):
                 for _ in range(self.num_policy_layers)
             ]
         )
-        self.policy_hand_proj = output_projection(self.hidden_dim, self.policy_rank)
+        self.policy_hand_proj = output_projection(
+            self.range_summary_dim, self.policy_rank
+        )
         self.policy_action_head = output_projection(
             self.hidden_dim, self.num_actions * self.policy_rank
         )
         self.policy_action_bias = output_projection(self.hidden_dim, self.num_actions)
         self.policy_hand_bias = output_projection(
-            self.hidden_dim, self.policy_hand_bias_rank
+            self.range_summary_dim, self.policy_hand_bias_rank
         )
         self.policy_hand_bias_action = output_projection(
             self.hidden_dim, self.num_actions * self.policy_hand_bias_rank
         )
-        self.policy_hand_norm = nn.RMSNorm(self.hidden_dim, eps=1e-5)
+        self.policy_hand_norm = nn.RMSNorm(self.range_summary_dim, eps=1e-5)
 
     def forward_policy(self, features: MLPFeatures, latent=None) -> torch.Tensor:
         player_beliefs, flat_features, x, hand_emb = self._forward_base(features)

@@ -41,9 +41,12 @@ preflop_buckets:
   allow_partial: false
   overwrite: false
   progress_roots: 10000
+  snapshot_interval_steps: 250
   wandb_group: null
   student_init: null
   distill_batch_size: 1024
+  distill_buckets: null
+  distill_train_value: true
   distill_checkpoints:
     checkpoint_12_15: null
     checkpoint_8_11: null

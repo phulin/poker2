@@ -572,9 +572,12 @@ class PreflopBucketTrainingConfig:
     allow_partial: bool = False
     overwrite: bool = False
     progress_roots: int = 10_000
+    snapshot_interval_steps: int = 250
     wandb_group: str | None = None
     student_init: str | None = None
     distill_batch_size: int = 1024
+    distill_buckets: list[str] | None = None
+    distill_train_value: bool = True
     distill_checkpoints: PreflopBucketDistillCheckpointsConfig = field(
         default_factory=PreflopBucketDistillCheckpointsConfig
     )

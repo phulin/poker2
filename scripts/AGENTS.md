@@ -11,6 +11,8 @@ Reusable profiling and benchmark scripts that are broader than a single repro bu
 - `bench_model_share.py`: Benchmarks model sharing or reuse behavior.
 - `bench_cfr_main_path.py`: Runs realistic ReBeL CFR train-step source profiling and component microbenchmarks with optional train_rebel pause/resume handling and configurable starting CFR iteration for post-delay kernel timing.
 - `bench_kernel_profile.py`: Profiles the live fused preflop CFR training configuration with PyTorch CPU/CUDA profiler, exports a Chrome trace, and writes per-kernel self-time JSON summaries.
+- `bench_preflop_full_loop_profile.py`: Profiles eager 6-player compact preflop CFR iterations on packed bucket states from the actions_4_7 training shape, including component and kernel timing, while pausing live `train_rebel` processes.
+- `bench_preflop_fused_hotloop.py`: Microbenchmarks compact preflop fused hot-loop projection, source-weight, and EV-backup kernels versus legacy tensor expressions, pausing live `train_rebel` processes with SIGSTOP/SIGCONT while timing.
 - `bench_write_children_kernel.py`: Replays real fused-subgame child-writer inputs to compare legacy and optimized `write_children_same_street` Triton kernels with CUDA events.
 - `bench_cfr_init_spots.py`: Microbenchmarks fused sparse CFR subgame initialization and init-time tensor expansions from evenly balanced saved spots.
 - `bench_cfr_iterator_spots.py`: Profiles eager sparse/fused-sparse CFR iterator segments and isolated CFR components from evenly balanced saved spots across preflop/flop/turn/river roots.

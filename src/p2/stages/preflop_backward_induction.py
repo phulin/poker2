@@ -85,6 +85,12 @@ BUCKET_ORDER_DEEP_TO_SHALLOW = (
     "actions_0_3",
 )
 
+LEGACY_LATEST_CHECKPOINT = "rebel_latest.pt"
+SPECIALIST_FINAL_CHECKPOINT = "specialist_final.pt"
+SPECIALIST_INPROGRESS_CHECKPOINT = "specialist_inprogress.pt"
+DISTILLED_FINAL_CHECKPOINT = "distilled_final.pt"
+DISTILLED_INPROGRESS_CHECKPOINT = "distilled_inprogress.pt"
+
 
 def _device(name: str) -> torch.device:
     if name == "auto":
@@ -465,6 +471,15 @@ def _save_trainer_checkpoint(
     )
 
 
+def _copy_checkpoint_alias(source: Path, alias: Path) -> None:
+    if source == alias:
+        return
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    if alias.exists() or alias.is_symlink():
+        alias.unlink()
+    shutil.copy2(source, alias)
+
+
 def _bucket_spec(label: str):
     for spec in BUCKET_SPECS:
         if spec.label == label:
@@ -478,6 +493,18 @@ def _train_bucket_labels(args: PreflopBucketExecutionConfig) -> tuple[str, ...]:
     label = str(args.train_bucket)
     _bucket_spec(label)
     return (label,)
+
+
+def _distill_bucket_labels(args: PreflopBucketExecutionConfig) -> tuple[str, ...]:
+    labels = args.distill_buckets
+    if labels is None:
+        return BUCKET_ORDER_DEEP_TO_SHALLOW
+    parsed = tuple(str(label) for label in labels)
+    if not parsed:
+        raise ValueError("preflop_buckets.distill_buckets must not be empty")
+    for label in parsed:
+        _bucket_spec(label)
+    return parsed
 
 
 def _checkpoint_signature(checkpoint_path: str) -> dict[str, Any]:
@@ -1336,6 +1363,47 @@ def run_train_specialists(
                         and bucket_step % int(args.validation_interval_steps) == 0
                     ):
                         log_validation(epoch=epoch, epoch_roots=epoch_roots)
+                    if (
+                        args.snapshot_interval_steps > 0
+                        and trained_this_step
+                        and bucket_step % int(args.snapshot_interval_steps) == 0
+                    ):
+                        snapshot_path = (
+                            bucket_dir
+                            / "checkpoints"
+                            / SPECIALIST_INPROGRESS_CHECKPOINT
+                        )
+                        _save_trainer_checkpoint(
+                            trainer,
+                            snapshot_path,
+                            step=global_step,
+                            run_id=None if run is None else run.id,
+                            metadata={
+                                "kind": "preflop_backward_induction_specialist",
+                                "snapshot": "in_progress",
+                                "bucket_label": bucket_label,
+                                "bucket_step": bucket_step,
+                                "epoch": epoch,
+                                "epoch_roots": epoch_roots,
+                                "roots_solved": roots_solved,
+                                "value_examples": value_examples,
+                                "policy_examples": policy_examples,
+                                "train_value": train_value,
+                                "solver_checkpoint": os.path.realpath(
+                                    previous_value_checkpoint
+                                ),
+                            },
+                        )
+                        if run is not None:
+                            run.summary[
+                                f"{bucket_label}/inprogress_checkpoint"
+                            ] = str(snapshot_path)
+                        print(
+                            f"{bucket_label}: saved in-progress checkpoint "
+                            f"{snapshot_path} at bucket_step={bucket_step} "
+                            f"roots={roots_solved:,}",
+                            flush=True,
+                        )
                     if roots_solved >= next_progress_roots:
                         print_progress(
                             "progress",
@@ -1383,7 +1451,9 @@ def run_train_specialists(
                     json.dumps(_jsonable(bucket_summary), indent=2, sort_keys=True)
                     + "\n"
                 )
-            checkpoint_path = bucket_dir / "checkpoints" / "rebel_latest.pt"
+            checkpoint_path = (
+                bucket_dir / "checkpoints" / SPECIALIST_FINAL_CHECKPOINT
+            )
             _save_trainer_checkpoint(
                 trainer,
                 checkpoint_path,
@@ -1397,6 +1467,10 @@ def run_train_specialists(
                     "solved_manifest": bucket_summary.get("solved_manifest"),
                     "solver_checkpoint": os.path.realpath(previous_value_checkpoint),
                 },
+            )
+            _copy_checkpoint_alias(
+                checkpoint_path,
+                bucket_dir / "checkpoints" / LEGACY_LATEST_CHECKPOINT,
             )
             specialist_paths[bucket_label] = str(checkpoint_path)
             if train_value:
@@ -1511,7 +1585,7 @@ def run_distill(
     total_updates = max(
         1,
         math.ceil(args.states_per_bucket / max(1, args.distill_batch_size))
-        * len(BUCKET_ORDER_DEEP_TO_SHALLOW),
+        * len(_distill_bucket_labels(args)),
     )
     cfg = build_run_config(
         base_template,
@@ -1539,7 +1613,7 @@ def run_distill(
         if run is not None:
             run.summary.update(count_model_parameters(student.model))
         global_step = 0
-        for bucket_label in BUCKET_ORDER_DEEP_TO_SHALLOW:
+        for bucket_label in _distill_bucket_labels(args):
             checkpoints = {
                 "actions_12_15": args.checkpoint_12_15,
                 "actions_8_11": args.checkpoint_8_11,
@@ -1549,7 +1623,9 @@ def run_distill(
             checkpoint = checkpoints[bucket_label]
             if checkpoint is None:
                 raise ValueError(f"missing specialist checkpoint for {bucket_label}")
-            include_value = bucket_label != "actions_0_3"
+            include_value = (
+                bool(args.distill_train_value) and bucket_label != "actions_0_3"
+            )
             teacher_cfg = build_run_config(
                 base_template,
                 args,
@@ -1626,11 +1702,47 @@ def run_distill(
                 )
                 if run is not None:
                     run.log(payload, step=global_step)
+                if (
+                    args.snapshot_interval_steps > 0
+                    and trained_this_step
+                    and global_step % int(args.snapshot_interval_steps) == 0
+                ):
+                    snapshot_path = (
+                        output_dir
+                        / "checkpoints"
+                        / DISTILLED_INPROGRESS_CHECKPOINT
+                    )
+                    _save_trainer_checkpoint(
+                        student,
+                        snapshot_path,
+                        step=global_step,
+                        run_id=None if run is None else run.id,
+                        metadata={
+                            "kind": "preflop_backward_induction_distilled_model",
+                            "snapshot": "in_progress",
+                            "current_bucket": bucket_label,
+                            "current_bucket_roots": roots,
+                            "global_step": global_step,
+                            "state_dataset": os.path.realpath(args.state_dataset),
+                            "distill_buckets": list(_distill_bucket_labels(args)),
+                            "distill_train_value": bool(args.distill_train_value),
+                        },
+                    )
+                    if run is not None:
+                        run.summary["distill/inprogress_checkpoint"] = str(
+                            snapshot_path
+                        )
+                    print(
+                        f"distill: saved in-progress checkpoint {snapshot_path} "
+                        f"at global_step={global_step} bucket={bucket_label} "
+                        f"roots={roots:,}",
+                        flush=True,
+                    )
                 if roots >= args.states_per_bucket:
                     break
             print(f"distilled {bucket_label}: roots={roots:,}", flush=True)
 
-        checkpoint_path = output_dir / "checkpoints" / "rebel_latest.pt"
+        checkpoint_path = output_dir / "checkpoints" / DISTILLED_FINAL_CHECKPOINT
         _save_trainer_checkpoint(
             student,
             checkpoint_path,
@@ -1645,6 +1757,12 @@ def run_distill(
                     "actions_4_7": args.checkpoint_4_7,
                     "actions_0_3": args.checkpoint_0_3,
                 },
+                "distill_buckets": list(_distill_bucket_labels(args)),
+                "distill_train_value": bool(args.distill_train_value),
             },
+        )
+        _copy_checkpoint_alias(
+            checkpoint_path,
+            output_dir / "checkpoints" / LEGACY_LATEST_CHECKPOINT,
         )
         print(f"saved distilled model: {checkpoint_path}", flush=True)

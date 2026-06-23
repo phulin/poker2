@@ -49,6 +49,8 @@ def test_config_rebel_preflop_buckets_resolves() -> None:
     assert cfg.preflop_buckets.train_bucket is None
     assert cfg.preflop_buckets.state_dataset == "/tmp/states"
     assert cfg.preflop_buckets.base_checkpoint == "/tmp/base.pt"
+    assert cfg.preflop_buckets.snapshot_interval_steps == 250
+    assert cfg.preflop_buckets.distill_buckets is None
     assert cfg.preflop_buckets.distill_checkpoints.checkpoint_12_15 is None
 
 
@@ -77,6 +79,7 @@ def test_preflop_hydra_cli_dispatches_train_specialists(monkeypatch, tmp_path) -
     assert args.train_bucket == "actions_12_15"
     assert args.cfr_batch_size == 17
     assert args.actions_12_15_cfr_batch_size == 9
+    assert args.snapshot_interval_steps == 250
     assert args.use_wandb is False
     assert args.wandb_project == "preflop-project"
 
@@ -106,6 +109,62 @@ def test_preflop_hydra_cli_dispatches_distill(monkeypatch, tmp_path) -> None:
     assert args.checkpoint_8_11 == "ckpt-8.pt"
     assert args.checkpoint_4_7 == "ckpt-4.pt"
     assert args.checkpoint_0_3 == "ckpt-0.pt"
+    assert args.distill_buckets is None
+    assert args.distill_train_value is True
+
+
+def test_preflop_hydra_cli_distill_allows_bucket_subset(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+
+    def fake_distill(args, *, base_template):
+        calls.append(("distill", args, base_template))
+
+    monkeypatch.setattr(preflop_cli.preflop_bi, "run_distill", fake_distill)
+    cfg = _base_config(tmp_path)
+    cfg.preflop_buckets.command = "distill"
+    cfg.preflop_buckets.distill_buckets = [
+        "actions_12_15",
+        "actions_8_11",
+        "actions_4_7",
+    ]
+    cfg.preflop_buckets.distill_checkpoints.checkpoint_12_15 = "ckpt-12.pt"
+    cfg.preflop_buckets.distill_checkpoints.checkpoint_8_11 = "ckpt-8.pt"
+    cfg.preflop_buckets.distill_checkpoints.checkpoint_4_7 = "ckpt-4.pt"
+
+    preflop_cli.train_rebel_preflop_buckets(cfg)
+
+    assert len(calls) == 1
+    kind, args, _ = calls[0]
+    assert kind == "distill"
+    assert args.distill_buckets == ("actions_12_15", "actions_8_11", "actions_4_7")
+    assert args.checkpoint_0_3 is None
+
+
+def test_preflop_hydra_cli_distill_can_disable_value_training(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+
+    def fake_distill(args, *, base_template):
+        calls.append(("distill", args, base_template))
+
+    monkeypatch.setattr(preflop_cli.preflop_bi, "run_distill", fake_distill)
+    cfg = _base_config(tmp_path)
+    cfg.preflop_buckets.command = "distill"
+    cfg.preflop_buckets.distill_train_value = False
+    cfg.preflop_buckets.distill_checkpoints.checkpoint_12_15 = "ckpt-12.pt"
+    cfg.preflop_buckets.distill_checkpoints.checkpoint_8_11 = "ckpt-8.pt"
+    cfg.preflop_buckets.distill_checkpoints.checkpoint_4_7 = "ckpt-4.pt"
+    cfg.preflop_buckets.distill_checkpoints.checkpoint_0_3 = "ckpt-0.pt"
+
+    preflop_cli.train_rebel_preflop_buckets(cfg)
+
+    assert len(calls) == 1
+    kind, args, _ = calls[0]
+    assert kind == "distill"
+    assert args.distill_train_value is False
 
 
 def test_preflop_hydra_cli_dispatches_presolve_values(

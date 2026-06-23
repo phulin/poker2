@@ -39,6 +39,7 @@ class PreflopBucketExecutionConfig:
     allow_partial: bool
     overwrite: bool
     progress_roots: int
+    snapshot_interval_steps: int
     use_wandb: bool
     wandb_project: str
     wandb_name: str | None
@@ -46,6 +47,8 @@ class PreflopBucketExecutionConfig:
     wandb_tags: tuple[str, ...]
     student_init: str | None
     distill_batch_size: int
+    distill_buckets: tuple[str, ...] | None
+    distill_train_value: bool
     checkpoint_12_15: str | None
     checkpoint_8_11: str | None
     checkpoint_4_7: str | None

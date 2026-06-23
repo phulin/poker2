@@ -51,6 +51,7 @@ Scope / caveats
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -63,6 +64,19 @@ except ImportError:  # pragma: no cover - optional dep
     tl = None
 
 from p2.core.structured_config import CFRType
+
+
+_PREFLOP169_NUM_HANDS = 169
+_PREFLOP169_NUM_CARDS = 52
+_PREFLOP169_NUM_RANKS = 13
+_PREFLOP169_MAX_CLASS_CARDS = 8
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return int(default)
 
 
 def triton_is_available() -> bool:
@@ -2170,6 +2184,951 @@ def select_actor_beliefs_and_marginal_policy_multiway_triton_out_(
     )
 
 
+_preflop169_card_projection_cache: dict[
+    tuple[torch.device, torch.dtype], torch.Tensor
+] = {}
+_preflop169_class_card_lut_cache: dict[
+    torch.device, tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+] = {}
+_preflop169_rank_projection_cache: dict[
+    tuple[torch.device, torch.dtype], torch.Tensor
+] = {}
+_preflop169_class_rank_lut_cache: dict[
+    torch.device, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+] = {}
+
+
+def _get_preflop169_card_projection(
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    key = (device, dtype)
+    cached = _preflop169_card_projection_cache.get(key)
+    if cached is not None:
+        return cached
+    from p2.env.card_utils import (
+        PREFLOP_HANDS,
+        combo_to_preflop_class_tensor,
+        hand_combos_tensor,
+        preflop_class_multiplicity_tensor,
+    )
+
+    class_ids = combo_to_preflop_class_tensor(device=device)
+    combos = hand_combos_tensor(device=device)
+    multiplicity = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    inv_mult_per_combo = multiplicity.reciprocal().index_select(0, class_ids)
+    projection = torch.zeros(
+        PREFLOP_HANDS,
+        1 + _PREFLOP169_NUM_CARDS,
+        device=device,
+        dtype=torch.float32,
+    )
+    projection[:, 0] = 1.0
+    projection.index_put_(
+        (class_ids, 1 + combos[:, 0]),
+        inv_mult_per_combo,
+        accumulate=True,
+    )
+    projection.index_put_(
+        (class_ids, 1 + combos[:, 1]),
+        inv_mult_per_combo,
+        accumulate=True,
+    )
+    _preflop169_card_projection_cache[key] = projection.to(dtype=dtype).contiguous()
+    return _preflop169_card_projection_cache[key]
+
+
+def _get_preflop169_class_card_lut(
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cached = _preflop169_class_card_lut_cache.get(device)
+    if cached is not None:
+        return cached
+    from p2.env.card_utils import (
+        PREFLOP_HANDS,
+        preflop_class_multiplicity_tensor,
+    )
+
+    projection = _get_preflop169_card_projection(device, torch.float32)
+    card_avg = projection[:, 1:]
+    card_idx = torch.full(
+        (PREFLOP_HANDS, _PREFLOP169_MAX_CLASS_CARDS),
+        -1,
+        device=device,
+        dtype=torch.int32,
+    )
+    card_weight = torch.zeros(
+        (PREFLOP_HANDS, _PREFLOP169_MAX_CLASS_CARDS),
+        device=device,
+        dtype=torch.float32,
+    )
+    for class_id in range(PREFLOP_HANDS):
+        nz = torch.nonzero(card_avg[class_id] > 0, as_tuple=False).flatten()
+        count = int(nz.numel())
+        if count > _PREFLOP169_MAX_CLASS_CARDS:
+            raise RuntimeError("preflop class card LUT overflow")
+        card_idx[class_id, :count] = nz.to(torch.int32)
+        card_weight[class_id, :count] = card_avg[class_id, nz]
+    multiplicity = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    inv_multiplicity = multiplicity.reciprocal().contiguous()
+    cached = (card_idx.contiguous(), card_weight.contiguous(), inv_multiplicity)
+    _preflop169_class_card_lut_cache[device] = cached
+    return cached
+
+
+def _get_preflop169_rank_projection(
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    key = (device, dtype)
+    cached = _preflop169_rank_projection_cache.get(key)
+    if cached is not None:
+        return cached
+    from p2.env.card_utils import PREFLOP_HANDS
+
+    class_ids = torch.arange(PREFLOP_HANDS, device=device)
+    row = torch.div(class_ids, 13, rounding_mode="floor")
+    col = class_ids % 13
+    pair = row == col
+    projection = torch.zeros(
+        PREFLOP_HANDS,
+        1 + _PREFLOP169_NUM_RANKS,
+        device=device,
+        dtype=torch.float32,
+    )
+    projection[:, 0] = 1.0
+    projection[class_ids, 1 + row] += torch.where(pair, 2.0, 1.0)
+    projection[class_ids, 1 + col] += torch.where(pair, 0.0, 1.0)
+    _preflop169_rank_projection_cache[key] = projection.to(dtype=dtype).contiguous()
+    return _preflop169_rank_projection_cache[key]
+
+
+def _get_preflop169_class_rank_lut(
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cached = _preflop169_class_rank_lut_cache.get(device)
+    if cached is not None:
+        return cached
+    from p2.env.card_utils import PREFLOP_HANDS, preflop_class_multiplicity_tensor
+
+    class_ids = torch.arange(PREFLOP_HANDS, device=device)
+    row = torch.div(class_ids, 13, rounding_mode="floor")
+    col = class_ids % 13
+    pair = row == col
+    rank_a = row.to(torch.int32).contiguous()
+    rank_b = torch.where(pair, torch.full_like(col, -1), col).to(torch.int32).contiguous()
+    # Pair classes average two cards from one rank; non-pair classes average
+    # one card from each of two ranks.
+    rank_weight = torch.full((PREFLOP_HANDS,), 0.25, device=device, dtype=torch.float32)
+    rank_weight[pair] = 0.5
+    multiplicity = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    inv_multiplicity = multiplicity.reciprocal().contiguous()
+    cached = (rank_a, rank_b, rank_weight.contiguous(), inv_multiplicity)
+    _preflop169_class_rank_lut_cache[device] = cached
+    return cached
+
+
+def preflop169_unblocked_stats_out_(
+    target: torch.Tensor,
+    stats_out: torch.Tensor,
+) -> None:
+    """Write compact-169 ``(S, concrete-card marginals)`` stats for rows."""
+    assert target.is_contiguous() and target.dim() == 2
+    assert target.shape[1] == _PREFLOP169_NUM_HANDS
+    assert stats_out.is_contiguous()
+    assert stats_out.shape == (target.shape[0], 1 + _PREFLOP169_NUM_CARDS)
+    projection = _get_preflop169_card_projection(target.device, target.dtype)
+    torch.mm(target, projection, out=stats_out)
+
+
+def preflop169_unblocked_rank_stats_out_(
+    target: torch.Tensor,
+    stats_out: torch.Tensor,
+) -> None:
+    """Write compact-169 ``(S, rank marginals)`` stats for rows."""
+    assert target.is_contiguous() and target.dim() == 2
+    assert target.shape[1] == _PREFLOP169_NUM_HANDS
+    assert stats_out.is_contiguous()
+    assert stats_out.shape == (target.shape[0], 1 + _PREFLOP169_NUM_RANKS)
+    projection = _get_preflop169_rank_projection(target.device, target.dtype)
+    torch.mm(target, projection, out=stats_out)
+
+
+if triton is not None:
+
+    @triton.jit
+    def _preflop169_unblocked_finalize_kernel(
+        target_ptr,  # [rows, H]
+        stats_ptr,  # [rows, 53], column 0 is row sum, 1..52 are cardsums
+        class_card_idx_ptr,  # [H, MAX_CLASS_CARDS]
+        class_card_weight_ptr,  # [H, MAX_CLASS_CARDS]
+        inv_multiplicity_ptr,  # [H]
+        allowed_weight_ptr,  # optional [rows, H], float/bool-compatible
+        out_ptr,  # [rows, H]
+        rows,
+        H,
+        HAS_ALLOWED: tl.constexpr,
+        STATS_STRIDE: tl.constexpr,
+        MAX_CLASS_CARDS: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hb = tl.program_id(1)
+        h = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = h < H
+        s = tl.load(stats_ptr + row * STATS_STRIDE)
+        blocked = tl.zeros([BLOCK_H], dtype=tl.float32)
+        for slot in tl.static_range(0, MAX_CLASS_CARDS):
+            card = tl.load(
+                class_card_idx_ptr + h * MAX_CLASS_CARDS + slot,
+                mask=mask,
+                other=-1,
+            )
+            weight = tl.load(
+                class_card_weight_ptr + h * MAX_CLASS_CARDS + slot,
+                mask=mask,
+                other=0.0,
+            ).to(tl.float32)
+            card_valid = card >= 0
+            card_sum = tl.load(
+                stats_ptr
+                + row * STATS_STRIDE
+                + 1
+                + tl.maximum(card, 0),
+                mask=mask & card_valid,
+                other=0.0,
+            ).to(tl.float32)
+            blocked += weight * card_sum
+        target = tl.load(target_ptr + row * H + h, mask=mask, other=0.0).to(tl.float32)
+        inv_mult = tl.load(inv_multiplicity_ptr + h, mask=mask, other=0.0).to(
+            tl.float32
+        )
+        out = tl.maximum(s - blocked + target * inv_mult, 0.0)
+        if HAS_ALLOWED:
+            allowed = tl.load(
+                allowed_weight_ptr + row * H + h,
+                mask=mask,
+                other=0.0,
+            ).to(tl.float32)
+            out *= allowed
+        tl.store(out_ptr + row * H + h, out, mask=mask)
+
+
+def preflop169_unblocked_mass_triton_out_(
+    target: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    stats_out: torch.Tensor | None = None,
+    row_sum: torch.Tensor | None = None,
+    allowed_weight: torch.Tensor | None = None,
+    block_h: int = 256,
+) -> None:
+    """Project compact-169 class rows through exact card-removal stats."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert target.is_contiguous() and target.dim() == 2
+    assert out.is_contiguous() and out.shape == target.shape
+    rows, h = target.shape
+    assert h == _PREFLOP169_NUM_HANDS
+    if stats_out is None:
+        stats_out = torch.empty(
+            rows,
+            1 + _PREFLOP169_NUM_CARDS,
+            device=target.device,
+            dtype=target.dtype,
+        )
+    preflop169_unblocked_stats_out_(target, stats_out)
+    if row_sum is not None:
+        assert row_sum.is_contiguous() and row_sum.shape == (rows,)
+        row_sum.copy_(stats_out[:, 0])
+    has_allowed = allowed_weight is not None
+    if has_allowed:
+        assert allowed_weight is not None
+        assert allowed_weight.is_contiguous() and allowed_weight.shape == target.shape
+        allowed_ptr = allowed_weight
+    else:
+        allowed_ptr = out
+    class_card_idx, class_card_weight, inv_multiplicity = _get_preflop169_class_card_lut(
+        target.device
+    )
+    _preflop169_unblocked_finalize_kernel[(rows, triton.cdiv(h, block_h))](
+        target,
+        stats_out,
+        class_card_idx,
+        class_card_weight,
+        inv_multiplicity,
+        allowed_ptr,
+        out,
+        rows,
+        h,
+        HAS_ALLOWED=has_allowed,
+        STATS_STRIDE=1 + _PREFLOP169_NUM_CARDS,
+        MAX_CLASS_CARDS=_PREFLOP169_MAX_CLASS_CARDS,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _preflop169_unblocked_rank_finalize_kernel(
+        target_ptr,  # [rows, H]
+        stats_ptr,  # [rows, 14], column 0 is row sum, 1..13 are rank sums
+        rank_a_ptr,  # [H]
+        rank_b_ptr,  # [H], -1 for pairs
+        rank_weight_ptr,  # [H]
+        inv_multiplicity_ptr,  # [H]
+        allowed_weight_ptr,  # optional [rows, H]
+        out_ptr,  # [rows, H]
+        rows,
+        H,
+        HAS_ALLOWED: tl.constexpr,
+        STATS_STRIDE: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hb = tl.program_id(1)
+        h = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = h < H
+        s = tl.load(stats_ptr + row * STATS_STRIDE)
+        rank_a = tl.load(rank_a_ptr + h, mask=mask, other=0)
+        rank_b = tl.load(rank_b_ptr + h, mask=mask, other=-1)
+        weight = tl.load(rank_weight_ptr + h, mask=mask, other=0.0).to(tl.float32)
+        rank_a_sum = tl.load(
+            stats_ptr + row * STATS_STRIDE + 1 + rank_a,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        has_b = rank_b >= 0
+        rank_b_sum = tl.load(
+            stats_ptr + row * STATS_STRIDE + 1 + tl.maximum(rank_b, 0),
+            mask=mask & has_b,
+            other=0.0,
+        ).to(tl.float32)
+        target = tl.load(target_ptr + row * H + h, mask=mask, other=0.0).to(tl.float32)
+        inv_mult = tl.load(inv_multiplicity_ptr + h, mask=mask, other=0.0).to(
+            tl.float32
+        )
+        blocked = weight * (rank_a_sum + rank_b_sum)
+        out = tl.maximum(s - blocked + target * inv_mult, 0.0)
+        if HAS_ALLOWED:
+            allowed = tl.load(
+                allowed_weight_ptr + row * H + h,
+                mask=mask,
+                other=0.0,
+            ).to(tl.float32)
+            out *= allowed
+        tl.store(out_ptr + row * H + h, out, mask=mask)
+
+
+def preflop169_unblocked_rank_mass_triton_out_(
+    target: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    stats_out: torch.Tensor | None = None,
+    row_sum: torch.Tensor | None = None,
+    allowed_weight: torch.Tensor | None = None,
+    block_h: int = 256,
+) -> None:
+    """Project compact-169 rows using exact rank-level blocker stats."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert target.is_contiguous() and target.dim() == 2
+    assert out.is_contiguous() and out.shape == target.shape
+    rows, h = target.shape
+    assert h == _PREFLOP169_NUM_HANDS
+    if stats_out is None:
+        stats_out = torch.empty(
+            rows,
+            1 + _PREFLOP169_NUM_RANKS,
+            device=target.device,
+            dtype=target.dtype,
+        )
+    preflop169_unblocked_rank_stats_out_(target, stats_out)
+    if row_sum is not None:
+        assert row_sum.is_contiguous() and row_sum.shape == (rows,)
+        row_sum.copy_(stats_out[:, 0])
+    has_allowed = allowed_weight is not None
+    if has_allowed:
+        assert allowed_weight is not None
+        assert allowed_weight.is_contiguous() and allowed_weight.shape == target.shape
+        allowed_ptr = allowed_weight
+    else:
+        allowed_ptr = out
+    rank_a, rank_b, rank_weight, inv_multiplicity = _get_preflop169_class_rank_lut(
+        target.device
+    )
+    _preflop169_unblocked_rank_finalize_kernel[(rows, triton.cdiv(h, block_h))](
+        target,
+        stats_out,
+        rank_a,
+        rank_b,
+        rank_weight,
+        inv_multiplicity,
+        allowed_ptr,
+        out,
+        rows,
+        h,
+        HAS_ALLOWED=has_allowed,
+        STATS_STRIDE=1 + _PREFLOP169_NUM_RANKS,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _preflop169_project_rows_kernel(
+        source_ptr,  # [rows, H]
+        projection_ptr,  # [H, H], computes source @ projection
+        out_ptr,  # [rows, H]
+        row_sum_ptr,  # optional [rows]
+        rows,
+        H,
+        STORE_ROW_SUM: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hb = tl.program_id(1)
+        h = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        k = tl.arange(0, BLOCK_K)
+        mask_h = h < H
+        mask_k = k < H
+
+        src = tl.load(source_ptr + row * H + k, mask=mask_k, other=0.0).to(tl.float32)
+        proj = tl.load(
+            projection_ptr + k[:, None] * H + h[None, :],
+            mask=mask_k[:, None] & mask_h[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        projected = tl.sum(src[:, None] * proj, axis=0)
+        tl.store(out_ptr + row * H + h, projected, mask=mask_h)
+
+        if STORE_ROW_SUM:
+            if hb == 0:
+                tl.store(row_sum_ptr + row, tl.sum(src), mask=row < rows)
+
+
+def fused_preflop169_project_rows_(
+    source: torch.Tensor,
+    projection: torch.Tensor,
+    out: torch.Tensor,
+    row_sum: torch.Tensor | None = None,
+    block_h: int = 64,
+    block_k: int = 256,
+) -> None:
+    """Project compact preflop rows with the class-compatibility matrix.
+
+    This is specialized for the hot-loop ``source @ projection`` operations in
+    the compact preflop evaluator. ``row_sum`` optionally receives
+    ``source.sum(dim=-1)`` in the same launch.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert source.is_contiguous() and source.dim() == 2
+    assert projection.is_contiguous() and projection.dim() == 2
+    assert out.is_contiguous() and out.shape == source.shape
+    rows, h = source.shape
+    assert projection.shape == (h, h)
+    if row_sum is not None:
+        assert row_sum.is_contiguous() and row_sum.shape == (rows,)
+        row_sum_ptr = row_sum
+    else:
+        row_sum_ptr = out
+    _preflop169_project_rows_kernel[(rows, triton.cdiv(h, block_h))](
+        source,
+        projection,
+        out,
+        row_sum_ptr,
+        rows,
+        h,
+        STORE_ROW_SUM=row_sum is not None,
+        BLOCK_H=block_h,
+        BLOCK_K=block_k,
+        num_warps=8,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _preflop169_src_weights_multiway_kernel(
+        class_mass_ptr,  # [top, P, H]
+        projection_ptr,  # [H, H]
+        to_act_ptr,  # [top]
+        has_folded_ptr,  # optional [top, P]
+        allowed_ptr,  # [top, H] bool
+        out_ptr,  # [top, H]
+        top,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        HAS_FOLDED: tl.constexpr,
+        EPS,
+        BLOCK_H: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hb = tl.program_id(1)
+        h = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        k = tl.arange(0, BLOCK_K)
+        mask_h = h < H
+        mask_k = k < H
+        actor = tl.load(to_act_ptr + row)
+        prod = tl.full([BLOCK_H], 1.0, dtype=tl.float32)
+
+        for p in tl.static_range(0, NUM_PLAYERS):
+            live = p != actor
+            if HAS_FOLDED:
+                folded = tl.load(has_folded_ptr + row * NUM_PLAYERS + p).to(tl.int1)
+                live = live & (~folded)
+            mass = tl.load(
+                class_mass_ptr + (row * NUM_PLAYERS + p) * H + k,
+                mask=mask_k,
+                other=0.0,
+            ).to(tl.float32)
+            proj = tl.load(
+                projection_ptr + k[:, None] * H + h[None, :],
+                mask=mask_k[:, None] & mask_h[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            unblocked = tl.sum(mass[:, None] * proj, axis=0)
+            prod *= tl.where(live, tl.maximum(unblocked, EPS), 1.0)
+
+        allowed = tl.load(allowed_ptr + row * H + h, mask=mask_h, other=0).to(tl.int1)
+        tl.store(out_ptr + row * H + h, tl.where(allowed, prod, 0.0), mask=mask_h)
+
+
+def fused_preflop169_src_weights_multiway_(
+    class_mass: torch.Tensor,
+    projection: torch.Tensor,
+    to_act: torch.Tensor,
+    allowed_mask: torch.Tensor,
+    out: torch.Tensor,
+    has_folded: torch.Tensor | None = None,
+    eps: float = 1e-12,
+    block_h: int = 64,
+    block_k: int = 256,
+) -> None:
+    """Compute compact preflop parent source weights without materializing
+    ``class_mass @ projection`` for every player.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert class_mass.is_contiguous() and class_mass.dim() == 3
+    assert projection.is_contiguous() and projection.dim() == 2
+    assert to_act.is_contiguous() and to_act.dim() == 1
+    assert allowed_mask.is_contiguous() and allowed_mask.dim() == 2
+    assert out.is_contiguous() and out.dim() == 2
+    top, players, h = class_mass.shape
+    assert projection.shape == (h, h)
+    assert to_act.shape == (top,)
+    assert allowed_mask.shape == (top, h)
+    assert out.shape == (top, h)
+    if has_folded is not None:
+        assert has_folded.is_contiguous() and has_folded.shape == (top, players)
+        folded_ptr = has_folded
+    else:
+        folded_ptr = allowed_mask
+    _preflop169_src_weights_multiway_kernel[(top, triton.cdiv(h, block_h))](
+        class_mass,
+        projection,
+        to_act,
+        folded_ptr,
+        allowed_mask,
+        out,
+        top,
+        h,
+        NUM_PLAYERS=players,
+        HAS_FOLDED=has_folded is not None,
+        EPS=eps,
+        BLOCK_H=block_h,
+        BLOCK_K=block_k,
+        num_warps=8,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _preflop169_src_weights_from_unblocked_multiway_kernel(
+        unblocked_ptr,  # [top, P, H]
+        to_act_ptr,  # [top]
+        has_folded_ptr,  # optional [top, P]
+        allowed_weight_ptr,  # [top, H], same dtype as output
+        out_ptr,  # [top, H]
+        top,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        HAS_FOLDED: tl.constexpr,
+        EPS,
+        BLOCK_H: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hb = tl.program_id(1)
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < H
+        actor = tl.load(to_act_ptr + row)
+        prod = tl.full([BLOCK_H], 1.0, dtype=tl.float32)
+
+        for p in tl.static_range(0, NUM_PLAYERS):
+            live = p != actor
+            if HAS_FOLDED:
+                folded = tl.load(has_folded_ptr + row * NUM_PLAYERS + p).to(tl.int1)
+                live = live & (~folded)
+            values = tl.load(
+                unblocked_ptr + (row * NUM_PLAYERS + p) * H + offs,
+                mask=mask,
+                other=0.0,
+            ).to(tl.float32)
+            prod *= tl.where(live, tl.maximum(values, EPS), 1.0)
+
+        allowed = tl.load(
+            allowed_weight_ptr + row * H + offs,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        tl.store(out_ptr + row * H + offs, prod * allowed, mask=mask)
+
+
+def fused_preflop169_src_weights_from_unblocked_multiway_(
+    unblocked: torch.Tensor,
+    to_act: torch.Tensor,
+    allowed_weight: torch.Tensor,
+    out: torch.Tensor,
+    has_folded: torch.Tensor | None = None,
+    eps: float = 1e-12,
+    block_h: int = 256,
+) -> None:
+    """Finalize compact preflop source weights from projected unblocked masses.
+
+    This is the hybrid path: cuBLAS computes ``class_mass @ projection`` first,
+    then this kernel fuses the live-player product, folded-player skip, clamp,
+    and allowed-hand weighting.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert unblocked.is_contiguous() and unblocked.dim() == 3
+    assert to_act.is_contiguous() and to_act.dim() == 1
+    assert allowed_weight.is_contiguous() and allowed_weight.dim() == 2
+    assert out.is_contiguous() and out.dim() == 2
+    top, players, h = unblocked.shape
+    assert to_act.shape == (top,)
+    assert allowed_weight.shape == (top, h)
+    assert out.shape == (top, h)
+    if has_folded is not None:
+        assert has_folded.is_contiguous() and has_folded.shape == (top, players)
+        folded_ptr = has_folded
+    else:
+        folded_ptr = allowed_weight
+    _preflop169_src_weights_from_unblocked_multiway_kernel[
+        (top, triton.cdiv(h, block_h))
+    ](
+        unblocked,
+        to_act,
+        folded_ptr,
+        allowed_weight,
+        out,
+        top,
+        h,
+        NUM_PLAYERS=players,
+        HAS_FOLDED=has_folded is not None,
+        EPS=eps,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _preflop169_src_weights_from_stats_multiway_kernel(
+        class_mass_ptr,  # [top, P, H]
+        stats_ptr,  # [top * P, 53]
+        to_act_ptr,  # [top]
+        has_folded_ptr,  # optional [top, P]
+        allowed_weight_ptr,  # [top, H]
+        class_card_idx_ptr,  # [H, MAX_CLASS_CARDS]
+        class_card_weight_ptr,  # [H, MAX_CLASS_CARDS]
+        inv_multiplicity_ptr,  # [H]
+        out_ptr,  # [top, H]
+        top,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        HAS_FOLDED: tl.constexpr,
+        EPS,
+        STATS_STRIDE: tl.constexpr,
+        MAX_CLASS_CARDS: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hb = tl.program_id(1)
+        h = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = h < H
+        actor = tl.load(to_act_ptr + row)
+        inv_mult = tl.load(inv_multiplicity_ptr + h, mask=mask, other=0.0).to(
+            tl.float32
+        )
+        prod = tl.full([BLOCK_H], 1.0, dtype=tl.float32)
+
+        for player in tl.static_range(0, NUM_PLAYERS):
+            include = player != actor
+            if HAS_FOLDED:
+                folded = tl.load(has_folded_ptr + row * NUM_PLAYERS + player).to(
+                    tl.int1
+                )
+                include = include & (~folded)
+            stats_row = row * NUM_PLAYERS + player
+            s = tl.load(stats_ptr + stats_row * STATS_STRIDE)
+            blocked = tl.zeros([BLOCK_H], dtype=tl.float32)
+            for slot in tl.static_range(0, MAX_CLASS_CARDS):
+                card = tl.load(
+                    class_card_idx_ptr + h * MAX_CLASS_CARDS + slot,
+                    mask=mask,
+                    other=-1,
+                )
+                weight = tl.load(
+                    class_card_weight_ptr + h * MAX_CLASS_CARDS + slot,
+                    mask=mask,
+                    other=0.0,
+                ).to(tl.float32)
+                card_valid = card >= 0
+                card_sum = tl.load(
+                    stats_ptr
+                    + stats_row * STATS_STRIDE
+                    + 1
+                    + tl.maximum(card, 0),
+                    mask=mask & card_valid,
+                    other=0.0,
+                ).to(tl.float32)
+                blocked += weight * card_sum
+            target = tl.load(
+                class_mass_ptr + (row * NUM_PLAYERS + player) * H + h,
+                mask=mask,
+                other=0.0,
+            ).to(tl.float32)
+            mass = tl.maximum(s - blocked + target * inv_mult, 0.0)
+            prod *= tl.where(include, tl.maximum(mass, EPS), 1.0)
+
+        allowed = tl.load(
+            allowed_weight_ptr + row * H + h,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        tl.store(out_ptr + row * H + h, prod * allowed, mask=mask)
+
+
+def fused_preflop169_src_weights_stats_multiway_(
+    class_mass: torch.Tensor,
+    to_act: torch.Tensor,
+    allowed_weight: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    has_folded: torch.Tensor | None = None,
+    stats_out: torch.Tensor | None = None,
+    eps: float = 1e-12,
+    block_h: int = 256,
+) -> None:
+    """Compute compact preflop multiway source weights from card stats.
+
+    This avoids materializing ``class_mass @ compatibility_projection`` for
+    every live player. The only dense preprocessing is ``[top * P, 169] @
+    [169, 53]`` for row/card stats.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert class_mass.is_contiguous() and class_mass.dim() == 3
+    assert to_act.is_contiguous() and to_act.dim() == 1
+    assert allowed_weight.is_contiguous() and allowed_weight.dim() == 2
+    assert out.is_contiguous() and out.dim() == 2
+    top, players, h = class_mass.shape
+    assert h == _PREFLOP169_NUM_HANDS
+    assert to_act.shape == (top,)
+    assert allowed_weight.shape == (top, h)
+    assert out.shape == (top, h)
+    flat = class_mass.reshape(top * players, h)
+    if stats_out is None:
+        stats_out = torch.empty(
+            top * players,
+            1 + _PREFLOP169_NUM_CARDS,
+            device=class_mass.device,
+            dtype=class_mass.dtype,
+        )
+    preflop169_unblocked_stats_out_(flat, stats_out)
+    has_folds = has_folded is not None
+    if has_folds:
+        assert has_folded is not None
+        assert has_folded.is_contiguous() and has_folded.shape == (top, players)
+        folded_ptr = has_folded
+    else:
+        folded_ptr = allowed_weight
+    class_card_idx, class_card_weight, inv_multiplicity = _get_preflop169_class_card_lut(
+        class_mass.device
+    )
+    _preflop169_src_weights_from_stats_multiway_kernel[
+        (top, triton.cdiv(h, block_h))
+    ](
+        class_mass,
+        stats_out,
+        to_act,
+        folded_ptr,
+        allowed_weight,
+        class_card_idx,
+        class_card_weight,
+        inv_multiplicity,
+        out,
+        top,
+        h,
+        NUM_PLAYERS=players,
+        HAS_FOLDED=has_folds,
+        EPS=eps,
+        STATS_STRIDE=1 + _PREFLOP169_NUM_CARDS,
+        MAX_CLASS_CARDS=_PREFLOP169_MAX_CLASS_CARDS,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _preflop169_src_weights_from_rank_stats_multiway_kernel(
+        class_mass_ptr,  # [top, P, H]
+        stats_ptr,  # [top * P, 14]
+        to_act_ptr,  # [top]
+        has_folded_ptr,  # optional [top, P]
+        allowed_weight_ptr,  # [top, H]
+        rank_a_ptr,  # [H]
+        rank_b_ptr,  # [H], -1 for pairs
+        rank_weight_ptr,  # [H]
+        inv_multiplicity_ptr,  # [H]
+        out_ptr,  # [top, H]
+        top,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        HAS_FOLDED: tl.constexpr,
+        EPS,
+        STATS_STRIDE: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        hb = tl.program_id(1)
+        h = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = h < H
+        actor = tl.load(to_act_ptr + row)
+        rank_a = tl.load(rank_a_ptr + h, mask=mask, other=0)
+        rank_b = tl.load(rank_b_ptr + h, mask=mask, other=-1)
+        rank_weight = tl.load(rank_weight_ptr + h, mask=mask, other=0.0).to(tl.float32)
+        inv_mult = tl.load(inv_multiplicity_ptr + h, mask=mask, other=0.0).to(
+            tl.float32
+        )
+        has_b = rank_b >= 0
+        prod = tl.full([BLOCK_H], 1.0, dtype=tl.float32)
+
+        for player in tl.static_range(0, NUM_PLAYERS):
+            include = player != actor
+            if HAS_FOLDED:
+                folded = tl.load(has_folded_ptr + row * NUM_PLAYERS + player).to(
+                    tl.int1
+                )
+                include = include & (~folded)
+            stats_row = row * NUM_PLAYERS + player
+            s = tl.load(stats_ptr + stats_row * STATS_STRIDE)
+            rank_a_sum = tl.load(
+                stats_ptr + stats_row * STATS_STRIDE + 1 + rank_a,
+                mask=mask,
+                other=0.0,
+            ).to(tl.float32)
+            rank_b_sum = tl.load(
+                stats_ptr + stats_row * STATS_STRIDE + 1 + tl.maximum(rank_b, 0),
+                mask=mask & has_b,
+                other=0.0,
+            ).to(tl.float32)
+            target = tl.load(
+                class_mass_ptr + (row * NUM_PLAYERS + player) * H + h,
+                mask=mask,
+                other=0.0,
+            ).to(tl.float32)
+            blocked = rank_weight * (rank_a_sum + rank_b_sum)
+            mass = tl.maximum(s - blocked + target * inv_mult, 0.0)
+            prod *= tl.where(include, tl.maximum(mass, EPS), 1.0)
+
+        allowed = tl.load(
+            allowed_weight_ptr + row * H + h,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        tl.store(out_ptr + row * H + h, prod * allowed, mask=mask)
+
+
+def fused_preflop169_src_weights_rank_stats_multiway_(
+    class_mass: torch.Tensor,
+    to_act: torch.Tensor,
+    allowed_weight: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    has_folded: torch.Tensor | None = None,
+    stats_out: torch.Tensor | None = None,
+    eps: float = 1e-12,
+    block_h: int = 256,
+) -> None:
+    """Compute compact preflop multiway source weights from rank stats."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert class_mass.is_contiguous() and class_mass.dim() == 3
+    assert to_act.is_contiguous() and to_act.dim() == 1
+    assert allowed_weight.is_contiguous() and allowed_weight.dim() == 2
+    assert out.is_contiguous() and out.dim() == 2
+    top, players, h = class_mass.shape
+    assert h == _PREFLOP169_NUM_HANDS
+    assert to_act.shape == (top,)
+    assert allowed_weight.shape == (top, h)
+    assert out.shape == (top, h)
+    flat = class_mass.reshape(top * players, h)
+    if stats_out is None:
+        stats_out = torch.empty(
+            top * players,
+            1 + _PREFLOP169_NUM_RANKS,
+            device=class_mass.device,
+            dtype=class_mass.dtype,
+        )
+    preflop169_unblocked_rank_stats_out_(flat, stats_out)
+    has_folds = has_folded is not None
+    if has_folds:
+        assert has_folded is not None
+        assert has_folded.is_contiguous() and has_folded.shape == (top, players)
+        folded_ptr = has_folded
+    else:
+        folded_ptr = allowed_weight
+    rank_a, rank_b, rank_weight, inv_multiplicity = _get_preflop169_class_rank_lut(
+        class_mass.device
+    )
+    _preflop169_src_weights_from_rank_stats_multiway_kernel[
+        (top, triton.cdiv(h, block_h))
+    ](
+        class_mass,
+        stats_out,
+        to_act,
+        folded_ptr,
+        allowed_weight,
+        rank_a,
+        rank_b,
+        rank_weight,
+        inv_multiplicity,
+        out,
+        top,
+        h,
+        NUM_PLAYERS=players,
+        HAS_FOLDED=has_folds,
+        EPS=eps,
+        STATS_STRIDE=1 + _PREFLOP169_NUM_RANKS,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
 class ParentBeliefUnblockedStats:
     """Caches S + cardsum at parent shape for both player slices of beliefs.
 
@@ -3141,7 +4100,7 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
         MAX_CHILDREN=mc_pow2,
         BLOCK_P=block_p,
         BLOCK_H=block_h,
-        num_warps=8,
+        num_warps=_env_int("P2_PREFLOP_POLICY_REACH_WARPS", 4),
     )
 
 
@@ -3704,6 +4663,582 @@ def fused_preflop169_parent_sum_opp_(
         HAS_FOLDED=has_folds,
         HAS_LEAF_SOURCE=has_leaf_source,
         MAX_CHILDREN=mc_pow2,
+        BLOCK_P=block_p,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_preflop169_parent_sum_opp_stats_kernel(
+        values_ptr,  # [total, P, H] in/out
+        leaf_values_ptr,  # optional [total, P, H]
+        leaf_mask_ptr,  # optional [total]
+        prev_actor_ptr,  # [total]
+        has_folded_ptr,  # optional [total, P]
+        policy_ptr,  # [total, H]
+        actor_beliefs_ptr,  # [top, H]
+        marginal_policy_ptr,  # [num_children, H]
+        actor_stats_ptr,  # [top, 53]
+        marginal_stats_ptr,  # [num_children, 53]
+        class_card_idx_ptr,  # [H, MAX_CLASS_CARDS]
+        class_card_weight_ptr,  # [H, MAX_CLASS_CARDS]
+        inv_multiplicity_ptr,  # [H]
+        child_offsets_ptr,  # [num_parents] absolute first child
+        child_count_ptr,  # [num_parents]
+        parent_base,
+        child_base,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        EPS,
+        HAS_FOLDED: tl.constexpr,
+        HAS_LEAF_SOURCE: tl.constexpr,
+        MAX_CHILDREN: tl.constexpr,
+        STATS_STRIDE: tl.constexpr,
+        MAX_CLASS_CARDS: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        parent_rel = tl.program_id(0)
+        hb = tl.program_id(1)
+        row = parent_base + parent_rel
+        first = tl.load(child_offsets_ptr + parent_rel)
+        count = tl.load(child_count_ptr + parent_rel)
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask_h = offs < H
+        players = tl.arange(0, BLOCK_P)
+        player_mask = players < NUM_PLAYERS
+        value_mask = player_mask[:, None] & mask_h[None, :]
+
+        if count == 0:
+            if HAS_LEAF_SOURCE:
+                is_leaf = tl.load(leaf_mask_ptr + row).to(tl.int1)
+                src = tl.load(
+                    leaf_values_ptr
+                    + (row * NUM_PLAYERS + players[:, None]) * H
+                    + offs[None, :],
+                    mask=value_mask & is_leaf,
+                    other=0.0,
+                )
+                tl.store(
+                    values_ptr
+                    + (row * NUM_PLAYERS + players[:, None]) * H
+                    + offs[None, :],
+                    src,
+                    mask=value_mask,
+                )
+            return
+
+        inv_mult = tl.load(inv_multiplicity_ptr + offs, mask=mask_h, other=0.0).to(
+            tl.float32
+        )
+        denom_s = tl.load(actor_stats_ptr + row * STATS_STRIDE)
+        denom_blocked = tl.zeros([BLOCK_H], dtype=tl.float32)
+        for slot in tl.static_range(0, MAX_CLASS_CARDS):
+            card = tl.load(
+                class_card_idx_ptr + offs * MAX_CLASS_CARDS + slot,
+                mask=mask_h,
+                other=-1,
+            )
+            weight = tl.load(
+                class_card_weight_ptr + offs * MAX_CLASS_CARDS + slot,
+                mask=mask_h,
+                other=0.0,
+            ).to(tl.float32)
+            card_valid = card >= 0
+            card_sum = tl.load(
+                actor_stats_ptr
+                + row * STATS_STRIDE
+                + 1
+                + tl.maximum(card, 0),
+                mask=mask_h & card_valid,
+                other=0.0,
+            ).to(tl.float32)
+            denom_blocked += weight * card_sum
+        denom_target = tl.load(
+            actor_beliefs_ptr + row * H + offs,
+            mask=mask_h,
+            other=0.0,
+        ).to(tl.float32)
+        denom = tl.maximum(denom_s - denom_blocked + denom_target * inv_mult, 0.0)
+        denom_safe = tl.maximum(denom, EPS)
+        acc = tl.zeros([BLOCK_P, BLOCK_H], dtype=tl.float32)
+
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                child_rel = child - child_base
+                prev_actor = tl.load(prev_actor_ptr + child)
+                hero_pol = tl.load(
+                    policy_ptr + child * H + offs,
+                    mask=mask_h,
+                    other=0.0,
+                )
+
+                numer_s = tl.load(
+                    marginal_stats_ptr + child_rel * STATS_STRIDE
+                )
+                numer_blocked = tl.zeros([BLOCK_H], dtype=tl.float32)
+                for slot in tl.static_range(0, MAX_CLASS_CARDS):
+                    card = tl.load(
+                        class_card_idx_ptr + offs * MAX_CLASS_CARDS + slot,
+                        mask=mask_h,
+                        other=-1,
+                    )
+                    weight = tl.load(
+                        class_card_weight_ptr + offs * MAX_CLASS_CARDS + slot,
+                        mask=mask_h,
+                        other=0.0,
+                    ).to(tl.float32)
+                    card_valid = card >= 0
+                    card_sum = tl.load(
+                        marginal_stats_ptr
+                        + child_rel * STATS_STRIDE
+                        + 1
+                        + tl.maximum(card, 0),
+                        mask=mask_h & card_valid,
+                        other=0.0,
+                    ).to(tl.float32)
+                    numer_blocked += weight * card_sum
+                numer_target = tl.load(
+                    marginal_policy_ptr + child_rel * H + offs,
+                    mask=mask_h,
+                    other=0.0,
+                ).to(tl.float32)
+                numer = tl.maximum(
+                    numer_s - numer_blocked + numer_target * inv_mult,
+                    0.0,
+                )
+                opp_pol = tl.where(denom > EPS, numer / denom_safe, 0.0)
+                folded = tl.zeros([BLOCK_P], dtype=tl.int1)
+                if HAS_FOLDED:
+                    folded = tl.load(
+                        has_folded_ptr + row * NUM_PLAYERS + players,
+                        mask=player_mask,
+                        other=0,
+                    ).to(tl.int1)
+                live_non_actor = (players[:, None] != prev_actor) & (~folded[:, None])
+                pol = tl.where(
+                    players[:, None] == prev_actor,
+                    hero_pol[None, :],
+                    tl.where(live_non_actor, opp_pol[None, :], numer_s),
+                )
+                vals = tl.load(
+                    values_ptr
+                    + (child * NUM_PLAYERS + players[:, None]) * H
+                    + offs[None, :],
+                    mask=value_mask,
+                    other=0.0,
+                )
+                if HAS_LEAF_SOURCE:
+                    leaf_vals = tl.load(
+                        leaf_values_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + offs[None, :],
+                        mask=value_mask,
+                        other=0.0,
+                    )
+                    child_is_leaf = tl.load(leaf_mask_ptr + child).to(tl.int1)
+                    vals = tl.where(child_is_leaf, leaf_vals, vals)
+                    tl.store(
+                        values_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + offs[None, :],
+                        leaf_vals,
+                        mask=value_mask & child_is_leaf,
+                    )
+                acc += vals * pol
+
+        tl.store(
+            values_ptr + (row * NUM_PLAYERS + players[:, None]) * H + offs[None, :],
+            acc,
+            mask=value_mask,
+        )
+
+
+def fused_preflop169_parent_sum_opp_stats_(
+    values: torch.Tensor,
+    prev_actor: torch.Tensor,
+    policy: torch.Tensor,
+    actor_beliefs: torch.Tensor,
+    marginal_policy: torch.Tensor,
+    actor_stats: torch.Tensor,
+    marginal_stats: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    parent_base: int,
+    child_base: int,
+    max_children: int,
+    max_children_pow2: int | None = None,
+    eps: float = 1.0e-8,
+    leaf_values: torch.Tensor | None = None,
+    leaf_mask: torch.Tensor | None = None,
+    has_folded: torch.Tensor | None = None,
+    block_h: int = 256,
+) -> None:
+    """Preflop-169 EV backup using compact card stats instead of projections."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values.is_contiguous() and values.dim() == 3
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert actor_beliefs.is_contiguous() and actor_beliefs.dim() == 2
+    assert marginal_policy.is_contiguous() and marginal_policy.dim() == 2
+    assert actor_stats.is_contiguous() and actor_stats.dim() == 2
+    assert marginal_stats.is_contiguous() and marginal_stats.dim() == 2
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    assert prev_actor.is_contiguous()
+    total, players, h = values.shape
+    assert h == _PREFLOP169_NUM_HANDS
+    assert policy.shape == (total, h)
+    assert actor_beliefs.shape[1] == h
+    assert marginal_policy.shape[1] == h
+    assert actor_stats.shape == (actor_beliefs.shape[0], 1 + _PREFLOP169_NUM_CARDS)
+    assert marginal_stats.shape == (
+        marginal_policy.shape[0],
+        1 + _PREFLOP169_NUM_CARDS,
+    )
+    has_leaf_source = leaf_values is not None
+    if has_leaf_source:
+        assert leaf_values is not None and leaf_mask is not None
+        assert leaf_values.is_contiguous() and leaf_values.shape == values.shape
+        assert leaf_mask.is_contiguous() and leaf_mask.shape == (total,)
+        leaf_values_ptr = leaf_values
+        leaf_mask_ptr = leaf_mask
+    else:
+        leaf_values_ptr = values
+        leaf_mask_ptr = child_count
+    has_folds = has_folded is not None
+    if has_folds:
+        assert has_folded is not None
+        assert has_folded.is_contiguous() and has_folded.shape == (total, players)
+        has_folded_ptr = has_folded
+    else:
+        has_folded_ptr = child_count
+    if max_children_pow2 is None:
+        mc_pow2 = 1
+        while mc_pow2 < max_children:
+            mc_pow2 *= 2
+    else:
+        mc_pow2 = max_children_pow2
+    block_p = 1
+    while block_p < players:
+        block_p *= 2
+    if child_offsets.numel() == 0:
+        return
+    class_card_idx, class_card_weight, inv_multiplicity = _get_preflop169_class_card_lut(
+        values.device
+    )
+    _fused_preflop169_parent_sum_opp_stats_kernel[
+        (child_offsets.shape[0], triton.cdiv(h, block_h))
+    ](
+        values,
+        leaf_values_ptr,
+        leaf_mask_ptr,
+        prev_actor,
+        has_folded_ptr,
+        policy,
+        actor_beliefs,
+        marginal_policy,
+        actor_stats,
+        marginal_stats,
+        class_card_idx,
+        class_card_weight,
+        inv_multiplicity,
+        child_offsets,
+        child_count,
+        parent_base,
+        child_base,
+        h,
+        NUM_PLAYERS=players,
+        EPS=eps,
+        HAS_FOLDED=has_folds,
+        HAS_LEAF_SOURCE=has_leaf_source,
+        MAX_CHILDREN=mc_pow2,
+        STATS_STRIDE=1 + _PREFLOP169_NUM_CARDS,
+        MAX_CLASS_CARDS=_PREFLOP169_MAX_CLASS_CARDS,
+        BLOCK_P=block_p,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
+    def _fused_preflop169_parent_sum_opp_rank_stats_kernel(
+        values_ptr,  # [total, P, H] in/out
+        leaf_values_ptr,  # optional [total, P, H]
+        leaf_mask_ptr,  # optional [total]
+        prev_actor_ptr,  # [total]
+        has_folded_ptr,  # optional [total, P]
+        policy_ptr,  # [total, H]
+        actor_beliefs_ptr,  # [top, H]
+        marginal_policy_ptr,  # [num_children, H]
+        actor_stats_ptr,  # [top, 14]
+        marginal_stats_ptr,  # [num_children, 14]
+        rank_a_ptr,  # [H]
+        rank_b_ptr,  # [H], -1 for pairs
+        rank_weight_ptr,  # [H]
+        inv_multiplicity_ptr,  # [H]
+        child_offsets_ptr,  # [num_parents] absolute first child
+        child_count_ptr,  # [num_parents]
+        parent_base,
+        child_base,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        EPS,
+        HAS_FOLDED: tl.constexpr,
+        HAS_LEAF_SOURCE: tl.constexpr,
+        MAX_CHILDREN: tl.constexpr,
+        STATS_STRIDE: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        parent_rel = tl.program_id(0)
+        hb = tl.program_id(1)
+        row = parent_base + parent_rel
+        first = tl.load(child_offsets_ptr + parent_rel)
+        count = tl.load(child_count_ptr + parent_rel)
+        offs = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask_h = offs < H
+        players = tl.arange(0, BLOCK_P)
+        player_mask = players < NUM_PLAYERS
+        value_mask = player_mask[:, None] & mask_h[None, :]
+
+        if count == 0:
+            if HAS_LEAF_SOURCE:
+                is_leaf = tl.load(leaf_mask_ptr + row).to(tl.int1)
+                src = tl.load(
+                    leaf_values_ptr
+                    + (row * NUM_PLAYERS + players[:, None]) * H
+                    + offs[None, :],
+                    mask=value_mask & is_leaf,
+                    other=0.0,
+                )
+                tl.store(
+                    values_ptr
+                    + (row * NUM_PLAYERS + players[:, None]) * H
+                    + offs[None, :],
+                    src,
+                    mask=value_mask,
+                )
+            return
+
+        rank_a = tl.load(rank_a_ptr + offs, mask=mask_h, other=0)
+        rank_b = tl.load(rank_b_ptr + offs, mask=mask_h, other=-1)
+        rank_weight = tl.load(rank_weight_ptr + offs, mask=mask_h, other=0.0).to(
+            tl.float32
+        )
+        inv_mult = tl.load(inv_multiplicity_ptr + offs, mask=mask_h, other=0.0).to(
+            tl.float32
+        )
+
+        denom_s = tl.load(actor_stats_ptr + row * STATS_STRIDE)
+        denom_rank_a = tl.load(
+            actor_stats_ptr + row * STATS_STRIDE + 1 + rank_a,
+            mask=mask_h,
+            other=0.0,
+        ).to(tl.float32)
+        denom_has_b = rank_b >= 0
+        denom_rank_b = tl.load(
+            actor_stats_ptr + row * STATS_STRIDE + 1 + tl.maximum(rank_b, 0),
+            mask=mask_h & denom_has_b,
+            other=0.0,
+        ).to(tl.float32)
+        denom_target = tl.load(
+            actor_beliefs_ptr + row * H + offs,
+            mask=mask_h,
+            other=0.0,
+        ).to(tl.float32)
+        denom_blocked = rank_weight * (denom_rank_a + denom_rank_b)
+        denom = tl.maximum(denom_s - denom_blocked + denom_target * inv_mult, 0.0)
+        denom_safe = tl.maximum(denom, EPS)
+        acc = tl.zeros([BLOCK_P, BLOCK_H], dtype=tl.float32)
+
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                child_rel = child - child_base
+                prev_actor = tl.load(prev_actor_ptr + child)
+                hero_pol = tl.load(
+                    policy_ptr + child * H + offs,
+                    mask=mask_h,
+                    other=0.0,
+                )
+
+                numer_s = tl.load(marginal_stats_ptr + child_rel * STATS_STRIDE)
+                numer_rank_a = tl.load(
+                    marginal_stats_ptr + child_rel * STATS_STRIDE + 1 + rank_a,
+                    mask=mask_h,
+                    other=0.0,
+                ).to(tl.float32)
+                numer_rank_b = tl.load(
+                    marginal_stats_ptr
+                    + child_rel * STATS_STRIDE
+                    + 1
+                    + tl.maximum(rank_b, 0),
+                    mask=mask_h & denom_has_b,
+                    other=0.0,
+                ).to(tl.float32)
+                numer_target = tl.load(
+                    marginal_policy_ptr + child_rel * H + offs,
+                    mask=mask_h,
+                    other=0.0,
+                ).to(tl.float32)
+                numer_blocked = rank_weight * (numer_rank_a + numer_rank_b)
+                numer = tl.maximum(
+                    numer_s - numer_blocked + numer_target * inv_mult,
+                    0.0,
+                )
+                opp_pol = tl.where(denom > EPS, numer / denom_safe, 0.0)
+                folded = tl.zeros([BLOCK_P], dtype=tl.int1)
+                if HAS_FOLDED:
+                    folded = tl.load(
+                        has_folded_ptr + row * NUM_PLAYERS + players,
+                        mask=player_mask,
+                        other=0,
+                    ).to(tl.int1)
+                live_non_actor = (players[:, None] != prev_actor) & (~folded[:, None])
+                pol = tl.where(
+                    players[:, None] == prev_actor,
+                    hero_pol[None, :],
+                    tl.where(live_non_actor, opp_pol[None, :], numer_s),
+                )
+                vals = tl.load(
+                    values_ptr
+                    + (child * NUM_PLAYERS + players[:, None]) * H
+                    + offs[None, :],
+                    mask=value_mask,
+                    other=0.0,
+                )
+                if HAS_LEAF_SOURCE:
+                    leaf_vals = tl.load(
+                        leaf_values_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + offs[None, :],
+                        mask=value_mask,
+                        other=0.0,
+                    )
+                    child_is_leaf = tl.load(leaf_mask_ptr + child).to(tl.int1)
+                    vals = tl.where(child_is_leaf, leaf_vals, vals)
+                    tl.store(
+                        values_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + offs[None, :],
+                        leaf_vals,
+                        mask=value_mask & child_is_leaf,
+                    )
+                acc += vals * pol
+
+        tl.store(
+            values_ptr + (row * NUM_PLAYERS + players[:, None]) * H + offs[None, :],
+            acc,
+            mask=value_mask,
+        )
+
+
+def fused_preflop169_parent_sum_opp_rank_stats_(
+    values: torch.Tensor,
+    prev_actor: torch.Tensor,
+    policy: torch.Tensor,
+    actor_beliefs: torch.Tensor,
+    marginal_policy: torch.Tensor,
+    actor_stats: torch.Tensor,
+    marginal_stats: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    parent_base: int,
+    child_base: int,
+    max_children: int,
+    max_children_pow2: int | None = None,
+    eps: float = 1.0e-8,
+    leaf_values: torch.Tensor | None = None,
+    leaf_mask: torch.Tensor | None = None,
+    has_folded: torch.Tensor | None = None,
+    block_h: int = 256,
+) -> None:
+    """Preflop-169 EV backup using compact rank stats directly."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values.is_contiguous() and values.dim() == 3
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert actor_beliefs.is_contiguous() and actor_beliefs.dim() == 2
+    assert marginal_policy.is_contiguous() and marginal_policy.dim() == 2
+    assert actor_stats.is_contiguous() and actor_stats.dim() == 2
+    assert marginal_stats.is_contiguous() and marginal_stats.dim() == 2
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    assert prev_actor.is_contiguous()
+    total, players, h = values.shape
+    assert h == _PREFLOP169_NUM_HANDS
+    assert policy.shape == (total, h)
+    assert actor_beliefs.shape[1] == h
+    assert marginal_policy.shape[1] == h
+    assert actor_stats.shape == (actor_beliefs.shape[0], 1 + _PREFLOP169_NUM_RANKS)
+    assert marginal_stats.shape == (
+        marginal_policy.shape[0],
+        1 + _PREFLOP169_NUM_RANKS,
+    )
+    has_leaf_source = leaf_values is not None
+    if has_leaf_source:
+        assert leaf_values is not None and leaf_mask is not None
+        assert leaf_values.is_contiguous() and leaf_values.shape == values.shape
+        assert leaf_mask.is_contiguous() and leaf_mask.shape == (total,)
+        leaf_values_ptr = leaf_values
+        leaf_mask_ptr = leaf_mask
+    else:
+        leaf_values_ptr = values
+        leaf_mask_ptr = child_count
+    has_folds = has_folded is not None
+    if has_folds:
+        assert has_folded is not None
+        assert has_folded.is_contiguous() and has_folded.shape == (total, players)
+        has_folded_ptr = has_folded
+    else:
+        has_folded_ptr = child_count
+    if max_children_pow2 is None:
+        mc_pow2 = 1
+        while mc_pow2 < max_children:
+            mc_pow2 *= 2
+    else:
+        mc_pow2 = max_children_pow2
+    block_p = 1
+    while block_p < players:
+        block_p *= 2
+    if child_offsets.numel() == 0:
+        return
+    rank_a, rank_b, rank_weight, inv_multiplicity = _get_preflop169_class_rank_lut(
+        values.device
+    )
+    _fused_preflop169_parent_sum_opp_rank_stats_kernel[
+        (child_offsets.shape[0], triton.cdiv(h, block_h))
+    ](
+        values,
+        leaf_values_ptr,
+        leaf_mask_ptr,
+        prev_actor,
+        has_folded_ptr,
+        policy,
+        actor_beliefs,
+        marginal_policy,
+        actor_stats,
+        marginal_stats,
+        rank_a,
+        rank_b,
+        rank_weight,
+        inv_multiplicity,
+        child_offsets,
+        child_count,
+        parent_base,
+        child_base,
+        h,
+        NUM_PLAYERS=players,
+        EPS=eps,
+        HAS_FOLDED=has_folds,
+        HAS_LEAF_SOURCE=has_leaf_source,
+        MAX_CHILDREN=mc_pow2,
+        STATS_STRIDE=1 + _PREFLOP169_NUM_RANKS,
         BLOCK_P=block_p,
         BLOCK_H=block_h,
         num_warps=4,

@@ -23,11 +23,22 @@ from p2.search.fused_cfr_triton import (
     fused_compact_regret_dcfr_update_multiway_with_tensors_,
     fused_model_values_writeback_multiway_,
     fused_parent_sum_divide_,
+    fused_preflop169_project_rows_,
+    fused_preflop169_parent_sum_opp_rank_stats_,
+    fused_preflop169_parent_sum_opp_stats_,
     fused_preflop169_parent_sum_opp_,
+    fused_preflop169_src_weights_rank_stats_multiway_,
+    fused_preflop169_src_weights_stats_multiway_,
+    fused_preflop169_src_weights_from_unblocked_multiway_,
+    fused_preflop169_src_weights_multiway_,
     fused_policy_reach_beliefs_depth_preflop_multiway_,
     fused_policy_renorm_reach_depth_multiway_,
     fused_preflop_multiway_beliefs_from_reach_,
     fused_regret_tail_multiway_,
+    preflop169_unblocked_rank_stats_out_,
+    preflop169_unblocked_rank_mass_triton_out_,
+    preflop169_unblocked_mass_triton_out_,
+    preflop169_unblocked_stats_out_,
     select_actor_beliefs_and_marginal_policy_multiway_triton_out_,
 )
 from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
@@ -56,8 +67,19 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self.warm_start_iterations = 0
         self._preflop_ev_actor_beliefs_buf: torch.Tensor | None = None
         self._preflop_ev_marginal_policy_buf: torch.Tensor | None = None
+        self._preflop_ev_marginal_action_policy_buf: torch.Tensor | None = None
         self._preflop_ev_numer_unblocked_buf: torch.Tensor | None = None
         self._preflop_ev_denom_unblocked_buf: torch.Tensor | None = None
+        self._preflop_ev_actor_stats_buf: torch.Tensor | None = None
+        self._preflop_ev_marginal_stats_buf: torch.Tensor | None = None
+        self._preflop_ev_actor_rank_stats_buf: torch.Tensor | None = None
+        self._preflop_ev_marginal_rank_stats_buf: torch.Tensor | None = None
+        self._preflop_regret_src_weights_buf: torch.Tensor | None = None
+        self._preflop_regret_src_stats_buf: torch.Tensor | None = None
+        self._preflop_regret_src_rank_stats_buf: torch.Tensor | None = None
+        self._preflop_allowed_float_buf: torch.Tensor | None = None
+        self._preflop_allowed_float_key: tuple[int, int, int, torch.dtype] | None = None
+        self._preflop_player_ids_buf: torch.Tensor | None = None
 
     @property
     def _compact_preflop(self) -> bool:
@@ -104,12 +126,17 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self,
         top: int,
         num_children: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         actor_shape = (top, PREFLOP_HANDS)
         child_shape = (num_children, PREFLOP_HANDS)
         actor_buf = getattr(self, "_preflop_ev_actor_beliefs_buf", None)
         denom_buf = getattr(self, "_preflop_ev_denom_unblocked_buf", None)
         marginal_buf = getattr(self, "_preflop_ev_marginal_policy_buf", None)
+        marginal_action_buf = getattr(
+            self,
+            "_preflop_ev_marginal_action_policy_buf",
+            None,
+        )
         numer_buf = getattr(self, "_preflop_ev_numer_unblocked_buf", None)
         if (
             actor_buf is None
@@ -139,12 +166,268 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         ):
             numer_buf = self.policy_probs.new_empty(child_shape)
             self._preflop_ev_numer_unblocked_buf = numer_buf
+        if (
+            marginal_action_buf is None
+            or marginal_action_buf.shape != (num_children,)
+            or marginal_action_buf.device != self.device
+        ):
+            marginal_action_buf = self.policy_probs.new_empty((num_children,))
+            self._preflop_ev_marginal_action_policy_buf = marginal_action_buf
         return (
             actor_buf,
             marginal_buf,
             denom_buf,
             numer_buf,
+            marginal_action_buf,
         )
+
+    def _preflop_use_fused_projection(self) -> bool:
+        flag = os.environ.get("P2_PREFLOP_FUSED_PROJECTION", "0")
+        return flag.strip().lower() not in {"0", "false", "off", "no"}
+
+    def _preflop_use_fused_src_weights(self, top: int) -> bool:
+        flag = os.environ.get("P2_PREFLOP_FUSED_SRC_WEIGHTS")
+        if flag is None or flag.strip().lower() == "auto":
+            threshold = int(os.environ.get("P2_PREFLOP_FUSED_SRC_WEIGHTS_MAX_TOP", "0"))
+            return top <= threshold
+        return flag.strip().lower() not in {"0", "false", "off", "no"}
+
+    def _preflop_use_fused_src_weight_tail(self) -> bool:
+        flag = os.environ.get("P2_PREFLOP_FUSED_SRC_WEIGHT_TAIL", "1")
+        return flag.strip().lower() not in {"0", "false", "off", "no"}
+
+    def _preflop_use_rank_stats_src_weights(self) -> bool:
+        flag = os.environ.get("P2_PREFLOP_RANK_STATS_SRC_WEIGHTS", "1")
+        return flag.strip().lower() not in {"0", "false", "off", "no"}
+
+    def _preflop_use_rank_stats_ev(self) -> bool:
+        flag = os.environ.get("P2_PREFLOP_RANK_STATS_EV", "1")
+        return flag.strip().lower() not in {"0", "false", "off", "no"}
+
+    def _preflop_use_rank_stats_parent_ev(self) -> bool:
+        flag = os.environ.get("P2_PREFLOP_RANK_STATS_PARENT_EV", "1")
+        return flag.strip().lower() not in {"0", "false", "off", "no"}
+
+    def _preflop_use_compact_stats_src_weights(self) -> bool:
+        flag = os.environ.get("P2_PREFLOP_COMPACT_STATS_SRC_WEIGHTS", "0")
+        return flag.strip().lower() not in {"0", "false", "off", "no"}
+
+    def _preflop_use_compact_stats_unblocked(self) -> bool:
+        flag = os.environ.get("P2_PREFLOP_COMPACT_STATS_UNBLOCKED", "0")
+        return flag.strip().lower() not in {"0", "false", "off", "no"}
+
+    def _preflop_use_compact_stats_ev(self) -> bool:
+        flag = os.environ.get("P2_PREFLOP_COMPACT_STATS_EV", "0")
+        return flag.strip().lower() not in {"0", "false", "off", "no"}
+
+    def _ensure_preflop_regret_src_weights_buf(self, top: int) -> torch.Tensor:
+        shape = (top, PREFLOP_HANDS)
+        buf = getattr(self, "_preflop_regret_src_weights_buf", None)
+        if buf is None or buf.shape != shape or buf.device != self.device:
+            buf = self.policy_probs.new_empty(shape)
+            self._preflop_regret_src_weights_buf = buf
+        return buf
+
+    def _ensure_preflop_stats_buf(
+        self,
+        attr: str,
+        rows: int,
+        width: int = 53,
+    ) -> torch.Tensor:
+        shape = (rows, width)
+        buf = getattr(self, attr, None)
+        if (
+            buf is None
+            or buf.shape != shape
+            or buf.device != self.device
+            or buf.dtype != self.float_dtype
+        ):
+            buf = self.policy_probs.new_empty(shape)
+            setattr(self, attr, buf)
+        return buf
+
+    def _ensure_preflop_regret_src_stats_buf(self, rows: int) -> torch.Tensor:
+        return self._ensure_preflop_stats_buf("_preflop_regret_src_stats_buf", rows)
+
+    def _ensure_preflop_regret_src_rank_stats_buf(self, rows: int) -> torch.Tensor:
+        return self._ensure_preflop_stats_buf(
+            "_preflop_regret_src_rank_stats_buf",
+            rows,
+            14,
+        )
+
+    def _ensure_preflop_ev_stats_bufs(
+        self,
+        top: int,
+        num_children: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        actor_stats = self._ensure_preflop_stats_buf(
+            "_preflop_ev_actor_stats_buf",
+            top,
+        )
+        marginal_stats = self._ensure_preflop_stats_buf(
+            "_preflop_ev_marginal_stats_buf",
+            num_children,
+        )
+        return actor_stats, marginal_stats
+
+    def _ensure_preflop_ev_rank_stats_bufs(
+        self,
+        top: int,
+        num_children: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        actor_stats = self._ensure_preflop_stats_buf(
+            "_preflop_ev_actor_rank_stats_buf",
+            top,
+            14,
+        )
+        marginal_stats = self._ensure_preflop_stats_buf(
+            "_preflop_ev_marginal_rank_stats_buf",
+            num_children,
+            14,
+        )
+        return actor_stats, marginal_stats
+
+    def _preflop_allowed_float(self, top: int) -> torch.Tensor:
+        allowed = self.allowed_hands[:top]
+        key = (
+            int(getattr(self, "_subgame_generation", 0)),
+            int(allowed.data_ptr()),
+            int(top),
+            self.float_dtype,
+        )
+        buf = getattr(self, "_preflop_allowed_float_buf", None)
+        if (
+            buf is None
+            or getattr(self, "_preflop_allowed_float_key", None) != key
+            or buf.shape != (top, PREFLOP_HANDS)
+            or buf.device != self.device
+        ):
+            buf = allowed.to(dtype=self.float_dtype).contiguous()
+            self._preflop_allowed_float_buf = buf
+            self._preflop_allowed_float_key = key
+        return buf
+
+    def _preflop_player_ids(self) -> torch.Tensor:
+        player_ids = getattr(self, "_preflop_player_ids_buf", None)
+        if (
+            player_ids is None
+            or player_ids.numel() != self.num_players
+            or player_ids.device != self.device
+        ):
+            player_ids = torch.arange(self.num_players, device=self.device)
+            self._preflop_player_ids_buf = player_ids
+        return player_ids
+
+    def _preflop_regret_src_weights(
+        self,
+        beliefs: torch.Tensor,
+        top: int,
+        to_act_top: torch.Tensor,
+    ) -> torch.Tensor:
+        if beliefs.device.type == "cuda" and self._preflop_use_rank_stats_src_weights():
+            out = self._ensure_preflop_regret_src_weights_buf(top)
+            has_folded = (
+                self.env.has_folded[:top].contiguous()
+                if hasattr(self.env, "has_folded")
+                else None
+            )
+            fused_preflop169_src_weights_rank_stats_multiway_(
+                class_mass=beliefs[:top].contiguous(),
+                to_act=to_act_top,
+                allowed_weight=self._preflop_allowed_float(top),
+                out=out,
+                has_folded=has_folded,
+                stats_out=self._ensure_preflop_regret_src_rank_stats_buf(
+                    top * self.num_players
+                ),
+            )
+            return out
+
+        if (
+            beliefs.device.type == "cuda"
+            and self._preflop_use_compact_stats_src_weights()
+        ):
+            out = self._ensure_preflop_regret_src_weights_buf(top)
+            has_folded = (
+                self.env.has_folded[:top].contiguous()
+                if hasattr(self.env, "has_folded")
+                else None
+            )
+            fused_preflop169_src_weights_stats_multiway_(
+                class_mass=beliefs[:top].contiguous(),
+                to_act=to_act_top,
+                allowed_weight=self._preflop_allowed_float(top),
+                out=out,
+                has_folded=has_folded,
+                stats_out=self._ensure_preflop_regret_src_stats_buf(
+                    top * self.num_players
+                ),
+            )
+            return out
+
+        if beliefs.device.type == "cuda" and self._preflop_use_fused_src_weights(top):
+            out = self._ensure_preflop_regret_src_weights_buf(top)
+            projection = self._preflop_unblocked_projection_for(beliefs).contiguous()
+            has_folded = (
+                self.env.has_folded[:top].contiguous()
+                if hasattr(self.env, "has_folded")
+                else None
+            )
+            fused_preflop169_src_weights_multiway_(
+                class_mass=beliefs[:top].contiguous(),
+                projection=projection,
+                to_act=to_act_top,
+                allowed_mask=self.allowed_hands[:top].contiguous(),
+                out=out,
+                has_folded=has_folded,
+            )
+            return out
+
+        if (
+            beliefs.device.type == "cuda"
+            and self._preflop_use_compact_stats_unblocked()
+        ):
+            unblocked_reach = torch.empty_like(beliefs[:top])
+            flat_in = beliefs[:top].contiguous().view(top * self.num_players, -1)
+            flat_out = unblocked_reach.view(top * self.num_players, -1)
+            preflop169_unblocked_mass_triton_out_(
+                flat_in,
+                flat_out,
+                stats_out=self._ensure_preflop_regret_src_stats_buf(
+                    top * self.num_players
+                ),
+            )
+        else:
+            unblocked_reach = self._preflop_unblocked_mass(beliefs[:top]).contiguous()
+        if beliefs.device.type == "cuda" and self._preflop_use_fused_src_weight_tail():
+            out = self._ensure_preflop_regret_src_weights_buf(top)
+            has_folded = (
+                self.env.has_folded[:top].contiguous()
+                if hasattr(self.env, "has_folded")
+                else None
+            )
+            fused_preflop169_src_weights_from_unblocked_multiway_(
+                unblocked=unblocked_reach,
+                to_act=to_act_top,
+                allowed_weight=self._preflop_allowed_float(top),
+                out=out,
+                has_folded=has_folded,
+            )
+            return out
+
+        unblocked_reach.clamp_min_(1e-12)
+        player_ids = self._preflop_player_ids()
+        other_live = player_ids[None, :, None] != to_act_top[:, None, None]
+        if hasattr(self.env, "has_folded"):
+            other_live &= ~self.env.has_folded[:top, :, None]
+        src_weights = torch.where(
+            other_live,
+            unblocked_reach,
+            1.0,
+        ).prod(dim=1)
+        src_weights *= self._preflop_allowed_float(top)
+        return src_weights.contiguous()
 
     def initialize_subgame(
         self,
@@ -355,9 +638,13 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         assert child_count_top is not None
         assert to_act_top is not None
 
-        actor_beliefs, marginal_policy, denom_unblocked, numer_unblocked = (
-            self._ensure_preflop_fused_ev_buffers(top, parent_index_bottom.numel())
-        )
+        (
+            actor_beliefs,
+            marginal_policy,
+            denom_unblocked,
+            numer_unblocked,
+            marginal_action_policy,
+        ) = self._ensure_preflop_fused_ev_buffers(top, parent_index_bottom.numel())
         beliefs_c = beliefs.contiguous()
         policy_c = policy.contiguous()
         prev_actor_c = self.prev_actor.contiguous()
@@ -373,33 +660,151 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             max_children=self.num_actions,
             block_h=256,
         )
-        projection = self._preflop_unblocked_projection_for(beliefs_c).contiguous()
-        torch.mm(actor_beliefs, projection, out=denom_unblocked)
-        torch.mm(marginal_policy, projection, out=numer_unblocked)
-        marginal_action_policy = marginal_policy.sum(dim=-1).contiguous()
-
-        for depth in range(self.tree_depth - 1, -1, -1):
-            fused_preflop169_parent_sum_opp_(
-                values=values,
-                prev_actor=prev_actor_c,
-                policy=policy_c,
-                marginal_action_policy=marginal_action_policy,
-                numer_unblocked=numer_unblocked,
-                denom_unblocked=denom_unblocked,
-                child_offsets=self._child_offsets_by_depth[depth],
-                child_count=self._child_count_by_depth[depth],
-                parent_base=self.depth_offsets[depth],
-                child_base=bottom,
-                max_children=self.num_actions,
-                max_children_pow2=self._child_count_pow2_by_depth[depth],
-                leaf_values=leaf_values if use_leaf_source else None,
-                leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
-                has_folded=(
-                    self.env.has_folded.contiguous()
-                    if hasattr(self.env, "has_folded")
-                    else None
-                ),
+        if beliefs_c.device.type == "cuda" and self._preflop_use_rank_stats_ev():
+            actor_rank_stats, marginal_rank_stats = (
+                self._ensure_preflop_ev_rank_stats_bufs(
+                    top,
+                    parent_index_bottom.numel(),
+                )
             )
+            if self._preflop_use_rank_stats_parent_ev():
+                preflop169_unblocked_rank_stats_out_(actor_beliefs, actor_rank_stats)
+                preflop169_unblocked_rank_stats_out_(
+                    marginal_policy,
+                    marginal_rank_stats,
+                )
+                for depth in range(self.tree_depth - 1, -1, -1):
+                    fused_preflop169_parent_sum_opp_rank_stats_(
+                        values=values,
+                        prev_actor=prev_actor_c,
+                        policy=policy_c,
+                        actor_beliefs=actor_beliefs,
+                        marginal_policy=marginal_policy,
+                        actor_stats=actor_rank_stats,
+                        marginal_stats=marginal_rank_stats,
+                        child_offsets=self._child_offsets_by_depth[depth],
+                        child_count=self._child_count_by_depth[depth],
+                        parent_base=self.depth_offsets[depth],
+                        child_base=bottom,
+                        max_children=self.num_actions,
+                        max_children_pow2=self._child_count_pow2_by_depth[depth],
+                        leaf_values=leaf_values if use_leaf_source else None,
+                        leaf_mask=(
+                            self.leaf_mask.contiguous() if use_leaf_source else None
+                        ),
+                        has_folded=(
+                            self.env.has_folded.contiguous()
+                            if hasattr(self.env, "has_folded")
+                            else None
+                        ),
+                    )
+            else:
+                preflop169_unblocked_rank_mass_triton_out_(
+                    actor_beliefs,
+                    denom_unblocked,
+                    stats_out=actor_rank_stats,
+                )
+                preflop169_unblocked_rank_mass_triton_out_(
+                    marginal_policy,
+                    numer_unblocked,
+                    stats_out=marginal_rank_stats,
+                    row_sum=marginal_action_policy,
+                )
+                for depth in range(self.tree_depth - 1, -1, -1):
+                    fused_preflop169_parent_sum_opp_(
+                        values=values,
+                        prev_actor=prev_actor_c,
+                        policy=policy_c,
+                        marginal_action_policy=marginal_action_policy,
+                        numer_unblocked=numer_unblocked,
+                        denom_unblocked=denom_unblocked,
+                        child_offsets=self._child_offsets_by_depth[depth],
+                        child_count=self._child_count_by_depth[depth],
+                        parent_base=self.depth_offsets[depth],
+                        child_base=bottom,
+                        max_children=self.num_actions,
+                        max_children_pow2=self._child_count_pow2_by_depth[depth],
+                        leaf_values=leaf_values if use_leaf_source else None,
+                        leaf_mask=(
+                            self.leaf_mask.contiguous() if use_leaf_source else None
+                        ),
+                        has_folded=(
+                            self.env.has_folded.contiguous()
+                            if hasattr(self.env, "has_folded")
+                            else None
+                        ),
+                    )
+        elif self._preflop_use_compact_stats_ev():
+            actor_stats, marginal_stats = self._ensure_preflop_ev_stats_bufs(
+                top,
+                parent_index_bottom.numel(),
+            )
+            preflop169_unblocked_stats_out_(actor_beliefs, actor_stats)
+            preflop169_unblocked_stats_out_(marginal_policy, marginal_stats)
+            for depth in range(self.tree_depth - 1, -1, -1):
+                fused_preflop169_parent_sum_opp_stats_(
+                    values=values,
+                    prev_actor=prev_actor_c,
+                    policy=policy_c,
+                    actor_beliefs=actor_beliefs,
+                    marginal_policy=marginal_policy,
+                    actor_stats=actor_stats,
+                    marginal_stats=marginal_stats,
+                    child_offsets=self._child_offsets_by_depth[depth],
+                    child_count=self._child_count_by_depth[depth],
+                    parent_base=self.depth_offsets[depth],
+                    child_base=bottom,
+                    max_children=self.num_actions,
+                    max_children_pow2=self._child_count_pow2_by_depth[depth],
+                    leaf_values=leaf_values if use_leaf_source else None,
+                    leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
+                    has_folded=(
+                        self.env.has_folded.contiguous()
+                        if hasattr(self.env, "has_folded")
+                        else None
+                    ),
+                )
+        else:
+            projection = self._preflop_unblocked_projection_for(beliefs_c).contiguous()
+            if self._preflop_use_fused_projection():
+                fused_preflop169_project_rows_(
+                    actor_beliefs,
+                    projection,
+                    denom_unblocked,
+                )
+                fused_preflop169_project_rows_(
+                    marginal_policy,
+                    projection,
+                    numer_unblocked,
+                    row_sum=marginal_action_policy,
+                )
+            else:
+                torch.mm(actor_beliefs, projection, out=denom_unblocked)
+                torch.mm(marginal_policy, projection, out=numer_unblocked)
+                torch.sum(marginal_policy, dim=-1, out=marginal_action_policy)
+
+            for depth in range(self.tree_depth - 1, -1, -1):
+                fused_preflop169_parent_sum_opp_(
+                    values=values,
+                    prev_actor=prev_actor_c,
+                    policy=policy_c,
+                    marginal_action_policy=marginal_action_policy,
+                    numer_unblocked=numer_unblocked,
+                    denom_unblocked=denom_unblocked,
+                    child_offsets=self._child_offsets_by_depth[depth],
+                    child_count=self._child_count_by_depth[depth],
+                    parent_base=self.depth_offsets[depth],
+                    child_base=bottom,
+                    max_children=self.num_actions,
+                    max_children_pow2=self._child_count_pow2_by_depth[depth],
+                    leaf_values=leaf_values if use_leaf_source else None,
+                    leaf_mask=self.leaf_mask.contiguous() if use_leaf_source else None,
+                    has_folded=(
+                        self.env.has_folded.contiguous()
+                        if hasattr(self.env, "has_folded")
+                        else None
+                    ),
+                )
 
     def compute_instantaneous_regrets(
         self,
@@ -426,17 +831,11 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         assert to_act_top is not None
 
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
-        unblocked_reach = self._preflop_unblocked_mass(beliefs[:top])
-        player_ids = torch.arange(self.num_players, device=self.device)
-        other_live = player_ids[None, :, None] != to_act_top[:, None, None]
-        if hasattr(self.env, "has_folded"):
-            other_live &= ~self.env.has_folded[:top, :, None]
-        src_weights = torch.where(
-            other_live,
-            unblocked_reach.clamp_min(1e-12),
-            torch.ones_like(unblocked_reach),
-        ).prod(dim=1)
-        src_weights *= self.allowed_hands[:top].to(dtype=self.float_dtype)
+        src_weights = self._preflop_regret_src_weights(
+            beliefs,
+            top,
+            to_act_top,
+        )
 
         regrets = torch.zeros_like(self.policy_probs)
         fused_regret_tail_multiway_(
@@ -833,17 +1232,11 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         assert to_act_top is not None
 
         beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
-        unblocked_reach = self._preflop_unblocked_mass(beliefs[:top])
-        player_ids = torch.arange(self.num_players, device=self.device)
-        other_live = player_ids[None, :, None] != to_act_top[:, None, None]
-        if hasattr(self.env, "has_folded"):
-            other_live &= ~self.env.has_folded[:top, :, None]
-        src_weights = torch.where(
-            other_live,
-            unblocked_reach.clamp_min(1e-12),
-            torch.ones_like(unblocked_reach),
-        ).prod(dim=1)
-        src_weights *= self.allowed_hands[:top].to(dtype=self.float_dtype)
+        src_weights = self._preflop_regret_src_weights(
+            beliefs,
+            top,
+            to_act_top,
+        )
 
         positive_regrets_out = self._ensure_positive_regrets_buf()
         last_regrets = (

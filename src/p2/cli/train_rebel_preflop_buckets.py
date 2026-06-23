@@ -70,6 +70,7 @@ def _execution_config_from_config(cfg: Config) -> PreflopBucketExecutionConfig:
         allow_partial=preflop.allow_partial,
         overwrite=preflop.overwrite,
         progress_roots=preflop.progress_roots,
+        snapshot_interval_steps=preflop.snapshot_interval_steps,
         use_wandb=cfg.use_wandb,
         wandb_project=cfg.wandb_project,
         wandb_name=cfg.wandb_name,
@@ -77,6 +78,12 @@ def _execution_config_from_config(cfg: Config) -> PreflopBucketExecutionConfig:
         wandb_tags=cfg.wandb_tags,
         student_init=preflop.student_init,
         distill_batch_size=preflop.distill_batch_size,
+        distill_buckets=(
+            None
+            if preflop.distill_buckets is None
+            else tuple(preflop.distill_buckets)
+        ),
+        distill_train_value=preflop.distill_train_value,
         **checkpoint_args,
     )
 
@@ -99,9 +106,24 @@ def train_rebel_preflop_buckets(cfg: Config) -> None:
     if execution.command == "presolve-values":
         preflop_bi.run_presolve_values(execution, base_template=cfg)
         return
+    bucket_to_key = {
+        "actions_12_15": "checkpoint_12_15",
+        "actions_8_11": "checkpoint_8_11",
+        "actions_4_7": "checkpoint_4_7",
+        "actions_0_3": "checkpoint_0_3",
+    }
+    distill_buckets = cfg.preflop_buckets.distill_buckets
+    required_buckets = (
+        tuple(bucket_to_key) if distill_buckets is None else tuple(distill_buckets)
+    )
+    unknown = sorted(set(required_buckets) - set(bucket_to_key))
+    if unknown:
+        raise ValueError(f"unknown preflop distill bucket(s): {', '.join(unknown)}")
+    checkpoint_args = _distill_checkpoint_args(cfg.preflop_buckets)
     missing = [
-        key for key, value in _distill_checkpoint_args(cfg.preflop_buckets).items()
-        if value is None
+        bucket_to_key[bucket]
+        for bucket in required_buckets
+        if checkpoint_args[bucket_to_key[bucket]] is None
     ]
     if missing:
         raise ValueError(
