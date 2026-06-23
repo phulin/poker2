@@ -110,7 +110,7 @@ def test_muon_optimizer_uses_separate_adamw_lr_for_all_adamw_params():
     }
 
 
-def test_muon_optimizer_uses_separate_policy_head_lr():
+def test_muon_optimizer_includes_policy_head_matrices_in_main_group():
     if not hasattr(torch.optim, "Muon"):
         pytest.skip("torch.optim.Muon is not available")
 
@@ -126,28 +126,19 @@ def test_muon_optimizer_uses_separate_policy_head_lr():
     cfg = TrainingConfig(
         optimizer="muon",
         learning_rate=1e-3,
-        policy_head_muon_learning_rate=0.05,
         weight_decay=0.01,
     )
 
     optimizer = build_optimizer(model, cfg, torch.device("cpu"))
 
     assert isinstance(optimizer, SplitOptimizer)
-    assert [name for name, _ in optimizer.optimizers] == [
-        "muon",
-        "policy_head_muon",
-        "adamw",
-    ]
+    assert [name for name, _ in optimizer.optimizers] == ["muon", "adamw"]
     assert set(optimizer.optimizers[0][1].param_groups[0]["params"]) == {
         model.trunk.weight,
-        model.value_head.weight,
-    }
-    assert set(optimizer.optimizers[1][1].param_groups[0]["params"]) == {
         model.policy_tower.weight,
         model.policy_head[0].weight,
+        model.value_head.weight,
     }
-    assert optimizer.optimizers[1][1].param_groups[0]["lr"] == 0.05
-    assert optimizer.optimizers[1][1].param_groups[0]["lr_role"] == "policy_head_muon"
 
 
 def test_normuon_optimizer_splits_matrix_params_from_other_params():
@@ -212,7 +203,7 @@ def test_adamw_excludes_norm_params_from_weight_decay():
     }
 
 
-def test_cfr_schedule_scales_policy_head_muon_lr():
+def test_cfr_schedule_scales_muon_and_adamw_lrs():
     trainer = RebelCFRTrainer.__new__(RebelCFRTrainer)
     trainer.cfg = Config()
     trainer.cfg.num_steps = 100
@@ -220,7 +211,6 @@ def test_cfr_schedule_scales_policy_head_muon_lr():
     trainer.cfg.train.learning_rate_final = 1e-4
     trainer.cfg.train.lr_schedule = LrSchedule.linear
     trainer.cfg.train.warmup_steps = 0
-    trainer.cfg.train.policy_head_muon_learning_rate = 0.05
     trainer.cfg.train.adamw_learning_rate = 2e-4
     trainer.cfg.search.iterations = 100
     trainer.cfg.search.iterations_final = None
@@ -228,7 +218,6 @@ def test_cfr_schedule_scales_policy_head_muon_lr():
     trainer.optimizer = type("_Opt", (), {})()
     trainer.optimizer.param_groups = [
         {"lr": 1e-3},
-        {"lr": 0.05, "lr_role": "policy_head_muon"},
         {"lr": 2e-4, "lr_role": "adamw"},
     ]
     trainer.cfr_evaluator = type("_Evaluator", (), {})()
@@ -236,8 +225,7 @@ def test_cfr_schedule_scales_policy_head_muon_lr():
     trainer._apply_schedules(50)
 
     assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(5.5e-4)
-    assert trainer.optimizer.param_groups[1]["lr"] == pytest.approx(0.0275)
-    assert trainer.optimizer.param_groups[2]["lr"] == pytest.approx(1.1e-4)
+    assert trainer.optimizer.param_groups[1]["lr"] == pytest.approx(1.1e-4)
 
 
 def test_cfr_train_step_logs_schedule_and_cfr_iterations():

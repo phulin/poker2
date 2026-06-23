@@ -99,7 +99,6 @@ class RebelTrainingConfig:
     normuon_beta1: float
     normuon_beta2: float
     normuon_eps: float
-    policy_head_muon_learning_rate: float
     adamw_learning_rate: float | None
     stratify_streets: list[StratifyConfig] = field(default_factory=list)
     model_ema: float | None = None
@@ -154,7 +153,6 @@ class RebelTrainingConfig:
             normuon_beta1=cfg.normuon_beta1,
             normuon_beta2=cfg.normuon_beta2,
             normuon_eps=cfg.normuon_eps,
-            policy_head_muon_learning_rate=cfg.policy_head_muon_learning_rate,
             adamw_learning_rate=cfg.adamw_learning_rate,
             stratify_streets=copy.deepcopy(cfg.stratify_streets),
             model_ema=cfg.model_ema,
@@ -209,7 +207,6 @@ class RebelTrainingConfig:
         cfg.normuon_beta1 = self.normuon_beta1
         cfg.normuon_beta2 = self.normuon_beta2
         cfg.normuon_eps = self.normuon_eps
-        cfg.policy_head_muon_learning_rate = self.policy_head_muon_learning_rate
         cfg.adamw_learning_rate = self.adamw_learning_rate
         cfg.stratify_streets = copy.deepcopy(self.stratify_streets)
         cfg.model_ema = self.model_ema

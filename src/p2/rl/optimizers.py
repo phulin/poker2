@@ -57,10 +57,9 @@ class SplitOptimizer:
             if name not in saved_optimizers:
                 raise ValueError(f"Missing optimizer state for {name!r}")
             optimizer.load_state_dict(saved_optimizers[name])
-            if name in {"adamw", "policy_head_muon"}:
-                lr_role = "adamw" if name == "adamw" else name
+            if name == "adamw":
                 for param_group in optimizer.param_groups:
-                    param_group["lr_role"] = lr_role
+                    param_group["lr_role"] = "adamw"
 
 
 TrainOptimizer = torch.optim.Optimizer | SplitOptimizer
@@ -306,15 +305,6 @@ def _adamw(
     return optimizer
 
 
-def _is_policy_head_param(name: str) -> bool:
-    return (
-        name.startswith("policy_")
-        or name.startswith("policy_head.")
-        or name.startswith("policy_model.policy_")
-        or name.startswith("policy_model.policy_head.")
-    )
-
-
 def _no_weight_decay_param_ids(model: nn.Module) -> set[int]:
     """Parameters that should not be pulled toward smaller logit/activation scale."""
     no_decay: set[int] = set()
@@ -407,19 +397,14 @@ def build_optimizer(
         )
 
     matrix_params: list[nn.Parameter] = []
-    policy_head_matrix_params: list[nn.Parameter] = []
     other_params: list[nn.Parameter] = []
     matrix_param_ids: set[int] = set()
-    for module_prefix, module in model.named_modules():
+    for module in model.modules():
         for name, param in module.named_parameters(recurse=False):
             if not param.requires_grad:
                 continue
             if isinstance(module, nn.Linear) and name == "weight" and param.ndim == 2:
-                full_name = f"{module_prefix}.{name}" if module_prefix else name
-                if _is_policy_head_param(full_name):
-                    policy_head_matrix_params.append(param)
-                else:
-                    matrix_params.append(param)
+                matrix_params.append(param)
                 matrix_param_ids.add(id(param))
 
     for param in model.parameters():
@@ -440,28 +425,8 @@ def build_optimizer(
                 train_cfg,
                 train_cfg.learning_rate,
                 compile_update=False,
-            )
+        )
         optimizers.append((optimizer_name, matrix_optimizer))
-    if policy_head_matrix_params:
-        policy_head_muon_lr = float(train_cfg.policy_head_muon_learning_rate)
-        if policy_head_muon_lr <= 0.0:
-            raise ValueError("train.policy_head_muon_learning_rate must be positive")
-        if optimizer_name == "muon":
-            policy_head_optimizer = _muon(
-                policy_head_matrix_params,
-                train_cfg,
-                policy_head_muon_lr,
-            )
-        else:
-            policy_head_optimizer = _normuon(
-                policy_head_matrix_params,
-                train_cfg,
-                policy_head_muon_lr,
-                compile_update=False,
-            )
-        for param_group in policy_head_optimizer.param_groups:
-            param_group["lr_role"] = "policy_head_muon"
-        optimizers.append(("policy_head_muon", policy_head_optimizer))
     if other_params:
         optimizers.append(
             (

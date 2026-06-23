@@ -949,9 +949,6 @@ class RebelCFRTrainer:
             wsd_decay_fraction=self.cfg.train.lr_wsd_decay_fraction,
         )
         lr_scale = lr_now / lr_start if lr_start > 0.0 else 1.0
-        policy_head_muon_lr = (
-            float(self.cfg.train.policy_head_muon_learning_rate) * lr_scale
-        )
         adamw_lr_start = (
             lr_start
             if self.cfg.train.adamw_learning_rate is None
@@ -961,9 +958,7 @@ class RebelCFRTrainer:
 
         # Update optimizer learning rate
         for param_group in self.optimizer.param_groups:
-            if param_group.get("lr_role") == "policy_head_muon":
-                param_group["lr"] = policy_head_muon_lr
-            elif param_group.get("lr_role") == "adamw":
+            if param_group.get("lr_role") == "adamw":
                 param_group["lr"] = adamw_lr
             else:
                 param_group["lr"] = lr_now
@@ -2845,13 +2840,6 @@ class RebelCFRTrainer:
         update_info = self._update_model(step)
         update_info["step"] = step_public
         update_info["learning_rate"] = self.optimizer.param_groups[0]["lr"]
-        policy_head_lrs = [
-            group["lr"]
-            for group in self.optimizer.param_groups
-            if group.get("lr_role") == "policy_head_muon"
-        ]
-        if policy_head_lrs:
-            update_info["policy_head_muon_learning_rate"] = policy_head_lrs[0]
         adamw_lrs = [
             group["lr"]
             for group in self.optimizer.param_groups

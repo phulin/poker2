@@ -18,7 +18,6 @@ trials:
       train.learning_rate: 0.016
       train.learning_rate_final: 0.0016
       train.adamw_learning_rate: 0.0032
-      train.policy_head_muon_learning_rate: 0.032
       train.lr_schedule: [cosine, linear]
 
   - name: standard_deep_value_lr0006
@@ -34,7 +33,6 @@ trials:
       train.learning_rate: 0.006
       train.learning_rate_final: 0.0006
       train.adamw_learning_rate: 0.0012
-      train.policy_head_muon_learning_rate: 0.012
       train.lr_schedule: [cosine, wsd]
 
   - name: standard_base_lr0016
@@ -50,7 +48,6 @@ trials:
       train.learning_rate: 0.016
       train.learning_rate_final: 0.0016
       train.adamw_learning_rate: 0.0032
-      train.policy_head_muon_learning_rate: 0.032
       train.lr_schedule: [linear, wsd]
 
   - name: standard_compact_lr0016
@@ -66,7 +63,6 @@ trials:
       train.learning_rate: 0.016
       train.learning_rate_final: 0.0016
       train.adamw_learning_rate: 0.0032
-      train.policy_head_muon_learning_rate: 0.032
       train.lr_schedule: [cosine, wsd]
 
   - name: standard_compact_lr001
@@ -82,7 +78,6 @@ trials:
       train.learning_rate: 0.01
       train.learning_rate_final: 0.001
       train.adamw_learning_rate: 0.002
-      train.policy_head_muon_learning_rate: 0.02
       train.lr_schedule: cosine
 
   - name: standard_range512_lr0006_wsd
@@ -98,7 +93,6 @@ trials:
       train.learning_rate: 0.006
       train.learning_rate_final: 0.0006
       train.adamw_learning_rate: 0.0012
-      train.policy_head_muon_learning_rate: 0.012
       train.lr_schedule: wsd
 
   - name: standard_range512_lr001_cosine
@@ -114,7 +108,6 @@ trials:
       train.learning_rate: 0.01
       train.learning_rate_final: 0.001
       train.adamw_learning_rate: 0.002
-      train.policy_head_muon_learning_rate: 0.02
       train.lr_schedule: cosine
 
   - name: standard_wide_lr0006_cosine
@@ -130,7 +123,6 @@ trials:
       train.learning_rate: 0.006
       train.learning_rate_final: 0.0006
       train.adamw_learning_rate: 0.0012
-      train.policy_head_muon_learning_rate: 0.012
       train.lr_schedule: cosine
 
   - name: small_tiny_lr0016_cosine
@@ -146,7 +138,6 @@ trials:
       train.learning_rate: 0.016
       train.learning_rate_final: 0.0016
       train.adamw_learning_rate: 0.0032
-      train.policy_head_muon_learning_rate: 0.032
       train.lr_schedule: cosine
 
   - name: small_lr0006_wsd
@@ -162,7 +153,6 @@ trials:
       train.learning_rate: 0.006
       train.learning_rate_final: 0.0006
       train.adamw_learning_rate: 0.0012
-      train.policy_head_muon_learning_rate: 0.012
       train.lr_schedule: wsd
 
   - name: small_lr0016_cosine
@@ -178,7 +168,6 @@ trials:
       train.learning_rate: 0.016
       train.learning_rate_final: 0.0016
       train.adamw_learning_rate: 0.0032
-      train.policy_head_muon_learning_rate: 0.032
       train.lr_schedule: cosine
 
   - name: compact_deep_value_lr0016_cosine
@@ -194,7 +183,6 @@ trials:
       train.learning_rate: 0.016
       train.learning_rate_final: 0.0016
       train.adamw_learning_rate: 0.0032
-      train.policy_head_muon_learning_rate: 0.032
       train.lr_schedule: cosine
 
   - name: compact_deep_value_lr002_cosine
@@ -210,7 +198,6 @@ trials:
       train.learning_rate: 0.02
       train.learning_rate_final: 0.002
       train.adamw_learning_rate: 0.004
-      train.policy_head_muon_learning_rate: 0.04
       train.lr_schedule: cosine
 
   - name: compact_deep_value_lr003_cosine
@@ -226,7 +213,6 @@ trials:
       train.learning_rate: 0.03
       train.learning_rate_final: 0.003
       train.adamw_learning_rate: 0.006
-      train.policy_head_muon_learning_rate: 0.06
       train.lr_schedule: cosine
 
   - name: compact_deep_value_no_trunk_lr003_cosine
@@ -242,7 +228,6 @@ trials:
       train.learning_rate: 0.03
       train.learning_rate_final: 0.003
       train.adamw_learning_rate: 0.006
-      train.policy_head_muon_learning_rate: 0.06
       train.lr_schedule: cosine
 
   - name: compact_deep_value_no_trunk_lr004_cosine
@@ -258,7 +243,6 @@ trials:
       train.learning_rate: 0.04
       train.learning_rate_final: 0.004
       train.adamw_learning_rate: 0.008
-      train.policy_head_muon_learning_rate: 0.08
       train.lr_schedule: cosine
 
   - name: compact_deep_value_no_trunk_lr004_phm002_adamw_sweep
@@ -274,7 +258,6 @@ trials:
       train.learning_rate: 0.04
       train.learning_rate_final: 0.004
       train.adamw_learning_rate: [0.004, 0.016]
-      train.policy_head_muon_learning_rate: 0.02
       train.lr_schedule: cosine
 
   - name: compact_deep_value_no_trunk_lr004_phm002_adamw0025
@@ -290,7 +273,6 @@ trials:
       train.learning_rate: 0.04
       train.learning_rate_final: 0.004
       train.adamw_learning_rate: 0.025
-      train.policy_head_muon_learning_rate: 0.02
       train.lr_schedule: cosine
 
   - name: compact_deep_value_no_trunk_lr004_phm002_adamw004
@@ -306,7 +288,6 @@ trials:
       train.learning_rate: 0.04
       train.learning_rate_final: 0.004
       train.adamw_learning_rate: 0.04
-      train.policy_head_muon_learning_rate: 0.02
       train.lr_schedule: cosine
 
   - name: compact_deep_value_no_trunk_lr004_final002_phm002_adamw004
@@ -322,5 +303,4 @@ trials:
       train.learning_rate: 0.04
       train.learning_rate_final: 0.002
       train.adamw_learning_rate: 0.04
-      train.policy_head_muon_learning_rate: 0.02
       train.lr_schedule: cosine

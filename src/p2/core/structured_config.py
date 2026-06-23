@@ -207,7 +207,6 @@ class TrainingConfig:
     normuon_beta1: float = 0.95
     normuon_beta2: float = 0.95
     normuon_eps: float = 1e-8
-    policy_head_muon_learning_rate: float = 0.05
     adamw_learning_rate: float | None = None
 
     use_kv_cache: bool = False
