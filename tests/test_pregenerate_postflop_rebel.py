@@ -101,7 +101,7 @@ class _FakeTrainer:
         self.data_generator = _FakeGenerator()
         self.synced = False
 
-    def _sync_inference_model(self) -> None:
+    def sync_inference_model(self) -> None:
         self.synced = True
 
 

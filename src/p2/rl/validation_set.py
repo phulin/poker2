@@ -72,7 +72,7 @@ class RebelValueValidationSetEvaluator:
                 device=self.trainer.device,
                 float_dtype=self.trainer.float_dtype,
             )
-            with self.trainer._model_autocast():
+            with self.trainer.model_autocast():
                 output = self.trainer.inference_model.repeat(
                     batch.features,
                     count=self.cfg.model.num_supervisions,

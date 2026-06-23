@@ -3,6 +3,7 @@ from __future__ import annotations
 import glob
 import os
 import time
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -166,13 +167,14 @@ def run_training_loop(
     start_step: int,
     stop_step: int,
     stage_tag: str | None = None,
+    step_body: Callable[[int], dict[str, Any]] | None = None,
     checkpoint_metadata: dict[str, object] | None = None,
+    value_only: bool = False,
     print_preflop_analyzer: bool = True,
 ) -> int:
-    del stage_tag
-
+    stage_suffix = f" for {stage_tag}" if stage_tag else ""
     print(
-        f"Starting ReBeL CFR training for {stop_step - start_step} steps "
+        f"Starting ReBeL CFR training{stage_suffix} for {stop_step - start_step} steps "
         f"(total target: {stop_step})"
     )
     if cfg.use_wandb:
@@ -206,7 +208,7 @@ def run_training_loop(
 
     for step in range(start_step, stop_step):
         step_start = time.time()
-        metrics = trainer.train_step(step)
+        metrics = step_body(step) if step_body is not None else trainer.train_step(step)
         step_elapsed = time.time() - step_start
         total_elapsed = time.time() - training_start
 
@@ -233,13 +235,14 @@ def run_training_loop(
             metrics["step_time_s"] = step_elapsed
             run.log(metrics, step=metrics["step"])
 
-        if (step + 1) % cfg.checkpoint_interval == 0:
+        if cfg.checkpoint_interval > 0 and (step + 1) % cfg.checkpoint_interval == 0:
             save_rebel_checkpoint_pair(
                 trainer,
                 cfg,
                 run,
                 step=step,
                 checkpoint_metadata=checkpoint_metadata,
+                value_only=value_only,
             )
             if print_preflop_analyzer:
                 print_preflop_range_grid(trainer, step, rebel=True)
@@ -262,6 +265,7 @@ def run_training_loop(
         cfg,
         step=stop_step,
         checkpoint_metadata=checkpoint_metadata,
+        value_only=value_only,
     )
     total_elapsed = time.time() - training_start
     print(

@@ -22,13 +22,9 @@ from p2.core.structured_config import (
     StreetValueHeads,
 )
 from p2.models.mlp.better_ffn import BetterSplitFFN
+from p2.rl.checkpoint_io import CheckpointIO
 from p2.rl.cfr_trainer import RebelCFRTrainer
-from p2.rl.rebel_loop import (
-    print_rebel_training_stats,
-    run_training_loop,
-    save_rebel_checkpoint_pair,
-    save_rebel_final_checkpoint,
-)
+from p2.rl.rebel_loop import run_training_loop
 from p2.runtime.training_run import (
     device_from_config,
     log_model_parameter_summary,
@@ -135,11 +131,7 @@ def _checkpoint_metadata(
 
 
 def _read_checkpoint_metadata(path: str, device: torch.device) -> dict[str, Any]:
-    if not path or not os.path.exists(path):
-        return {}
-    checkpoint = torch.load(path, weights_only=False, map_location=device)
-    metadata = checkpoint.get("metadata", {})
-    return dict(metadata) if type(metadata) is dict else {}
+    return CheckpointIO.metadata(path, map_location=device)
 
 
 def _metadata_string(metadata: dict[str, Any], key: str) -> str | None:
@@ -302,7 +294,7 @@ def _initialize_policy_from_checkpoint(
     if type(target_model) is not BetterSplitFFN:
         raise TypeError("model.name=BetterFFN must construct BetterSplitFFN")
     target_policy = _policy_model(target_model)
-    source_model = trainer._load_closing_leaf_model(checkpoint_path)
+    source_model = trainer.load_closing_leaf_model(checkpoint_path)
     if type(source_model) is not BetterSplitFFN:
         raise ValueError(
             f"Curriculum train substep {substep_name} cannot initialize policy "
@@ -312,7 +304,7 @@ def _initialize_policy_from_checkpoint(
     target_policy.load_state_dict(
         source_policy.state_dict(), strict=trainer.cfg.strict_model_loading
     )
-    trainer._sync_inference_model()
+    trainer.sync_inference_model()
     print(f"Initialized policy for train substep {substep_name} from {checkpoint_path}")
 
 
@@ -362,10 +354,10 @@ def _initialize_value_from_checkpoint(
     substep_name: str,
 ) -> dict[str, int]:
     target_value = _value_model(trainer.model)
-    source_model = trainer._load_closing_leaf_model(checkpoint_path)
+    source_model = trainer.load_closing_leaf_model(checkpoint_path)
     source_value = _value_model(source_model)
     loaded = _copy_value_state_from_source(target_value, source_value)
-    trainer._sync_inference_model()
+    trainer.sync_inference_model()
     print(
         f"Initialized value model for train substep {substep_name} from "
         f"{checkpoint_path} "
@@ -514,7 +506,7 @@ def _run_distill_substep(
             start_step = trainer.load_checkpoint(resume_from) + 1
             print(f"Resumed {substep_name} at step {start_step}")
 
-        source_model = trainer._load_closing_leaf_model(source_checkpoint)
+        source_model = trainer.load_closing_leaf_model(source_checkpoint)
         value_model = _value_model(trainer.model)
         chance_helper = ChanceNodeHelper(
             device=device,
@@ -525,9 +517,7 @@ def _run_distill_substep(
             flop_sample_size=substep.flop_sample_size,
         )
 
-        loop_start = time.time()
-        for step in range(start_step, stage_cfg.num_steps):
-            step_start = time.time()
+        def distill_step(step: int) -> dict[str, Any]:
             sample = sample_end_of_street_chance_roots(
                 trainer.env,
                 batch_size=stage_cfg.train.batch_size,
@@ -563,37 +553,22 @@ def _run_distill_substep(
                         chance=chance,
                     )
                 )
-            step_elapsed = time.time() - step_start
-            total_elapsed = time.time() - loop_start
-            print_rebel_training_stats(
-                metrics, step, stage_cfg.num_steps, step_elapsed, total_elapsed
-            )
+            return metrics
 
-            if stage_cfg.use_wandb:
-                metrics["step_time_s"] = step_elapsed
-                run.log(metrics, step=metrics["step"])
-
-            if (
-                stage_cfg.checkpoint_interval > 0
-                and (step + 1) % stage_cfg.checkpoint_interval == 0
-            ):
-                save_rebel_checkpoint_pair(
-                    trainer,
-                    stage_cfg,
-                    run,
-                    step=step,
-                    checkpoint_metadata=metadata,
-                    value_only=True,
-                )
-
-        final_path = save_rebel_final_checkpoint(
+        run_training_loop(
             trainer,
             stage_cfg,
-            step=stage_cfg.num_steps,
+            run,
+            start_step=start_step,
+            stop_step=stage_cfg.num_steps,
+            stage_tag=substep_name,
+            step_body=distill_step,
             checkpoint_metadata=metadata,
             value_only=True,
+            print_preflop_analyzer=False,
         )
 
+    final_path = os.path.join(stage_cfg.checkpoint_dir, "rebel_final.pt")
     promoted_path = _promote_checkpoint(cfg, substep, final_path)
     print(f"Promoted distill substep {substep_name}: {promoted_path}")
     return promoted_path
@@ -655,7 +630,7 @@ def _validate_preflop_value_169(
             float_dtype=trainer.float_dtype,
             generator=trainer.rng,
         ).to(trainer.device)
-        with trainer._model_autocast():
+        with trainer.model_autocast():
             output = trainer.model(batch.features, include_policy=False)
         loss_dict = trainer.loss_fn._call_forward_value(output, batch)
         weighted_loss += float(loss_dict["value_loss"].detach().item()) * current

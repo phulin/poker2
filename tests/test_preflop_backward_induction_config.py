@@ -253,10 +253,10 @@ class _FakeTrainer:
         self.synced = False
         self.target_step = None
 
-    def _sync_inference_model(self) -> None:
+    def sync_inference_model(self) -> None:
         self.synced = True
 
-    def _sync_cfr_target_model(self, step: int) -> None:
+    def sync_cfr_target_model(self, step: int) -> None:
         self.target_step = step
 
 

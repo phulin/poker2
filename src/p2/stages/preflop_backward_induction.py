@@ -23,7 +23,7 @@ from p2.config.rebel_schema import RebelExperimentConfig
 from p2.core.structured_config import Config
 from p2.env.card_utils import PREFLOP_HANDS, preflop_class_multiplicity_tensor
 from p2.env.pbs_env import PBSEnv
-from p2.models.mlp.better_ffn import BetterSplitFFN
+from p2.rl.checkpoint_io import CheckpointIO
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
 from p2.search.cfr_evaluator import CFREvaluator
@@ -137,35 +137,7 @@ def _load_model_weights(
     *,
     strict: bool | None = None,
 ) -> int:
-    checkpoint = torch.load(
-        checkpoint_path, map_location=trainer.device, weights_only=False
-    )
-    model_state = checkpoint["model"]
-    save_dtype = checkpoint.get("save_dtype")
-    if save_dtype is not None and save_dtype != str(trainer.float_dtype):
-        model_state = {
-            key: value.to(trainer.float_dtype)
-            if value.dtype.is_floating_point
-            else value
-            for key, value in model_state.items()
-        }
-    if checkpoint.get("model_component") == "value_model":
-        if type(trainer.model) is not BetterSplitFFN:
-            raise TypeError("value-only checkpoints require a BetterSplitFFN model")
-        value_model = trainer.model.value_model
-        value_model.load_state_dict(
-            model_state,
-            strict=trainer.cfg.strict_model_loading if strict is None else strict,
-        )
-    else:
-        trainer.model.load_state_dict(
-            model_state,
-            strict=trainer.cfg.strict_model_loading if strict is None else strict,
-        )
-    trainer._sync_inference_model()
-    trainer._sync_cfr_target_model(int(checkpoint.get("step", 0)))
-    trainer.model.train()
-    return int(checkpoint.get("step", -1))
+    return CheckpointIO.load_model_weights(trainer, checkpoint_path, strict=strict)
 
 
 def _make_env_from_manifest(
@@ -436,11 +408,13 @@ def _policy_update(
     *,
     step: int,
 ) -> dict[str, float]:
-    trainer._apply_schedules(step)
-    trainer.model.train()
-    stats = trainer._supervise_policy_only(batch.to(trainer.device))
-    trainer._sync_inference_model()
-    trainer._sync_cfr_target_model(step + 1)
+    stats = trainer.supervise_policy_batch(
+        batch,
+        step=step,
+        apply_schedules=True,
+        sync_inference_model=True,
+        sync_cfr_target_model=True,
+    )
     return _float_metrics(stats)
 
 
@@ -682,7 +656,7 @@ def _evaluate_validation_split(
                 batch, start, min(start + eval_batch_size, len(batch))
             ).to(trainer.device)
             rows = len(part)
-            with trainer._model_autocast():
+            with trainer.model_autocast():
                 output = trainer.model(
                     part.features,
                     include_policy=not include_value,

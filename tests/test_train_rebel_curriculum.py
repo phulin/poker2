@@ -95,7 +95,7 @@ class _FakeSplitTrainer:
         self.cfg.strict_model_loading = True
         self.synced = False
 
-    def _load_closing_leaf_model(self, checkpoint_path: str) -> torch.nn.Module:
+    def load_closing_leaf_model(self, checkpoint_path: str) -> torch.nn.Module:
         del checkpoint_path
         source = _fake_split_model()
         with torch.no_grad():
@@ -103,7 +103,7 @@ class _FakeSplitTrainer:
             source.policy_model.bias.fill_(4.0)
         return source
 
-    def _sync_inference_model(self) -> None:
+    def sync_inference_model(self) -> None:
         self.synced = True
 
 
@@ -288,7 +288,7 @@ class _FakeValueInitTrainer:
         self.model = _fake_value_init_model(_FakeTargetValueModel())
         self.synced = False
 
-    def _load_closing_leaf_model(self, checkpoint_path: str) -> torch.nn.Module:
+    def load_closing_leaf_model(self, checkpoint_path: str) -> torch.nn.Module:
         assert checkpoint_path == "outputs/E_turn.pt"
         source = _fake_value_init_model(_FakeSourceValueModel())
         with torch.no_grad():
@@ -298,7 +298,7 @@ class _FakeValueInitTrainer:
             source.value_model.pre_value_head.bias.fill_(4.0)
         return source
 
-    def _sync_inference_model(self) -> None:
+    def sync_inference_model(self) -> None:
         self.synced = True
 
 
