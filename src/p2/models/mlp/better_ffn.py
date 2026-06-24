@@ -1440,6 +1440,62 @@ class _PreflopTokenEncoderBlock(nn.Module):
         return x + self.ffn(x) / math.sqrt(2.0)
 
 
+class _PreflopRangeAttentionPool(nn.Module):
+    """Learned attention summaries over one player's compact preflop range."""
+
+    def __init__(
+        self,
+        hand_dim: int,
+        player_context_dim: int,
+        hidden_dim: int,
+        slots: int,
+    ) -> None:
+        super().__init__()
+        if slots <= 0:
+            raise ValueError("slots must be positive")
+        self.hand_dim = int(hand_dim)
+        self.slots = int(slots)
+        self.slot_queries = nn.Parameter(torch.empty(slots, hand_dim))
+        self.log_key_proj = nn.Linear(1, hand_dim, bias=False)
+        self.log_value_proj = nn.Linear(1, hand_dim, bias=False)
+        self.context_query_proj = nn.Linear(player_context_dim, hand_dim, bias=False)
+        self.context_key_proj = nn.Linear(player_context_dim, hand_dim, bias=False)
+        self.context_value_proj = nn.Linear(player_context_dim, hand_dim, bias=False)
+        self.query_norm = nn.RMSNorm(hand_dim, eps=1e-5)
+        self.key_norm = nn.RMSNorm(hand_dim, eps=1e-5)
+        self.value_norm = nn.RMSNorm(hand_dim, eps=1e-5)
+        self.output_proj = nn.Linear(slots * hand_dim, hidden_dim, bias=False)
+        nn.init.normal_(self.slot_queries, mean=0.0, std=0.02)
+
+    def forward(
+        self,
+        player_beliefs: torch.Tensor,
+        hand_emb: torch.Tensor,
+        player_context: torch.Tensor,
+    ) -> torch.Tensor:
+        log_beliefs = player_beliefs.clamp_min(1.0e-8).log()
+        log_features = log_beliefs[..., None]
+        hand_tokens = hand_emb[None, None, :, :]
+        context_query = self.context_query_proj(player_context)[:, :, None, :]
+        context_key = self.context_key_proj(player_context)[:, :, None, :]
+        context_value = self.context_value_proj(player_context)[:, :, None, :]
+        queries = self.query_norm(
+            self.slot_queries[None, None, :, :] + context_query
+        )
+        keys = self.key_norm(
+            hand_tokens + self.log_key_proj(log_features) + context_key
+        )
+        values = self.value_norm(
+            hand_tokens + self.log_value_proj(log_features) + context_value
+        )
+        scores = torch.einsum("bpsd,bphd->bpsh", queries, keys)
+        scores = scores / math.sqrt(float(self.hand_dim))
+        scores = scores + log_beliefs[:, :, None, :]
+        weights = torch.softmax(scores, dim=-1)
+        pooled = torch.einsum("bpsh,bphd->bpsd", weights, values)
+        return self.output_proj(pooled.flatten(2))
+
+
 class _BetterPreflopCompactFFN(BaseMLPModel):
     """Shared compact 169-hand preflop MLP trunk."""
 
@@ -1710,11 +1766,14 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         policy_hand_bias_rank: int = 32,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
         transformer_heads: int = 8,
+        range_attention_slots: int = 0,
     ) -> None:
         super().__init__()
         _validate_internal_zero_sum(num_players, enforce_zero_sum)
         if range_hidden_dim < 0:
             raise ValueError("range_hidden_dim must be non-negative")
+        if range_attention_slots < 0:
+            raise ValueError("range_attention_slots must be non-negative")
         if board_interaction_dim != 0:
             raise ValueError("compact preflop models do not support board interaction")
         if policy_rank <= 0:
@@ -1742,6 +1801,7 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         self.policy_hand_bias_rank = int(policy_hand_bias_rank)
         self.nonlinearity = nonlinearity
         self.transformer_heads = int(transformer_heads)
+        self.range_attention_slots = int(range_attention_slots)
 
         self.scalar_context_dim = context_length(num_players) - num_players * 13
         self.player_context_dim = 13
@@ -1776,6 +1836,16 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             nn.Linear(16, hidden_dim, bias=False),
             nn.RMSNorm(hidden_dim, eps=1e-5),
             get_activation(nonlinearity),
+        )
+        self.range_attention_pool = (
+            _PreflopRangeAttentionPool(
+                hand_embed_dim,
+                self.player_context_dim,
+                hidden_dim,
+                self.range_attention_slots,
+            )
+            if self.range_attention_slots > 0
+            else None
         )
         self.game_context_proj = nn.Sequential(
             nn.Linear(self.scalar_context_dim, hidden_dim),
@@ -1887,6 +1957,12 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             + self.bucket_mass_proj(player_beliefs @ bucket_projection)
             + self.player_context_proj(player_context.to(dtype))
         )
+        if self.range_attention_pool is not None:
+            player_tokens = player_tokens + self.range_attention_pool(
+                player_beliefs,
+                hand_emb,
+                player_context.to(dtype),
+            )
         game_token = (
             self.static_feature_base(features)
             if static_game_token is None

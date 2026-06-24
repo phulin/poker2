@@ -90,6 +90,7 @@ model:
   street_value_heads: both
   preflop_model_type: ffn
   preflop_transformer_heads: 8
+  preflop_range_attention_slots: 0
 
   shared_trunk: true # Keep policy gradients through shared input encoders.
   num_hidden_layers: 0

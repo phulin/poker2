@@ -237,6 +237,7 @@ class RebelModelConfig:
     preflop_hand_dim: int
     preflop_model_type: PreflopModelType
     preflop_transformer_heads: int
+    preflop_range_attention_slots: int
     num_recursions: int
     num_iterations: int
     num_supervisions: int
@@ -266,6 +267,7 @@ class RebelModelConfig:
             preflop_hand_dim=cfg.preflop_hand_dim,
             preflop_model_type=cfg.preflop_model_type,
             preflop_transformer_heads=cfg.preflop_transformer_heads,
+            preflop_range_attention_slots=cfg.preflop_range_attention_slots,
             num_recursions=cfg.num_recursions,
             num_iterations=cfg.num_iterations,
             num_supervisions=cfg.num_supervisions,
@@ -295,6 +297,7 @@ class RebelModelConfig:
         cfg.preflop_hand_dim = self.preflop_hand_dim
         cfg.preflop_model_type = self.preflop_model_type
         cfg.preflop_transformer_heads = self.preflop_transformer_heads
+        cfg.preflop_range_attention_slots = self.preflop_range_attention_slots
         cfg.num_recursions = self.num_recursions
         cfg.num_iterations = self.num_iterations
         cfg.num_supervisions = self.num_supervisions

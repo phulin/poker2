@@ -297,6 +297,7 @@ class ModelConfig:
     preflop_hand_dim: int = 1326
     preflop_model_type: PreflopModelType = PreflopModelType.ffn
     preflop_transformer_heads: int = 8
+    preflop_range_attention_slots: int = 0
 
     # Better TRM parameters
     num_recursions: int = 6

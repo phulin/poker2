@@ -550,6 +550,7 @@ def test_rebel_cfr_trainer_constructs_preflop_transformer_models():
     cfg.model.preflop_hand_dim = 169
     cfg.model.preflop_model_type = PreflopModelType.transformer
     cfg.model.preflop_transformer_heads = 4
+    cfg.model.preflop_range_attention_slots = 2
     cfg.model.hidden_dim = 16
     cfg.model.range_hidden_dim = 8
     cfg.model.ffn_dim = 48
@@ -571,6 +572,8 @@ def test_rebel_cfr_trainer_constructs_preflop_transformer_models():
 
     assert isinstance(trainer.model.policy_model, BetterPreflopTransformerPolicyFFN)
     assert isinstance(trainer.model.value_model, BetterPreflopTransformerValueFFN)
+    assert trainer.model.policy_model.range_attention_slots == 2
+    assert trainer.model.value_model.range_attention_slots == 2
 
 
 def test_rebel_cfr_trainer_routes_multiway_pbs_env_to_fused_preflop(

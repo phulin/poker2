@@ -553,3 +553,49 @@ def test_compact_preflop_transformer_head_layers_work_without_shared_layers() ->
     assert policy_model(
         features, include_policy=True, include_value=False
     ).policy_logits.shape == (2, PREFLOP_HANDS, 5)
+
+
+def test_compact_preflop_transformer_range_attention_pool_shapes() -> None:
+    features = _compact_features(batch_size=2, num_players=3)
+    value_model = BetterPreflopTransformerValueFFN(
+        num_actions=1,
+        hidden_dim=48,
+        range_hidden_dim=16,
+        ffn_dim=96,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=3,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        transformer_heads=4,
+        range_attention_slots=3,
+        enforce_zero_sum=False,
+    )
+    policy_model = BetterPreflopTransformerPolicyFFN(
+        num_actions=5,
+        hidden_dim=48,
+        range_hidden_dim=16,
+        ffn_dim=96,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=3,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        transformer_heads=4,
+        range_attention_slots=3,
+        enforce_zero_sum=False,
+    )
+    value_model.init_weights(torch.Generator(device="cpu").manual_seed(6))
+    policy_model.init_weights(torch.Generator(device="cpu").manual_seed(7))
+
+    assert value_model.range_attention_pool is not None
+    assert value_model.range_attention_pool.slots == 3
+    value_output = value_model(features, include_policy=False)
+    policy_output = policy_model(features, include_policy=True, include_value=False)
+
+    assert value_output.hand_values.shape == (2, 3, PREFLOP_HANDS)
+    assert policy_output.policy_logits.shape == (2, PREFLOP_HANDS, 5)
+    assert torch.isfinite(value_output.hand_values).all()
+    assert torch.isfinite(policy_output.policy_logits).all()

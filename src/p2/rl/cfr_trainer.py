@@ -722,6 +722,9 @@ class RebelCFRTrainer:
                 transformer_common = dict(
                     common,
                     transformer_heads=int(cfg.model.preflop_transformer_heads),
+                    range_attention_slots=int(
+                        cfg.model.preflop_range_attention_slots
+                    ),
                 )
                 return BetterSplitFFN(
                     policy_model=BetterPreflopTransformerPolicyFFN(
