@@ -157,6 +157,10 @@ profile_output*.txt
 /venv/
 /notes.md
 /task_plan.md
+/.codex/notes*.md
+/.codex/task_plan*.md
+/.codex/*_plan.md
+/.codex/*_report.md
 /checkpoints/
 /checkpoints-*/
 /allin_lr_sweep/checkpoints*/
