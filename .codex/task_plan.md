@@ -1,33 +1,28 @@
-# Task Plan: Training Config Refactor Implementation
+# Task Plan: Preflop Value Sweep Follow-Ups
 
 ## Goal
-Implement the ReBeL training/config refactor plan in committed increments.
+Run additional one-epoch value-training experiments on pregenerated `actions_12_15` data, including scheduler/AdamW variants and a 500-CFR target dataset, then identify the best validation loss.
 
 ## Phases
-- [x] Phase 1: Re-read current state and identify safe first slice
-- [x] Phase 2: Add shared ReBeL config/runtime helpers with tests
-- [x] Phase 3: Migrate main ReBeL and curriculum lifecycle onto helpers
-- [x] Phase 4: Add Hydra-first preflop staged schema and package CLI
-- [ ] Phase 5: Expand validation/tests, update AGENTS/docs, and audit completion
+- [x] Phase 1: Cleanup and setup
+- [x] Phase 2: Inspect optimizer/schedule implementation
+- [x] Phase 3: Extend or reuse sweep harness for new experiment knobs
+- [x] Phase 4: Generate 500-CFR presolved value dataset
+- [x] Phase 5: Run schedule, AdamW, 500-CFR, and additional useful experiments
+- [x] Phase 6: Summarize results and commit source changes
 
 ## Key Questions
-1. How can the new runtime helpers be introduced without breaking existing Hydra configs?
-2. Which old defensive/compatibility paths can be removed once typed contracts exist?
-3. Where should preflop staged bucket config live so Hydra is the source of truth?
-4. What tests prove the refactor is behavior-preserving while moving toward the target architecture?
+1. Which scheduler names and AdamW/Muon fields does `RebelCFRTrainer` actually consume?
+2. Does 500-CFR target generation improve fixed validation loss enough to justify extra solve cost?
+3. Which extra low-cost experiments are most informative after the first LR/BS sweep?
 
 ## Decisions Made
-- Start with shared runtime/config infrastructure and main ReBeL migration before the larger preflop conversion.
-- Do not commit unrelated untracked `.codex` or local metadata files.
-- Per user direction, prioritize a clean internally consistent repo state over backward compatibility or checkpoint-config migration.
-- Prefer typed contracts over defensive `getattr`/`isinstance` in newly refactored paths.
-- Moved preflop backward-induction implementation into `p2.stages` and routed the top-level script through the Hydra CLI.
-- Replaced the preflop Hydra CLI's `argparse.Namespace` adapter with `PreflopBucketExecutionConfig`.
-- Converted `scripts/evaluate_rebel_value_loss.py` to Hydra-first config and removed checkpoint-embedded config loading.
-- Tightened postflop pregeneration feature-encoder metadata and value-only checkpoint loading around the trainer/BetterSplitFFN contract.
+- Store experiment bookkeeping in `.codex/` instead of adding planning artifacts to source directories.
+- Treat the first sweep's `lr=0.01, bs=512` result as the incumbent and run focused follow-up sweeps around it.
+- Compare schedules with `final_ratio=0.1`; compare WSD at two decay fractions (`0.2`, `0.5`).
 
 ## Errors Encountered
-- `tests/test_preflop_backward_induction_config.py` initially imported `scripts` as a package, but pytest did not expose that namespace. Switched the test to import the script by file path.
+- None yet.
 
 ## Status
-**Currently in Phase 5** - Running focused validation and auditing remaining ReBeL utility cleanup.
+**Complete** - Experiments finished; source changes committed; report delivered in final response.
