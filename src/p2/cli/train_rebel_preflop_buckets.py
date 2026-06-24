@@ -77,6 +77,12 @@ def _execution_config_from_config(cfg: Config) -> PreflopBucketExecutionConfig:
         wandb_group=preflop.wandb_group,
         wandb_tags=cfg.wandb_tags,
         student_init=preflop.student_init,
+        student_init_from_base=preflop.student_init_from_base,
+        bootstrap_distill_checkpoint=preflop.bootstrap_distill_checkpoint,
+        bootstrap_distill_epochs=preflop.bootstrap_distill_epochs,
+        bootstrap_distill_rows=preflop.bootstrap_distill_rows,
+        bootstrap_distill_batch_size=preflop.bootstrap_distill_batch_size,
+        bootstrap_distill_train_value=preflop.bootstrap_distill_train_value,
         distill_batch_size=preflop.distill_batch_size,
         distill_buckets=(
             None

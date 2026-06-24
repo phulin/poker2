@@ -20,7 +20,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from p2.config.rebel_schema import RebelExperimentConfig
-from p2.core.structured_config import Config
+from p2.core.structured_config import Config, PreflopModelType
 from p2.env.card_utils import PREFLOP_HANDS, preflop_class_multiplicity_tensor
 from p2.env.pbs_env import PBSEnv
 from p2.rl.checkpoint_io import CheckpointIO
@@ -90,6 +90,9 @@ SPECIALIST_FINAL_CHECKPOINT = "specialist_final.pt"
 SPECIALIST_INPROGRESS_CHECKPOINT = "specialist_inprogress.pt"
 DISTILLED_FINAL_CHECKPOINT = "distilled_final.pt"
 DISTILLED_INPROGRESS_CHECKPOINT = "distilled_inprogress.pt"
+SHARED_VALIDATION_CACHE_DIR = (
+    Path("outputs") / "preflop_backward_induction" / "validation_cache"
+)
 
 
 def _device(name: str) -> torch.device:
@@ -144,6 +147,173 @@ def _load_model_weights(
     strict: bool | None = None,
 ) -> int:
     return CheckpointIO.load_model_weights(trainer, checkpoint_path, strict=strict)
+
+
+def _checkpoint_model_state(checkpoint_path: str) -> dict[str, torch.Tensor]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    model_state = checkpoint.get("model")
+    if not isinstance(model_state, dict):
+        raise ValueError(f"{checkpoint_path} does not contain a model state dict")
+    return model_state
+
+
+def _checkpoint_model_config(base_cfg: Config, checkpoint_path: str) -> Config:
+    """Build a model config that matches a preflop checkpoint's tensor shapes."""
+
+    state = _checkpoint_model_state(checkpoint_path)
+    cfg = copy.deepcopy(base_cfg)
+    street_embedding = state.get("policy_model.street_embedding.weight")
+    if street_embedding is None:
+        raise ValueError(
+            f"Cannot infer preflop model dimensions from {checkpoint_path}"
+        )
+
+    cfg.model.hidden_dim = int(street_embedding.shape[1])
+    is_transformer = any(key.endswith(".qkv.weight") for key in state)
+    if is_transformer:
+        hand_encoder = state.get("policy_model.hand_encoder.0.weight")
+        ffn_in = state.get("policy_model.policy_encoder.0.ffn.linear_in.weight")
+        if hand_encoder is None or ffn_in is None:
+            raise ValueError(
+                f"Cannot infer transformer preflop dimensions from {checkpoint_path}"
+            )
+        cfg.model.range_hidden_dim = int(hand_encoder.shape[0])
+        cfg.model.ffn_dim = int(ffn_in.shape[0])
+        cfg.model.num_hidden_layers = 0
+        cfg.model.num_policy_layers = _checkpoint_encoder_depth(
+            state, "policy_model.policy_encoder"
+        )
+        cfg.model.num_value_layers = _checkpoint_encoder_depth(
+            state, "value_model.value_encoder"
+        )
+        cfg.model.preflop_model_type = PreflopModelType.transformer
+    else:
+        class_embedding = state.get("policy_model.class_hi_embedding.weight")
+        ffn_in = _first_checkpoint_tensor(
+            state,
+            (
+                "policy_model.policy_tower.0.inner.linear_in.weight",
+                "value_model.value_head.0.inner.linear_in.weight",
+                "policy_model.trunk.0.inner.linear_in.weight",
+            ),
+        )
+        if class_embedding is None or ffn_in is None:
+            raise ValueError(
+                f"Cannot infer compact FFN preflop dimensions from {checkpoint_path}"
+            )
+        cfg.model.range_hidden_dim = int(class_embedding.shape[1])
+        cfg.model.ffn_dim = int(ffn_in.shape[0])
+        cfg.model.num_hidden_layers = _checkpoint_sequential_depth(
+            state, "policy_model.trunk"
+        )
+        cfg.model.num_policy_layers = _checkpoint_sequential_depth(
+            state, "policy_model.policy_tower"
+        )
+        cfg.model.num_value_layers = _checkpoint_sequential_depth(
+            state, "value_model.value_head"
+        )
+        cfg.model.preflop_model_type = PreflopModelType.ffn
+    cfg.model.preflop_hand_dim = PREFLOP_HANDS
+    cfg.model.board_interaction_dim = 0
+    cfg.model.enforce_zero_sum = False
+    return cfg
+
+
+def _first_checkpoint_tensor(
+    state: dict[str, torch.Tensor],
+    keys: tuple[str, ...],
+) -> torch.Tensor | None:
+    for key in keys:
+        value = state.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _checkpoint_encoder_depth(
+    state: dict[str, torch.Tensor],
+    prefix: str,
+) -> int:
+    depth = 0
+    marker = ".ffn.linear_in.weight"
+    for key in state:
+        if not key.startswith(prefix) or not key.endswith(marker):
+            continue
+        suffix = key[len(prefix) + 1 : -len(marker)]
+        if suffix.isdigit():
+            depth = max(depth, int(suffix) + 1)
+    if depth == 0:
+        raise ValueError(f"Cannot infer encoder depth for {prefix}")
+    return depth
+
+
+def _checkpoint_sequential_depth(
+    state: dict[str, torch.Tensor],
+    prefix: str,
+) -> int:
+    depth = 0
+    marker = ".inner.linear_in.weight"
+    for key in state:
+        if not key.startswith(prefix) or not key.endswith(marker):
+            continue
+        suffix = key[len(prefix) + 1 : -len(marker)]
+        if suffix.isdigit():
+            depth = max(depth, int(suffix) + 1)
+    return depth
+
+
+def _checkpoint_shapes_match_model(
+    trainer: RebelCFRTrainer,
+    checkpoint_path: str,
+) -> bool:
+    checkpoint_state = _checkpoint_model_state(checkpoint_path)
+    model_state = trainer.model.state_dict()
+    for key, checkpoint_value in checkpoint_state.items():
+        model_value = model_state.get(key)
+        if model_value is None:
+            continue
+        if tuple(checkpoint_value.shape) != tuple(model_value.shape):
+            return False
+    return True
+
+
+def _maybe_load_student_weights(
+    trainer: RebelCFRTrainer,
+    checkpoint_path: str | None,
+    *,
+    required: bool,
+) -> bool:
+    if checkpoint_path is None:
+        return False
+    if not _checkpoint_shapes_match_model(trainer, checkpoint_path):
+        if required:
+            raise RuntimeError(
+                f"student_init checkpoint is not shape-compatible with the student "
+                f"model: {checkpoint_path}"
+            )
+        print(
+            f"skipping student warm-start from incompatible checkpoint "
+            f"{checkpoint_path}",
+            flush=True,
+        )
+        return False
+    _load_model_weights(trainer, checkpoint_path)
+    return True
+
+
+def _student_checkpoint_for_bucket(
+    args: PreflopBucketExecutionConfig,
+    *,
+    bucket_index: int,
+    previous_value_checkpoint: str,
+) -> str | None:
+    if bucket_index != 0:
+        return previous_value_checkpoint
+    if args.student_init is not None:
+        return args.student_init
+    if bool(args.student_init_from_base):
+        return previous_value_checkpoint
+    return None
 
 
 def _make_env_from_manifest(
@@ -543,16 +713,74 @@ def _max_cfr_batch_size(args: PreflopBucketExecutionConfig) -> int:
 
 
 def _estimate_train_updates(args: PreflopBucketExecutionConfig) -> int:
+    return max(
+        1,
+        sum(
+            _estimate_bucket_train_updates(args, bucket_label)
+            for bucket_label in _train_bucket_labels(args)
+        ),
+    )
+
+
+def _estimate_bucket_train_updates(
+    args: PreflopBucketExecutionConfig,
+    bucket_label: str,
+) -> int:
     manifest = _load_state_manifest(
         Path(args.state_dataset), allow_partial=args.allow_partial
     )
-    total_updates = 0
-    for bucket_label in _train_bucket_labels(args):
-        _, rows, _ = _bucket_shards(manifest, Path(args.state_dataset), bucket_label)
-        rows = min(int(args.states_per_bucket), int(rows))
-        cfr_batches = math.ceil(rows / _bucket_cfr_batch_size(args, bucket_label))
-        total_updates += cfr_batches * _bucket_epochs(args, bucket_label)
-    return max(1, total_updates)
+    _, rows, _ = _bucket_shards(manifest, Path(args.state_dataset), bucket_label)
+    rows = min(int(args.states_per_bucket), int(rows))
+    cfr_batches = math.ceil(rows / _bucket_cfr_batch_size(args, bucket_label))
+    return max(
+        1,
+        cfr_batches * _bucket_epochs(args, bucket_label)
+        + _estimate_bootstrap_distill_updates(args, bucket_label, rows),
+    )
+
+
+def _bootstrap_distill_enabled(
+    args: PreflopBucketExecutionConfig,
+    bucket_label: str,
+) -> bool:
+    labels = _train_bucket_labels(args)
+    return (
+        args.bootstrap_distill_checkpoint is not None
+        and int(args.bootstrap_distill_epochs) > 0
+        and bool(labels)
+        and bucket_label == labels[0]
+    )
+
+
+def _bootstrap_distill_batch_size(args: PreflopBucketExecutionConfig) -> int:
+    if args.bootstrap_distill_batch_size is not None:
+        return max(1, int(args.bootstrap_distill_batch_size))
+    return max(1, int(args.distill_batch_size))
+
+
+def _bootstrap_distill_schedule_roots(
+    args: PreflopBucketExecutionConfig,
+    bucket_label: str,
+) -> int:
+    return max(1, _bucket_cfr_batch_size(args, bucket_label))
+
+
+def _estimate_bootstrap_distill_updates(
+    args: PreflopBucketExecutionConfig,
+    bucket_label: str,
+    bucket_rows: int,
+) -> int:
+    if not _bootstrap_distill_enabled(args, bucket_label):
+        return 0
+    rows = int(bucket_rows)
+    if args.bootstrap_distill_rows is not None:
+        rows = min(rows, max(0, int(args.bootstrap_distill_rows)))
+    if rows <= 0:
+        return 0
+    return (
+        math.ceil(rows / _bootstrap_distill_schedule_roots(args, bucket_label))
+        * max(1, int(args.bootstrap_distill_epochs))
+    )
 
 
 def _validation_cache_metadata(
@@ -578,20 +806,56 @@ def _validation_cache_metadata(
     }
 
 
-def _validation_cache_path(
+def _validation_cache_key(metadata: dict[str, Any]) -> str:
+    encoded = json.dumps(_jsonable(metadata), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _validation_cache_filename(metadata: dict[str, Any]) -> str:
+    cache_key = _validation_cache_key(metadata)
+    return (
+        f"validation_n{metadata['validation_items']}_"
+        f"cfr{metadata['validation_cfr_iterations']}_{cache_key}.pt"
+    )
+
+
+def _validation_cache_path(metadata: dict[str, Any]) -> Path:
+    return (
+        SHARED_VALIDATION_CACHE_DIR
+        / str(metadata["bucket_label"])
+        / _validation_cache_filename(metadata)
+    )
+
+
+def _legacy_validation_cache_path(
     bucket_dir: Path,
     metadata: dict[str, Any],
 ) -> Path:
-    encoded = json.dumps(_jsonable(metadata), sort_keys=True).encode("utf-8")
-    cache_key = hashlib.sha256(encoded).hexdigest()[:16]
-    return (
-        bucket_dir
-        / "validation"
-        / (
-            f"validation_n{metadata['validation_items']}_"
-            f"cfr{metadata['validation_cfr_iterations']}_{cache_key}.pt"
-        )
-    )
+    return bucket_dir / "validation" / _validation_cache_filename(metadata)
+
+
+def _load_validation_cache(
+    cache_path: Path,
+    metadata: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not cache_path.exists():
+        return None
+    cached = torch.load(cache_path, map_location="cpu", weights_only=False)
+    if cached.get("metadata") != metadata:
+        return None
+    print(f"loaded validation cache {cache_path}", flush=True)
+    return cached
+
+
+def _promote_validation_cache(source: Path, destination: Path) -> None:
+    if source == destination or destination.exists():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+    print(f"promoted validation cache {source} -> {destination}", flush=True)
 
 
 def _slice_batch(batch: RebelBatch, start: int, end: int) -> RebelBatch:
@@ -688,6 +952,7 @@ def _evaluate_validation_split(
                     part.features,
                     include_policy=not include_value,
                     include_value=include_value,
+                    apply_zero_sum=False,
                 )
             loss_dict = (
                 trainer.loss_fn._call_forward_value(output, part)
@@ -721,7 +986,12 @@ def _pot_relative_value_error_metrics(
     if pot is None or scale is None:
         return {}
 
-    predictions = output.hand_values.float()
+    corrected = loss_dict.get("value_predictions")
+    predictions = (
+        corrected.float()
+        if isinstance(corrected, torch.Tensor)
+        else output.hand_values.float()
+    )
     targets = batch.value_targets.to(
         device=predictions.device,
         dtype=predictions.dtype,
@@ -805,12 +1075,15 @@ def _build_validation_cache(
         bucket_label=bucket_label,
         cutoff_checkpoint=cutoff_checkpoint,
     )
-    cache_path = _validation_cache_path(bucket_dir, metadata)
-    if cache_path.exists():
-        cached = torch.load(cache_path, map_location="cpu", weights_only=False)
-        if cached.get("metadata") == metadata:
-            print(f"loaded validation cache {cache_path}", flush=True)
-            return cached
+    cache_path = _validation_cache_path(metadata)
+    legacy_cache_path = _legacy_validation_cache_path(bucket_dir, metadata)
+    cached = _load_validation_cache(cache_path, metadata)
+    if cached is not None:
+        return cached
+    cached = _load_validation_cache(legacy_cache_path, metadata)
+    if cached is not None:
+        _promote_validation_cache(legacy_cache_path, cache_path)
+        return cached
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cfr_batch_size = _bucket_cfr_batch_size(args, bucket_label)
@@ -914,6 +1187,183 @@ def _build_validation_cache(
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return validation
+
+
+def _run_bootstrap_distill_for_bucket(
+    *,
+    args: PreflopBucketExecutionConfig,
+    bucket_label: str,
+    trainer: RebelCFRTrainer,
+    cfg: Config,
+    reader: PublicStateBucketReader,
+    device: torch.device,
+    rng: torch.Generator,
+    run: Any,
+    global_step: int,
+    bucket_train_step: int,
+    train_value: bool,
+    bucket_index: int,
+) -> tuple[int, int, int]:
+    if not _bootstrap_distill_enabled(args, bucket_label):
+        return global_step, bucket_train_step, 0
+    checkpoint = args.bootstrap_distill_checkpoint
+    if checkpoint is None:
+        return global_step, bucket_train_step, 0
+
+    batch_size = _bootstrap_distill_batch_size(args)
+    max_rows = int(args.states_per_bucket)
+    if args.bootstrap_distill_rows is not None:
+        max_rows = min(max_rows, max(0, int(args.bootstrap_distill_rows)))
+    if max_rows <= 0:
+        return global_step, bucket_train_step, 0
+
+    schedule_roots = _bootstrap_distill_schedule_roots(args, bucket_label)
+    teacher_cfg = _checkpoint_model_config(cfg, checkpoint)
+    teacher_cfg.num_envs = batch_size
+    teacher_cfg.num_steps = max(
+        1,
+        _estimate_bootstrap_distill_updates(args, bucket_label, reader.rows),
+    )
+    teacher = RebelCFRTrainer(
+        cfg=copy.deepcopy(teacher_cfg),
+        device=device,
+        pregeneration_only=True,
+    )
+    _load_model_weights(teacher, checkpoint)
+    env = _make_env_from_manifest(
+        reader.manifest,
+        num_envs=batch_size,
+        device=device,
+        seed=args.seed + bucket_index + 50_000,
+    )
+    include_value = bool(args.bootstrap_distill_train_value) and train_value
+    epochs = max(1, int(args.bootstrap_distill_epochs))
+    roots_total = 0
+    print(
+        f"{bucket_label}: bootstrap_distill start checkpoint={checkpoint} "
+        f"epochs={epochs} max_rows={max_rows:,} batch={batch_size} "
+        f"schedule_roots={schedule_roots:,} "
+        f"include_value={include_value}",
+        flush=True,
+    )
+    for epoch in range(epochs):
+        epoch_roots = 0
+        step_roots = 0
+        step_microbatches = 0
+        step_value_minibatches = 0
+        step_policy_minibatches = 0
+        step_value_stats: list[tuple[int, dict[str, Any]]] = []
+        step_policy_stats: list[tuple[int, dict[str, Any]]] = []
+
+        def flush_step() -> None:
+            nonlocal global_step
+            nonlocal bucket_train_step
+            nonlocal step_roots
+            nonlocal step_microbatches
+            nonlocal step_value_minibatches
+            nonlocal step_policy_minibatches
+            nonlocal step_value_stats
+            nonlocal step_policy_stats
+            if step_roots <= 0:
+                return
+            value_stats = _aggregate_minibatch_stats(step_value_stats)
+            policy_stats = _aggregate_minibatch_stats(step_policy_stats)
+            global_step += 1
+            bucket_train_step += 1
+            payload = {
+                f"{bucket_label}/bootstrap_distill_epoch": epoch + 1,
+                f"{bucket_label}/bootstrap_distill_roots": roots_total,
+                f"{bucket_label}/bootstrap_distill_epoch_roots": epoch_roots,
+                f"{bucket_label}/bootstrap_distill_step_roots": step_roots,
+                f"{bucket_label}/bootstrap_distill_microbatches": step_microbatches,
+                f"{bucket_label}/bootstrap_distill_value_minibatches": step_value_minibatches,
+                f"{bucket_label}/bootstrap_distill_policy_minibatches": step_policy_minibatches,
+                f"{bucket_label}/bucket_train_step": bucket_train_step,
+                f"{bucket_label}/global_step": global_step,
+                "global_step": global_step,
+            }
+            payload.update(
+                _prefixed_metrics(
+                    f"{bucket_label}/bootstrap_distill", "value", value_stats
+                )
+            )
+            payload.update(
+                _prefixed_metrics(
+                    f"{bucket_label}/bootstrap_distill", "policy", policy_stats
+                )
+            )
+            if run is not None:
+                run.log(payload, step=global_step)
+            step_roots = 0
+            step_microbatches = 0
+            step_value_minibatches = 0
+            step_policy_minibatches = 0
+            step_value_stats = []
+            step_policy_stats = []
+
+        for states in reader.iter_state_batches(
+            batch_size=batch_size,
+            max_rows=max_rows,
+            seed=_seed_for_label(
+                args.seed,
+                bucket_label,
+                salt=500_000 + epoch,
+            ),
+        ):
+            rows = _copy_public_states_to_env(env, states)
+            beliefs = _random_beliefs(
+                rows,
+                teacher.num_players,
+                device=device,
+                rng=rng,
+                mode=args.belief_mode,
+            )
+            value_batch, policy_batch = _distill_batch_from_teacher(
+                teacher,
+                env,
+                beliefs,
+                include_value=include_value,
+            )
+            schedule_step = bucket_train_step
+            if value_batch is not None:
+                value_stats, value_minibatches = _train_value_minibatches(
+                    trainer,
+                    value_batch,
+                    step=schedule_step,
+                    batch_size=max(1, int(args.train_batch_size)),
+                )
+            else:
+                value_stats = {}
+                value_minibatches = 0
+            policy_stats, policy_minibatches = _train_policy_minibatches(
+                trainer,
+                policy_batch,
+                step=schedule_step,
+                batch_size=max(1, int(args.train_batch_size)),
+            )
+            roots_total += rows
+            epoch_roots += rows
+            step_roots += rows
+            step_microbatches += 1
+            step_value_minibatches += value_minibatches
+            step_policy_minibatches += policy_minibatches
+            if value_batch is not None:
+                step_value_stats.append((rows, value_stats))
+            step_policy_stats.append((rows, policy_stats))
+            if step_roots >= schedule_roots:
+                flush_step()
+        flush_step()
+        print(
+            f"{bucket_label}: bootstrap_distill epoch_complete "
+            f"epoch={epoch + 1}/{epochs} roots={roots_total:,} "
+            f"bucket_train_step={bucket_train_step}",
+            flush=True,
+        )
+
+    del teacher
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return global_step, bucket_train_step, roots_total
 
 
 def run_presolve_values(
@@ -1132,6 +1582,7 @@ def run_train_specialists(
             spec = _bucket_spec(bucket_label)
             train_value = bucket_label != "actions_0_3"
             cfr_batch_size = _bucket_cfr_batch_size(args, bucket_label)
+            bucket_updates_guess = _estimate_bucket_train_updates(args, bucket_label)
             bucket_dir = output_dir / bucket_label
             bucket_dir.mkdir(parents=True, exist_ok=True)
             solved_dir = bucket_dir / "solved"
@@ -1148,13 +1599,14 @@ def run_train_specialists(
                 base_template,
                 args,
                 checkpoint_dir=bucket_dir / "checkpoints",
-                num_steps=total_updates_guess,
+                num_steps=bucket_updates_guess,
                 num_envs=cfr_batch_size,
             )
             write_resolved_config(
                 cfg,
                 resolved_config=RebelExperimentConfig.from_trainer_config(cfg),
             )
+            cutoff_cfg = _checkpoint_model_config(cfg, previous_value_checkpoint)
             reader = PublicStateBucketReader(
                 args.state_dataset,
                 bucket_label,
@@ -1167,17 +1619,26 @@ def run_train_specialists(
                 spec=spec,
                 bucket_dir=bucket_dir,
                 cutoff_checkpoint=previous_value_checkpoint,
-                cfg=cfg,
+                cfg=cutoff_cfg,
                 reader=reader,
                 device=device,
                 bucket_index=bucket_index,
             )
             solver = RebelCFRTrainer(
-                cfg=copy.deepcopy(cfg), device=device, pregeneration_only=True
+                cfg=copy.deepcopy(cutoff_cfg), device=device, pregeneration_only=True
             )
             _load_model_weights(solver, previous_value_checkpoint)
             trainer = RebelCFRTrainer(cfg=copy.deepcopy(cfg), device=device)
-            _load_model_weights(trainer, previous_value_checkpoint)
+            student_checkpoint = _student_checkpoint_for_bucket(
+                args,
+                bucket_index=bucket_index,
+                previous_value_checkpoint=previous_value_checkpoint,
+            )
+            _maybe_load_student_weights(
+                trainer,
+                student_checkpoint,
+                required=args.student_init is not None and bucket_index == 0,
+            )
             if bucket_index == 0 and run is not None:
                 run.summary.update(count_model_parameters(trainer.model))
 
@@ -1199,12 +1660,32 @@ def run_train_specialists(
             value_examples = 0
             policy_examples = 0
             bucket_step = 0
+            bucket_train_step = 0
             bucket_epochs = _bucket_epochs(args, bucket_label)
             bucket_start = time.time()
             train_batch_size = max(1, int(args.train_batch_size))
             progress_interval = max(int(args.progress_roots), cfr_batch_size)
             next_progress_roots = progress_interval
             last_tree_stats: dict[str, float] = {}
+            (
+                global_step,
+                bucket_train_step,
+                bootstrap_distill_roots,
+            ) = _run_bootstrap_distill_for_bucket(
+                args=args,
+                bucket_label=bucket_label,
+                trainer=trainer,
+                cfg=cfg,
+                reader=reader,
+                device=device,
+                rng=rng,
+                run=run,
+                global_step=global_step,
+                bucket_train_step=bucket_train_step,
+                train_value=train_value,
+                bucket_index=bucket_index,
+            )
+            bucket_start = time.time()
 
             def log_validation(epoch: int, epoch_roots: int) -> None:
                 if run is None:
@@ -1216,6 +1697,7 @@ def run_train_specialists(
                 )
                 payload = {
                     f"{bucket_label}/validation_step": bucket_step,
+                    f"{bucket_label}/bucket_train_step": bucket_train_step,
                     f"{bucket_label}/epoch": epoch,
                     f"{bucket_label}/epoch_roots": epoch_roots,
                     f"{bucket_label}/roots_solved": roots_solved,
@@ -1247,7 +1729,9 @@ def run_train_specialists(
                     f"value={value_examples:,} policy={policy_examples:,} "
                     f"nodes={int(last_tree_stats.get('evaluator_total_nodes', 0)):,} "
                     f"cfr_batch={cfr_batch_size} step={global_step} "
-                    f"bucket_step={bucket_step} train_batch={train_batch_size} "
+                    f"bucket_step={bucket_step} "
+                    f"bucket_train_step={bucket_train_step} "
+                    f"train_batch={train_batch_size} "
                     f"roots/s={roots_per_s:.2f} elapsed={elapsed:.1f}s",
                     flush=True,
                 )
@@ -1290,7 +1774,7 @@ def run_train_specialists(
                     )
                     value_stream = _value_only(value_batch) if train_value else None
                     policy_stream = _policy_only(policy_batch)
-                    step_before_updates = global_step
+                    schedule_step = bucket_train_step
                     trained_this_step = False
                     if value_stream is not None:
                         if writer is not None:
@@ -1299,7 +1783,7 @@ def run_train_specialists(
                         value_stats, value_minibatches = _train_value_minibatches(
                             trainer,
                             value_stream,
-                            step=step_before_updates,
+                            step=schedule_step,
                             batch_size=train_batch_size,
                         )
                         trained_this_step = True
@@ -1313,7 +1797,7 @@ def run_train_specialists(
                         policy_stats, policy_minibatches = _train_policy_minibatches(
                             trainer,
                             policy_stream,
-                            step=step_before_updates,
+                            step=schedule_step,
                             batch_size=train_batch_size,
                         )
                         trained_this_step = True
@@ -1322,6 +1806,7 @@ def run_train_specialists(
                         policy_minibatches = 0
                     if trained_this_step:
                         global_step += 1
+                        bucket_train_step += 1
 
                     roots_solved += rows
                     epoch_roots += rows
@@ -1332,6 +1817,8 @@ def run_train_specialists(
                         f"{bucket_label}/epoch": epoch,
                         f"{bucket_label}/epoch_roots": epoch_roots,
                         f"{bucket_label}/bucket_step": bucket_step,
+                        f"{bucket_label}/bucket_train_step": bucket_train_step,
+                        f"{bucket_label}/bucket_schedule_steps": bucket_updates_guess,
                         f"{bucket_label}/cfr_batch_size": cfr_batch_size,
                         f"{bucket_label}/train_batch_size": train_batch_size,
                         f"{bucket_label}/global_step": global_step,
@@ -1376,13 +1863,15 @@ def run_train_specialists(
                         _save_trainer_checkpoint(
                             trainer,
                             snapshot_path,
-                            step=global_step,
+                            step=bucket_train_step,
                             run_id=None if run is None else run.id,
                             metadata={
                                 "kind": "preflop_backward_induction_specialist",
                                 "snapshot": "in_progress",
                                 "bucket_label": bucket_label,
                                 "bucket_step": bucket_step,
+                                "bucket_train_step": bucket_train_step,
+                                "global_step": global_step,
                                 "epoch": epoch,
                                 "epoch_roots": epoch_roots,
                                 "roots_solved": roots_solved,
@@ -1434,6 +1923,12 @@ def run_train_specialists(
                 "value_examples": value_examples,
                 "policy_examples": policy_examples,
                 "train_value": train_value,
+                "bootstrap_distill_checkpoint": args.bootstrap_distill_checkpoint,
+                "bootstrap_distill_epochs": int(args.bootstrap_distill_epochs),
+                "bootstrap_distill_roots": bootstrap_distill_roots,
+                "bucket_train_steps": bucket_train_step,
+                "bucket_schedule_steps": bucket_updates_guess,
+                "global_updates_at_finish": global_step,
                 "write_solved_shards": bool(args.write_solved_shards),
                 "source_state_dataset": os.path.realpath(args.state_dataset),
                 "solver_checkpoint": os.path.realpath(previous_value_checkpoint),
@@ -1457,13 +1952,15 @@ def run_train_specialists(
             _save_trainer_checkpoint(
                 trainer,
                 checkpoint_path,
-                step=global_step,
+                step=bucket_train_step,
                 run_id=None if run is None else run.id,
                 metadata={
                     "kind": "preflop_backward_induction_specialist",
                     "bucket_label": bucket_label,
                     "train_value": train_value,
                     "training_summary": bucket_summary,
+                    "bucket_train_step": bucket_train_step,
+                    "global_step": global_step,
                     "solved_manifest": bucket_summary.get("solved_manifest"),
                     "solver_checkpoint": os.path.realpath(previous_value_checkpoint),
                 },
@@ -1599,7 +2096,11 @@ def run_distill(
         resolved_config=RebelExperimentConfig.from_trainer_config(cfg),
     )
     student = RebelCFRTrainer(cfg=copy.deepcopy(cfg), device=device)
-    _load_model_weights(student, args.student_init or args.base_checkpoint)
+    _maybe_load_student_weights(
+        student,
+        args.student_init or args.base_checkpoint,
+        required=args.student_init is not None,
+    )
     rng = torch.Generator(device=device)
     rng.manual_seed(int(args.seed))
     run_cm = _init_wandb(
@@ -1626,12 +2127,10 @@ def run_distill(
             include_value = (
                 bool(args.distill_train_value) and bucket_label != "actions_0_3"
             )
-            teacher_cfg = build_run_config(
-                base_template,
-                args,
-                checkpoint_dir=output_dir / "teacher_tmp",
-                num_steps=total_updates,
-            )
+            teacher_cfg = _checkpoint_model_config(cfg, checkpoint)
+            teacher_cfg.checkpoint_dir = str(output_dir / "teacher_tmp")
+            teacher_cfg.num_steps = total_updates
+            teacher_cfg.num_envs = int(args.distill_batch_size)
             teacher = RebelCFRTrainer(
                 cfg=copy.deepcopy(teacher_cfg),
                 device=device,

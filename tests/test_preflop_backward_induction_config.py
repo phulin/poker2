@@ -13,6 +13,7 @@ from p2.stages.preflop_backward_induction import (
     _init_wandb,
     _load_model_weights,
     _pot_relative_value_error_metrics,
+    _student_checkpoint_for_bucket,
 )
 from p2.stages.preflop_buckets import (
     PreflopBucketExecutionConfig,
@@ -59,6 +60,12 @@ def _execution_config(**overrides) -> PreflopBucketExecutionConfig:
         "wandb_group": None,
         "wandb_tags": ("preflop", "test"),
         "student_init": None,
+        "student_init_from_base": True,
+        "bootstrap_distill_checkpoint": None,
+        "bootstrap_distill_epochs": 0,
+        "bootstrap_distill_rows": None,
+        "bootstrap_distill_batch_size": None,
+        "bootstrap_distill_train_value": True,
         "distill_batch_size": 1024,
         "distill_buckets": None,
         "distill_train_value": True,
@@ -166,6 +173,44 @@ def test_estimate_train_updates_counts_cfr_root_batches(tmp_path) -> None:
             actions_12_15_epochs=2,
         )
     ) == 2
+
+
+def test_student_checkpoint_for_bucket_can_disable_base_warm_start() -> None:
+    assert (
+        _student_checkpoint_for_bucket(
+            _execution_config(student_init_from_base=True),
+            bucket_index=0,
+            previous_value_checkpoint="/tmp/base.pt",
+        )
+        == "/tmp/base.pt"
+    )
+    assert (
+        _student_checkpoint_for_bucket(
+            _execution_config(
+                student_init="/tmp/student.pt",
+                student_init_from_base=False,
+            ),
+            bucket_index=0,
+            previous_value_checkpoint="/tmp/base.pt",
+        )
+        == "/tmp/student.pt"
+    )
+    assert (
+        _student_checkpoint_for_bucket(
+            _execution_config(student_init_from_base=False),
+            bucket_index=0,
+            previous_value_checkpoint="/tmp/base.pt",
+        )
+        is None
+    )
+    assert (
+        _student_checkpoint_for_bucket(
+            _execution_config(student_init_from_base=False),
+            bucket_index=1,
+            previous_value_checkpoint="/tmp/previous.pt",
+        )
+        == "/tmp/previous.pt"
+    )
 
 
 def test_preflop_wandb_init_passes_stage_payload(monkeypatch, tmp_path) -> None:

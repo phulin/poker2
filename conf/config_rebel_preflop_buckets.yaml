@@ -44,6 +44,12 @@ preflop_buckets:
   snapshot_interval_steps: 250
   wandb_group: null
   student_init: null
+  student_init_from_base: true
+  bootstrap_distill_checkpoint: null
+  bootstrap_distill_epochs: 0
+  bootstrap_distill_rows: null
+  bootstrap_distill_batch_size: null
+  bootstrap_distill_train_value: true
   distill_batch_size: 1024
   distill_buckets: null
   distill_train_value: true

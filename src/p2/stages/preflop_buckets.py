@@ -46,6 +46,12 @@ class PreflopBucketExecutionConfig:
     wandb_group: str | None
     wandb_tags: tuple[str, ...]
     student_init: str | None
+    student_init_from_base: bool
+    bootstrap_distill_checkpoint: str | None
+    bootstrap_distill_epochs: int
+    bootstrap_distill_rows: int | None
+    bootstrap_distill_batch_size: int | None
+    bootstrap_distill_train_value: bool
     distill_batch_size: int
     distill_buckets: tuple[str, ...] | None
     distill_train_value: bool
@@ -80,6 +86,8 @@ def build_run_config(
     cfg.train.episodes_per_step = 1
     cfg.train.replay_buffer_batches = max(1, int(execution.replay_buffer_batches))
     cfg.train.save_replay_buffers = False
+    cfg.model.enforce_zero_sum = False
+    cfg.model.board_interaction_dim = 0
     cfg.search.depth = int(execution.depth)
     cfg.search.iterations = int(execution.cfr_iterations)
     cfg.search.iterations_final = None
