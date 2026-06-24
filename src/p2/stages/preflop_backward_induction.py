@@ -88,8 +88,10 @@ BUCKET_ORDER_DEEP_TO_SHALLOW = (
 LEGACY_LATEST_CHECKPOINT = "rebel_latest.pt"
 SPECIALIST_FINAL_CHECKPOINT = "specialist_final.pt"
 SPECIALIST_INPROGRESS_CHECKPOINT = "specialist_inprogress.pt"
+BOOTSTRAP_DISTILLED_CHECKPOINT = "bootstrap_distilled.pt"
 DISTILLED_FINAL_CHECKPOINT = "distilled_final.pt"
 DISTILLED_INPROGRESS_CHECKPOINT = "distilled_inprogress.pt"
+BOOTSTRAP_DISTILL_VALUE_SEMANTICS = "folded_baseline_live_zerosum_v1"
 SHARED_VALIDATION_CACHE_DIR = (
     Path("outputs") / "preflop_backward_induction" / "validation_cache"
 )
@@ -783,6 +785,97 @@ def _estimate_bootstrap_distill_updates(
     )
 
 
+def _bootstrap_distill_student_metadata(cfg: Config) -> dict[str, Any]:
+    fields = (
+        "preflop_model_type",
+        "preflop_hand_dim",
+        "hidden_dim",
+        "range_hidden_dim",
+        "ffn_dim",
+        "preflop_transformer_heads",
+        "preflop_range_attention_slots",
+        "num_hidden_layers",
+        "num_value_layers",
+        "num_policy_layers",
+        "board_interaction_dim",
+        "street_value_heads",
+        "enforce_zero_sum",
+    )
+    return {field: _jsonable(getattr(cfg.model, field, None)) for field in fields}
+
+
+def _bootstrap_distill_checkpoint_path(bucket_dir: Path) -> Path:
+    return bucket_dir / "checkpoints" / BOOTSTRAP_DISTILLED_CHECKPOINT
+
+
+def _bootstrap_distill_expected_metadata(
+    args: PreflopBucketExecutionConfig,
+    *,
+    bucket_label: str,
+    cfg: Config,
+    teacher_checkpoint: str,
+    batch_size: int,
+    max_rows: int,
+    include_value: bool,
+) -> dict[str, Any]:
+    return {
+        "kind": "preflop_backward_induction_bootstrap_distilled_model",
+        "format_version": 1,
+        "bucket_label": bucket_label,
+        "state_dataset": os.path.realpath(args.state_dataset),
+        "teacher_checkpoint": _checkpoint_signature(teacher_checkpoint),
+        "bootstrap_distill_epochs": int(args.bootstrap_distill_epochs),
+        "bootstrap_distill_rows": args.bootstrap_distill_rows,
+        "bootstrap_distill_max_rows": int(max_rows),
+        "bootstrap_distill_batch_size": int(batch_size),
+        "bootstrap_distill_train_value": bool(args.bootstrap_distill_train_value),
+        "include_value": bool(include_value),
+        "belief_mode": str(args.belief_mode),
+        "seed": int(args.seed),
+        "student_num_steps": int(cfg.num_steps),
+        "student_model": _bootstrap_distill_student_metadata(cfg),
+        "value_target_semantics": BOOTSTRAP_DISTILL_VALUE_SEMANTICS,
+        "policy_target_semantics": "teacher_masked_softmax_v1",
+    }
+
+
+def _metadata_matches_expected(
+    metadata: dict[str, Any],
+    expected: dict[str, Any],
+) -> bool:
+    return all(metadata.get(key) == value for key, value in expected.items())
+
+
+def _try_load_bootstrap_distill_checkpoint(
+    trainer: RebelCFRTrainer,
+    checkpoint_path: Path,
+    expected_metadata: dict[str, Any],
+) -> tuple[int, int, int] | None:
+    if not checkpoint_path.exists():
+        return None
+    metadata = CheckpointIO.metadata(
+        str(checkpoint_path),
+        map_location=torch.device("cpu"),
+    )
+    if not _metadata_matches_expected(metadata, expected_metadata):
+        print(
+            f"ignoring stale bootstrap distill checkpoint {checkpoint_path}",
+            flush=True,
+        )
+        return None
+    step = _load_model_weights(trainer, str(checkpoint_path))
+    fallback_step = max(0, int(step))
+    global_step = int(metadata.get("global_step", fallback_step))
+    bucket_train_step = int(metadata.get("bucket_train_step", fallback_step))
+    roots = int(metadata.get("bootstrap_distill_roots", 0))
+    print(
+        f"loaded bootstrap distill checkpoint {checkpoint_path} "
+        f"step={bucket_train_step} roots={roots:,}",
+        flush=True,
+    )
+    return global_step, bucket_train_step, roots
+
+
 def _validation_cache_metadata(
     args: PreflopBucketExecutionConfig,
     *,
@@ -1193,6 +1286,7 @@ def _run_bootstrap_distill_for_bucket(
     *,
     args: PreflopBucketExecutionConfig,
     bucket_label: str,
+    bucket_dir: Path,
     trainer: RebelCFRTrainer,
     cfg: Config,
     reader: PublicStateBucketReader,
@@ -1218,6 +1312,25 @@ def _run_bootstrap_distill_for_bucket(
         return global_step, bucket_train_step, 0
 
     schedule_roots = _bootstrap_distill_schedule_roots(args, bucket_label)
+    include_value = bool(args.bootstrap_distill_train_value) and train_value
+    checkpoint_path = _bootstrap_distill_checkpoint_path(bucket_dir)
+    expected_metadata = _bootstrap_distill_expected_metadata(
+        args,
+        bucket_label=bucket_label,
+        cfg=cfg,
+        teacher_checkpoint=checkpoint,
+        batch_size=batch_size,
+        max_rows=max_rows,
+        include_value=include_value,
+    )
+    cached = _try_load_bootstrap_distill_checkpoint(
+        trainer,
+        checkpoint_path,
+        expected_metadata,
+    )
+    if cached is not None:
+        return cached
+
     teacher_cfg = _checkpoint_model_config(cfg, checkpoint)
     teacher_cfg.num_envs = batch_size
     teacher_cfg.num_steps = max(
@@ -1236,7 +1349,6 @@ def _run_bootstrap_distill_for_bucket(
         device=device,
         seed=args.seed + bucket_index + 50_000,
     )
-    include_value = bool(args.bootstrap_distill_train_value) and train_value
     epochs = max(1, int(args.bootstrap_distill_epochs))
     roots_total = 0
     print(
@@ -1363,6 +1475,28 @@ def _run_bootstrap_distill_for_bucket(
     del teacher
     if device.type == "cuda":
         torch.cuda.empty_cache()
+    _save_trainer_checkpoint(
+        trainer,
+        checkpoint_path,
+        step=bucket_train_step,
+        run_id=None if run is None else run.id,
+        metadata={
+            **expected_metadata,
+            "snapshot": "after_bootstrap_distill",
+            "global_step": int(global_step),
+            "bucket_train_step": int(bucket_train_step),
+            "bootstrap_distill_roots": int(roots_total),
+        },
+    )
+    if run is not None:
+        run.summary[f"{bucket_label}/bootstrap_distill_checkpoint"] = str(
+            checkpoint_path
+        )
+    print(
+        f"{bucket_label}: saved bootstrap distill checkpoint {checkpoint_path} "
+        f"step={bucket_train_step} roots={roots_total:,}",
+        flush=True,
+    )
     return global_step, bucket_train_step, roots_total
 
 
@@ -1674,6 +1808,7 @@ def run_train_specialists(
             ) = _run_bootstrap_distill_for_bucket(
                 args=args,
                 bucket_label=bucket_label,
+                bucket_dir=bucket_dir,
                 trainer=trainer,
                 cfg=cfg,
                 reader=reader,
@@ -1926,6 +2061,9 @@ def run_train_specialists(
                 "bootstrap_distill_checkpoint": args.bootstrap_distill_checkpoint,
                 "bootstrap_distill_epochs": int(args.bootstrap_distill_epochs),
                 "bootstrap_distill_roots": bootstrap_distill_roots,
+                "bootstrap_distilled_checkpoint": str(
+                    _bootstrap_distill_checkpoint_path(bucket_dir)
+                ),
                 "bucket_train_steps": bucket_train_step,
                 "bucket_schedule_steps": bucket_updates_guess,
                 "global_updates_at_finish": global_step,
