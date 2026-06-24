@@ -2483,9 +2483,14 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             model = value_model
             base_model = getattr(model, "_orig_mod", model)
             if type(base_model) is BetterTRM:
-                model_output = model(features, include_policy=False, latent=self.latent)
+                model_output = model(
+                    features,
+                    include_policy=False,
+                    latent=self.latent,
+                    apply_zero_sum=False,
+                )
                 self.latent = model_output.latent
-                model_applied_zero_sum = bool(base_model.enforce_zero_sum)
+                model_applied_zero_sum = False
             elif hasattr(base_model, "static_feature_base") and hasattr(
                 base_model, "forward_value_static_base"
             ):
@@ -2529,7 +2534,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                         features
                     ).clone()
                     self._static_model_base_key = key
-                value_kwargs = {"apply_zero_sum": True}
+                value_kwargs = {"apply_zero_sum": False}
                 if getattr(self, "_static_model_base_accepts_value_head", False):
                     value_kwargs["value_head"] = "pre" if use_pre_head else "auto"
                 call_static_value = getattr(
@@ -2542,16 +2547,21 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     self._static_model_base_features,
                     **value_kwargs,
                 )
-                model_applied_zero_sum = bool(base_model.enforce_zero_sum)
+                model_applied_zero_sum = False
             else:
                 if use_pre_head and hasattr(model, "forward_pre"):
-                    hand_values = model.forward_pre(features).contiguous()
-                    model_applied_zero_sum = bool(
-                        getattr(base_model, "enforce_zero_sum", False)
-                    )
+                    hand_values = model.forward_pre(
+                        features,
+                        apply_zero_sum=False,
+                    ).contiguous()
+                    model_applied_zero_sum = False
                     model_output = None
                 else:
-                    model_output = model(features, include_policy=False)
+                    model_output = model(
+                        features,
+                        include_policy=False,
+                        apply_zero_sum=False,
+                    )
         if model_output is not None:
             hand_values = model_output.hand_values.contiguous()
         return hand_values, model_applied_zero_sum
@@ -2738,6 +2748,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         hand_values, model_applied_zero_sum = (
             self._model_leaf_values_for_fused_writeback(features)
         )
+        hand_values = self._postprocess_model_leaf_values(
+            hand_values,
+            beliefs,
+            self.model_indices,
+        ).contiguous()
+        model_applied_zero_sum = True
 
         do_mix = (
             self.cfr_avg
@@ -2759,12 +2775,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         else:
             last_out = hand_values
             last_model_values = hand_values
-        # ``apply_zero_sum`` controls when the projection is applied, not if.
-        # BetterFFN/BetterTRM already return zero-sum values when configured to
-        # do so. CFR-AVG mixing can break that projection, and models without
-        # internal projection still need the fused writeback to apply it.
-        enforce_writeback_zero_sum = bool(self.model.enforce_zero_sum) and (
-            do_mix or not model_applied_zero_sum
+        enforce_writeback_zero_sum = (
+            bool(self.model.enforce_zero_sum) and not model_applied_zero_sum
         )
         fused_model_values_writeback_(
             hand_values=hand_values,

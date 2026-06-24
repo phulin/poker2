@@ -2267,6 +2267,35 @@ class CFREvaluator(ABC):
         else:
             return hand_values
 
+    def _postprocess_model_leaf_values(
+        self,
+        hand_values: torch.Tensor,
+        player_beliefs: torch.Tensor,
+        node_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        values = hand_values
+        env = getattr(self, "env", None)
+        folded = getattr(env, "has_folded", None)
+        if folded is None:
+            live_mask = torch.ones(
+                values.shape[:2], dtype=torch.bool, device=values.device
+            )
+        else:
+            folded_mask = folded[node_indices].to(device=values.device, dtype=torch.bool)
+            live_mask = ~folded_mask
+            folded_values = self._stack_value_baseline(
+                node_indices,
+                values.shape[-1],
+            ).to(dtype=values.dtype, device=values.device)
+            values = torch.where(folded_mask[:, :, None], folded_values, values)
+
+        beliefs = player_beliefs.to(device=values.device, dtype=values.dtype)
+        live_weight = live_mask[:, :, None].to(dtype=values.dtype)
+        denom = (beliefs * live_weight).sum(dim=(1, 2), keepdim=True)
+        expected_sum = (values * beliefs).sum(dim=(1, 2), keepdim=True)
+        correction = expected_sum / denom.clamp_min(1.0e-12)
+        return torch.where(live_mask[:, :, None], values - correction, values)
+
     def _eval_value_model(
         self, value_model, features: MLPFeatures, *, use_pre_head: bool
     ) -> torch.Tensor:
@@ -2277,13 +2306,21 @@ class CFREvaluator(ABC):
                     features,
                     include_policy=False,
                     latent=self.latent,
+                    apply_zero_sum=False,
                 )
                 self.latent = model_output.latent
             else:
                 if use_pre_head and hasattr(value_model, "forward_pre"):
-                    hand_values = value_model.forward_pre(features).to(self.float_dtype)
+                    hand_values = value_model.forward_pre(
+                        features,
+                        apply_zero_sum=False,
+                    ).to(self.float_dtype)
                 else:
-                    model_output = value_model(features, include_policy=False)
+                    model_output = value_model(
+                        features,
+                        include_policy=False,
+                        apply_zero_sum=False,
+                    )
                     hand_values = model_output.hand_values.to(self.float_dtype)
         return hand_values
 
@@ -2434,6 +2471,11 @@ class CFREvaluator(ABC):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Set model values for non-terminal leaves
         hand_values = self._model_leaf_values(features)
+        hand_values = self._postprocess_model_leaf_values(
+            hand_values,
+            beliefs,
+            self.model_indices,
+        )
 
         if (
             not self.cfr_avg
@@ -2609,8 +2651,6 @@ class CFREvaluator(ABC):
         unblocked_reach = calculate_unblocked_mass(beliefs)
         player_ids = torch.arange(self.num_players, device=self.device)
         other_live = player_ids[None, :, None] != self.env.to_act[:, None, None]
-        if hasattr(self.env, "has_folded"):
-            other_live &= ~self.env.has_folded[:, :, None]
         src_weights = torch.where(
             other_live,
             unblocked_reach.clamp_min(1e-12),

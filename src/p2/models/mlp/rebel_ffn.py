@@ -108,7 +108,13 @@ class RebelFFN(BaseMLPModel):
         policy_logits = self.policy_head(x).reshape(-1, NUM_HANDS, self.num_actions)
         return ModelOutput(policy_logits=policy_logits)
 
-    def forward_value(self, features: MLPFeatures, latent=None) -> ModelOutput:
+    def forward_value(
+        self,
+        features: MLPFeatures,
+        latent=None,
+        apply_zero_sum: bool = True,
+    ) -> ModelOutput:
+        del apply_zero_sum
         x = self._forward_base(features)
         hand_value_input = x.detach() if self.detach_value_head else x
         hand_values = self.hand_value_head(hand_value_input)
@@ -118,7 +124,13 @@ class RebelFFN(BaseMLPModel):
         value = hand_values.mean(dim=-1)
         return ModelOutput(value=value, hand_values=hand_values)
 
-    def forward_both(self, features: MLPFeatures, latent=None) -> ModelOutput:
+    def forward_both(
+        self,
+        features: MLPFeatures,
+        latent=None,
+        apply_zero_sum: bool = True,
+    ) -> ModelOutput:
+        del apply_zero_sum
         x = self._forward_base(features)
         policy_logits = self.policy_head(x).reshape(-1, NUM_HANDS, self.num_actions)
         hand_value_input = x.detach() if self.detach_value_head else x
@@ -139,14 +151,15 @@ class RebelFFN(BaseMLPModel):
         include_policy: bool = True,
         include_value: bool = True,
         latent=None,
+        apply_zero_sum: bool = True,
     ) -> ModelOutput:
         """Forward pass over flat feature vectors."""
         if include_policy and include_value:
-            return self._call_forward_both(features)
+            return self._call_forward_both(features, apply_zero_sum=apply_zero_sum)
         if include_policy:
             return self._call_forward_policy(features)
         if include_value:
-            return self._call_forward_value(features)
+            return self._call_forward_value(features, apply_zero_sum=apply_zero_sum)
         raise ValueError("At least one of include_policy/include_value must be true")
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
@@ -187,7 +200,11 @@ class RebelFFN(BaseMLPModel):
         count: int,
         include_policy: bool = False,
         include_value: bool = True,
+        apply_zero_sum: bool = True,
     ) -> ModelOutput:
         return self(
-            features, include_policy=include_policy, include_value=include_value
+            features,
+            include_policy=include_policy,
+            include_value=include_value,
+            apply_zero_sum=apply_zero_sum,
         )

@@ -232,11 +232,13 @@ class StreetModelRegistry(BaseMLPModel):
         count: int,
         include_policy: bool = False,
         include_value: bool = True,
+        apply_zero_sum: bool = True,
     ) -> ModelOutput:
         return self(
             features,
             include_policy=include_policy,
             include_value=include_value,
+            apply_zero_sum=apply_zero_sum,
         )
 
 

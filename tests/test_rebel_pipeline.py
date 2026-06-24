@@ -16,6 +16,7 @@ from p2.core.structured_config import (
 from p2.env.card_utils import (
     NUM_HANDS,
     combo_suit_permutation_inverse_tensor,
+    hand_combos_tensor,
     mask_conflicting_combos,
     suit_permutations_tensor,
 )
@@ -173,6 +174,7 @@ def test_rebel_cfr_trainer_loads_frozen_checkpoint_with_source_player_count(tmp_
     cfg.env.num_players = 3
     cfg.model.name = ModelType.better_ffn
     cfg.model.street_value_heads = StreetValueHeads.both
+    cfg.model.enforce_zero_sum = False
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
 
     frozen = trainer._load_closing_leaf_model(str(checkpoint_path))
@@ -496,7 +498,7 @@ def test_rebel_cfr_trainer_constructs_multiway_pbs_env():
     cfg.model.policy_hand_bias_rank = 4
     cfg.model.board_interaction_dim = 0
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
-    cfg.model.enforce_zero_sum = True
+    cfg.model.enforce_zero_sum = False
 
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
 
@@ -506,6 +508,27 @@ def test_rebel_cfr_trainer_constructs_multiway_pbs_env():
     assert trainer.env.num_players == 3
     assert isinstance(trainer.cfr_evaluator, PreflopSparseCFREvaluator)
     assert cfg.model.enforce_zero_sum is False
+
+
+def test_rebel_cfr_trainer_rejects_multiway_internal_zero_sum():
+    cfg = Config()
+    cfg.num_envs = 1
+    cfg.env.num_players = 3
+    cfg.env.bet_bins = [0.5]
+    cfg.search.depth = 1
+    cfg.search.iterations = 1
+    cfg.search.warm_start_iterations = 0
+    cfg.search.sparse = True
+    cfg.search.sparse_fused = False
+    cfg.search.allin_call_terminal_abstraction = False
+    cfg.train.batch_size = 1
+    cfg.train.replay_buffer_batches = 1
+    cfg.model.name = ModelType.better_ffn
+    cfg.model.preflop_hand_dim = 169
+    cfg.model.enforce_zero_sum = True
+
+    with pytest.raises(ValueError, match="heads-up only"):
+        RebelCFRTrainer(cfg, torch.device("cpu"))
 
 
 def test_rebel_cfr_trainer_constructs_preflop_transformer_models():
@@ -537,6 +560,7 @@ def test_rebel_cfr_trainer_constructs_preflop_transformer_models():
     cfg.model.policy_hand_bias_rank = 4
     cfg.model.board_interaction_dim = 0
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+    cfg.model.enforce_zero_sum = False
 
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
 
@@ -590,6 +614,7 @@ def test_rebel_cfr_trainer_routes_multiway_pbs_env_to_fused_preflop(
     cfg.model.policy_hand_bias_rank = 4
     cfg.model.board_interaction_dim = 0
     cfg.model.num_actions = len(cfg.env.bet_bins) + 3
+    cfg.model.enforce_zero_sum = False
 
     trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
 
@@ -709,6 +734,53 @@ def test_rebel_supervised_loss_multiway_finite():
     assert loss_dict["policy_weights"].shape == (batch_size, NUM_HANDS)
     assert loss_dict["value_weights"].shape == (batch_size, num_players, NUM_HANDS)
     loss_dict["total_loss"].backward()
+
+
+def test_rebel_supervised_loss_folded_beliefs_block_but_folded_values_untrained():
+    num_players = 3
+    loss_fn = RebelSupervisedLoss(num_players=num_players)
+    focal_hand = 0
+    combos = hand_combos_tensor()
+    focal_cards = combos[focal_hand]
+    conflicts = (combos == focal_cards[0]).any(dim=1) | (
+        combos == focal_cards[1]
+    ).any(dim=1)
+    conflict_hand = torch.where(conflicts)[0][0]
+    nonconflict_hand = torch.where(~conflicts)[0][0]
+
+    def make_batch(folded_player_hand: torch.Tensor) -> RebelBatch:
+        beliefs = torch.full((1, num_players, NUM_HANDS), 1.0 / NUM_HANDS)
+        beliefs[0, 2].zero_()
+        beliefs[0, 2, folded_player_hand] = 1.0
+        value_targets = torch.zeros(1, num_players, NUM_HANDS)
+        value_targets[:, 2, :] = 5.0
+        return RebelBatch(
+            features=MLPFeatures(
+                context=torch.zeros(1, 4),
+                street=torch.zeros(1, dtype=torch.long),
+                to_act=torch.zeros(1, dtype=torch.long),
+                board=torch.full((1, 5), -1, dtype=torch.long),
+                beliefs=beliefs.reshape(1, -1),
+            ),
+            legal_masks=torch.ones(1, 1, dtype=torch.bool),
+            value_targets=value_targets,
+            statistics={"has_folded": torch.tensor([[False, False, True]])},
+        )
+
+    hand_values = torch.zeros(1, num_players, NUM_HANDS)
+    hand_values[:, 2, :] = 7.0
+    output = ModelOutput(hand_values=hand_values, value=torch.zeros(1, num_players))
+    loss_conflict = loss_fn.forward_value(output, make_batch(conflict_hand))
+    loss_nonconflict = loss_fn.forward_value(output, make_batch(nonconflict_hand))
+
+    torch.testing.assert_close(
+        loss_conflict["value_predictions"][:, 2],
+        torch.full((1, NUM_HANDS), 7.0),
+    )
+    assert loss_conflict["value_weights"][0, 0, focal_hand] < (
+        loss_nonconflict["value_weights"][0, 0, focal_hand]
+    )
+    assert torch.count_nonzero(loss_conflict["value_weights"][0, 2]) == 0
 
 
 def test_rebel_supervised_loss_zeros_board_blocked_weights():

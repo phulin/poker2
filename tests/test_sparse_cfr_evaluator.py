@@ -97,8 +97,13 @@ class MockModel:
         return RebelFeatureEncoder(env=env, device=device, dtype=dtype)
 
     def __call__(
-        self, features: MLPFeatures, include_policy: bool = True
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = True,
+        **kwargs,
     ) -> ModelOutput:
+        del include_value, kwargs
         batch = len(features)
         device = features.context.device
         dtype = features.context.dtype
@@ -197,7 +202,8 @@ class PreOnlyMockModel(MockModel):
         super().__init__(*args, **kwargs)
         self.forward_pre_calls = 0
 
-    def forward_pre(self, features: MLPFeatures) -> torch.Tensor:
+    def forward_pre(self, features: MLPFeatures, **kwargs) -> torch.Tensor:
+        del kwargs
         self.forward_pre_calls += 1
         batch = len(features)
         return torch.zeros(
@@ -227,8 +233,12 @@ class ConstantValueModel:
         self.forward_pre_contexts: list[torch.Tensor] = []
 
     def __call__(
-        self, features: MLPFeatures, include_policy: bool = False
+        self,
+        features: MLPFeatures,
+        include_policy: bool = False,
+        **kwargs,
     ) -> ModelOutput:
+        del include_policy, kwargs
         self.call_contexts.append(features.context.detach().clone())
         batch = len(features)
         hand_values = torch.full(
@@ -243,7 +253,8 @@ class ConstantValueModel:
             hand_values=hand_values,
         )
 
-    def forward_pre(self, features: MLPFeatures) -> torch.Tensor:
+    def forward_pre(self, features: MLPFeatures, **kwargs) -> torch.Tensor:
+        del kwargs
         self.forward_pre_contexts.append(features.context.detach().clone())
         return torch.full(
             (len(features), self.num_players, NUM_HANDS),
@@ -310,8 +321,12 @@ class DeterministicModel:
         return RebelFeatureEncoder(env=env, device=device, dtype=dtype)
 
     def __call__(
-        self, features: MLPFeatures, include_policy: bool = True
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        **kwargs,
     ) -> ModelOutput:
+        del include_policy, kwargs
         batch = len(features)
         logits = self.base_logits.expand(batch, NUM_HANDS, self.num_actions).clone()
         values = self.base_values.expand(batch, 2, NUM_HANDS).clone()
@@ -549,9 +564,9 @@ def test_model_leaf_values_project_multiway_heads_up_closing_leaf() -> None:
     new_values, _ = evaluator._set_model_values_impl(0, beliefs, features)
 
     torch.testing.assert_close(new_values[0, 0], torch.full((PREFLOP_HANDS,), -0.1))
-    torch.testing.assert_close(new_values[0, 1], torch.full((PREFLOP_HANDS,), 2.0))
+    torch.testing.assert_close(new_values[0, 1], torch.full((PREFLOP_HANDS,), 0.15))
     torch.testing.assert_close(new_values[0, 2], torch.full((PREFLOP_HANDS,), -0.2))
-    torch.testing.assert_close(new_values[0, 3], torch.full((PREFLOP_HANDS,), 2.0))
+    torch.testing.assert_close(new_values[0, 3], torch.full((PREFLOP_HANDS,), 0.15))
     assert closing_model.call_contexts
 
 

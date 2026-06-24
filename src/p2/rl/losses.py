@@ -896,7 +896,6 @@ class RebelSupervisedLoss(nn.Module):
         if live_mask is not None:
             actor_live = live_mask.gather(1, actor_safe[:, None]).squeeze(1)
             valid_actor = valid_actor & actor_live
-            non_actor = non_actor & live_mask[:, :, None]
         other_matchup = torch.where(
             non_actor,
             unblocked_mass,
@@ -924,7 +923,6 @@ class RebelSupervisedLoss(nn.Module):
         non_focal = player_ids[None, :, None, None] != player_ids[None, None, :, None]
         if live_mask is not None:
             live_mask = live_mask.to(device=unblocked_mass.device, dtype=torch.bool)
-            non_focal = non_focal & live_mask[:, None, :, None]
         weights = torch.where(
             non_focal,
             unblocked_mass[:, None],
@@ -1068,7 +1066,6 @@ class RebelSupervisedLoss(nn.Module):
         if live_mask is not None:
             actor_live = live_mask.gather(1, actor_safe[:, None]).squeeze(1)
             valid_actor = valid_actor & actor_live
-            non_actor = non_actor & live_mask[:, :, None]
         other_matchup = torch.where(
             non_actor,
             unblocked_mass,
@@ -1192,6 +1189,7 @@ class RebelSupervisedLoss(nn.Module):
             "value_loss": value_loss,
             "value_loss_all": value_loss_all,
             "value_weights": value_weights,
+            "value_predictions": hand_values.detach(),
             "entropy": zero,
             "permutation_loss": zero,
         }
@@ -1339,6 +1337,7 @@ class RebelSupervisedLoss(nn.Module):
             "value_loss": value_loss,
             "value_loss_all": value_loss_all,
             "value_weights": value_weights,
+            "value_predictions": hand_values.detach(),
             "entropy": zero,
             "permutation_loss": zero,
         }
@@ -1453,6 +1452,7 @@ class RebelSupervisedLoss(nn.Module):
             "value_loss": value_loss,
             "value_loss_all": value_loss_all,
             "value_weights": value_weights,
+            "value_predictions": hand_values.detach(),
             "entropy": entropy,
             "permutation_loss": self._zero(device),
         }

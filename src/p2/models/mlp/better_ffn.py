@@ -32,6 +32,14 @@ HAND_STATIC_FEATURE_DIM = 8
 HAND_DYNAMIC_FEATURE_DIM = 15
 
 
+def _validate_internal_zero_sum(num_players: int, enforce_zero_sum: bool) -> None:
+    if int(num_players) != 2 and bool(enforce_zero_sum):
+        raise ValueError(
+            "Internal zero-sum projection is heads-up only; multiway value "
+            "models must use fold-aware external value postprocessing."
+        )
+
+
 def _is_cuda_graph_capturing(tensor: torch.Tensor) -> bool:
     if tensor.device.type != "cuda" or not torch.cuda.is_available():
         return False
@@ -113,6 +121,7 @@ class BetterFFN(BaseMLPModel):
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
         super().__init__()
+        _validate_internal_zero_sum(num_players, enforce_zero_sum)
         self.num_actions = num_actions
         self.hidden_dim = hidden_dim
         self.ffn_dim = ffn_dim
@@ -962,9 +971,13 @@ class BetterFFN(BaseMLPModel):
         count: int,
         include_policy: bool = False,
         include_value: bool = True,
+        apply_zero_sum: bool = True,
     ) -> ModelOutput:
         return self(
-            features, include_policy=include_policy, include_value=include_value
+            features,
+            include_policy=include_policy,
+            include_value=include_value,
+            apply_zero_sum=apply_zero_sum,
         )
 
 
@@ -1451,6 +1464,7 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
         context_in_dim: int | None = None,
     ) -> None:
         super().__init__()
+        _validate_internal_zero_sum(num_players, enforce_zero_sum)
         if range_hidden_dim < 0:
             raise ValueError("range_hidden_dim must be non-negative")
         if board_interaction_dim != 0:
@@ -1659,9 +1673,13 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
         count: int,
         include_policy: bool = False,
         include_value: bool = True,
+        apply_zero_sum: bool = True,
     ) -> ModelOutput:
         return self(
-            features, include_policy=include_policy, include_value=include_value
+            features,
+            include_policy=include_policy,
+            include_value=include_value,
+            apply_zero_sum=apply_zero_sum,
         )
 
 
@@ -1694,6 +1712,7 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         transformer_heads: int = 8,
     ) -> None:
         super().__init__()
+        _validate_internal_zero_sum(num_players, enforce_zero_sum)
         if range_hidden_dim < 0:
             raise ValueError("range_hidden_dim must be non-negative")
         if board_interaction_dim != 0:
@@ -1932,9 +1951,13 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         count: int,
         include_policy: bool = False,
         include_value: bool = True,
+        apply_zero_sum: bool = True,
     ) -> ModelOutput:
         return self(
-            features, include_policy=include_policy, include_value=include_value
+            features,
+            include_policy=include_policy,
+            include_value=include_value,
+            apply_zero_sum=apply_zero_sum,
         )
 
 
@@ -2582,7 +2605,11 @@ class BetterSplitFFN(BaseMLPModel):
         count: int,
         include_policy: bool = False,
         include_value: bool = True,
+        apply_zero_sum: bool = True,
     ) -> ModelOutput:
         return self(
-            features, include_policy=include_policy, include_value=include_value
+            features,
+            include_policy=include_policy,
+            include_value=include_value,
+            apply_zero_sum=apply_zero_sum,
         )

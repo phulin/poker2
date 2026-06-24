@@ -500,8 +500,6 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         unblocked = self._preflop_unblocked_mass(reach)
         player_ids = torch.arange(self.num_players, device=self.device)
         other_live = player_ids[None, :, None] != 0
-        if hasattr(self.env, "has_folded"):
-            other_live &= ~self.env.has_folded[:top, :, None]
         other_reach = torch.where(
             other_live,
             unblocked.clamp_min(1e-12),
@@ -621,8 +619,6 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         unblocked_reach = self._preflop_unblocked_mass(beliefs)
         player_ids = torch.arange(self.num_players, device=self.device)
         other_live = player_ids[None, :, None] != self.env.to_act[:, None, None]
-        if hasattr(self.env, "has_folded"):
-            other_live &= ~self.env.has_folded[:, :, None]
         src_weights = torch.where(
             other_live,
             unblocked_reach.clamp_min(1e-12),

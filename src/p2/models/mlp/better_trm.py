@@ -17,6 +17,14 @@ from p2.models.model_output import ModelOutput, TRMLatent
 from p2.utils.profiling import profile
 
 
+def _validate_internal_zero_sum(num_players: int, enforce_zero_sum: bool) -> None:
+    if int(num_players) != 2 and bool(enforce_zero_sum):
+        raise ValueError(
+            "Internal zero-sum projection is heads-up only; multiway value "
+            "models must use fold-aware external value postprocessing."
+        )
+
+
 def trunc_normal_(
     tensor: torch.Tensor,
     std: float = 1.0,
@@ -109,6 +117,7 @@ class BetterTRM(BaseMLPModel):
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
         super().__init__()
+        _validate_internal_zero_sum(num_players, enforce_zero_sum)
         self.num_actions = num_actions
         self.hidden_dim = hidden_dim
         self.ffn_dim = ffn_dim
@@ -228,11 +237,14 @@ class BetterTRM(BaseMLPModel):
         )
 
     def forward_value(
-        self, features: MLPFeatures, latent: TRMLatent | None = None
+        self,
+        features: MLPFeatures,
+        latent: TRMLatent | None = None,
+        apply_zero_sum: bool = True,
     ) -> ModelOutput:
         player_beliefs, y, z = self._forward_latent(features, latent)
         hand_values_raw = self.hand_value_head(y).view(-1, self.num_players, NUM_HANDS)
-        if self.enforce_zero_sum:
+        if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
                 (hand_values_raw * player_beliefs)
                 .sum(dim=2, keepdim=True)
@@ -249,7 +261,10 @@ class BetterTRM(BaseMLPModel):
         )
 
     def forward_both(
-        self, features: MLPFeatures, latent: TRMLatent | None = None
+        self,
+        features: MLPFeatures,
+        latent: TRMLatent | None = None,
+        apply_zero_sum: bool = True,
     ) -> ModelOutput:
         player_beliefs, y, z = self._forward_latent(features, latent)
         policy_input = y if self.shared_trunk else y.detach()
@@ -257,7 +272,7 @@ class BetterTRM(BaseMLPModel):
             -1, NUM_HANDS, self.num_actions
         )
         hand_values_raw = self.hand_value_head(y).view(-1, self.num_players, NUM_HANDS)
-        if self.enforce_zero_sum:
+        if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
                 (hand_values_raw * player_beliefs)
                 .sum(dim=2, keepdim=True)
@@ -282,14 +297,23 @@ class BetterTRM(BaseMLPModel):
         include_policy: bool = True,
         include_value: bool = True,
         latent: TRMLatent | None = None,
+        apply_zero_sum: bool = True,
     ) -> ModelOutput:
         """Forward pass over flat feature vectors."""
         if include_policy and include_value:
-            return self._call_forward_both(features, latent=latent)
+            return self._call_forward_both(
+                features,
+                latent=latent,
+                apply_zero_sum=apply_zero_sum,
+            )
         if include_policy:
             return self._call_forward_policy(features, latent=latent)
         if include_value:
-            return self._call_forward_value(features, latent=latent)
+            return self._call_forward_value(
+                features,
+                latent=latent,
+                apply_zero_sum=apply_zero_sum,
+            )
         raise ValueError("At least one of include_policy/include_value must be true")
 
     def init_weights(self, rng: torch.Generator | None = None) -> None:
@@ -338,6 +362,7 @@ class BetterTRM(BaseMLPModel):
         count: int,
         include_policy: bool = False,
         include_value: bool = True,
+        apply_zero_sum: bool = True,
     ) -> ModelOutput:
         latent = None
         for _ in range(count):
@@ -346,6 +371,7 @@ class BetterTRM(BaseMLPModel):
                 include_policy=include_policy,
                 include_value=include_value,
                 latent=latent,
+                apply_zero_sum=apply_zero_sum,
             )
             latent = output.latent
         return output

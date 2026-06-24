@@ -183,7 +183,7 @@ def test_compact_169_value_loss_matches_expanded_weighted_loss() -> None:
     torch.testing.assert_close(compact_loss, expanded_loss, rtol=1e-5, atol=1e-6)
 
 
-def test_compact_policy_loss_ignores_folded_opponent_belief() -> None:
+def test_compact_policy_loss_uses_folded_opponent_belief_for_blockers() -> None:
     batch_size = 2
     num_players = 3
     num_actions = 4
@@ -226,8 +226,8 @@ def test_compact_policy_loss_ignores_folded_opponent_belief() -> None:
         make_batch(beliefs_changed),
     )
 
-    torch.testing.assert_close(base["policy_weights"], changed["policy_weights"])
-    torch.testing.assert_close(base["policy_loss"], changed["policy_loss"])
+    assert not torch.allclose(base["policy_weights"], changed["policy_weights"])
+    assert not torch.allclose(base["policy_loss"], changed["policy_loss"])
 
 
 def test_compact_value_loss_excludes_folded_focal_players() -> None:
@@ -282,12 +282,17 @@ def test_compact_value_loss_excludes_folded_focal_players() -> None:
     loss_fn = RebelSupervisedLoss(num_players=num_players)
 
     base = loss_fn.forward_value(ModelOutput(hand_values=pred), batch)
-    changed = loss_fn.forward_value(
+    changed_pred = loss_fn.forward_value(
+        ModelOutput(hand_values=pred_changed),
+        batch,
+    )
+    changed_target = loss_fn.forward_value(
         ModelOutput(hand_values=pred_changed),
         changed_batch,
     )
 
-    torch.testing.assert_close(base["value_loss"], changed["value_loss"])
+    torch.testing.assert_close(base["value_loss"], changed_pred["value_loss"])
+    torch.testing.assert_close(base["value_loss"], changed_target["value_loss"])
     assert torch.all(base["value_weights"][:, 2] == 0)
 
 
@@ -452,6 +457,7 @@ def test_compact_preflop_transformer_model_shapes_and_policy_loss() -> None:
         policy_rank=8,
         policy_hand_bias_rank=4,
         transformer_heads=4,
+        enforce_zero_sum=False,
     )
     policy_model = BetterPreflopTransformerPolicyFFN(
         num_actions=num_actions,
@@ -465,6 +471,7 @@ def test_compact_preflop_transformer_model_shapes_and_policy_loss() -> None:
         policy_rank=8,
         policy_hand_bias_rank=4,
         transformer_heads=4,
+        enforce_zero_sum=False,
     )
     value_model.init_weights(torch.Generator(device="cpu").manual_seed(4))
     policy_model.init_weights(torch.Generator(device="cpu").manual_seed(5))
@@ -517,6 +524,7 @@ def test_compact_preflop_transformer_head_layers_work_without_shared_layers() ->
         policy_rank=8,
         policy_hand_bias_rank=4,
         transformer_heads=4,
+        enforce_zero_sum=False,
     )
     policy_model = BetterPreflopTransformerPolicyFFN(
         num_actions=5,
@@ -530,6 +538,7 @@ def test_compact_preflop_transformer_head_layers_work_without_shared_layers() ->
         policy_rank=8,
         policy_hand_bias_rank=4,
         transformer_heads=4,
+        enforce_zero_sum=False,
     )
 
     assert len(value_model.encoder) == 0

@@ -327,17 +327,11 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     ) -> torch.Tensor:
         if beliefs.device.type == "cuda" and self._preflop_use_rank_stats_src_weights():
             out = self._ensure_preflop_regret_src_weights_buf(top)
-            has_folded = (
-                self.env.has_folded[:top].contiguous()
-                if hasattr(self.env, "has_folded")
-                else None
-            )
             fused_preflop169_src_weights_rank_stats_multiway_(
                 class_mass=beliefs[:top].contiguous(),
                 to_act=to_act_top,
                 allowed_weight=self._preflop_allowed_float(top),
                 out=out,
-                has_folded=has_folded,
                 stats_out=self._ensure_preflop_regret_src_rank_stats_buf(
                     top * self.num_players
                 ),
@@ -349,17 +343,11 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             and self._preflop_use_compact_stats_src_weights()
         ):
             out = self._ensure_preflop_regret_src_weights_buf(top)
-            has_folded = (
-                self.env.has_folded[:top].contiguous()
-                if hasattr(self.env, "has_folded")
-                else None
-            )
             fused_preflop169_src_weights_stats_multiway_(
                 class_mass=beliefs[:top].contiguous(),
                 to_act=to_act_top,
                 allowed_weight=self._preflop_allowed_float(top),
                 out=out,
-                has_folded=has_folded,
                 stats_out=self._ensure_preflop_regret_src_stats_buf(
                     top * self.num_players
                 ),
@@ -369,18 +357,12 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         if beliefs.device.type == "cuda" and self._preflop_use_fused_src_weights(top):
             out = self._ensure_preflop_regret_src_weights_buf(top)
             projection = self._preflop_unblocked_projection_for(beliefs).contiguous()
-            has_folded = (
-                self.env.has_folded[:top].contiguous()
-                if hasattr(self.env, "has_folded")
-                else None
-            )
             fused_preflop169_src_weights_multiway_(
                 class_mass=beliefs[:top].contiguous(),
                 projection=projection,
                 to_act=to_act_top,
                 allowed_mask=self.allowed_hands[:top].contiguous(),
                 out=out,
-                has_folded=has_folded,
             )
             return out
 
@@ -402,25 +384,17 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             unblocked_reach = self._preflop_unblocked_mass(beliefs[:top]).contiguous()
         if beliefs.device.type == "cuda" and self._preflop_use_fused_src_weight_tail():
             out = self._ensure_preflop_regret_src_weights_buf(top)
-            has_folded = (
-                self.env.has_folded[:top].contiguous()
-                if hasattr(self.env, "has_folded")
-                else None
-            )
             fused_preflop169_src_weights_from_unblocked_multiway_(
                 unblocked=unblocked_reach,
                 to_act=to_act_top,
                 allowed_weight=self._preflop_allowed_float(top),
                 out=out,
-                has_folded=has_folded,
             )
             return out
 
         unblocked_reach.clamp_min_(1e-12)
         player_ids = self._preflop_player_ids()
         other_live = player_ids[None, :, None] != to_act_top[:, None, None]
-        if hasattr(self.env, "has_folded"):
-            other_live &= ~self.env.has_folded[:top, :, None]
         src_weights = torch.where(
             other_live,
             unblocked_reach,
@@ -1111,6 +1085,12 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         hand_values, model_applied_zero_sum = (
             self._model_leaf_values_for_fused_writeback(features)
         )
+        hand_values = self._postprocess_model_leaf_values(
+            hand_values,
+            beliefs,
+            self.model_indices,
+        ).contiguous()
+        model_applied_zero_sum = True
         do_mix = (
             self.cfr_avg
             and t > 1
@@ -1136,7 +1116,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         enforce_writeback_zero_sum = (
             bool(self.model.enforce_zero_sum)
             and self.num_players == 2
-            and (do_mix or not model_applied_zero_sum)
+            and not model_applied_zero_sum
         )
         fused_model_values_writeback_multiway_(
             hand_values=hand_values,

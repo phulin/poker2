@@ -57,10 +57,10 @@ class BaseMLPModel(nn.Module, ABC):
     def forward_policy(self, features, latent=None): ...
 
     @abstractmethod
-    def forward_value(self, features, latent=None): ...
+    def forward_value(self, features, latent=None, apply_zero_sum: bool = True): ...
 
     @abstractmethod
-    def forward_both(self, features, latent=None): ...
+    def forward_both(self, features, latent=None, apply_zero_sum: bool = True): ...
 
     @abstractmethod
     def forward(
@@ -69,6 +69,7 @@ class BaseMLPModel(nn.Module, ABC):
         include_policy: bool = True,
         include_value: bool = True,
         latent=None,
+        apply_zero_sum: bool = True,
     ): ...
 
     @abstractmethod
@@ -88,4 +89,5 @@ class BaseMLPModel(nn.Module, ABC):
         count: int,
         include_policy: bool = False,
         include_value: bool = True,
+        apply_zero_sum: bool = True,
     ): ...

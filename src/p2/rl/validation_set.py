@@ -77,6 +77,7 @@ class RebelValueValidationSetEvaluator:
                     batch.features,
                     count=self.cfg.model.num_supervisions,
                     include_policy=False,
+                    apply_zero_sum=False,
                 )
             loss_dict = self.trainer.loss_fn.forward_value(output, batch)
             value_loss_all = loss_dict["value_loss_all"]

@@ -97,6 +97,7 @@ def test_better_ffn_uses_rmsnorm_and_forward_shapes():
         num_players=num_players,
         policy_rank=8,
         policy_hand_bias_rank=4,
+        enforce_zero_sum=False,
     )
     model.init_weights(torch.Generator(device="cpu").manual_seed(0))
 
@@ -302,6 +303,7 @@ def test_better_split_ffn_policy_and_value_shapes_and_parameters():
         num_players=num_players,
         policy_rank=8,
         policy_hand_bias_rank=4,
+        enforce_zero_sum=False,
     )
     value_model = BetterStreetValueFFN(
         num_actions=1,
@@ -375,6 +377,7 @@ def test_better_policy_ffn_multiway_forward_shape():
         num_players=num_players,
         policy_rank=8,
         policy_hand_bias_rank=4,
+        enforce_zero_sum=False,
     )
     policy_model.init_weights(torch.Generator(device="cpu").manual_seed(0))
     beliefs = torch.full(

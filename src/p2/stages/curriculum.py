@@ -631,7 +631,11 @@ def _validate_preflop_value_169(
             generator=trainer.rng,
         ).to(trainer.device)
         with trainer.model_autocast():
-            output = trainer.model(batch.features, include_policy=False)
+            output = trainer.model(
+                batch.features,
+                include_policy=False,
+                apply_zero_sum=False,
+            )
         loss_dict = trainer.loss_fn._call_forward_value(output, batch)
         weighted_loss += float(loss_dict["value_loss"].detach().item()) * current
         seen += current

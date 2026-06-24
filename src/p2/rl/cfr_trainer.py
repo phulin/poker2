@@ -218,11 +218,11 @@ class RebelCFRTrainer:
         self.num_actions = len(self.bet_bins) + 3
         self.num_players = int(cfg.env.num_players)
         if self.num_players != 2 and cfg.model.enforce_zero_sum:
-            print(
-                "[RebelCFRTrainer] Disabling model.enforce_zero_sum for multiway "
-                "training; multiway constant-sum projection needs joint blockers."
+            raise ValueError(
+                "model.enforce_zero_sum is heads-up only. Multiway models must "
+                "set model.enforce_zero_sum=false and use fold-aware external "
+                "value postprocessing."
             )
-            cfg.model.enforce_zero_sum = False
         self.policy_extra_updates_per_step = cfg.train.policy_extra_updates_per_step
         if self.policy_extra_updates_per_step < 0:
             raise ValueError("train.policy_extra_updates_per_step must be >= 0")
@@ -1135,7 +1135,11 @@ class RebelCFRTrainer:
 
         with torch.no_grad():
             with self._model_autocast():
-                child_output = self.model(child_features, include_policy=False)
+                child_output = self.model(
+                    child_features,
+                    include_policy=False,
+                    apply_zero_sum=False,
+                )
                 policy_output = self.model(
                     parent_features,
                     include_policy=True,
@@ -2109,6 +2113,7 @@ class RebelCFRTrainer:
                         fresh_value_batch.features,
                         count=self.cfg.model.num_supervisions,
                         include_policy=False,
+                        apply_zero_sum=False,
                     )
                 fresh_loss_dict = self.loss_fn.forward_value(
                     fresh_model_output, fresh_value_batch
@@ -2124,6 +2129,7 @@ class RebelCFRTrainer:
                             value_batch.features,
                             count=self.cfg.model.num_supervisions,
                             include_policy=False,
+                            apply_zero_sum=False,
                         )
                     metrics["value_loss_avg"] = self.loss_fn.forward_value(
                         model_avg_output, value_batch
@@ -2299,18 +2305,21 @@ class RebelCFRTrainer:
                     value_batch.features,
                     include_policy=False,
                     latent=value_latent,
+                    apply_zero_sum=False,
                 )
                 # Run model on permuted inputs [model(permute(features))]
                 value_output_permuted = self.model(
                     permuted_batch.features,
                     include_policy=False,
                     latent=permuted_latent,
+                    apply_zero_sum=False,
                 )
             else:
                 value_count = len(value_batch)
                 value_output_both = self.model(
                     MLPFeatures.cat([value_batch.features, permuted_batch.features]),
                     include_policy=False,
+                    apply_zero_sum=False,
                 )
                 value_output_orig = value_output_both[:value_count]
                 value_output_permuted = value_output_both[value_count:]
@@ -2546,16 +2555,19 @@ class RebelCFRTrainer:
                 value_output_orig = self.model(
                     value_batch.features,
                     include_policy=False,
+                    apply_zero_sum=False,
                 )
                 value_output_permuted = self.model(
                     permuted_batch.features,
                     include_policy=False,
+                    apply_zero_sum=False,
                 )
             else:
                 value_count = len(value_batch)
                 value_output_both = self.model(
                     MLPFeatures.cat([value_batch.features, permuted_batch.features]),
                     include_policy=False,
+                    apply_zero_sum=False,
                 )
                 value_output_orig = value_output_both[:value_count]
                 value_output_permuted = value_output_both[value_count:]
