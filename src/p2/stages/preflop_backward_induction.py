@@ -2060,13 +2060,52 @@ def _distill_batch_from_teacher(
         if include_value:
             if output.hand_values is None:
                 raise RuntimeError("teacher did not produce hand_values")
+            value_targets = _postprocess_distilled_value_targets(
+                output.hand_values,
+                beliefs,
+                env,
+            )
             value_batch = RebelBatch(
                 features=features,
                 legal_masks=legal,
-                value_targets=output.hand_values.float().detach().clone(),
+                value_targets=value_targets.detach().clone(),
                 statistics=statistics,
             )
     return value_batch, policy_batch
+
+
+def _postprocess_distilled_value_targets(
+    hand_values: torch.Tensor,
+    beliefs: torch.Tensor,
+    env: PBSEnv,
+) -> torch.Tensor:
+    values = hand_values.float()
+    rows = values.shape[0]
+    folded = getattr(env, "has_folded", None)
+    if folded is None:
+        live_mask = torch.ones(
+            values.shape[:2],
+            dtype=torch.bool,
+            device=values.device,
+        )
+    else:
+        folded_mask = folded[:rows].to(device=values.device, dtype=torch.bool)
+        live_mask = ~folded_mask
+        scale = env.scale[:rows].to(device=values.device, dtype=torch.float32)
+        scale = scale.clamp_min(1.0)
+        folded_values = (
+            env.stacks[:rows].to(device=values.device, dtype=torch.float32)
+            - env.starting_stacks[:rows].to(device=values.device, dtype=torch.float32)
+        ) / scale[:, None]
+        folded_values = folded_values[:, :, None].expand_as(values)
+        values = torch.where(folded_mask[:, :, None], folded_values, values)
+
+    belief_values = beliefs[:rows].to(device=values.device, dtype=values.dtype)
+    live_weight = live_mask[:, :, None].to(dtype=values.dtype)
+    denom = (belief_values * live_weight).sum(dim=(1, 2), keepdim=True)
+    expected_sum = (values * belief_values).sum(dim=(1, 2), keepdim=True)
+    correction = expected_sum / denom.clamp_min(1.0e-12)
+    return torch.where(live_mask[:, :, None], values - correction, values)
 
 
 def run_distill(
