@@ -73,10 +73,14 @@ def _make_evaluator_for_mode(
     *,
     live2_entries: bool,
     sparse_writeback: bool,
+    direct_entry_beliefs: bool,
 ):
     os.environ["P2_PREFLOP_ALLIN_LIVE2_ENTRIES"] = "1" if live2_entries else "0"
     os.environ["P2_PREFLOP_ALLIN_SPARSE_WRITEBACK"] = (
         "1" if sparse_writeback else "0"
+    )
+    os.environ["P2_PREFLOP_ALLIN_DIRECT_ENTRY_BELIEFS"] = (
+        "1" if direct_entry_beliefs else "0"
     )
     ev, rows = _make_evaluator(_make_loop_args(args))
     if ev.device.type != "cuda":
@@ -93,11 +97,13 @@ def _bench_mode(
     *,
     live2_entries: bool,
     sparse_writeback: bool,
+    direct_entry_beliefs: bool,
 ) -> dict[str, float | int]:
     ev, rows = _make_evaluator_for_mode(
         args,
         live2_entries=live2_entries,
         sparse_writeback=sparse_writeback,
+        direct_entry_beliefs=direct_entry_beliefs,
     )
 
     def call() -> None:
@@ -110,6 +116,7 @@ def _bench_mode(
     return {
         "live2_entries": int(live2_entries),
         "sparse_writeback": int(sparse_writeback),
+        "direct_entry_beliefs": int(direct_entry_beliefs),
         "rows": int(rows),
         "total_nodes": int(ev.total_nodes),
         "allin_call_indices": int(ev.allin_call_indices.numel()),
@@ -126,11 +133,13 @@ def _correctness(args: argparse.Namespace) -> float:
         args,
         live2_entries=True,
         sparse_writeback=False,
+        direct_entry_beliefs=False,
     )
     ev_new, _rows = _make_evaluator_for_mode(
         args,
         live2_entries=True,
         sparse_writeback=True,
+        direct_entry_beliefs=True,
     )
     with torch.no_grad():
         ev_old._set_allin_call_values(ev_old.beliefs)
@@ -196,10 +205,30 @@ def main() -> None:
     with _pause_processes(not args.no_pause, args.pause_pattern):
         max_diff = _correctness(args)
         results = [
-            _bench_mode(args, live2_entries=True, sparse_writeback=False),
-            _bench_mode(args, live2_entries=True, sparse_writeback=True),
-            _bench_mode(args, live2_entries=True, sparse_writeback=True),
-            _bench_mode(args, live2_entries=True, sparse_writeback=False),
+            _bench_mode(
+                args,
+                live2_entries=True,
+                sparse_writeback=True,
+                direct_entry_beliefs=False,
+            ),
+            _bench_mode(
+                args,
+                live2_entries=True,
+                sparse_writeback=True,
+                direct_entry_beliefs=True,
+            ),
+            _bench_mode(
+                args,
+                live2_entries=True,
+                sparse_writeback=True,
+                direct_entry_beliefs=True,
+            ),
+            _bench_mode(
+                args,
+                live2_entries=True,
+                sparse_writeback=True,
+                direct_entry_beliefs=False,
+            ),
         ]
     output = {
         "max_diff": max_diff,
@@ -210,7 +239,8 @@ def main() -> None:
     for row in results:
         print(
             "live2_entries={live2_entries} sparse_writeback={sparse_writeback} "
-            "live2_nodes={live2_nodes} live3_nodes={live3_nodes} ms={ms:.6f}".format(
+            "direct_entry_beliefs={direct_entry_beliefs} live2_nodes={live2_nodes} "
+            "live3_nodes={live3_nodes} ms={ms:.6f}".format(
                 **row
             ),
             flush=True,

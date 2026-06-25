@@ -853,6 +853,21 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def _ensure_preflop_allin_169_oracle(self):
         return PreflopSparseCFREvaluator._ensure_preflop_allin_169_oracle(self)
 
+    def _preflop_allin_entry_beliefs(
+        self,
+        beliefs: torch.Tensor,
+        entry_nodes: torch.Tensor,
+        players: torch.Tensor,
+        attr: str,
+    ) -> torch.Tensor:
+        return PreflopSparseCFREvaluator._preflop_allin_entry_beliefs(
+            self,
+            beliefs,
+            entry_nodes,
+            players,
+            attr,
+        )
+
     def _set_allin_call_values(self, beliefs: torch.Tensor) -> None:
         PreflopSparseCFREvaluator._set_allin_call_values(self, beliefs)
 

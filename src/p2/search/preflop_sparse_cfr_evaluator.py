@@ -249,9 +249,11 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         self.preflop_allin_exact_indices = empty
         self.preflop_allin_model_indices = empty
         self.preflop_allin_live2_entry_rows = empty
+        self.preflop_allin_live2_entry_nodes = empty
         self.preflop_allin_live2_hero_players = empty
         self.preflop_allin_live2_opp_players = empty
         self.preflop_allin_live3_entry_rows = empty
+        self.preflop_allin_live3_entry_nodes = empty
         self.preflop_allin_live3_hero_players = empty
         self.preflop_allin_live3_opp0_players = empty
         self.preflop_allin_live3_opp1_players = empty
@@ -268,9 +270,11 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             self.preflop_allin_exact_indices = empty
             self.preflop_allin_model_indices = empty
             self.preflop_allin_live2_entry_rows = empty
+            self.preflop_allin_live2_entry_nodes = empty
             self.preflop_allin_live2_hero_players = empty
             self.preflop_allin_live2_opp_players = empty
             self.preflop_allin_live3_entry_rows = empty
+            self.preflop_allin_live3_entry_nodes = empty
             self.preflop_allin_live3_hero_players = empty
             self.preflop_allin_live3_opp0_players = empty
             self.preflop_allin_live3_opp1_players = empty
@@ -304,10 +308,12 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             opp_mask[entry, hero_players] = False
             opp_players = torch.nonzero(opp_mask, as_tuple=False)[:, 1]
             self.preflop_allin_live2_entry_rows = rows.contiguous()
+            self.preflop_allin_live2_entry_nodes = live2_idx[rows].contiguous()
             self.preflop_allin_live2_hero_players = hero_players.contiguous()
             self.preflop_allin_live2_opp_players = opp_players.contiguous()
         else:
             self.preflop_allin_live2_entry_rows = empty
+            self.preflop_allin_live2_entry_nodes = empty
             self.preflop_allin_live2_hero_players = empty
             self.preflop_allin_live2_opp_players = empty
         live3_idx = indices_by_count[3] if self.num_players >= 3 else empty
@@ -319,11 +325,13 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             opp_mask[entry, hero_players] = False
             opps = torch.nonzero(opp_mask, as_tuple=False)[:, 1].reshape(-1, 2)
             self.preflop_allin_live3_entry_rows = rows.contiguous()
+            self.preflop_allin_live3_entry_nodes = live3_idx[rows].contiguous()
             self.preflop_allin_live3_hero_players = hero_players.contiguous()
             self.preflop_allin_live3_opp0_players = opps[:, 0].contiguous()
             self.preflop_allin_live3_opp1_players = opps[:, 1].contiguous()
         else:
             self.preflop_allin_live3_entry_rows = empty
+            self.preflop_allin_live3_entry_nodes = empty
             self.preflop_allin_live3_hero_players = empty
             self.preflop_allin_live3_opp0_players = empty
             self.preflop_allin_live3_opp1_players = empty
@@ -459,6 +467,30 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         self.preflop_allin_169_oracle = oracle
         return oracle
 
+    def _preflop_allin_entry_beliefs(
+        self,
+        beliefs: torch.Tensor,
+        entry_nodes: torch.Tensor,
+        players: torch.Tensor,
+        attr: str,
+    ) -> torch.Tensor:
+        entries = int(entry_nodes.numel())
+        shape = (entries, PREFLOP_HANDS)
+        if entries == 0:
+            return beliefs.new_empty(shape)
+        flat_indices = entry_nodes * self.num_players + players
+        flat = beliefs.view(-1, self.hand_dim)
+        buf = getattr(self, attr, None)
+        if (
+            buf is None
+            or buf.shape != shape
+            or buf.device != beliefs.device
+            or buf.dtype != beliefs.dtype
+        ):
+            buf = beliefs.new_empty(shape)
+            setattr(self, attr, buf)
+        return torch.index_select(flat, 0, flat_indices.contiguous(), out=buf)
+
     def _set_allin_call_values(self, beliefs: torch.Tensor) -> None:
         indices = getattr(self, "allin_call_indices", None)
         if indices is None or indices.numel() == 0:
@@ -474,11 +506,16 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             os.environ.get("P2_PREFLOP_ALLIN_SPARSE_WRITEBACK", "1").strip().lower()
             not in {"0", "false", "off", "no"}
         )
+        use_direct_entry_beliefs = (
+            os.environ.get("P2_PREFLOP_ALLIN_DIRECT_ENTRY_BELIEFS", "1")
+            .strip()
+            .lower()
+            not in {"0", "false", "off", "no"}
+        )
         for live_players in range(2, min(3, self.num_players) + 1):
             node_idx = self.preflop_allin_indices_by_live_count[live_players]
             if node_idx.numel() == 0:
                 continue
-            beliefs_at_nodes = beliefs[node_idx]
             starting_stacks = self.env.starting_stacks[node_idx].to(torch.float32)
             committed = self.env.chips_placed[node_idx].to(torch.float32)
             stacks_after = self.env.stacks[node_idx].to(torch.float32)
@@ -488,12 +525,27 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                 live_players == 2
                 and use_live2_entries
                 and use_sparse_writeback
-                and hasattr(oracle, "write_live2_entry_values_")
+                and use_direct_entry_beliefs
+                and hasattr(oracle, "write_live2_entry_values_from_beliefs_")
             ):
-                oracle.write_live2_entry_values_(
+                entry_nodes = self.preflop_allin_live2_entry_nodes
+                hero_beliefs = self._preflop_allin_entry_beliefs(
+                    beliefs,
+                    entry_nodes,
+                    self.preflop_allin_live2_hero_players,
+                    "_preflop_allin_live2_hero_beliefs_buf",
+                )
+                opp_beliefs = self._preflop_allin_entry_beliefs(
+                    beliefs,
+                    entry_nodes,
+                    self.preflop_allin_live2_opp_players,
+                    "_preflop_allin_live2_opp_beliefs_buf",
+                )
+                oracle.write_live2_entry_values_from_beliefs_(
                     output=self.latest_values,
                     node_indices=node_idx,
-                    beliefs=beliefs_at_nodes,
+                    hero_beliefs=hero_beliefs,
+                    opp_beliefs=opp_beliefs,
                     starting_stacks=starting_stacks,
                     committed=committed,
                     stacks_after=stacks_after,
@@ -501,18 +553,39 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                     scale=scale,
                     live_entry_rows=self.preflop_allin_live2_entry_rows,
                     hero_players=self.preflop_allin_live2_hero_players,
-                    opp_players=self.preflop_allin_live2_opp_players,
                 )
                 continue
             if (
                 live_players == 3
                 and use_sparse_writeback
-                and hasattr(oracle, "write_live3_entry_values_")
+                and use_direct_entry_beliefs
+                and hasattr(oracle, "write_live3_entry_values_from_beliefs_")
             ):
-                oracle.write_live3_entry_values_(
+                entry_nodes = self.preflop_allin_live3_entry_nodes
+                hero_beliefs = self._preflop_allin_entry_beliefs(
+                    beliefs,
+                    entry_nodes,
+                    self.preflop_allin_live3_hero_players,
+                    "_preflop_allin_live3_hero_beliefs_buf",
+                )
+                opp0_beliefs = self._preflop_allin_entry_beliefs(
+                    beliefs,
+                    entry_nodes,
+                    self.preflop_allin_live3_opp0_players,
+                    "_preflop_allin_live3_opp0_beliefs_buf",
+                )
+                opp1_beliefs = self._preflop_allin_entry_beliefs(
+                    beliefs,
+                    entry_nodes,
+                    self.preflop_allin_live3_opp1_players,
+                    "_preflop_allin_live3_opp1_beliefs_buf",
+                )
+                oracle.write_live3_entry_values_from_beliefs_(
                     output=self.latest_values,
                     node_indices=node_idx,
-                    beliefs=beliefs_at_nodes,
+                    hero_beliefs=hero_beliefs,
+                    opp0_beliefs=opp0_beliefs,
+                    opp1_beliefs=opp1_beliefs,
                     starting_stacks=starting_stacks,
                     committed=committed,
                     stacks_after=stacks_after,
@@ -520,8 +593,6 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                     scale=scale,
                     live_entry_rows=self.preflop_allin_live3_entry_rows,
                     hero_players=self.preflop_allin_live3_hero_players,
-                    opp0_players=self.preflop_allin_live3_opp0_players,
-                    opp1_players=self.preflop_allin_live3_opp1_players,
                 )
                 continue
             if (
@@ -529,6 +600,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                 and use_live2_entries
                 and hasattr(oracle, "values_for_live2_entries")
             ):
+                beliefs_at_nodes = beliefs[node_idx]
                 values = oracle.values_for_live2_entries(
                     beliefs=beliefs_at_nodes,
                     starting_stacks=starting_stacks,
@@ -541,6 +613,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                     opp_players=self.preflop_allin_live2_opp_players,
                 )
             elif live_players == 3 and hasattr(oracle, "values_for_live3_entries"):
+                beliefs_at_nodes = beliefs[node_idx]
                 values = oracle.values_for_live3_entries(
                     beliefs=beliefs_at_nodes,
                     starting_stacks=starting_stacks,
@@ -554,6 +627,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                     opp1_players=self.preflop_allin_live3_opp1_players,
                 )
             else:
+                beliefs_at_nodes = beliefs[node_idx]
                 values = oracle.values(
                     beliefs=beliefs_at_nodes,
                     starting_stacks=starting_stacks,

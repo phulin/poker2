@@ -1082,6 +1082,38 @@ class PreflopAllIn169Oracle:
         )
 
     @torch.no_grad()
+    def write_live2_entry_values_from_beliefs_(
+        self,
+        *,
+        output: torch.Tensor,
+        node_indices: torch.Tensor,
+        hero_beliefs: torch.Tensor,
+        opp_beliefs: torch.Tensor,
+        starting_stacks: torch.Tensor,
+        committed: torch.Tensor,
+        stacks_after: torch.Tensor,
+        folded_mask: torch.Tensor,
+        scale: torch.Tensor,
+        live_entry_rows: torch.Tensor,
+        hero_players: torch.Tensor,
+    ) -> None:
+        if hero_beliefs.shape[-1] != PREFLOP_HANDS:
+            raise ValueError(f"expected 169-class beliefs, got {hero_beliefs.shape}")
+        share_values = self._share2_values(hero_beliefs, opp_beliefs)
+        self._write_entry_values_triton_(
+            output=output,
+            node_indices=node_indices,
+            share_values=share_values,
+            starting_stacks=starting_stacks,
+            committed=committed,
+            stacks_after=stacks_after,
+            folded_mask=folded_mask,
+            scale=scale,
+            live_entry_rows=live_entry_rows,
+            hero_players=hero_players,
+        )
+
+    @torch.no_grad()
     def write_live3_entry_values_(
         self,
         *,
@@ -1105,6 +1137,39 @@ class PreflopAllIn169Oracle:
             beliefs[live_entry_rows, opp0_players],
             beliefs[live_entry_rows, opp1_players],
         )
+        self._write_entry_values_triton_(
+            output=output,
+            node_indices=node_indices,
+            share_values=share_values,
+            starting_stacks=starting_stacks,
+            committed=committed,
+            stacks_after=stacks_after,
+            folded_mask=folded_mask,
+            scale=scale,
+            live_entry_rows=live_entry_rows,
+            hero_players=hero_players,
+        )
+
+    @torch.no_grad()
+    def write_live3_entry_values_from_beliefs_(
+        self,
+        *,
+        output: torch.Tensor,
+        node_indices: torch.Tensor,
+        hero_beliefs: torch.Tensor,
+        opp0_beliefs: torch.Tensor,
+        opp1_beliefs: torch.Tensor,
+        starting_stacks: torch.Tensor,
+        committed: torch.Tensor,
+        stacks_after: torch.Tensor,
+        folded_mask: torch.Tensor,
+        scale: torch.Tensor,
+        live_entry_rows: torch.Tensor,
+        hero_players: torch.Tensor,
+    ) -> None:
+        if hero_beliefs.shape[-1] != PREFLOP_HANDS:
+            raise ValueError(f"expected 169-class beliefs, got {hero_beliefs.shape}")
+        share_values = self._share3_values(hero_beliefs, opp0_beliefs, opp1_beliefs)
         self._write_entry_values_triton_(
             output=output,
             node_indices=node_indices,
