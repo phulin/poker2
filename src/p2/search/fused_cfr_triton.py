@@ -4045,6 +4045,8 @@ if triton is not None:
         policy_ptr,  # [total, H] in/out
         reach_ptr,  # [total, P, H] in/out
         beliefs_ptr,  # [total, P, H] in/out
+        leaf_slot_ptr,  # [total], -1 for non-model leaves
+        leaf_out_ptr,  # [num_model_leaves, P, H]
         allowed_mask_ptr,  # [total, H] bool
         allowed_prob_ptr,  # [total, H]
         root_index_ptr,  # [total]
@@ -4058,6 +4060,7 @@ if triton is not None:
         MAX_CHILDREN: tl.constexpr,
         BLOCK_P: tl.constexpr,
         BLOCK_H: tl.constexpr,
+        WRITE_LEAF: tl.constexpr,
     ):
         p = tl.program_id(0)
         parent = parent_base + p
@@ -4148,6 +4151,17 @@ if triton is not None:
                     out,
                     mask=value_mask,
                 )
+                if WRITE_LEAF:
+                    slot_raw = tl.load(leaf_slot_ptr + child)
+                    if slot_raw >= 0:
+                        slot = slot_raw.to(tl.int64)
+                        tl.store(
+                            leaf_out_ptr
+                            + (slot * NUM_PLAYERS + players[:, None]) * H
+                            + hands[None, :],
+                            out,
+                            mask=value_mask,
+                        )
 
 
 def fused_policy_reach_beliefs_depth_preflop_multiway_(
@@ -4164,6 +4178,8 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
     max_children: int,
     eps: float = 1e-5,
     block_h: int = 256,
+    leaf_slot: torch.Tensor | None = None,
+    leaf_out: torch.Tensor | None = None,
 ) -> None:
     """Sibling renorm + reach + compact belief propagation for one depth."""
     if not triton_is_available():
@@ -4179,6 +4195,15 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
     assert root_index.is_contiguous() and root_index.shape == (total,)
     assert child_offsets.is_contiguous() and child_count.is_contiguous()
     assert prev_actor.is_contiguous()
+    write_leaf = leaf_slot is not None and leaf_out is not None
+    if write_leaf:
+        assert leaf_slot is not None and leaf_out is not None
+        assert leaf_slot.is_contiguous() and leaf_slot.shape == (total,)
+        assert leaf_out.is_contiguous() and leaf_out.dim() == 3
+        assert leaf_out.shape[1:] == (players, h)
+    else:
+        leaf_slot = root_index
+        leaf_out = beliefs
     if h > block_h:
         raise ValueError(f"hand dim {h} exceeds block_h {block_h}")
     mc_pow2 = 1
@@ -4191,6 +4216,8 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
         policy,
         reach,
         beliefs,
+        leaf_slot,
+        leaf_out,
         allowed_mask,
         allowed_prob,
         root_index,
@@ -4204,6 +4231,7 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
         MAX_CHILDREN=mc_pow2,
         BLOCK_P=block_p,
         BLOCK_H=block_h,
+        WRITE_LEAF=write_leaf,
         num_warps=_env_int("P2_PREFLOP_POLICY_REACH_WARPS", 4),
     )
 

@@ -84,6 +84,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_player_ids_buf: torch.Tensor | None = None
         self._preflop_model_beliefs_buf: torch.Tensor | None = None
         self._preflop_model_beliefs_key: tuple[int, int, int, int, torch.dtype] | None = None
+        self._model_leaf_duplicate_src: torch.Tensor | None = None
+        self._model_leaf_duplicate_dst: torch.Tensor | None = None
+        self._model_leaf_duplicate_copy_buf: torch.Tensor | None = None
         self._preflop_cutoff_last_values_buf: torch.Tensor | None = None
         self._preflop_new_street_baseline_last_values_buf: torch.Tensor | None = None
         self._preflop_new_street_last_values_buf: torch.Tensor | None = None
@@ -118,6 +121,12 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self._preflop_partition_node_cache = {}
         if not hasattr(self, "_preflop_partition_beliefs_cache"):
             self._preflop_partition_beliefs_cache = {}
+        if not hasattr(self, "_model_leaf_duplicate_src"):
+            self._model_leaf_duplicate_src = None
+        if not hasattr(self, "_model_leaf_duplicate_dst"):
+            self._model_leaf_duplicate_dst = None
+        if not hasattr(self, "_model_leaf_duplicate_copy_buf"):
+            self._model_leaf_duplicate_copy_buf = None
         if not hasattr(self, "_preflop_partition_last_values_valid"):
             self._preflop_partition_last_values_valid = False
         if not hasattr(self, "_preflop_partition_last_values_marker"):
@@ -577,6 +586,17 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
 
     def _model_beliefs_for_values(self, beliefs: torch.Tensor) -> torch.Tensor:
         if (
+            beliefs is self.beliefs
+            and self._model_leaf_scatter_enabled
+            and self._model_leaf_beliefs_valid
+            and self._model_leaf_beliefs_buf is not None
+            and self._model_leaf_beliefs_buf.shape
+            == (int(self.model_indices.numel()), self.num_players, PREFLOP_HANDS)
+            and self._model_leaf_beliefs_buf.device == beliefs.device
+            and self._model_leaf_beliefs_buf.dtype == beliefs.dtype
+        ):
+            return self._model_leaf_beliefs_buf
+        if (
             os.environ.get("P2_PREFLOP_MODEL_BELIEF_GATHER_OUT", "1")
             .strip()
             .lower()
@@ -615,6 +635,96 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self.model_indices.contiguous(),
             out=buf,
         )
+
+    def _ensure_model_leaf_belief_buffers(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[bool, ...]]:
+        m = int(self.model_indices.numel())
+        shape = (m, self.num_players, PREFLOP_HANDS)
+        if (
+            self._model_leaf_beliefs_buf is None
+            or self._model_leaf_beliefs_buf.shape != shape
+            or self._model_leaf_beliefs_buf.dtype != self.beliefs.dtype
+            or self._model_leaf_beliefs_buf.device != self.beliefs.device
+        ):
+            self._model_leaf_beliefs_buf = self.beliefs.new_empty(shape)
+            self._model_leaf_beliefs_valid = False
+
+        total = int(self.beliefs.shape[0])
+        key = (
+            int(self._subgame_generation),
+            int(self.model_indices.data_ptr()),
+            m,
+            total,
+        )
+        if self._model_leaf_slot_key != key or self._model_leaf_slot is None:
+            slot = torch.full(
+                (total,),
+                -1,
+                device=self.device,
+                dtype=torch.int64,
+            )
+            if m > 0:
+                slot[self.model_indices] = torch.arange(
+                    m,
+                    device=self.device,
+                    dtype=torch.int64,
+                )
+                canonical_slots = slot[self.model_indices]
+                model_slots = torch.arange(
+                    m,
+                    device=self.device,
+                    dtype=torch.int64,
+                )
+                duplicate_mask = canonical_slots != model_slots
+                self._model_leaf_duplicate_src = canonical_slots[
+                    duplicate_mask
+                ].contiguous()
+                self._model_leaf_duplicate_dst = model_slots[
+                    duplicate_mask
+                ].contiguous()
+                self._model_leaf_beliefs_buf.copy_(
+                    self._model_beliefs_for_values(self.beliefs)
+                )
+                model_indices_cpu = self.model_indices.detach().cpu()
+                depth_has_slot = []
+                for depth in range(self.tree_depth):
+                    start = int(self.depth_offsets[depth + 1])
+                    end = int(self.depth_offsets[depth + 2])
+                    in_depth = (model_indices_cpu >= start) & (model_indices_cpu < end)
+                    depth_has_slot.append(bool(in_depth.any().item()))
+                self._model_leaf_depth_has_slot = tuple(depth_has_slot)
+            else:
+                self._model_leaf_depth_has_slot = (False,) * int(self.tree_depth)
+                self._model_leaf_duplicate_src = None
+                self._model_leaf_duplicate_dst = None
+            self._model_leaf_slot = slot.contiguous()
+            self._model_leaf_slot_key = key
+            self._model_leaf_beliefs_valid = False
+
+        return (
+            self._model_leaf_beliefs_buf,
+            self._model_leaf_slot,
+            self._model_leaf_depth_has_slot,
+        )
+
+    def _copy_duplicate_model_leaf_belief_slots(self, leaf_out: torch.Tensor) -> None:
+        src = self._model_leaf_duplicate_src
+        dst = self._model_leaf_duplicate_dst
+        if src is None or dst is None or src.numel() == 0:
+            return
+        shape = (int(src.numel()), leaf_out.shape[1], leaf_out.shape[2])
+        buf = self._model_leaf_duplicate_copy_buf
+        if (
+            buf is None
+            or buf.shape != shape
+            or buf.dtype != leaf_out.dtype
+            or buf.device != leaf_out.device
+        ):
+            buf = leaf_out.new_empty(shape)
+            self._model_leaf_duplicate_copy_buf = buf
+        torch.index_select(leaf_out, 0, src, out=buf)
+        leaf_out.index_copy_(0, dst, buf)
 
     def _init_hand_rank_data(self) -> None:
         PreflopSparseCFREvaluator._init_hand_rank_data(self)
@@ -993,7 +1103,24 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         policy[: self.root_nodes] = 0.0
         root_index = self._get_root_index()
         prev_actor = self.prev_actor.contiguous()
+        write_model_leaf_beliefs = (
+            beliefs is self.beliefs
+            and self._model_leaf_scatter_enabled
+            and int(self.model_indices.numel()) > 0
+        )
+        if beliefs is self.beliefs:
+            self._model_leaf_beliefs_valid = False
+        leaf_out = None
+        leaf_slot = None
+        leaf_depth_has_slot: tuple[bool, ...] = ()
+        if write_model_leaf_beliefs:
+            leaf_out, leaf_slot, leaf_depth_has_slot = (
+                self._ensure_model_leaf_belief_buffers()
+            )
         for depth in range(self.tree_depth):
+            scatter_depth = (
+                depth < len(leaf_depth_has_slot) and leaf_depth_has_slot[depth]
+            )
             fused_policy_reach_beliefs_depth_preflop_multiway_(
                 policy=policy,
                 reach=reach,
@@ -1006,7 +1133,13 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 prev_actor=prev_actor,
                 parent_base=self.depth_offsets[depth],
                 max_children=self.num_actions,
+                leaf_slot=leaf_slot if scatter_depth else None,
+                leaf_out=leaf_out if scatter_depth else None,
             )
+        if beliefs is self.beliefs:
+            if leaf_out is not None:
+                self._copy_duplicate_model_leaf_belief_slots(leaf_out)
+            self._model_leaf_beliefs_valid = leaf_out is not None
 
     def _regret_match_current_policy(self, t: int | None = None) -> None:
         if self._try_apply_warm_start_ftrl_policy(t):
