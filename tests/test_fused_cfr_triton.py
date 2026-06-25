@@ -1389,6 +1389,124 @@ def test_fused_preflop_sample_snapshot_rows_multiway_matches_where() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_preflop_public_policy_reach_matches_generic() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import (
+        fused_policy_reach_beliefs_depth_preflop_multiway_,
+        fused_policy_reach_beliefs_depth_preflop_public_multiway_,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(79)
+    parents, max_children, players, h = 23, 4, 6, 169
+    child_count = torch.randint(1, max_children + 1, (parents,), device=device)
+    child_offsets = parents + torch.cumsum(child_count, dim=0) - child_count
+    children = int(child_count.sum().item())
+    total = parents + children
+
+    policy = torch.zeros(total, h, device=device)
+    child_policy = torch.rand(children, h, device=device)
+    policy[parents:] = child_policy
+    reach = torch.rand(total, players, h, device=device)
+    reach[:parents] /= reach[:parents].sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    beliefs = torch.rand(total, players, h, device=device)
+    beliefs[:parents] /= beliefs[:parents].sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    allowed = torch.ones(total, h, dtype=torch.bool, device=device)
+    allowed_prob = torch.full((total, h), 1.0 / h, device=device)
+    root_index = torch.arange(total, device=device).clamp(max=parents - 1)
+    for parent in range(parents):
+        first = int(child_offsets[parent].item())
+        count = int(child_count[parent].item())
+        root_index[first : first + count] = parent
+    prev_actor = torch.randint(0, players, (total,), device=device)
+
+    policy_generic = policy.clone().contiguous()
+    reach_generic = reach.clone().contiguous()
+    beliefs_generic = beliefs.clone().contiguous()
+    policy_public = policy.clone().contiguous()
+    reach_public = reach.clone().contiguous()
+    beliefs_public = beliefs.clone().contiguous()
+
+    fused_policy_reach_beliefs_depth_preflop_multiway_(
+        policy_generic,
+        reach_generic,
+        beliefs_generic,
+        allowed,
+        allowed_prob,
+        root_index.contiguous(),
+        child_offsets.contiguous(),
+        child_count.contiguous(),
+        prev_actor.contiguous(),
+        parent_base=0,
+        max_children=max_children,
+    )
+    fused_policy_reach_beliefs_depth_preflop_public_multiway_(
+        policy_public,
+        reach_public,
+        beliefs_public,
+        root_index.contiguous(),
+        child_offsets.contiguous(),
+        child_count.contiguous(),
+        prev_actor.contiguous(),
+        parent_base=0,
+        max_children=max_children,
+    )
+    torch.testing.assert_close(policy_public, policy_generic, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(reach_public, reach_generic, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(beliefs_public, beliefs_generic, rtol=1e-5, atol=1e-6)
+
+    leaf_slot = torch.full((total,), -1, dtype=torch.long, device=device)
+    leaf_slot[parents::3] = torch.arange(
+        0,
+        ((total - parents) + 2) // 3,
+        device=device,
+        dtype=torch.long,
+    )[: leaf_slot[parents::3].numel()]
+    leaf_rows = int((leaf_slot >= 0).sum().item())
+    leaf_generic = torch.empty(leaf_rows, players, h, device=device)
+    leaf_public = torch.empty_like(leaf_generic)
+    policy_generic = policy.clone().contiguous()
+    reach_generic = reach.clone().contiguous()
+    beliefs_generic = beliefs.clone().contiguous()
+    policy_public = policy.clone().contiguous()
+    reach_public = reach.clone().contiguous()
+    beliefs_public = beliefs.clone().contiguous()
+
+    fused_policy_reach_beliefs_depth_preflop_multiway_(
+        policy_generic,
+        reach_generic,
+        beliefs_generic,
+        allowed,
+        allowed_prob,
+        root_index.contiguous(),
+        child_offsets.contiguous(),
+        child_count.contiguous(),
+        prev_actor.contiguous(),
+        parent_base=0,
+        max_children=max_children,
+        leaf_slot=leaf_slot.contiguous(),
+        leaf_out=leaf_generic,
+    )
+    fused_policy_reach_beliefs_depth_preflop_public_multiway_(
+        policy_public,
+        reach_public,
+        beliefs_public,
+        root_index.contiguous(),
+        child_offsets.contiguous(),
+        child_count.contiguous(),
+        prev_actor.contiguous(),
+        parent_base=0,
+        max_children=max_children,
+        leaf_slot=leaf_slot.contiguous(),
+        leaf_out=leaf_public,
+    )
+    torch.testing.assert_close(policy_public, policy_generic, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(reach_public, reach_generic, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(beliefs_public, beliefs_generic, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(leaf_public, leaf_generic, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fused_sibling_sum_matches_scatter_plus_gather() -> None:
     pytest.importorskip("triton")
     from p2.search.fused_cfr_triton import fused_sibling_sum

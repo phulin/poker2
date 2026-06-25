@@ -35,6 +35,7 @@ from p2.search.fused_cfr_triton import (
     fused_preflop169_src_weights_from_unblocked_multiway_,
     fused_preflop169_src_weights_multiway_,
     fused_policy_reach_beliefs_depth_preflop_multiway_,
+    fused_policy_reach_beliefs_depth_preflop_public_multiway_,
     fused_policy_renorm_reach_depth_multiway_,
     fused_preflop_multiway_beliefs_from_reach_,
     fused_preflop_sample_snapshot_multiway_,
@@ -114,6 +115,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_partition_position_slices: dict[
             tuple[int, int], tuple[int, int]
         ] = {}
+        self._preflop_all_hands_allowed = False
 
     @property
     def _compact_preflop(self) -> bool:
@@ -139,6 +141,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self._preflop_partition_last_values_valid = False
         if not hasattr(self, "_preflop_partition_last_values_marker"):
             self._preflop_partition_last_values_marker = None
+        if not hasattr(self, "_preflop_all_hands_allowed"):
+            self._preflop_all_hands_allowed = False
 
     def _invalidate_subgame_caches(self) -> None:
         super()._invalidate_subgame_caches()
@@ -498,6 +502,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         CFREvaluator.initialize_subgame(self, src_env, src_indices, initial_beliefs)
         self._init_fused_feature_encoders()
         PreflopSparseCFREvaluator._validate_compact_shapes(self)
+        self._preflop_all_hands_allowed = bool(self.allowed_hands.all().item())
         self._prepare_tree_slices()
         self._reset_average_policy_accumulators()
 
@@ -1230,21 +1235,39 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             scatter_depth = (
                 depth < len(leaf_depth_has_slot) and leaf_depth_has_slot[depth]
             )
-            fused_policy_reach_beliefs_depth_preflop_multiway_(
-                policy=policy,
-                reach=reach,
-                beliefs=beliefs,
-                allowed_mask=self.allowed_hands,
-                allowed_prob=self.allowed_hands_prob,
-                root_index=root_index,
-                child_offsets=self._child_offsets_by_depth[depth],
-                child_count=self._child_count_by_depth[depth],
-                prev_actor=prev_actor,
-                parent_base=self.depth_offsets[depth],
-                max_children=self.num_actions,
-                leaf_slot=leaf_slot if scatter_depth else None,
-                leaf_out=leaf_out if scatter_depth else None,
-            )
+            if (
+                self._preflop_all_hands_allowed
+                and self._use_public_policy_reach_beliefs()
+            ):
+                fused_policy_reach_beliefs_depth_preflop_public_multiway_(
+                    policy=policy,
+                    reach=reach,
+                    beliefs=beliefs,
+                    root_index=root_index,
+                    child_offsets=self._child_offsets_by_depth[depth],
+                    child_count=self._child_count_by_depth[depth],
+                    prev_actor=prev_actor,
+                    parent_base=self.depth_offsets[depth],
+                    max_children=self.num_actions,
+                    leaf_slot=leaf_slot if scatter_depth else None,
+                    leaf_out=leaf_out if scatter_depth else None,
+                )
+            else:
+                fused_policy_reach_beliefs_depth_preflop_multiway_(
+                    policy=policy,
+                    reach=reach,
+                    beliefs=beliefs,
+                    allowed_mask=self.allowed_hands,
+                    allowed_prob=self.allowed_hands_prob,
+                    root_index=root_index,
+                    child_offsets=self._child_offsets_by_depth[depth],
+                    child_count=self._child_count_by_depth[depth],
+                    prev_actor=prev_actor,
+                    parent_base=self.depth_offsets[depth],
+                    max_children=self.num_actions,
+                    leaf_slot=leaf_slot if scatter_depth else None,
+                    leaf_out=leaf_out if scatter_depth else None,
+                )
         if beliefs is self.beliefs:
             if leaf_out is not None:
                 self._copy_duplicate_model_leaf_belief_slots(leaf_out)
@@ -1534,6 +1557,14 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def _use_sparse_sample_snapshot(self) -> bool:
         return (
             os.environ.get("P2_PREFLOP_SPARSE_SAMPLE_SNAPSHOT", "1")
+            .strip()
+            .lower()
+            not in {"0", "false", "off", "no"}
+        )
+
+    def _use_public_policy_reach_beliefs(self) -> bool:
+        return (
+            os.environ.get("P2_PREFLOP_PUBLIC_POLICY_REACH_BELIEFS", "1")
             .strip()
             .lower()
             not in {"0", "false", "off", "no"}

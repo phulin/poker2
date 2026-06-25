@@ -17,6 +17,7 @@ Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton ke
 - `bench_preflop_cutoff_belief_reuse.py`: Realistic actions_4_7 microbenchmark for reusing cutoff model-input belief rows during value writeback instead of gathering the same rows twice.
 - `bench_preflop_defer_avg_policy.py`: Realistic actions_4_7 microbenchmark for deferring average-policy materialization and renormalization until the end of a default preflop solve.
 - `bench_preflop_model_leaf_scatter.py`: Realistic actions_4_7 microbenchmark for compact preflop model-leaf belief scatter, comparing direct model-index gathers against the fused propagation side-output while pausing live preflop training process groups.
+- `bench_preflop_policy_reach_public.py`: Realistic actions_4_7 microbenchmark for the public-preflop policy reach/belief propagation specialization that skips allowed-hand mask and fallback-vector loads.
 - `bench_preflop_sample_snapshot.py`: Realistic actions_4_7 microbenchmark for replacing full-tree sample policy/belief `torch.where` updates with a sparse fused snapshot copy.
 - `bench_preflop_skip_model_leaf_belief_store.py`: Realistic actions_4_7 microbenchmark for skipping full reach/belief tensor writes for model leaves when the compact model-leaf scatter side-output is active.
 - `bench_preflop_selected_hu_writeback.py`: Realistic actions_4_7 microbenchmark for HU closing value writeback from already-selected live-player beliefs instead of a full six-player belief gather.

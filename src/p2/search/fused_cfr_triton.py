@@ -4041,6 +4041,138 @@ def fused_policy_renorm_reach_depth_multiway_(
 if triton is not None:
 
     @triton.jit
+    def _policy_reach_beliefs_depth_preflop_public_multiway_kernel(
+        policy_ptr,  # [total, H] in/out
+        reach_ptr,  # [total, P, H] in/out
+        beliefs_ptr,  # [total, P, H] in/out
+        leaf_slot_ptr,  # [total], -1 for non-model leaves
+        leaf_out_ptr,  # [num_model_leaves, P, H]
+        root_index_ptr,  # [total]
+        child_offsets_ptr,  # [num_parents]
+        child_count_ptr,  # [num_parents]
+        prev_actor_ptr,  # [total]
+        parent_base,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        EPS,
+        MAX_CHILDREN: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+        WRITE_LEAF: tl.constexpr,
+        SKIP_MODEL_LEAF_REACH_STORE: tl.constexpr,
+        SKIP_MODEL_LEAF_BELIEF_STORE: tl.constexpr,
+    ):
+        p = tl.program_id(0)
+        parent = parent_base + p
+        first = tl.load(child_offsets_ptr + p)
+        count = tl.load(child_count_ptr + p)
+        if count == 0:
+            return
+
+        hands = tl.arange(0, BLOCK_H)
+        hand_mask = hands < H
+        players = tl.arange(0, BLOCK_P)
+        player_mask = players < NUM_PLAYERS
+        value_mask = player_mask[:, None] & hand_mask[None, :]
+
+        denom = tl.zeros([BLOCK_H], dtype=tl.float32)
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                denom += tl.load(
+                    policy_ptr + child * H + hands,
+                    mask=hand_mask,
+                    other=0.0,
+                )
+        use_div = denom > EPS
+        denom_safe = tl.maximum(denom, EPS)
+
+        parent_reach = tl.load(
+            reach_ptr + (parent * NUM_PLAYERS + players[:, None]) * H + hands[None, :],
+            mask=value_mask,
+            other=0.0,
+        )
+
+        uniform = 1.0 / H
+        for i in tl.static_range(0, MAX_CHILDREN):
+            if i < count:
+                child = first + i
+                raw = tl.load(
+                    policy_ptr + child * H + hands,
+                    mask=hand_mask,
+                    other=0.0,
+                )
+                pol = tl.where(use_div, raw / denom_safe, raw)
+                tl.store(policy_ptr + child * H + hands, pol, mask=hand_mask)
+
+                prev_actor = tl.load(prev_actor_ptr + child)
+                child_reach = tl.where(
+                    players[:, None] == prev_actor,
+                    parent_reach * pol[None, :],
+                    parent_reach,
+                )
+                if WRITE_LEAF:
+                    slot_raw = tl.load(leaf_slot_ptr + child)
+                    if (not SKIP_MODEL_LEAF_REACH_STORE) or slot_raw < 0:
+                        tl.store(
+                            reach_ptr
+                            + (child * NUM_PLAYERS + players[:, None]) * H
+                            + hands[None, :],
+                            child_reach,
+                            mask=value_mask,
+                        )
+                else:
+                    tl.store(
+                        reach_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + hands[None, :],
+                        child_reach,
+                        mask=value_mask,
+                    )
+
+                root = tl.load(root_index_ptr + child)
+                root_belief = tl.load(
+                    beliefs_ptr
+                    + (root * NUM_PLAYERS + players[:, None]) * H
+                    + hands[None, :],
+                    mask=value_mask,
+                    other=0.0,
+                )
+                unnorm = root_belief * child_reach
+                belief_denom = tl.sum(unnorm, axis=1)
+                out = tl.where(
+                    belief_denom[:, None] > EPS,
+                    unnorm / tl.maximum(belief_denom[:, None], EPS),
+                    uniform,
+                )
+                if WRITE_LEAF:
+                    if slot_raw >= 0:
+                        slot = slot_raw.to(tl.int64)
+                        tl.store(
+                            leaf_out_ptr
+                            + (slot * NUM_PLAYERS + players[:, None]) * H
+                            + hands[None, :],
+                            out,
+                            mask=value_mask,
+                        )
+                    if (not SKIP_MODEL_LEAF_BELIEF_STORE) or slot_raw < 0:
+                        tl.store(
+                            beliefs_ptr
+                            + (child * NUM_PLAYERS + players[:, None]) * H
+                            + hands[None, :],
+                            out,
+                            mask=value_mask,
+                        )
+                else:
+                    tl.store(
+                        beliefs_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + hands[None, :],
+                        out,
+                        mask=value_mask,
+                    )
+
+    @triton.jit
     def _policy_reach_beliefs_depth_preflop_multiway_kernel(
         policy_ptr,  # [total, H] in/out
         reach_ptr,  # [total, P, H] in/out
@@ -4253,6 +4385,92 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
         leaf_out,
         allowed_mask,
         allowed_prob,
+        root_index,
+        child_offsets,
+        child_count,
+        prev_actor,
+        parent_base,
+        h,
+        NUM_PLAYERS=players,
+        EPS=eps,
+        MAX_CHILDREN=mc_pow2,
+        BLOCK_P=block_p,
+        BLOCK_H=block_h,
+        WRITE_LEAF=write_leaf,
+        SKIP_MODEL_LEAF_REACH_STORE=skip_model_leaf_reach_store,
+        SKIP_MODEL_LEAF_BELIEF_STORE=skip_model_leaf_belief_store,
+        num_warps=_env_int("P2_PREFLOP_POLICY_REACH_WARPS", 4),
+    )
+
+
+def fused_policy_reach_beliefs_depth_preflop_public_multiway_(
+    policy: torch.Tensor,
+    reach: torch.Tensor,
+    beliefs: torch.Tensor,
+    root_index: torch.Tensor,
+    child_offsets: torch.Tensor,
+    child_count: torch.Tensor,
+    prev_actor: torch.Tensor,
+    parent_base: int,
+    max_children: int,
+    eps: float = 1e-5,
+    block_h: int = 256,
+    leaf_slot: torch.Tensor | None = None,
+    leaf_out: torch.Tensor | None = None,
+) -> None:
+    """Preflop-public sibling renorm + reach + belief propagation.
+
+    This specialization assumes all compact preflop hands are legal at every
+    node, so fallback beliefs are uniform and no per-node allowed mask is read.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert reach.is_contiguous() and beliefs.is_contiguous()
+    assert reach.shape == beliefs.shape
+    total, h = policy.shape
+    players = reach.shape[1]
+    assert reach.shape == (total, players, h)
+    assert root_index.is_contiguous() and root_index.shape == (total,)
+    assert child_offsets.is_contiguous() and child_count.is_contiguous()
+    assert prev_actor.is_contiguous()
+    write_leaf = leaf_slot is not None and leaf_out is not None
+    if write_leaf:
+        assert leaf_slot is not None and leaf_out is not None
+        assert leaf_slot.is_contiguous() and leaf_slot.shape == (total,)
+        assert leaf_out.is_contiguous() and leaf_out.dim() == 3
+        assert leaf_out.shape[1:] == (players, h)
+    else:
+        leaf_slot = root_index
+        leaf_out = beliefs
+    skip_model_leaf_belief_store = write_leaf and (
+        os.environ.get("P2_PREFLOP_SKIP_MODEL_LEAF_BELIEF_STORE", "1")
+        .strip()
+        .lower()
+        not in {"0", "false", "off", "no"}
+    )
+    skip_model_leaf_reach_store = write_leaf and (
+        os.environ.get("P2_PREFLOP_SKIP_MODEL_LEAF_REACH_STORE", "1")
+        .strip()
+        .lower()
+        not in {"0", "false", "off", "no"}
+    )
+    if h > block_h:
+        raise ValueError(f"hand dim {h} exceeds block_h {block_h}")
+    mc_pow2 = 1
+    while mc_pow2 < max_children:
+        mc_pow2 *= 2
+    block_p = 1
+    while block_p < players:
+        block_p *= 2
+    _policy_reach_beliefs_depth_preflop_public_multiway_kernel[
+        (child_offsets.shape[0],)
+    ](
+        policy,
+        reach,
+        beliefs,
+        leaf_slot,
+        leaf_out,
         root_index,
         child_offsets,
         child_count,
