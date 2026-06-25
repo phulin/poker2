@@ -343,7 +343,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cfr-iterations", type=int, default=300)
     parser.add_argument(
         "--model-type",
-        choices=("transformer", "ffn"),
+        choices=("transformer", "ffn", "gated_token_mixer"),
         default="transformer",
     )
     parser.add_argument("--hidden-dim", type=int, default=192)

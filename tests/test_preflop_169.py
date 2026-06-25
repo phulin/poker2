@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+import pytest
 
+from p2.core.structured_config import NonlinearityType
 from p2.env.card_utils import (
     NUM_HANDS,
     PREFLOP_HANDS,
@@ -23,6 +25,7 @@ from p2.models.mlp.better_ffn import (
     BetterPreflopTransformerPolicyFFN,
     BetterPreflopTransformerValueFFN,
     BetterPreflopValueFFN,
+    _PreflopGatedTokenMixerBlock,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
@@ -581,6 +584,29 @@ def test_compact_preflop_gated_token_mixer_model_shapes_and_policy_loss() -> Non
         batch,
     )
     assert torch.isfinite(loss["policy_loss"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_preflop_gated_token_mixer_triton_matches_linear(monkeypatch) -> None:
+    torch.manual_seed(10)
+    block = _PreflopGatedTokenMixerBlock(
+        192,
+        token_count=7,
+        ffn_dim=256,
+        nonlinearity=NonlinearityType.leaky_relu,
+    ).cuda()
+    x = torch.randn(17, 7, 192, device="cuda", dtype=torch.bfloat16)
+    block = block.to(dtype=torch.bfloat16)
+
+    monkeypatch.setenv("P2_PREFLOP_GATED_TOKEN_MIXER_IMPL", "linear")
+    expected = block(x)
+    torch.cuda.synchronize()
+
+    monkeypatch.setenv("P2_PREFLOP_GATED_TOKEN_MIXER_IMPL", "triton")
+    actual = block(x)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual, expected, atol=3e-2, rtol=3e-2)
 
 
 def test_compact_preflop_transformer_head_layers_work_without_shared_layers() -> None:
