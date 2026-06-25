@@ -193,6 +193,115 @@ if triton is not None:
             mask=row_mask[:, None] & h_mask[None, :],
         )
 
+    @triton.jit
+    def _fill_allin_folded_value_kernel(
+        out_ptr,
+        node_idx_ptr,
+        starting_ptr,
+        stacks_after_ptr,
+        scale_ptr,
+        rows: tl.constexpr,
+        players: tl.constexpr,
+        hands: tl.constexpr,
+        out_stride0: tl.constexpr,
+        out_stride1: tl.constexpr,
+        out_stride2: tl.constexpr,
+        env_stride0: tl.constexpr,
+        env_stride1: tl.constexpr,
+        block: tl.constexpr,
+    ) -> None:
+        offs = tl.program_id(0) * block + tl.arange(0, block)
+        total = rows * players * hands
+        mask = offs < total
+        hand = offs % hands
+        tmp = offs // hands
+        player = tmp % players
+        row = tmp // players
+        node = tl.load(node_idx_ptr + row, mask=mask, other=0)
+        stack_after = tl.load(
+            stacks_after_ptr + row * env_stride0 + player * env_stride1,
+            mask=mask,
+            other=0.0,
+        )
+        starting = tl.load(
+            starting_ptr + row * env_stride0 + player * env_stride1,
+            mask=mask,
+            other=0.0,
+        )
+        scale = tl.load(scale_ptr + row, mask=mask, other=1.0)
+        value = (stack_after - starting) / tl.maximum(scale, 1.0)
+        tl.store(
+            out_ptr
+            + node * out_stride0
+            + player * out_stride1
+            + hand * out_stride2,
+            value,
+            mask=mask,
+        )
+
+    @triton.jit
+    def _write_allin_entry_share_values_kernel(
+        out_ptr,
+        node_idx_ptr,
+        entry_rows_ptr,
+        hero_players_ptr,
+        share_ptr,
+        starting_ptr,
+        stacks_after_ptr,
+        max_eligible_ptr,
+        scale_ptr,
+        entries: tl.constexpr,
+        hands: tl.constexpr,
+        out_stride0: tl.constexpr,
+        out_stride1: tl.constexpr,
+        out_stride2: tl.constexpr,
+        env_stride0: tl.constexpr,
+        env_stride1: tl.constexpr,
+        max_stride0: tl.constexpr,
+        max_stride1: tl.constexpr,
+        share_stride0: tl.constexpr,
+        share_stride1: tl.constexpr,
+        block: tl.constexpr,
+    ) -> None:
+        offs = tl.program_id(0) * block + tl.arange(0, block)
+        total = entries * hands
+        mask = offs < total
+        hand = offs % hands
+        entry = offs // hands
+        row = tl.load(entry_rows_ptr + entry, mask=mask, other=0)
+        player = tl.load(hero_players_ptr + entry, mask=mask, other=0)
+        node = tl.load(node_idx_ptr + row, mask=mask, other=0)
+        share = tl.load(
+            share_ptr + entry * share_stride0 + hand * share_stride1,
+            mask=mask,
+            other=0.0,
+        )
+        stack_after = tl.load(
+            stacks_after_ptr + row * env_stride0 + player * env_stride1,
+            mask=mask,
+            other=0.0,
+        )
+        starting = tl.load(
+            starting_ptr + row * env_stride0 + player * env_stride1,
+            mask=mask,
+            other=0.0,
+        )
+        max_eligible = tl.load(
+            max_eligible_ptr + row * max_stride0 + player * max_stride1,
+            mask=mask,
+            other=0.0,
+        )
+        scale = tl.load(scale_ptr + row, mask=mask, other=1.0)
+        value = (stack_after + share * max_eligible - starting) / tl.maximum(scale, 1.0)
+        tl.store(
+            out_ptr
+            + node * out_stride0
+            + player * out_stride1
+            + hand * out_stride2,
+            value,
+            mask=mask,
+        )
+
 
 def _device_cache_key(device: torch.device) -> tuple[str, int | None]:
     if device.type == "cuda" and device.index is None:
@@ -822,6 +931,192 @@ class PreflopAllIn169Oracle:
             folded_mask=folded_mask,
             scale=scale,
         ).to(beliefs.dtype)
+
+    def _write_entry_values_fallback_(
+        self,
+        *,
+        output: torch.Tensor,
+        node_indices: torch.Tensor,
+        share_values: torch.Tensor,
+        starting_stacks: torch.Tensor,
+        committed: torch.Tensor,
+        stacks_after: torch.Tensor,
+        folded_mask: torch.Tensor,
+        scale: torch.Tensor,
+        live_entry_rows: torch.Tensor,
+        hero_players: torch.Tensor,
+    ) -> None:
+        share = torch.zeros(
+            starting_stacks.shape[0],
+            starting_stacks.shape[1],
+            PREFLOP_HANDS,
+            dtype=share_values.dtype,
+            device=share_values.device,
+        )
+        if live_entry_rows.numel() > 0:
+            share[live_entry_rows, hero_players] = share_values
+        values = eligible_pot_share_to_net_values_169(
+            share,
+            starting_stacks=starting_stacks,
+            committed=committed,
+            stacks_after=stacks_after,
+            folded_mask=folded_mask,
+            scale=scale,
+        )
+        output[node_indices] = values.to(output.dtype)
+
+    def _write_entry_values_triton_(
+        self,
+        *,
+        output: torch.Tensor,
+        node_indices: torch.Tensor,
+        share_values: torch.Tensor,
+        starting_stacks: torch.Tensor,
+        committed: torch.Tensor,
+        stacks_after: torch.Tensor,
+        folded_mask: torch.Tensor,
+        scale: torch.Tensor,
+        live_entry_rows: torch.Tensor,
+        hero_players: torch.Tensor,
+    ) -> None:
+        if (
+            triton is None
+            or output.device.type != "cuda"
+            or live_entry_rows.numel() == 0
+        ):
+            self._write_entry_values_fallback_(
+                output=output,
+                node_indices=node_indices,
+                share_values=share_values,
+                starting_stacks=starting_stacks,
+                committed=committed,
+                stacks_after=stacks_after,
+                folded_mask=folded_mask,
+                scale=scale,
+                live_entry_rows=live_entry_rows,
+                hero_players=hero_players,
+            )
+            return
+        rows, players = starting_stacks.shape
+        hands = share_values.shape[-1]
+        max_eligible = _max_eligible_to_win(committed, folded_mask).to(torch.float32)
+        block = 256
+        total_default = rows * players * hands
+        _fill_allin_folded_value_kernel[(triton.cdiv(total_default, block),)](
+            output,
+            node_indices,
+            starting_stacks,
+            stacks_after,
+            scale,
+            rows,
+            players,
+            hands,
+            output.stride(0),
+            output.stride(1),
+            output.stride(2),
+            starting_stacks.stride(0),
+            starting_stacks.stride(1),
+            block,
+            num_warps=4,
+        )
+        entries = live_entry_rows.numel()
+        total_entries = entries * hands
+        _write_allin_entry_share_values_kernel[(triton.cdiv(total_entries, block),)](
+            output,
+            node_indices,
+            live_entry_rows,
+            hero_players,
+            share_values,
+            starting_stacks,
+            stacks_after,
+            max_eligible,
+            scale,
+            entries,
+            hands,
+            output.stride(0),
+            output.stride(1),
+            output.stride(2),
+            starting_stacks.stride(0),
+            starting_stacks.stride(1),
+            max_eligible.stride(0),
+            max_eligible.stride(1),
+            share_values.stride(0),
+            share_values.stride(1),
+            block,
+            num_warps=4,
+        )
+
+    @torch.no_grad()
+    def write_live2_entry_values_(
+        self,
+        *,
+        output: torch.Tensor,
+        node_indices: torch.Tensor,
+        beliefs: torch.Tensor,
+        starting_stacks: torch.Tensor,
+        committed: torch.Tensor,
+        stacks_after: torch.Tensor,
+        folded_mask: torch.Tensor,
+        scale: torch.Tensor,
+        live_entry_rows: torch.Tensor,
+        hero_players: torch.Tensor,
+        opp_players: torch.Tensor,
+    ) -> None:
+        if beliefs.shape[-1] != PREFLOP_HANDS:
+            raise ValueError(f"expected 169-class beliefs, got {beliefs.shape}")
+        share_values = self._share2_values(
+            beliefs[live_entry_rows, hero_players],
+            beliefs[live_entry_rows, opp_players],
+        )
+        self._write_entry_values_triton_(
+            output=output,
+            node_indices=node_indices,
+            share_values=share_values,
+            starting_stacks=starting_stacks,
+            committed=committed,
+            stacks_after=stacks_after,
+            folded_mask=folded_mask,
+            scale=scale,
+            live_entry_rows=live_entry_rows,
+            hero_players=hero_players,
+        )
+
+    @torch.no_grad()
+    def write_live3_entry_values_(
+        self,
+        *,
+        output: torch.Tensor,
+        node_indices: torch.Tensor,
+        beliefs: torch.Tensor,
+        starting_stacks: torch.Tensor,
+        committed: torch.Tensor,
+        stacks_after: torch.Tensor,
+        folded_mask: torch.Tensor,
+        scale: torch.Tensor,
+        live_entry_rows: torch.Tensor,
+        hero_players: torch.Tensor,
+        opp0_players: torch.Tensor,
+        opp1_players: torch.Tensor,
+    ) -> None:
+        if beliefs.shape[-1] != PREFLOP_HANDS:
+            raise ValueError(f"expected 169-class beliefs, got {beliefs.shape}")
+        share_values = self._share3_values(
+            beliefs[live_entry_rows, hero_players],
+            beliefs[live_entry_rows, opp0_players],
+            beliefs[live_entry_rows, opp1_players],
+        )
+        self._write_entry_values_triton_(
+            output=output,
+            node_indices=node_indices,
+            share_values=share_values,
+            starting_stacks=starting_stacks,
+            committed=committed,
+            stacks_after=stacks_after,
+            folded_mask=folded_mask,
+            scale=scale,
+            live_entry_rows=live_entry_rows,
+            hero_players=hero_players,
+        )
 
     @torch.no_grad()
     def values(

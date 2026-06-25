@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark live-entry routing for exact 2-player preflop all-in values."""
+"""Benchmark live-entry routing/writeback for exact preflop all-in values."""
 
 from __future__ import annotations
 
@@ -68,8 +68,16 @@ def _make_loop_args(args: argparse.Namespace) -> argparse.Namespace:
     )
 
 
-def _make_evaluator_for_mode(args: argparse.Namespace, *, live2_entries: bool):
+def _make_evaluator_for_mode(
+    args: argparse.Namespace,
+    *,
+    live2_entries: bool,
+    sparse_writeback: bool,
+):
     os.environ["P2_PREFLOP_ALLIN_LIVE2_ENTRIES"] = "1" if live2_entries else "0"
+    os.environ["P2_PREFLOP_ALLIN_SPARSE_WRITEBACK"] = (
+        "1" if sparse_writeback else "0"
+    )
     ev, rows = _make_evaluator(_make_loop_args(args))
     if ev.device.type != "cuda":
         raise RuntimeError("CUDA is required")
@@ -80,8 +88,17 @@ def _make_evaluator_for_mode(args: argparse.Namespace, *, live2_entries: bool):
     return ev, rows
 
 
-def _bench_mode(args: argparse.Namespace, *, live2_entries: bool) -> dict[str, float | int]:
-    ev, rows = _make_evaluator_for_mode(args, live2_entries=live2_entries)
+def _bench_mode(
+    args: argparse.Namespace,
+    *,
+    live2_entries: bool,
+    sparse_writeback: bool,
+) -> dict[str, float | int]:
+    ev, rows = _make_evaluator_for_mode(
+        args,
+        live2_entries=live2_entries,
+        sparse_writeback=sparse_writeback,
+    )
 
     def call() -> None:
         with torch.no_grad():
@@ -92,6 +109,7 @@ def _bench_mode(args: argparse.Namespace, *, live2_entries: bool) -> dict[str, f
     ms = _event_time_ms(call, iters=args.iters, device=ev.device)
     return {
         "live2_entries": int(live2_entries),
+        "sparse_writeback": int(sparse_writeback),
         "rows": int(rows),
         "total_nodes": int(ev.total_nodes),
         "allin_call_indices": int(ev.allin_call_indices.numel()),
@@ -104,8 +122,16 @@ def _bench_mode(args: argparse.Namespace, *, live2_entries: bool) -> dict[str, f
 
 
 def _correctness(args: argparse.Namespace) -> float:
-    ev_old, _rows = _make_evaluator_for_mode(args, live2_entries=False)
-    ev_new, _rows = _make_evaluator_for_mode(args, live2_entries=True)
+    ev_old, _rows = _make_evaluator_for_mode(
+        args,
+        live2_entries=True,
+        sparse_writeback=False,
+    )
+    ev_new, _rows = _make_evaluator_for_mode(
+        args,
+        live2_entries=True,
+        sparse_writeback=True,
+    )
     with torch.no_grad():
         ev_old._set_allin_call_values(ev_old.beliefs)
         ev_new._set_allin_call_values(ev_new.beliefs)
@@ -170,10 +196,10 @@ def main() -> None:
     with _pause_processes(not args.no_pause, args.pause_pattern):
         max_diff = _correctness(args)
         results = [
-            _bench_mode(args, live2_entries=False),
-            _bench_mode(args, live2_entries=True),
-            _bench_mode(args, live2_entries=True),
-            _bench_mode(args, live2_entries=False),
+            _bench_mode(args, live2_entries=True, sparse_writeback=False),
+            _bench_mode(args, live2_entries=True, sparse_writeback=True),
+            _bench_mode(args, live2_entries=True, sparse_writeback=True),
+            _bench_mode(args, live2_entries=True, sparse_writeback=False),
         ]
     output = {
         "max_diff": max_diff,
@@ -183,8 +209,10 @@ def main() -> None:
     args.out.write_text(json.dumps(output, indent=2) + "\n")
     for row in results:
         print(
-            "live2_entries={live2_entries} live2_nodes={live2_nodes} "
-            "live3_nodes={live3_nodes} ms={ms:.6f}".format(**row),
+            "live2_entries={live2_entries} sparse_writeback={sparse_writeback} "
+            "live2_nodes={live2_nodes} live3_nodes={live3_nodes} ms={ms:.6f}".format(
+                **row
+            ),
             flush=True,
         )
     print(f"max_diff={max_diff:.6g}", flush=True)

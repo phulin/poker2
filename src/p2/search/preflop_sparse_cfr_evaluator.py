@@ -470,6 +470,10 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             os.environ.get("P2_PREFLOP_ALLIN_LIVE2_ENTRIES", "1").strip().lower()
             not in {"0", "false", "off", "no"}
         )
+        use_sparse_writeback = (
+            os.environ.get("P2_PREFLOP_ALLIN_SPARSE_WRITEBACK", "1").strip().lower()
+            not in {"0", "false", "off", "no"}
+        )
         for live_players in range(2, min(3, self.num_players) + 1):
             node_idx = self.preflop_allin_indices_by_live_count[live_players]
             if node_idx.numel() == 0:
@@ -480,6 +484,46 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             stacks_after = self.env.stacks[node_idx].to(torch.float32)
             folded_mask = self.env.has_folded[node_idx]
             scale = self.env.scale[node_idx].to(torch.float32)
+            if (
+                live_players == 2
+                and use_live2_entries
+                and use_sparse_writeback
+                and hasattr(oracle, "write_live2_entry_values_")
+            ):
+                oracle.write_live2_entry_values_(
+                    output=self.latest_values,
+                    node_indices=node_idx,
+                    beliefs=beliefs_at_nodes,
+                    starting_stacks=starting_stacks,
+                    committed=committed,
+                    stacks_after=stacks_after,
+                    folded_mask=folded_mask,
+                    scale=scale,
+                    live_entry_rows=self.preflop_allin_live2_entry_rows,
+                    hero_players=self.preflop_allin_live2_hero_players,
+                    opp_players=self.preflop_allin_live2_opp_players,
+                )
+                continue
+            if (
+                live_players == 3
+                and use_sparse_writeback
+                and hasattr(oracle, "write_live3_entry_values_")
+            ):
+                oracle.write_live3_entry_values_(
+                    output=self.latest_values,
+                    node_indices=node_idx,
+                    beliefs=beliefs_at_nodes,
+                    starting_stacks=starting_stacks,
+                    committed=committed,
+                    stacks_after=stacks_after,
+                    folded_mask=folded_mask,
+                    scale=scale,
+                    live_entry_rows=self.preflop_allin_live3_entry_rows,
+                    hero_players=self.preflop_allin_live3_hero_players,
+                    opp0_players=self.preflop_allin_live3_opp0_players,
+                    opp1_players=self.preflop_allin_live3_opp1_players,
+                )
+                continue
             if (
                 live_players == 2
                 and use_live2_entries

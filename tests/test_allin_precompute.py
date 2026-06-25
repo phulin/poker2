@@ -3,7 +3,10 @@ from __future__ import annotations
 import torch
 import pytest
 
-from p2.allin.oracle import PreflopAllIn169Oracle
+from p2.allin.oracle import (
+    PreflopAllIn169Oracle,
+    eligible_pot_share_to_net_values_169,
+)
 from p2.allin.precompute import (
     _board_chunks,
     allin_2p_169_share0_from_combo_payoff,
@@ -75,6 +78,72 @@ def test_allin_169_oracle_two_player_weights_class_mass_by_multiplicity() -> Non
     )
 
     torch.testing.assert_close(out[0], expected)
+
+
+def test_allin_169_oracle_sparse_live3_writeback_matches_dense_values() -> None:
+    device = torch.device("cpu")
+    rows = 2
+    players = 4
+    oracle = PreflopAllIn169Oracle(device=device)
+    beliefs = torch.zeros(rows, players, PREFLOP_HANDS, device=device)
+    starting = torch.full((rows, players), 100.0, device=device)
+    committed = torch.tensor(
+        [[50.0, 40.0, 25.0, 5.0], [60.0, 55.0, 20.0, 10.0]],
+        device=device,
+    )
+    stacks_after = starting - committed
+    folded = torch.tensor(
+        [[False, False, False, True], [False, True, False, False]],
+        device=device,
+    )
+    scale = torch.tensor([100.0, 120.0], device=device)
+    node_indices = torch.tensor([3, 7], device=device)
+    entry_rows = torch.tensor([0, 0, 0, 1, 1, 1], device=device)
+    hero_players = torch.tensor([0, 1, 2, 0, 2, 3], device=device)
+    opp0_players = torch.tensor([1, 0, 0, 2, 0, 0], device=device)
+    opp1_players = torch.tensor([2, 2, 1, 3, 3, 2], device=device)
+    share_values = (
+        torch.arange(entry_rows.numel() * PREFLOP_HANDS, dtype=torch.float32)
+        .reshape(entry_rows.numel(), PREFLOP_HANDS)
+        .div_(10000.0)
+    )
+
+    def fake_share3(hero, opp0, opp1):
+        del hero, opp0, opp1
+        return share_values
+
+    oracle._share3_values = fake_share3  # type: ignore[method-assign]
+    output = torch.full((10, players, PREFLOP_HANDS), -123.0, device=device)
+    oracle.write_live3_entry_values_(
+        output=output,
+        node_indices=node_indices,
+        beliefs=beliefs,
+        starting_stacks=starting,
+        committed=committed,
+        stacks_after=stacks_after,
+        folded_mask=folded,
+        scale=scale,
+        live_entry_rows=entry_rows,
+        hero_players=hero_players,
+        opp0_players=opp0_players,
+        opp1_players=opp1_players,
+    )
+
+    dense_share = torch.zeros(rows, players, PREFLOP_HANDS, device=device)
+    dense_share[entry_rows, hero_players] = share_values
+    expected = eligible_pot_share_to_net_values_169(
+        dense_share,
+        starting_stacks=starting,
+        committed=committed,
+        stacks_after=stacks_after,
+        folded_mask=folded,
+        scale=scale,
+    )
+    torch.testing.assert_close(output[node_indices], expected)
+    torch.testing.assert_close(
+        output[0],
+        torch.full((players, PREFLOP_HANDS), -123.0, device=device),
+    )
 
 
 def _brute_class_shares(
