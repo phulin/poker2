@@ -586,6 +586,56 @@ def test_compact_preflop_gated_token_mixer_model_shapes_and_policy_loss() -> Non
     assert torch.isfinite(loss["policy_loss"])
 
 
+def test_compact_preflop_static_hand_features_are_cached_correctly() -> None:
+    model = BetterPreflopGatedTokenMixerValueFFN(
+        num_actions=1,
+        hidden_dim=48,
+        range_hidden_dim=16,
+        ffn_dim=64,
+        num_players=3,
+        enforce_zero_sum=False,
+    )
+    hi = model.class_hi_rank.to(torch.float32)
+    lo = model.class_lo_rank.to(torch.float32)
+    suited = model.class_suited
+    pair = model.class_hi_rank == model.class_lo_rank
+    gap = (hi - lo).clamp(min=0.0)
+    expected = torch.stack(
+        [
+            pair.to(torch.float32),
+            suited.to(torch.float32),
+            gap / 12.0,
+            hi / 12.0,
+            lo / 12.0,
+            (hi == 12).to(torch.float32),
+            (lo >= 8).to(torch.float32),
+            (gap <= 1).to(torch.float32),
+        ],
+        dim=-1,
+    )
+    torch.testing.assert_close(model._class_static_features(), expected)
+
+    compact_ffn = BetterPreflopValueFFN(
+        num_actions=1,
+        hidden_dim=48,
+        range_hidden_dim=16,
+        ffn_dim=64,
+        num_players=3,
+        enforce_zero_sum=False,
+    )
+    expected_type = torch.where(
+        pair,
+        torch.zeros_like(model.class_hi_rank),
+        torch.where(
+            suited,
+            torch.ones_like(model.class_hi_rank),
+            torch.full_like(model.class_hi_rank, 2),
+        ),
+    )
+    torch.testing.assert_close(compact_ffn._class_static_features(), expected)
+    torch.testing.assert_close(compact_ffn.class_type, expected_type)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_preflop_gated_token_mixer_triton_matches_linear(monkeypatch) -> None:
     torch.manual_seed(10)

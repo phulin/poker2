@@ -1733,9 +1733,20 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
         self.rank_embedding = nn.Embedding(13 + 1, hidden_dim, padding_idx=13)
         self.suit_embedding = nn.Embedding(4 + 1, hidden_dim, padding_idx=4)
         hi, lo, suited = _preflop_class_ranks()
+        class_type = torch.where(
+            hi == lo,
+            torch.zeros_like(hi),
+            torch.where(suited, torch.ones_like(hi), torch.full_like(hi, 2)),
+        )
         self.register_buffer("class_hi_rank", hi, persistent=False)
         self.register_buffer("class_lo_rank", lo, persistent=False)
         self.register_buffer("class_suited", suited, persistent=False)
+        self.register_buffer("class_type", class_type, persistent=False)
+        self.register_buffer(
+            "preflop_class_static_features",
+            self._build_preflop_class_static_features(hi, lo, suited),
+            persistent=False,
+        )
         if range_hidden_dim == 0 and ffn_dim % num_players != 0:
             raise ValueError(
                 "ffn_dim must be divisible by num_players when range_hidden_dim is 0"
@@ -1772,11 +1783,15 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
             ]
         )
 
-    def _class_static_features(self) -> torch.Tensor:
-        hi = self.class_hi_rank.to(torch.float32)
-        lo = self.class_lo_rank.to(torch.float32)
-        suited = self.class_suited
-        pair = self.class_hi_rank == self.class_lo_rank
+    @staticmethod
+    def _build_preflop_class_static_features(
+        hi_rank: torch.Tensor,
+        lo_rank: torch.Tensor,
+        suited: torch.Tensor,
+    ) -> torch.Tensor:
+        hi = hi_rank.to(torch.float32)
+        lo = lo_rank.to(torch.float32)
+        pair = hi_rank == lo_rank
         gap = (hi - lo).clamp(min=0.0)
         return torch.stack(
             [
@@ -1792,22 +1807,15 @@ class _BetterPreflopCompactFFN(BaseMLPModel):
             dim=-1,
         )
 
+    def _class_static_features(self) -> torch.Tensor:
+        return self.preflop_class_static_features
+
     def _hand_embedding(self) -> torch.Tensor:
-        pair = self.class_hi_rank == self.class_lo_rank
-        class_type = torch.where(
-            pair,
-            torch.zeros_like(self.class_hi_rank),
-            torch.where(
-                self.class_suited,
-                torch.ones_like(self.class_hi_rank),
-                torch.full_like(self.class_hi_rank, 2),
-            ),
-        )
         static = self._class_static_features().to(self.class_hi_embedding.weight.dtype)
         return (
             self.class_hi_embedding(self.class_hi_rank)
             + self.class_lo_embedding(self.class_lo_rank)
-            + self.class_type_embedding(class_type)
+            + self.class_type_embedding(self.class_type)
             + self.class_feature_proj(static)
         )
 
@@ -2002,6 +2010,11 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         self.register_buffer("class_lo_rank", lo, persistent=False)
         self.register_buffer("class_suited", suited, persistent=False)
         self.register_buffer(
+            "preflop_class_static_features",
+            self._build_preflop_class_static_features(hi, lo, suited),
+            persistent=False,
+        )
+        self.register_buffer(
             "preflop_bucket_projection",
             _preflop_bucket_projection(),
             persistent=False,
@@ -2063,11 +2076,15 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             nonlinearity=self.nonlinearity,
         )
 
-    def _class_static_features(self) -> torch.Tensor:
-        hi = self.class_hi_rank.to(torch.float32)
-        lo = self.class_lo_rank.to(torch.float32)
-        suited = self.class_suited
-        pair = self.class_hi_rank == self.class_lo_rank
+    @staticmethod
+    def _build_preflop_class_static_features(
+        hi_rank: torch.Tensor,
+        lo_rank: torch.Tensor,
+        suited: torch.Tensor,
+    ) -> torch.Tensor:
+        hi = hi_rank.to(torch.float32)
+        lo = lo_rank.to(torch.float32)
+        pair = hi_rank == lo_rank
         gap = (hi - lo).clamp(min=0.0)
         return torch.stack(
             [
@@ -2082,6 +2099,9 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             ],
             dim=-1,
         )
+
+    def _class_static_features(self) -> torch.Tensor:
+        return self.preflop_class_static_features
 
     def _hand_embedding(self) -> torch.Tensor:
         return self.hand_encoder(
