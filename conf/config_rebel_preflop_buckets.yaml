@@ -8,6 +8,7 @@ defaults:
   - _self_
 
 checkpoint_dir: checkpoints-rebel-preflop-buckets
+resume_from: null
 use_wandb: true
 wandb_project: poker-rebel-preflop-backward-induction
 wandb_tags: ["rebel", "cfr", "preflop", "backward-induction"]

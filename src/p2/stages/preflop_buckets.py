@@ -12,6 +12,7 @@ class PreflopBucketExecutionConfig:
     command: str
     state_dataset: str
     base_checkpoint: str
+    resume_from: str | None
     output_dir: str
     presolve_bucket: str
     train_bucket: str | None

@@ -43,6 +43,7 @@ def _execution_config_from_config(cfg: Config) -> PreflopBucketExecutionConfig:
         command=command,
         state_dataset=state_dataset,
         base_checkpoint=base_checkpoint,
+        resume_from=cfg.resume_from,
         output_dir=preflop.output_dir,
         presolve_bucket=preflop.presolve_bucket,
         train_bucket=preflop.train_bucket,

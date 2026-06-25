@@ -454,9 +454,13 @@ class PublicStateBucketReader:
         batch_size: int,
         max_rows: int,
         seed: int | None = None,
+        skip_rows: int = 0,
     ) -> Iterator[dict[str, torch.Tensor]]:
         target_rows = min(int(max_rows), int(self.rows))
         if target_rows <= 0:
+            return
+        skipped = max(0, int(skip_rows))
+        if skipped >= target_rows:
             return
         dataset = TensorDataset(torch.arange(self.rows, dtype=torch.long))
         loader = DataLoader(
@@ -476,6 +480,13 @@ class PublicStateBucketReader:
         for (batch_indices,) in loader:
             if yielded >= target_rows:
                 break
+            if skipped:
+                skip = min(skipped, int(batch_indices.numel()))
+                skipped -= skip
+                yielded += skip
+                if skip == int(batch_indices.numel()):
+                    continue
+                batch_indices = batch_indices[skip:]
             take = min(int(batch_indices.numel()), target_rows - yielded)
             if take < int(batch_indices.numel()):
                 batch_indices = batch_indices[:take]
@@ -657,12 +668,17 @@ def _save_trainer_checkpoint(
     step: int,
     run_id: str | None,
     metadata: dict[str, Any],
+    save_optimizer: bool = False,
+    stage_rng: torch.Generator | None = None,
 ) -> None:
+    metadata = dict(metadata)
+    if stage_rng is not None:
+        metadata["stage_rng_state"] = stage_rng.get_state()
     trainer.save_checkpoint(
         str(path),
         step=step,
         wandb_run_id=run_id,
-        save_optimizer=False,
+        save_optimizer=save_optimizer,
         save_dtype=torch.bfloat16,
         metadata=metadata,
     )
@@ -899,6 +915,64 @@ def _try_load_bootstrap_distill_checkpoint(
         flush=True,
     )
     return global_step, bucket_train_step, roots
+
+
+def _load_specialist_resume_metadata(
+    args: PreflopBucketExecutionConfig,
+) -> tuple[Path, dict[str, Any]] | None:
+    if args.resume_from is None or str(args.resume_from) == "":
+        return None
+    checkpoint_path = Path(args.resume_from)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"resume checkpoint does not exist: {checkpoint_path}")
+    metadata = CheckpointIO.metadata(
+        str(checkpoint_path),
+        map_location=torch.device("cpu"),
+    )
+    if metadata.get("kind") != "preflop_backward_induction_specialist":
+        raise ValueError(
+            "preflop specialist resume_from must point at a specialist checkpoint; "
+            f"got kind={metadata.get('kind')!r}"
+        )
+    if metadata.get("snapshot") != "in_progress":
+        raise ValueError(
+            "preflop specialist resume_from must point at an in-progress snapshot; "
+            f"got snapshot={metadata.get('snapshot')!r}"
+        )
+    bucket_label = metadata.get("bucket_label")
+    labels = _train_bucket_labels(args)
+    if bucket_label not in labels:
+        raise ValueError(
+            f"resume checkpoint bucket {bucket_label!r} is not in this training run "
+            f"bucket list {labels!r}"
+        )
+    return checkpoint_path, metadata
+
+
+def _restore_stage_rng_from_metadata(
+    rng: torch.Generator,
+    metadata: dict[str, Any],
+) -> bool:
+    state = metadata.get("stage_rng_state")
+    if state is None:
+        return False
+    if not isinstance(state, torch.Tensor):
+        raise TypeError("resume checkpoint metadata stage_rng_state is not a tensor")
+    rng.set_state(state.detach().cpu())
+    return True
+
+
+def _resume_epoch_start(
+    *,
+    metadata: dict[str, Any],
+    states_per_bucket: int,
+) -> tuple[int, int]:
+    epoch = max(0, int(metadata.get("epoch", 0)))
+    epoch_roots = max(0, int(metadata.get("epoch_roots", 0)))
+    max_rows = max(1, int(states_per_bucket))
+    if epoch_roots >= max_rows:
+        return epoch + 1, 0
+    return epoch, epoch_roots
 
 
 def _validation_cache_metadata(
@@ -1753,6 +1827,16 @@ def run_train_specialists(
         torch.set_float32_matmul_precision("high")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    resume_state = _load_specialist_resume_metadata(args)
+    resume_path: Path | None = None
+    resume_metadata: dict[str, Any] = {}
+    resume_bucket_label: str | None = None
+    resume_bucket_index: int | None = None
+    train_labels = _train_bucket_labels(args)
+    if resume_state is not None:
+        resume_path, resume_metadata = resume_state
+        resume_bucket_label = str(resume_metadata["bucket_label"])
+        resume_bucket_index = train_labels.index(resume_bucket_label)
     total_updates_guess = _estimate_train_updates(args)
     base_cfg = build_run_config(
         base_template,
@@ -1761,6 +1845,8 @@ def run_train_specialists(
         num_steps=total_updates_guess,
         num_envs=_max_cfr_batch_size(args),
     )
+    if resume_path is not None:
+        base_cfg.resume_from = str(resume_path)
     write_resolved_config(
         base_cfg,
         output_dir,
@@ -1774,12 +1860,44 @@ def run_train_specialists(
     )
     rng = torch.Generator(device=device)
     rng.manual_seed(int(args.seed))
+    if resume_metadata and _restore_stage_rng_from_metadata(rng, resume_metadata):
+        print(
+            f"restored preflop specialist stage RNG from {resume_path}",
+            flush=True,
+        )
+    elif resume_metadata:
+        print(
+            "resume checkpoint does not contain stage RNG state; continuing with "
+            "deterministic row skipping but fresh belief RNG sequence",
+            flush=True,
+        )
 
     with run_cm as run:
         previous_value_checkpoint = args.base_checkpoint
-        global_step = 0
+        global_step = int(resume_metadata.get("global_step", 0)) if resume_metadata else 0
         specialist_paths: dict[str, str] = {}
-        for bucket_index, bucket_label in enumerate(_train_bucket_labels(args)):
+        for bucket_index, bucket_label in enumerate(train_labels):
+            if resume_bucket_index is not None and bucket_index < resume_bucket_index:
+                checkpoint_path = (
+                    output_dir
+                    / bucket_label
+                    / "checkpoints"
+                    / SPECIALIST_FINAL_CHECKPOINT
+                )
+                if checkpoint_path.exists():
+                    specialist_paths[bucket_label] = str(checkpoint_path)
+                print(
+                    f"skipping completed bucket before resume: {bucket_label}",
+                    flush=True,
+                )
+                continue
+            resume_current_bucket = (
+                resume_bucket_label is not None and bucket_label == resume_bucket_label
+            )
+            if resume_current_bucket:
+                solver_checkpoint = resume_metadata.get("solver_checkpoint")
+                if isinstance(solver_checkpoint, str) and solver_checkpoint:
+                    previous_value_checkpoint = solver_checkpoint
             spec = _bucket_spec(bucket_label)
             train_value = bucket_label != "actions_0_3"
             cfr_batch_size = _bucket_cfr_batch_size(args, bucket_label)
@@ -1804,6 +1922,8 @@ def run_train_specialists(
                 num_envs=cfr_batch_size,
                 bucket_label=bucket_label,
             )
+            if resume_current_bucket and resume_path is not None:
+                cfg.resume_from = str(resume_path)
             write_resolved_config(
                 cfg,
                 resolved_config=RebelExperimentConfig.from_trainer_config(cfg),
@@ -1831,16 +1951,24 @@ def run_train_specialists(
             )
             _load_model_weights(solver, previous_value_checkpoint)
             trainer = RebelCFRTrainer(cfg=copy.deepcopy(cfg), device=device)
-            student_checkpoint = _student_checkpoint_for_bucket(
-                args,
-                bucket_index=bucket_index,
-                previous_value_checkpoint=previous_value_checkpoint,
-            )
-            _maybe_load_student_weights(
-                trainer,
-                student_checkpoint,
-                required=args.student_init is not None and bucket_index == 0,
-            )
+            if resume_current_bucket and resume_path is not None:
+                loaded_step = trainer.load_checkpoint(str(resume_path), load_optimizer=True)
+                print(
+                    f"resumed {bucket_label} from {resume_path} "
+                    f"step={loaded_step}",
+                    flush=True,
+                )
+            else:
+                student_checkpoint = _student_checkpoint_for_bucket(
+                    args,
+                    bucket_index=bucket_index,
+                    previous_value_checkpoint=previous_value_checkpoint,
+                )
+                _maybe_load_student_weights(
+                    trainer,
+                    student_checkpoint,
+                    required=args.student_init is not None and bucket_index == 0,
+                )
             if bucket_index == 0 and run is not None:
                 run.summary.update(count_model_parameters(trainer.model))
 
@@ -1864,30 +1992,61 @@ def run_train_specialists(
             bucket_step = 0
             bucket_train_step = 0
             bucket_epochs = _bucket_epochs(args, bucket_label)
+            start_epoch = 0
+            first_epoch_skip_rows = 0
+            if resume_current_bucket:
+                roots_solved = int(resume_metadata.get("roots_solved", 0))
+                value_examples = int(resume_metadata.get("value_examples", 0))
+                policy_examples = int(resume_metadata.get("policy_examples", 0))
+                bucket_step = int(resume_metadata.get("bucket_step", 0))
+                bucket_train_step = int(
+                    resume_metadata.get(
+                        "bucket_train_step",
+                        resume_metadata.get("step", bucket_train_step),
+                    )
+                )
+                start_epoch, first_epoch_skip_rows = _resume_epoch_start(
+                    metadata=resume_metadata,
+                    states_per_bucket=args.states_per_bucket,
+                )
+                print(
+                    f"{bucket_label}: continuing from bucket_step={bucket_step} "
+                    f"bucket_train_step={bucket_train_step} "
+                    f"roots={roots_solved:,} epoch={start_epoch + 1} "
+                    f"skip_rows={first_epoch_skip_rows:,}",
+                    flush=True,
+                )
             bucket_start = time.time()
             train_batch_size = max(1, int(args.train_batch_size))
             progress_interval = max(int(args.progress_roots), cfr_batch_size)
-            next_progress_roots = progress_interval
+            next_progress_roots = (
+                (roots_solved // progress_interval) + 1
+            ) * progress_interval
             last_tree_stats: dict[str, float] = {}
-            (
-                global_step,
-                bucket_train_step,
-                bootstrap_distill_roots,
-            ) = _run_bootstrap_distill_for_bucket(
-                args=args,
-                bucket_label=bucket_label,
-                bucket_dir=bucket_dir,
-                trainer=trainer,
-                cfg=cfg,
-                reader=reader,
-                device=device,
-                rng=rng,
-                run=run,
-                global_step=global_step,
-                bucket_train_step=bucket_train_step,
-                train_value=train_value,
-                bucket_index=bucket_index,
-            )
+            if resume_current_bucket:
+                bootstrap_distill_roots = int(
+                    resume_metadata.get("bootstrap_distill_roots", 0)
+                )
+            else:
+                (
+                    global_step,
+                    bucket_train_step,
+                    bootstrap_distill_roots,
+                ) = _run_bootstrap_distill_for_bucket(
+                    args=args,
+                    bucket_label=bucket_label,
+                    bucket_dir=bucket_dir,
+                    trainer=trainer,
+                    cfg=cfg,
+                    reader=reader,
+                    device=device,
+                    rng=rng,
+                    run=run,
+                    global_step=global_step,
+                    bucket_train_step=bucket_train_step,
+                    train_value=train_value,
+                    bucket_index=bucket_index,
+                )
             bucket_start = time.time()
 
             def log_validation(epoch: int, epoch_roots: int) -> None:
@@ -1939,16 +2098,25 @@ def run_train_specialists(
                     flush=True,
                 )
 
-            if args.validation_interval_steps > 0:
+            if args.validation_interval_steps > 0 and not resume_current_bucket:
                 log_validation(epoch=0, epoch_roots=0)
 
-            for epoch in range(bucket_epochs):
-                epoch_roots = 0
+            for epoch in range(start_epoch, bucket_epochs):
+                epoch_roots = (
+                    int(resume_metadata.get("epoch_roots", 0))
+                    if resume_current_bucket and epoch == start_epoch
+                    else 0
+                )
                 epoch_seed = args.seed + bucket_index * 10_000 + epoch * 1_000_000
                 for states in reader.iter_state_batches(
                     batch_size=cfr_batch_size,
                     max_rows=args.states_per_bucket,
                     seed=epoch_seed,
+                    skip_rows=(
+                        first_epoch_skip_rows
+                        if resume_current_bucket and epoch == start_epoch
+                        else 0
+                    ),
                 ):
                     rows = _copy_public_states_to_env(env, states)
                     beliefs = _random_beliefs(
@@ -2068,6 +2236,8 @@ def run_train_specialists(
                             snapshot_path,
                             step=bucket_train_step,
                             run_id=None if run is None else run.id,
+                            save_optimizer=True,
+                            stage_rng=rng,
                             metadata={
                                 "kind": "preflop_backward_induction_specialist",
                                 "snapshot": "in_progress",
@@ -2463,6 +2633,8 @@ def run_distill(
                         snapshot_path,
                         step=global_step,
                         run_id=None if run is None else run.id,
+                        save_optimizer=True,
+                        stage_rng=rng,
                         metadata={
                             "kind": "preflop_backward_induction_distilled_model",
                             "snapshot": "in_progress",

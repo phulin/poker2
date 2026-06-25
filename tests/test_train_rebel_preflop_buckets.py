@@ -34,6 +34,7 @@ def test_config_rebel_preflop_buckets_resolves() -> None:
             overrides=[
                 "device=cpu",
                 "use_wandb=false",
+                "resume_from=/tmp/resume.pt",
                 "preflop_buckets.state_dataset=/tmp/states",
                 "preflop_buckets.base_checkpoint=/tmp/base.pt",
             ],
@@ -49,6 +50,7 @@ def test_config_rebel_preflop_buckets_resolves() -> None:
     assert cfg.preflop_buckets.train_bucket is None
     assert cfg.preflop_buckets.state_dataset == "/tmp/states"
     assert cfg.preflop_buckets.base_checkpoint == "/tmp/base.pt"
+    assert cfg.resume_from == "/tmp/resume.pt"
     assert cfg.preflop_buckets.snapshot_interval_steps == 250
     assert cfg.preflop_buckets.distill_buckets is None
     assert cfg.preflop_buckets.distill_checkpoints.checkpoint_12_15 is None
@@ -76,6 +78,7 @@ def test_preflop_hydra_cli_dispatches_train_specialists(monkeypatch, tmp_path) -
     assert args.command == "train-specialists"
     assert args.state_dataset == str(tmp_path / "states")
     assert args.base_checkpoint == str(tmp_path / "base.pt")
+    assert args.resume_from is None
     assert args.train_bucket == "actions_12_15"
     assert args.cfr_batch_size == 17
     assert args.actions_12_15_cfr_batch_size == 9
