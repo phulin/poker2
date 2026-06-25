@@ -46,7 +46,7 @@ preflop_buckets:
   allow_partial: false
   overwrite: false
   progress_roots: 10000
-  snapshot_interval_steps: 250
+  snapshot_interval_steps: 50
   wandb_group: null
   student_init: null
   student_init_from_base: true

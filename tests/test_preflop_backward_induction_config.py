@@ -59,7 +59,7 @@ def _execution_config(**overrides) -> PreflopBucketExecutionConfig:
         "allow_partial": False,
         "overwrite": False,
         "progress_roots": 10_000,
-        "snapshot_interval_steps": 250,
+        "snapshot_interval_steps": 50,
         "use_wandb": False,
         "wandb_project": "preflop-project",
         "wandb_name": "preflop-run",

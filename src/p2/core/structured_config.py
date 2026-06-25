@@ -578,7 +578,7 @@ class PreflopBucketTrainingConfig:
     allow_partial: bool = False
     overwrite: bool = False
     progress_roots: int = 10_000
-    snapshot_interval_steps: int = 250
+    snapshot_interval_steps: int = 50
     wandb_group: str | None = None
     student_init: str | None = None
     student_init_from_base: bool = True

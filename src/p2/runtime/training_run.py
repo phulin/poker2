@@ -40,7 +40,7 @@ def setup_torch_runtime(
     cfg: Config,
     device: torch.device,
     *,
-    recompile_limit: int = 16,
+    recompile_limit: int = 64,
 ) -> None:
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
@@ -193,7 +193,7 @@ def training_run(
     stage: str | None = None,
     create_checkpoint_dir: bool = True,
     configure_torch: bool = True,
-    recompile_limit: int = 16,
+    recompile_limit: int = 64,
     resolved_config: ResolvedConfig | None = None,
     extra_config: dict[str, Any] | None = None,
     resume_from_checkpoint: bool = True,

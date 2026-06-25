@@ -32,7 +32,11 @@ from p2.stages.preflop_buckets import (
     PreflopBucketExecutionConfig,
     build_run_config,
 )
-from p2.runtime.training_run import wandb_run, write_resolved_config
+from p2.runtime.training_run import (
+    setup_torch_runtime,
+    wandb_run,
+    write_resolved_config,
+)
 from p2.utils.model_utils import compute_masked_logits, count_model_parameters
 
 
@@ -1145,12 +1149,21 @@ def _train_policy_minibatches(
     schedule_step = int(step)
     for start in range(0, len(batch), batch_size):
         part = _slice_batch(batch, start, min(start + batch_size, len(batch)))
+        original_count = len(part)
+        if original_count < batch_size:
+            pad_count = batch_size - original_count
+            pad_indices = torch.arange(
+                pad_count,
+                device=batch.legal_masks.device,
+                dtype=torch.long,
+            ) % len(batch)
+            part = RebelBatch.cat([part, batch[pad_indices]])
         stats = _policy_update(
             trainer,
             part,
             step=schedule_step,
         )
-        weighted_stats.append((len(part), stats))
+        weighted_stats.append((original_count, stats))
     return _aggregate_minibatch_stats(weighted_stats), len(weighted_stats)
 
 
@@ -1845,6 +1858,7 @@ def run_train_specialists(
         num_steps=total_updates_guess,
         num_envs=_max_cfr_batch_size(args),
     )
+    setup_torch_runtime(base_cfg, device, recompile_limit=64)
     if resume_path is not None:
         base_cfg.resume_from = str(resume_path)
     write_resolved_config(
