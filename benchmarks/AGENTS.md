@@ -9,6 +9,7 @@ Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton ke
 - `bench_combo_mask.py`: Combo masking benchmark.
 - `bench_fused_cfr_triton.py`: Fused CFR Triton benchmark.
 - `bench_fused_sparse_speedups.py`: Fused sparse evaluator speedup benchmark.
+- `bench_heads_up_projection.py`: Benchmarks the n-way-to-heads-up closing-belief projection, comparing the current PyTorch row-plus-player gather with the direct Triton row/player select kernel.
 - `bench_indexed_add.py`: Indexed-add benchmark.
 - `bench_preflop_allin_3p_kernel.py`: Benchmarks the exact native-169 3-player all-in share calculation, comparing the current materialized opponent outer-product matmul path with combined-GEMM, structural-denominator, packed-symmetry, and fused Triton candidates.
 - `bench_reach_weights.py`: Reach-weight computation benchmark.

@@ -19,6 +19,7 @@ from p2.search.fused_cfr_triton import (
     preflop169_unblocked_rank_stats_out_,
     preflop169_unblocked_rank_mass_triton_out_,
     preflop169_unblocked_mass_triton_out_,
+    select_heads_up_beliefs_triton,
     triton_is_available,
 )
 
@@ -33,6 +34,43 @@ def _projection(device: torch.device) -> torch.Tensor:
         torch.float32
     )
     return (compatibility.T * multiplicity.reciprocal()[:, None]).contiguous()
+
+
+@pytest.mark.skipif(not _cuda_available(), reason="requires CUDA and Triton")
+def test_select_heads_up_beliefs_triton_matches_torch_gather() -> None:
+    device = torch.device("cuda")
+    rows = 17
+    feature_rows = 31
+    players = 6
+    beliefs = torch.randn(
+        feature_rows,
+        players * PREFLOP_HANDS,
+        device=device,
+        dtype=torch.float32,
+    )
+    positions = torch.tensor(
+        [0, 3, 5, 7, 11, 13, 17, 19, 23, 29, 1, 4, 8, 12, 16, 20, 24],
+        device=device,
+    )
+    live_players = torch.stack(
+        (
+            torch.arange(rows, device=device) % players,
+            (torch.arange(rows, device=device) + 2) % players,
+        ),
+        dim=1,
+    ).contiguous()
+    expected = beliefs[positions].view(rows, players, PREFLOP_HANDS).gather(
+        1,
+        live_players[:, :, None].expand(-1, 2, PREFLOP_HANDS),
+    )
+    actual = select_heads_up_beliefs_triton(
+        beliefs,
+        positions,
+        live_players,
+        num_players=players,
+        hand_dim=PREFLOP_HANDS,
+    )
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.skipif(not _cuda_available(), reason="requires CUDA and Triton")

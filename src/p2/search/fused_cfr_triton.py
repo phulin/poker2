@@ -2655,6 +2655,110 @@ def fused_preflop169_project_rows_(
 if triton is not None:
 
     @triton.jit
+    def _select_heads_up_beliefs_kernel(
+        beliefs_ptr,  # [N, P * H]
+        positions_ptr,  # [rows]
+        live_players_ptr,  # [rows, 2]
+        out_ptr,  # [rows, 2, H]
+        rows,
+        P: tl.constexpr,
+        H: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        slot = tl.program_id(1)
+        hb = tl.program_id(2)
+        h = hb * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = (row < rows) & (h < H)
+
+        src_row = tl.load(positions_ptr + row, mask=row < rows, other=0)
+        player = tl.load(live_players_ptr + row * 2 + slot, mask=row < rows, other=0)
+        values = tl.load(
+            beliefs_ptr + src_row * (P * H) + player * H + h,
+            mask=mask,
+            other=0.0,
+        )
+        tl.store(out_ptr + (row * 2 + slot) * H + h, values, mask=mask)
+
+
+def select_heads_up_beliefs_triton(
+    beliefs: torch.Tensor,
+    positions: torch.Tensor,
+    live_players: torch.Tensor,
+    *,
+    num_players: int,
+    hand_dim: int,
+    out: torch.Tensor | None = None,
+    block_h: int = 256,
+    num_warps: int | None = None,
+) -> torch.Tensor:
+    """Gather two live-player belief lanes directly from flattened model features.
+
+    This replaces the PyTorch sequence ``beliefs[positions].view(rows, P, H)``
+    followed by a two-player ``gather``.  The current projection path only needs
+    two lanes, so materializing all ``P`` lanes is avoidable on CUDA.
+    """
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    if beliefs.dim() != 2 or beliefs.shape[1] != num_players * hand_dim:
+        raise ValueError(
+            "beliefs must have shape [N, num_players * hand_dim]; got "
+            f"{tuple(beliefs.shape)} for num_players={num_players}, "
+            f"hand_dim={hand_dim}"
+        )
+    if positions.dim() != 1:
+        raise ValueError("positions must be a 1-D tensor")
+    rows = int(positions.numel())
+    if live_players.shape != (rows, 2):
+        raise ValueError(
+            f"live_players must have shape ({rows}, 2), got "
+            f"{tuple(live_players.shape)}"
+        )
+    if not beliefs.is_cuda:
+        raise ValueError("select_heads_up_beliefs_triton requires CUDA tensors")
+    inputs_contiguous = (
+        beliefs.is_contiguous()
+        and positions.is_contiguous()
+        and live_players.is_contiguous()
+    )
+    if not inputs_contiguous:
+        raise ValueError("beliefs, positions, and live_players must be contiguous")
+    if out is None:
+        out = torch.empty(
+            (rows, 2, hand_dim),
+            device=beliefs.device,
+            dtype=beliefs.dtype,
+        )
+    if out.shape != (rows, 2, hand_dim) or out.device != beliefs.device:
+        raise ValueError(
+            f"out must have shape ({rows}, 2, {hand_dim}) on {beliefs.device}; "
+            f"got shape={tuple(out.shape)} device={out.device}"
+        )
+    if out.dtype != beliefs.dtype or not out.is_contiguous():
+        raise ValueError("out must be contiguous and have the same dtype as beliefs")
+    if rows == 0:
+        return out
+    if num_warps is None:
+        num_warps = 2 if hand_dim <= 256 else 4
+    _select_heads_up_beliefs_kernel[
+        (rows, 2, triton.cdiv(hand_dim, block_h))
+    ](
+        beliefs,
+        positions,
+        live_players,
+        out,
+        rows,
+        P=int(num_players),
+        H=int(hand_dim),
+        BLOCK_H=int(block_h),
+        num_warps=int(num_warps),
+    )
+    return out
+
+
+if triton is not None:
+
+    @triton.jit
     def _preflop169_src_weights_multiway_kernel(
         class_mass_ptr,  # [top, P, H]
         projection_ptr,  # [H, H]

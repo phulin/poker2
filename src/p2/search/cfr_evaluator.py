@@ -46,6 +46,10 @@ from p2.rl.target_provenance import (
     TARGET_SOURCE_EXACT_TERMINAL,
 )
 from p2.search.chance_node_helper import ChanceNodeHelper
+from p2.search.fused_cfr_triton import (
+    select_heads_up_beliefs_triton,
+    triton_is_available as fused_triton_is_available,
+)
 from p2.utils.model_utils import compute_masked_logits
 from p2.utils.profiling import profile
 
@@ -509,6 +513,54 @@ class CFREvaluator(ABC):
         score = torch.where(live, score, torch.full_like(score, -1))
         return score.topk(k=2, dim=1).indices.contiguous()
 
+    def _select_heads_up_feature_beliefs(
+        self,
+        feature_beliefs: torch.Tensor,
+        positions: torch.Tensor,
+        live_players: torch.Tensor,
+        *,
+        hand_dim: int,
+    ) -> torch.Tensor:
+        if (
+            feature_beliefs.is_cuda
+            and positions.is_cuda
+            and live_players.is_cuda
+            and feature_beliefs.is_contiguous()
+            and positions.is_contiguous()
+            and live_players.is_contiguous()
+            and fused_triton_is_available()
+        ):
+            shape = (positions.numel(), 2, hand_dim)
+            out = getattr(self, "_heads_up_selected_beliefs_buf", None)
+            if (
+                out is None
+                or out.shape != shape
+                or out.dtype != feature_beliefs.dtype
+                or out.device != feature_beliefs.device
+            ):
+                out = torch.empty(
+                    shape,
+                    dtype=feature_beliefs.dtype,
+                    device=feature_beliefs.device,
+                )
+                self._heads_up_selected_beliefs_buf = out
+            return select_heads_up_beliefs_triton(
+                feature_beliefs,
+                positions,
+                live_players,
+                num_players=self.num_players,
+                hand_dim=hand_dim,
+                out=out,
+            )
+
+        selected_beliefs = feature_beliefs[positions].view(
+            -1, self.num_players, hand_dim
+        )
+        return selected_beliefs.gather(
+            1,
+            live_players[:, :, None].expand(-1, 2, hand_dim),
+        )
+
     def _live_counts_for_nodes(self, node_indices: torch.Tensor) -> torch.Tensor:
         if not isinstance(self.env, PBSEnv):
             raise TypeError("live-count query requires PBSEnv nodes")
@@ -619,12 +671,11 @@ class CFREvaluator(ABC):
         else:
             live_players = cached[-1]
 
-        selected_beliefs = features.beliefs[positions].view(
-            -1, self.num_players, source_hand_dim
-        )
-        selected_beliefs = selected_beliefs.gather(
-            1,
-            live_players[:, :, None].expand(-1, 2, source_hand_dim),
+        selected_beliefs = self._select_heads_up_feature_beliefs(
+            features.beliefs,
+            positions,
+            live_players,
+            hand_dim=source_hand_dim,
         )
         selected_beliefs = self._hand_dim_convert(
             selected_beliefs,
