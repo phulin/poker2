@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import torch
 import pytest
 
@@ -144,6 +146,52 @@ def test_allin_169_oracle_sparse_live3_writeback_matches_dense_values() -> None:
         output[0],
         torch.full((players, PREFLOP_HANDS), -123.0, device=device),
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_allin_169_oracle_share3_denom_correction_modes_match() -> None:
+    pytest.importorskip("triton")
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device)
+    generator.manual_seed(1234)
+    rows = 384
+    oracle = PreflopAllIn169Oracle(device=device)
+    oracle._exact_loaded = True
+    oracle._share3 = torch.rand(
+        PREFLOP_HANDS,
+        PREFLOP_HANDS,
+        PREFLOP_HANDS,
+        device=device,
+        generator=generator,
+    )
+    beliefs = torch.rand(
+        rows,
+        3,
+        PREFLOP_HANDS,
+        device=device,
+        generator=generator,
+    )
+    beliefs = beliefs / beliefs.sum(dim=-1, keepdim=True).clamp_min(1.0e-8)
+
+    def call_mode(mode: str | None) -> torch.Tensor:
+        old = os.environ.get("P2_ALLIN_SHARE3_DENOM_CORRECTION")
+        if mode is None:
+            os.environ.pop("P2_ALLIN_SHARE3_DENOM_CORRECTION", None)
+        else:
+            os.environ["P2_ALLIN_SHARE3_DENOM_CORRECTION"] = mode
+        try:
+            return oracle._share3_values(beliefs[:, 0], beliefs[:, 1], beliefs[:, 2])
+        finally:
+            if old is None:
+                os.environ.pop("P2_ALLIN_SHARE3_DENOM_CORRECTION", None)
+            else:
+                os.environ["P2_ALLIN_SHARE3_DENOM_CORRECTION"] = old
+
+    ref = call_mode("matmul")
+    torch.testing.assert_close(call_mode("card"), ref, atol=1.0e-5, rtol=1.0e-5)
+    card_combined = call_mode("card_combined")
+    torch.testing.assert_close(card_combined, ref, atol=1.0e-5, rtol=1.0e-5)
+    torch.testing.assert_close(call_mode(None), card_combined, atol=0.0, rtol=0.0)
 
 
 def _brute_class_shares(

@@ -12,6 +12,7 @@ Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton ke
 - `bench_heads_up_projection.py`: Benchmarks the n-way-to-heads-up closing-belief projection, comparing the current PyTorch row-plus-player gather with the direct Triton row/player select kernel.
 - `bench_indexed_add.py`: Indexed-add benchmark.
 - `bench_preflop_allin_3p_kernel.py`: Benchmarks the exact native-169 3-player all-in share calculation, comparing the current materialized opponent outer-product matmul path with combined-GEMM, structural-denominator, packed-symmetry, and fused Triton candidates.
+- `bench_preflop_allin_share3_denom.py`: Realistic actions_4_7 microbenchmark for exact 3-player all-in denominator correction variants, comparing the compatibility matmul against card-count formula and combined card-count projection paths.
 - `bench_preflop_allin_live2_entries.py`: Realistic actions_4_7 microbenchmark for exact preflop all-in value routing/writeback, including live-entry routing and sparse net-value writeback variants.
 - `bench_preflop_combined_range_projection.py`: Realistic actions_4_7 microbenchmark for compact preflop value-model range moment projection variants that combine the two hand-moment belief matmuls.
 - `bench_preflop_cutoff_belief_reuse.py`: Realistic actions_4_7 microbenchmark for reusing cutoff model-input belief rows during value writeback instead of gathering the same rows twice.
