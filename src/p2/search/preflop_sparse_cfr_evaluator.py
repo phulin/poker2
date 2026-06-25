@@ -528,6 +528,53 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             setattr(self, attr, buf)
         return torch.index_select(flat, 0, flat_indices.contiguous(), out=buf)
 
+    def _preflop_allin_entry_beliefs_grouped(
+        self,
+        beliefs: torch.Tensor,
+        entry_nodes: torch.Tensor,
+        player_groups: tuple[torch.Tensor, ...],
+        attr: str,
+    ) -> tuple[torch.Tensor, ...]:
+        entries = int(entry_nodes.numel())
+        group_count = len(player_groups)
+        if entries == 0:
+            empty = beliefs.new_empty((0, PREFLOP_HANDS))
+            return tuple(empty for _ in player_groups)
+        indices_attr = f"{attr}_indices"
+        key_attr = f"{attr}_indices_key"
+        key = (
+            int(getattr(self, "_subgame_generation", 0)),
+            int(entry_nodes.data_ptr()),
+            entries,
+            self.num_players,
+            tuple(int(players.data_ptr()) for players in player_groups),
+        )
+        flat_indices = getattr(self, indices_attr, None)
+        if flat_indices is None or getattr(self, key_attr, None) != key:
+            flat_base = entry_nodes * self.num_players
+            flat_indices = torch.cat(
+                tuple(flat_base + players for players in player_groups),
+                dim=0,
+            ).contiguous()
+            setattr(self, indices_attr, flat_indices)
+            setattr(self, key_attr, key)
+        shape = (entries * group_count, PREFLOP_HANDS)
+        flat = beliefs.view(-1, self.hand_dim)
+        buf = getattr(self, attr, None)
+        if (
+            buf is None
+            or buf.shape != shape
+            or buf.device != beliefs.device
+            or buf.dtype != beliefs.dtype
+        ):
+            buf = beliefs.new_empty(shape)
+            setattr(self, attr, buf)
+        gathered = torch.index_select(flat, 0, flat_indices, out=buf)
+        return tuple(
+            gathered.narrow(0, group * entries, entries)
+            for group in range(group_count)
+        )
+
     def _set_allin_call_values(self, beliefs: torch.Tensor) -> None:
         indices = getattr(self, "allin_call_indices", None)
         if indices is None or indices.numel() == 0:
@@ -567,17 +614,14 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                 and hasattr(oracle, "write_live2_entry_values_from_beliefs_")
             ):
                 entry_nodes = self.preflop_allin_live2_entry_nodes
-                hero_beliefs = self._preflop_allin_entry_beliefs(
+                hero_beliefs, opp_beliefs = self._preflop_allin_entry_beliefs_grouped(
                     beliefs,
                     entry_nodes,
-                    self.preflop_allin_live2_hero_players,
-                    "_preflop_allin_live2_hero_beliefs_buf",
-                )
-                opp_beliefs = self._preflop_allin_entry_beliefs(
-                    beliefs,
-                    entry_nodes,
-                    self.preflop_allin_live2_opp_players,
-                    "_preflop_allin_live2_opp_beliefs_buf",
+                    (
+                        self.preflop_allin_live2_hero_players,
+                        self.preflop_allin_live2_opp_players,
+                    ),
+                    "_preflop_allin_live2_beliefs_buf",
                 )
                 oracle.write_live2_entry_values_from_beliefs_(
                     output=self.latest_values,
@@ -599,23 +643,19 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                 and hasattr(oracle, "write_live3_entry_values_from_beliefs_")
             ):
                 entry_nodes = self.preflop_allin_live3_entry_nodes
-                hero_beliefs = self._preflop_allin_entry_beliefs(
+                (
+                    hero_beliefs,
+                    opp0_beliefs,
+                    opp1_beliefs,
+                ) = self._preflop_allin_entry_beliefs_grouped(
                     beliefs,
                     entry_nodes,
-                    self.preflop_allin_live3_hero_players,
-                    "_preflop_allin_live3_hero_beliefs_buf",
-                )
-                opp0_beliefs = self._preflop_allin_entry_beliefs(
-                    beliefs,
-                    entry_nodes,
-                    self.preflop_allin_live3_opp0_players,
-                    "_preflop_allin_live3_opp0_beliefs_buf",
-                )
-                opp1_beliefs = self._preflop_allin_entry_beliefs(
-                    beliefs,
-                    entry_nodes,
-                    self.preflop_allin_live3_opp1_players,
-                    "_preflop_allin_live3_opp1_beliefs_buf",
+                    (
+                        self.preflop_allin_live3_hero_players,
+                        self.preflop_allin_live3_opp0_players,
+                        self.preflop_allin_live3_opp1_players,
+                    ),
+                    "_preflop_allin_live3_beliefs_buf",
                 )
                 oracle.write_live3_entry_values_from_beliefs_(
                     output=self.latest_values,

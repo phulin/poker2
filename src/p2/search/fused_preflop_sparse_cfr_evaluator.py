@@ -769,6 +769,21 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             attr,
         )
 
+    def _preflop_allin_entry_beliefs_grouped(
+        self,
+        beliefs: torch.Tensor,
+        entry_nodes: torch.Tensor,
+        player_groups: tuple[torch.Tensor, ...],
+        attr: str,
+    ) -> tuple[torch.Tensor, ...]:
+        return PreflopSparseCFREvaluator._preflop_allin_entry_beliefs_grouped(
+            self,
+            beliefs,
+            entry_nodes,
+            player_groups,
+            attr,
+        )
+
     def _set_allin_call_values(self, beliefs: torch.Tensor) -> None:
         PreflopSparseCFREvaluator._set_allin_call_values(self, beliefs)
 
