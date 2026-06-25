@@ -1352,6 +1352,14 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             not in {"0", "false", "off", "no"}
         )
 
+    def _reuse_cutoff_feature_beliefs_for_writeback(self) -> bool:
+        return (
+            os.environ.get("P2_PREFLOP_REUSE_CUTOFF_FEATURE_BELIEFS", "1")
+            .strip()
+            .lower()
+            not in {"0", "false", "off", "no"}
+        )
+
     def _partition_last_values_buffer(
         self,
         attr: str,
@@ -1420,16 +1428,22 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         hand_values: torch.Tensor,
         beliefs_at_model: torch.Tensor,
         positions: torch.Tensor,
+        position_beliefs: torch.Tensor | None = None,
         last_attr: str,
         do_mix: bool,
         store_last: bool,
     ) -> None:
         if positions.numel() == 0:
             return
-        position_beliefs = self._partition_beliefs_for_positions(
-            beliefs_at_model,
-            positions,
-        )
+        if position_beliefs is None:
+            position_beliefs = self._partition_beliefs_for_positions(
+                beliefs_at_model,
+                positions,
+            )
+        else:
+            position_beliefs = position_beliefs.view(
+                int(positions.numel()), self.num_players, self.hand_dim
+            )
         node_indices = self._partition_node_indices_for_positions(positions)
         hand_values = hand_values.contiguous()
         if store_last:
@@ -1535,15 +1549,23 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
 
         cutoff_positions = self.cutoff_model_positions
         if cutoff_positions.numel() > 0:
+            cutoff_features = self._features_for_model_positions(
+                features, cutoff_positions
+            )
             cutoff_values, _ = self._eval_model_for_fused_writeback(
                 self.value_model,
-                self._features_for_model_positions(features, cutoff_positions),
+                cutoff_features,
                 use_pre_head=False,
             )
             self._writeback_model_values_partition(
                 hand_values=cutoff_values,
                 beliefs_at_model=beliefs,
                 positions=cutoff_positions,
+                position_beliefs=(
+                    cutoff_features.beliefs
+                    if self._reuse_cutoff_feature_beliefs_for_writeback()
+                    else None
+                ),
                 last_attr="_preflop_cutoff_last_values_buf",
                 do_mix=do_mix,
                 store_last=store_last,
