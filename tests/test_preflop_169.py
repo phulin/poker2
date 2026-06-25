@@ -613,6 +613,57 @@ def test_compact_preflop_combined_range_projection_forward() -> None:
     assert torch.isfinite(hand_values).all()
 
 
+def test_compact_preflop_token_static_base_caches_player_tokens() -> None:
+    batch_size = 3
+    num_players = 4
+    features = _compact_features(batch_size, num_players)
+    gen = torch.Generator(device="cpu").manual_seed(12)
+    features.context.copy_(torch.randn(features.context.shape, generator=gen))
+    value_model = BetterPreflopGatedTokenMixerValueFFN(
+        num_actions=1,
+        hidden_dim=48,
+        range_hidden_dim=16,
+        ffn_dim=96,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        transformer_heads=4,
+        enforce_zero_sum=False,
+    )
+    value_model.init_weights(torch.Generator(device="cpu").manual_seed(13))
+
+    static_tokens = value_model.static_feature_base(features)
+    static_prefix = value_model.static_feature_base_from_prefix(
+        value_model.static_feature_prefix(features.context, features.street),
+        features.board,
+    )
+
+    assert static_tokens.shape == (
+        batch_size,
+        num_players + 1,
+        value_model.hidden_dim,
+    )
+    assert static_prefix.shape == (batch_size, value_model.hidden_dim)
+
+    baseline = value_model(features, include_policy=False).hand_values
+    cached_tokens = value_model(
+        features,
+        include_policy=False,
+        static_base_features=static_tokens,
+    ).hand_values
+    cached_prefix = value_model(
+        features,
+        include_policy=False,
+        static_base_features=static_prefix,
+    ).hand_values
+
+    torch.testing.assert_close(cached_tokens, baseline)
+    torch.testing.assert_close(cached_prefix, baseline)
+
+
 def test_compact_preflop_static_hand_features_are_cached_correctly() -> None:
     model = BetterPreflopGatedTokenMixerValueFFN(
         num_actions=1,

@@ -2125,7 +2125,13 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         )
 
     def static_feature_base(self, features: MLPFeatures) -> torch.Tensor:
-        return self.static_feature_prefix(features.context, features.street)
+        scalar_context, player_context = self._split_context(features.context)
+        dtype = self.street_embedding.weight.dtype
+        game_token = self.street_embedding(features.street) + self.game_context_proj(
+            scalar_context.to(dtype)
+        )
+        player_tokens = self.player_context_proj(player_context.to(dtype))
+        return torch.cat((game_token[:, None, :], player_tokens), dim=1)
 
     def static_feature_base_from_prefix(
         self, prefix: torch.Tensor, board: torch.Tensor
@@ -2144,13 +2150,33 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
                 f"got {features.hand_dim}"
             )
         player_beliefs = features.beliefs.view(-1, self.num_players, PREFLOP_HANDS)
-        _, player_context = self._split_context(features.context)
         hand_static = self._class_static_features().to(
             device=self.class_hi_rank.device,
             dtype=self.hand_encoder[0].weight.dtype,
         )
         hand_emb = self.hand_encoder(hand_static)
         dtype = hand_emb.dtype
+        game_token = None
+        static_player_tokens = None
+        if static_game_token is not None:
+            static_game_token = static_game_token.to(dtype)
+            if static_game_token.ndim == 3:
+                if static_game_token.shape[1] != self.num_players + 1:
+                    raise ValueError(
+                        "static preflop token cache must have shape "
+                        f"[batch, {self.num_players + 1}, hidden_dim], got "
+                        f"{tuple(static_game_token.shape)}"
+                    )
+                game_token = static_game_token[:, 0]
+                static_player_tokens = static_game_token[:, 1:]
+            elif static_game_token.ndim == 2:
+                game_token = static_game_token
+            else:
+                raise ValueError(
+                    "static preflop features must be either a game-token tensor "
+                    "or a cached token tensor"
+                )
+        player_context = None
         player_beliefs = player_beliefs.to(dtype)
         bucket_projection = self.preflop_bucket_projection.to(
             device=player_beliefs.device,
@@ -2159,22 +2185,26 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
         range_summary = player_beliefs @ combined_projection
         bucket_mass = player_beliefs @ bucket_projection
+        if static_player_tokens is None:
+            _, player_context = self._split_context(features.context)
+            static_player_tokens = self.player_context_proj(player_context.to(dtype))
         player_tokens = (
             self.range_proj(range_summary)
             + self.bucket_mass_proj(bucket_mass)
-            + self.player_context_proj(player_context.to(dtype))
+            + static_player_tokens
         )
         if self.range_slot_moment_pool is not None:
+            if player_context is None:
+                _, player_context = self._split_context(features.context)
             player_tokens = player_tokens + self.range_slot_moment_pool(
                 player_beliefs,
                 hand_static,
                 player_context.to(dtype),
             )
-        game_token = (
-            self.static_feature_base(features)
-            if static_game_token is None
-            else static_game_token.to(dtype)
-        )
+        if game_token is None:
+            game_token = self.static_feature_prefix(
+                features.context, features.street
+            ).to(dtype)
         encoded = torch.cat((game_token[:, None, :], player_tokens), dim=1)
         for block in self.encoder:
             encoded = block(encoded)
