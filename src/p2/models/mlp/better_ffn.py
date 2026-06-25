@@ -100,6 +100,93 @@ if triton is not None:
         tl.store(out_ptr + (offs_b[:, None] * 7 + 5) * dim + offs_d[None, :], out5, mask=mask)
         tl.store(out_ptr + (offs_b[:, None] * 7 + 6) * dim + offs_d[None, :], out6, mask=mask)
 
+    @triton.jit
+    def _preflop_token_mixer_gate_residual_kernel(
+        x_ptr,
+        y_ptr,
+        gate_ptr,
+        w_in_ptr,
+        w_out_ptr,
+        out_ptr,
+        batch_size: tl.constexpr,
+        dim: tl.constexpr,
+        scale: tl.constexpr,
+        BLOCK_B: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        pid_b = tl.program_id(0)
+        pid_d = tl.program_id(1)
+        offs_b = pid_b * BLOCK_B + tl.arange(0, BLOCK_B)
+        offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+        mask = (offs_b[:, None] < batch_size) & (offs_d[None, :] < dim)
+
+        y0 = tl.load(y_ptr + (offs_b[:, None] * 7 + 0) * dim + offs_d[None, :], mask=mask, other=0.0)
+        y1 = tl.load(y_ptr + (offs_b[:, None] * 7 + 1) * dim + offs_d[None, :], mask=mask, other=0.0)
+        y2 = tl.load(y_ptr + (offs_b[:, None] * 7 + 2) * dim + offs_d[None, :], mask=mask, other=0.0)
+        y3 = tl.load(y_ptr + (offs_b[:, None] * 7 + 3) * dim + offs_d[None, :], mask=mask, other=0.0)
+        y4 = tl.load(y_ptr + (offs_b[:, None] * 7 + 4) * dim + offs_d[None, :], mask=mask, other=0.0)
+        y5 = tl.load(y_ptr + (offs_b[:, None] * 7 + 5) * dim + offs_d[None, :], mask=mask, other=0.0)
+        y6 = tl.load(y_ptr + (offs_b[:, None] * 7 + 6) * dim + offs_d[None, :], mask=mask, other=0.0)
+
+        out0 = tl.zeros((BLOCK_B, BLOCK_D), dtype=tl.float32)
+        out1 = tl.zeros((BLOCK_B, BLOCK_D), dtype=tl.float32)
+        out2 = tl.zeros((BLOCK_B, BLOCK_D), dtype=tl.float32)
+        out3 = tl.zeros((BLOCK_B, BLOCK_D), dtype=tl.float32)
+        out4 = tl.zeros((BLOCK_B, BLOCK_D), dtype=tl.float32)
+        out5 = tl.zeros((BLOCK_B, BLOCK_D), dtype=tl.float32)
+        out6 = tl.zeros((BLOCK_B, BLOCK_D), dtype=tl.float32)
+
+        for h in tl.static_range(0, 28):
+            hidden = (
+                y0 * tl.load(w_in_ptr + h * 7 + 0)
+                + y1 * tl.load(w_in_ptr + h * 7 + 1)
+                + y2 * tl.load(w_in_ptr + h * 7 + 2)
+                + y3 * tl.load(w_in_ptr + h * 7 + 3)
+                + y4 * tl.load(w_in_ptr + h * 7 + 4)
+                + y5 * tl.load(w_in_ptr + h * 7 + 5)
+                + y6 * tl.load(w_in_ptr + h * 7 + 6)
+            )
+            hidden = tl.where(hidden >= 0.0, hidden, hidden * 0.01)
+            out0 += hidden * tl.load(w_out_ptr + 0 * 28 + h)
+            out1 += hidden * tl.load(w_out_ptr + 1 * 28 + h)
+            out2 += hidden * tl.load(w_out_ptr + 2 * 28 + h)
+            out3 += hidden * tl.load(w_out_ptr + 3 * 28 + h)
+            out4 += hidden * tl.load(w_out_ptr + 4 * 28 + h)
+            out5 += hidden * tl.load(w_out_ptr + 5 * 28 + h)
+            out6 += hidden * tl.load(w_out_ptr + 6 * 28 + h)
+
+        x0 = tl.load(x_ptr + (offs_b[:, None] * 7 + 0) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        x1 = tl.load(x_ptr + (offs_b[:, None] * 7 + 1) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        x2 = tl.load(x_ptr + (offs_b[:, None] * 7 + 2) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        x3 = tl.load(x_ptr + (offs_b[:, None] * 7 + 3) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        x4 = tl.load(x_ptr + (offs_b[:, None] * 7 + 4) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        x5 = tl.load(x_ptr + (offs_b[:, None] * 7 + 5) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        x6 = tl.load(x_ptr + (offs_b[:, None] * 7 + 6) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+
+        g0 = tl.load(gate_ptr + (offs_b[:, None] * 7 + 0) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        g1 = tl.load(gate_ptr + (offs_b[:, None] * 7 + 1) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        g2 = tl.load(gate_ptr + (offs_b[:, None] * 7 + 2) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        g3 = tl.load(gate_ptr + (offs_b[:, None] * 7 + 3) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        g4 = tl.load(gate_ptr + (offs_b[:, None] * 7 + 4) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        g5 = tl.load(gate_ptr + (offs_b[:, None] * 7 + 5) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        g6 = tl.load(gate_ptr + (offs_b[:, None] * 7 + 6) * dim + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+
+        out0 = x0 + out0 * tl.sigmoid(g0) * scale
+        out1 = x1 + out1 * tl.sigmoid(g1) * scale
+        out2 = x2 + out2 * tl.sigmoid(g2) * scale
+        out3 = x3 + out3 * tl.sigmoid(g3) * scale
+        out4 = x4 + out4 * tl.sigmoid(g4) * scale
+        out5 = x5 + out5 * tl.sigmoid(g5) * scale
+        out6 = x6 + out6 * tl.sigmoid(g6) * scale
+
+        tl.store(out_ptr + (offs_b[:, None] * 7 + 0) * dim + offs_d[None, :], out0, mask=mask)
+        tl.store(out_ptr + (offs_b[:, None] * 7 + 1) * dim + offs_d[None, :], out1, mask=mask)
+        tl.store(out_ptr + (offs_b[:, None] * 7 + 2) * dim + offs_d[None, :], out2, mask=mask)
+        tl.store(out_ptr + (offs_b[:, None] * 7 + 3) * dim + offs_d[None, :], out3, mask=mask)
+        tl.store(out_ptr + (offs_b[:, None] * 7 + 4) * dim + offs_d[None, :], out4, mask=mask)
+        tl.store(out_ptr + (offs_b[:, None] * 7 + 5) * dim + offs_d[None, :], out5, mask=mask)
+        tl.store(out_ptr + (offs_b[:, None] * 7 + 6) * dim + offs_d[None, :], out6, mask=mask)
+
 
 def _preflop_token_mixer_leaky_relu_triton(
     y: torch.Tensor,
@@ -124,6 +211,51 @@ def _preflop_token_mixer_leaky_relu_triton(
         out,
         batch_size,
         dim,
+        BLOCK_B=block_b,
+        BLOCK_D=block_d,
+        num_warps=4,
+    )
+    return out
+
+
+def _preflop_token_mixer_gate_residual_triton(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    gate: torch.Tensor,
+    w_in: torch.Tensor,
+    w_out: torch.Tensor,
+) -> torch.Tensor:
+    if triton is None:
+        raise RuntimeError("Triton is not available")
+    if not x.is_contiguous():
+        x = x.contiguous()
+    if not y.is_contiguous():
+        y = y.contiguous()
+    if not gate.is_contiguous():
+        gate = gate.contiguous()
+    out = torch.empty_like(x)
+    batch_size, token_count, dim = x.shape
+    if (
+        token_count != 7
+        or y.shape != x.shape
+        or gate.shape != x.shape
+        or w_in.shape != (28, 7)
+        or w_out.shape != (7, 28)
+    ):
+        raise ValueError("specialized preflop token mixer gate requires 7 -> 28 -> 7")
+    block_b = 8
+    block_d = 32
+    grid = (triton.cdiv(batch_size, block_b), triton.cdiv(dim, block_d))
+    _preflop_token_mixer_gate_residual_kernel[grid](
+        x,
+        y,
+        gate,
+        w_in,
+        w_out,
+        out,
+        batch_size,
+        dim,
+        1.0 / math.sqrt(2.0),
         BLOCK_B=block_b,
         BLOCK_D=block_d,
         num_warps=4,
@@ -1573,23 +1705,25 @@ class _PreflopGatedTokenMixerBlock(nn.Module):
         linear_in = self.token_mixer.linear_in
         activation = self.token_mixer.activation
         linear_out = self.token_mixer.linear_out
+        gate = self.token_gate(y)
         if (
-            y.is_cuda
+            x.is_cuda
             and isinstance(activation, nn.LeakyReLU)
             and activation.negative_slope == 0.01
-            and y.shape[1] == 7
+            and x.shape[1] == 7
             and linear_in.weight.shape == (28, 7)
             and linear_out.weight.shape == (7, 28)
         ):
-            mixed = _preflop_token_mixer_leaky_relu_triton(
+            x = _preflop_token_mixer_gate_residual_triton(
+                x,
                 y,
+                gate,
                 linear_in.weight,
                 linear_out.weight,
             )
         else:
             mixed = self.token_mixer(y.transpose(1, 2)).transpose(1, 2)
-        gate = torch.sigmoid(self.token_gate(y))
-        x = x + mixed * gate / math.sqrt(2.0)
+            x = x + mixed * torch.sigmoid(gate) / math.sqrt(2.0)
         return x + self.ffn(x) / math.sqrt(2.0)
 
 

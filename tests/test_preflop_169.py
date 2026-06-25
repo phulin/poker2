@@ -26,6 +26,7 @@ from p2.models.mlp.better_ffn import (
     BetterPreflopTransformerValueFFN,
     BetterPreflopValueFFN,
     _PreflopGatedTokenMixerBlock,
+    _preflop_token_mixer_gate_residual_triton,
     _preflop_token_mixer_leaky_relu_triton,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
@@ -745,9 +746,21 @@ def test_preflop_gated_token_mixer_triton_matches_linear() -> None:
         block.token_mixer.linear_in.weight,
         block.token_mixer.linear_out.weight,
     )
+    gate = block.token_gate(y)
+    expected_gated = x + expected * torch.sigmoid(gate) / torch.sqrt(
+        torch.tensor(2.0, device=x.device)
+    )
+    actual_gated = _preflop_token_mixer_gate_residual_triton(
+        x,
+        y,
+        gate,
+        block.token_mixer.linear_in.weight,
+        block.token_mixer.linear_out.weight,
+    )
     torch.cuda.synchronize()
 
     torch.testing.assert_close(actual, expected, atol=3e-2, rtol=3e-2)
+    torch.testing.assert_close(actual_gated, expected_gated, atol=4e-2, rtol=4e-2)
 
 
 def test_compact_preflop_transformer_head_layers_work_without_shared_layers() -> None:
