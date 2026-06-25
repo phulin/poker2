@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from p2.core.structured_config import Config
@@ -90,6 +91,7 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
     base.search.warm_start_iterations = 15
     base.search.sparse = False
     base.search.sparse_fused = False
+    base.search.closing_leaf_checkpoint = "/tmp/E_preflop.pt"
     base.model.compile = "default"
 
     cfg = build_run_config(
@@ -127,6 +129,17 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
     assert base.data.mode == "pregenerated"
     assert base.search.iterations_final == 5678
     assert base.model.compile == "default"
+
+
+def test_build_run_config_requires_closing_checkpoint_for_mixed_street(tmp_path) -> None:
+    with pytest.raises(ValueError, match="closing_leaf_checkpoint"):
+        build_run_config(
+            Config(device="cpu"),
+            _execution_config(),
+            checkpoint_dir=tmp_path / "checkpoints",
+            num_steps=1,
+            num_envs=2,
+        )
 
 
 def test_estimate_train_updates_counts_cfr_root_batches(tmp_path) -> None:
@@ -227,8 +240,10 @@ def test_preflop_wandb_init_passes_stage_payload(monkeypatch, tmp_path) -> None:
     )
 
     args = _execution_config(use_wandb=True, wandb_group="bucket-group")
+    base = Config(device="cpu")
+    base.search.closing_leaf_checkpoint = "/tmp/E_preflop.pt"
     cfg = build_run_config(
-        Config(device="cpu"),
+        base,
         args,
         checkpoint_dir=tmp_path / "checkpoints",
         num_steps=1,

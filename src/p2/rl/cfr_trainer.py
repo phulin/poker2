@@ -46,6 +46,7 @@ from p2.models.mlp.better_ffn import (
     BetterPreflopValueFFN,
     BetterSplitFFN,
     BetterStreetValueFFN,
+    ffn_block,
 )
 from p2.models.mlp.better_trm import BetterTRM
 from p2.models.mlp.mlp_features import MLPFeatures
@@ -861,11 +862,54 @@ class RebelCFRTrainer:
             f"got {type(checkpoint_config).__name__}"
         )
 
+    def _reconcile_frozen_config_with_state(
+        self,
+        cfg: Config,
+        model_state: dict[str, torch.Tensor],
+    ) -> Config:
+        class_hi = model_state.get("class_hi_embedding.weight")
+        if class_hi is None or not hasattr(class_hi, "shape") or class_hi.dim() != 2:
+            return cfg
+        if int(cfg.model.preflop_hand_dim) != 169:
+            return cfg
+        range_hidden_dim = int(class_hi.shape[1])
+        if range_hidden_dim <= 0:
+            return cfg
+        if int(cfg.model.range_hidden_dim) != range_hidden_dim:
+            cfg = copy.deepcopy(cfg)
+            cfg.model.range_hidden_dim = range_hidden_dim
+        return cfg
+
+    def _maybe_restore_legacy_preflop_belief_proj(
+        self,
+        model: nn.Module,
+        cfg: Config,
+        model_state: dict[str, torch.Tensor],
+    ) -> None:
+        linear_in = model_state.get("belief_proj.linear_in.weight")
+        linear_out = model_state.get("belief_proj.linear_out.weight")
+        if linear_in is None or linear_out is None:
+            return
+        if not isinstance(model, BetterPreflopValueFFN):
+            return
+        in_dim = int(linear_in.shape[1])
+        hidden_dim = int(linear_in.shape[0])
+        out_dim = int(linear_out.shape[0])
+        model.belief_proj = ffn_block(
+            in_dim,
+            hidden_dim,
+            out_dim,
+            nonlinearity=cfg.model.nonlinearity,
+        ).to(device=self.device, dtype=self.float_dtype)
+
     def _load_frozen_eval_model(self, checkpoint_path: str) -> nn.Module:
         checkpoint = CheckpointIO.load(checkpoint_path, map_location=self.device)
         frozen_cfg = self._config_for_frozen_checkpoint(checkpoint)
         model_component = checkpoint.get("model_component")
         model_state = checkpoint["model"]
+        frozen_cfg = self._reconcile_frozen_config_with_state(
+            frozen_cfg, model_state
+        )
         preflop_context_in_dim = _preflop_context_in_dim_from_state(model_state)
         model = self._make_eval_twin(
             compile_model=False,
@@ -880,6 +924,9 @@ class RebelCFRTrainer:
             if type(model) is not BetterSplitFFN:
                 raise TypeError("value-only checkpoints require model.name=BetterFFN")
             model = model.value_model
+        self._maybe_restore_legacy_preflop_belief_proj(
+            model, frozen_cfg, model_state
+        )
         model.load_state_dict(model_state, strict=self.cfg.strict_model_loading)
         model.eval()
         for param in model.parameters():

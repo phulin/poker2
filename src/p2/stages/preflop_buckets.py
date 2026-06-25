@@ -61,6 +61,23 @@ class PreflopBucketExecutionConfig:
     checkpoint_0_3: str | None
 
 
+def _model_scope_name(value: object) -> str:
+    return str(getattr(value, "value", value))
+
+
+def _validate_bucket_run_config(cfg: Config) -> None:
+    if (
+        _model_scope_name(cfg.search.model_scope) == "mixed_street"
+        and cfg.search.closing_leaf_checkpoint is None
+    ):
+        raise ValueError(
+            "Preflop bucket mixed_street solving requires "
+            "search.closing_leaf_checkpoint. New-street leaves must use the "
+            "explicit end-of-preflop cutoff model instead of silently falling "
+            "back to the active same-street model."
+        )
+
+
 def build_run_config(
     base_cfg: Config,
     execution: PreflopBucketExecutionConfig,
@@ -96,6 +113,7 @@ def build_run_config(
     cfg.search.sparse_fused = execution.sparse_fused
     if execution.compile is not None:
         cfg.model.compile = execution.compile
+    _validate_bucket_run_config(cfg)
     return cfg
 
 

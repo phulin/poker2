@@ -8,6 +8,7 @@ import copy
 import json
 import math
 import time
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,11 +20,11 @@ from p2.core.structured_config import Config, LrSchedule, ValueLossType
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.search.rebel_solved_dataset import RebelSolvedDataset
 from p2.stages.preflop_backward_induction import (
+    _aggregate_minibatch_stats,
     _evaluate_validation_set,
     _jsonable,
     _load_model_weights,
     _save_trainer_checkpoint,
-    _train_value_minibatches,
 )
 
 
@@ -37,7 +38,6 @@ class TrialSpec:
     lr_final_ratio: float
     lr_wsd_decay_fraction: float
     adamw_learning_rate: float
-    policy_head_muon_learning_rate: float
     weight_decay: float
     grad_clip: float
     value_loss_type: str
@@ -52,7 +52,6 @@ class TrialSpec:
                 f"final{_float_slug(self.lr_final_ratio)}",
                 f"wsd{_float_slug(self.lr_wsd_decay_fraction)}",
                 f"adamw{_float_slug(self.adamw_learning_rate)}",
-                f"phm{_float_slug(self.policy_head_muon_learning_rate)}",
                 f"wd{_float_slug(self.weight_decay)}",
                 f"gc{_float_slug(self.grad_clip)}",
                 self.value_loss_type,
@@ -135,9 +134,6 @@ def _trial_config(
     cfg.train.lr_schedule = LrSchedule(schedule)
     cfg.train.lr_wsd_decay_fraction = float(trial.lr_wsd_decay_fraction)
     cfg.train.warmup_steps = 0
-    cfg.train.policy_head_muon_learning_rate = float(
-        trial.policy_head_muon_learning_rate
-    )
     cfg.train.adamw_learning_rate = float(trial.adamw_learning_rate)
     cfg.train.weight_decay = float(trial.weight_decay)
     cfg.train.grad_clip = float(trial.grad_clip)
@@ -155,13 +151,15 @@ def _train_one_epoch(
     *,
     batch_size: int,
     seed: int,
-) -> tuple[int, dict[str, float], float]:
+    tail_steps: int,
+) -> tuple[int, dict[str, float], dict[str, float], float]:
     generator = torch.Generator(device="cpu")
     generator.manual_seed(int(seed))
     shard_order = _shuffle_order(len(dataset.shards["value"]), generator)
     step = 0
     examples = 0
     weighted_stats: dict[str, float] = {}
+    tail: deque[tuple[int, dict[str, float]]] = deque(maxlen=max(1, int(tail_steps)))
     started = time.time()
     for shard_pos, shard_idx_tensor in enumerate(shard_order):
         shard_idx = int(shard_idx_tensor.item())
@@ -171,17 +169,25 @@ def _train_one_epoch(
         batch = dataset.get_batch("value", start, count, float_dtype=torch.float32)
         row_order = _shuffle_order(len(batch), generator)
         batch = batch[row_order]
-        step, stats, updates = _train_value_minibatches(
-            trainer,
-            batch,
-            step=step,
-            batch_size=batch_size,
-        )
+        updates = 0
+        for part_start in range(0, len(batch), batch_size):
+            part = batch[part_start : min(part_start + batch_size, len(batch))]
+            stats = trainer.train_value_batch(
+                part,
+                step,
+                sync_inference_model=True,
+            )
+            stats = {
+                key: float(value)
+                for key, value in stats.items()
+                if value is not None
+            }
+            updates += 1
+            step += 1
+            for key, value in stats.items():
+                weighted_stats[key] = weighted_stats.get(key, 0.0) + value * len(part)
+            tail.append((len(part), stats))
         examples += len(batch)
-        for key, value in stats.items():
-            if value is None:
-                continue
-            weighted_stats[key] = weighted_stats.get(key, 0.0) + float(value) * len(batch)
         if shard_pos == 0 or (shard_pos + 1) % 10 == 0 or shard_pos + 1 == len(shard_order):
             elapsed = time.time() - started
             print(
@@ -194,7 +200,8 @@ def _train_one_epoch(
         key: value / max(1, examples)
         for key, value in weighted_stats.items()
     }
-    return step, averaged, time.time() - started
+    tail_stats = _aggregate_minibatch_stats(list(tail))
+    return step, averaged, tail_stats, time.time() - started
 
 
 def _validation_value_loss(metrics: dict[str, float]) -> float:
@@ -202,6 +209,14 @@ def _validation_value_loss(metrics: dict[str, float]) -> float:
         if key in metrics:
             return float(metrics[key])
     raise KeyError(f"validation metrics missing value loss: {sorted(metrics)}")
+
+
+def _tail_selection_loss(result: dict[str, Any]) -> float:
+    stats = result.get("tail_train_stats") or {}
+    for key in ("value_loss", "loss", "total_loss"):
+        if key in stats:
+            return float(stats[key])
+    raise KeyError(f"tail_train_stats missing loss: {sorted(stats)}")
 
 
 def _values_or_default(values: list[float] | None, default: float) -> list[float]:
@@ -221,9 +236,6 @@ def _trial_specs(args: argparse.Namespace, base_cfg: Config) -> list[TrialSpec]:
     specs: list[TrialSpec] = []
     for lr in learning_rates:
         adamw_lrs = _values_or_default(args.adamw_learning_rates, lr)
-        policy_head_lrs = _values_or_default(
-            args.policy_head_muon_learning_rates, lr
-        )
         for batch_size in batch_sizes:
             for schedule in lr_schedules:
                 schedule_final_ratios = [1.0] if schedule == "constant" else lr_final_ratios
@@ -235,27 +247,25 @@ def _trial_specs(args: argparse.Namespace, base_cfg: Config) -> list[TrialSpec]:
                 for final_ratio in schedule_final_ratios:
                     for wsd_fraction in schedule_wsd_fractions:
                         for adamw_lr in adamw_lrs:
-                            for policy_head_lr in policy_head_lrs:
-                                for weight_decay in weight_decays:
-                                    for grad_clip in grad_clips:
-                                        for value_loss_type in value_loss_types:
-                                            specs.append(
-                                                TrialSpec(
-                                                    trial=len(specs) + 1,
-                                                    learning_rate=lr,
-                                                    batch_size=batch_size,
-                                                    lr_schedule=schedule,
-                                                    learning_rate_final=lr
-                                                    * final_ratio,
-                                                    lr_final_ratio=final_ratio,
-                                                    lr_wsd_decay_fraction=wsd_fraction,
-                                                    adamw_learning_rate=adamw_lr,
-                                                    policy_head_muon_learning_rate=policy_head_lr,
-                                                    weight_decay=weight_decay,
-                                                    grad_clip=grad_clip,
-                                                    value_loss_type=value_loss_type,
-                                                )
+                            for weight_decay in weight_decays:
+                                for grad_clip in grad_clips:
+                                    for value_loss_type in value_loss_types:
+                                        specs.append(
+                                            TrialSpec(
+                                                trial=len(specs) + 1,
+                                                learning_rate=lr,
+                                                batch_size=batch_size,
+                                                lr_schedule=schedule,
+                                                learning_rate_final=lr
+                                                * final_ratio,
+                                                lr_final_ratio=final_ratio,
+                                                lr_wsd_decay_fraction=wsd_fraction,
+                                                adamw_learning_rate=adamw_lr,
+                                                weight_decay=weight_decay,
+                                                grad_clip=grad_clip,
+                                                value_loss_type=value_loss_type,
                                             )
+                                        )
     return specs
 
 
@@ -270,7 +280,7 @@ def _print_result_table(results: Iterable[dict[str, Any]]) -> None:
             f"final_ratio={result['lr_final_ratio']:.8g} "
             f"wsd={result['lr_wsd_decay_fraction']:.8g} "
             f"adamw={result['adamw_learning_rate']:.8g} "
-            f"val={result['validation_value_loss']:.8g}",
+            f"tail_loss={_tail_selection_loss(result):.8g}",
             flush=True,
         )
 
@@ -283,9 +293,14 @@ def run(args: argparse.Namespace) -> None:
     solved_dir = Path(args.solved_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    validation_path = Path(args.validation_cache)
-    validation = torch.load(validation_path, map_location="cpu", weights_only=False)
-    validation["policy_batch"] = None
+    validation_path = Path(args.validation_cache) if args.validation_cache else None
+    validation = (
+        torch.load(validation_path, map_location="cpu", weights_only=False)
+        if validation_path is not None
+        else None
+    )
+    if validation is not None:
+        validation["policy_batch"] = None
     base_cfg = _load_base_config(Path(args.resolved_config))
     base_cfg.device = str(device)
 
@@ -293,9 +308,11 @@ def run(args: argparse.Namespace) -> None:
         solved_dir,
         num_players=base_cfg.env.num_players,
         num_actions=base_cfg.model.num_actions,
-        context_length=int(validation["metadata"].get("context_length", 93))
-        if "context_length" in validation.get("metadata", {})
-        else int(json.loads((solved_dir / "manifest.json").read_text()).get("context_length", 93)),
+        context_length=(
+            int(validation["metadata"].get("context_length", 93))
+            if validation is not None and "context_length" in validation.get("metadata", {})
+            else int(json.loads((solved_dir / "manifest.json").read_text()).get("context_length", 93))
+        ),
         street_support=[0],
         async_shard_prefetch=True,
     )
@@ -331,9 +348,13 @@ def run(args: argparse.Namespace) -> None:
             f"examples={total_examples:,} updates={total_updates}",
             flush=True,
         )
+        torch.manual_seed(int(args.model_seed))
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(int(args.model_seed))
         trainer = RebelCFRTrainer(cfg=cfg, device=device)
-        _load_model_weights(trainer, args.base_checkpoint)
-        if initial_metrics is None:
+        if args.base_checkpoint:
+            _load_model_weights(trainer, args.base_checkpoint)
+        if validation is not None and initial_metrics is None:
             initial_metrics = _evaluate_validation_set(
                 trainer,
                 validation,
@@ -344,18 +365,23 @@ def run(args: argparse.Namespace) -> None:
                 + json.dumps(_jsonable(initial_metrics), sort_keys=True),
                 flush=True,
             )
-        step, train_stats, train_elapsed = _train_one_epoch(
+        step, train_stats, tail_train_stats, train_elapsed = _train_one_epoch(
             trainer,
             dataset,
             batch_size=int(trial.batch_size),
             seed=int(args.seed) + trial.trial * int(args.trial_seed_stride),
+            tail_steps=int(args.tail_steps),
         )
-        metrics = _evaluate_validation_set(
-            trainer,
-            validation,
-            eval_batch_size=args.validation_eval_batch_size,
+        metrics = (
+            _evaluate_validation_set(
+                trainer,
+                validation,
+                eval_batch_size=args.validation_eval_batch_size,
+            )
+            if validation is not None
+            else {}
         )
-        value_loss = _validation_value_loss(metrics)
+        value_loss = _validation_value_loss(metrics) if metrics else None
         result = {
             "trial": trial.trial,
             "learning_rate": trial.learning_rate,
@@ -365,7 +391,6 @@ def run(args: argparse.Namespace) -> None:
             "lr_final_ratio": trial.lr_final_ratio,
             "lr_wsd_decay_fraction": trial.lr_wsd_decay_fraction,
             "adamw_learning_rate": trial.adamw_learning_rate,
-            "policy_head_muon_learning_rate": trial.policy_head_muon_learning_rate,
             "weight_decay": trial.weight_decay,
             "grad_clip": trial.grad_clip,
             "value_loss_type": trial.value_loss_type,
@@ -373,6 +398,8 @@ def run(args: argparse.Namespace) -> None:
             "examples": int(total_examples),
             "train_elapsed_s": train_elapsed,
             "train_stats": train_stats,
+            "tail_steps": int(args.tail_steps),
+            "tail_train_stats": tail_train_stats,
             "validation": metrics,
             "validation_value_loss": value_loss,
             "trial_dir": str(trial_dir),
@@ -381,15 +408,19 @@ def run(args: argparse.Namespace) -> None:
         (trial_dir / "result.json").write_text(
             json.dumps(_jsonable(result), indent=2, sort_keys=True) + "\n"
         )
-        print(
+        done_msg = (
             f"trial {trial.trial} done: lr={trial.learning_rate:g} "
             f"bs={trial.batch_size} schedule={trial.lr_schedule} "
             f"adamw={trial.adamw_learning_rate:g} "
-            f"validation_value_loss={value_loss:.8g} "
-            f"elapsed={train_elapsed:.1f}s",
-            flush=True,
+            f"tail_value_loss={_tail_selection_loss(result):.8g} "
         )
-        if best is None or value_loss < float(best["validation_value_loss"]):
+        if value_loss is not None:
+            done_msg += f"validation_value_loss={value_loss:.8g} "
+        done_msg += f"elapsed={train_elapsed:.1f}s"
+        print(done_msg, flush=True)
+        result_loss = _tail_selection_loss(result)
+        best_loss = _tail_selection_loss(best) if best is not None else math.inf
+        if result_loss < best_loss:
             best = result
             _save_trainer_checkpoint(
                 trainer,
@@ -399,9 +430,17 @@ def run(args: argparse.Namespace) -> None:
                 metadata={
                     "kind": "preflop_value_lr_bs_sweep_best",
                     "sweep_result": result,
-                    "base_checkpoint": str(Path(args.base_checkpoint).resolve()),
+                    "base_checkpoint": (
+                        str(Path(args.base_checkpoint).resolve())
+                        if args.base_checkpoint
+                        else None
+                    ),
                     "solved_dir": str(solved_dir.resolve()),
-                    "validation_cache": str(validation_path.resolve()),
+                    "validation_cache": (
+                        str(validation_path.resolve())
+                        if validation_path is not None
+                        else None
+                    ),
                 },
             )
         del trainer
@@ -411,7 +450,7 @@ def run(args: argparse.Namespace) -> None:
         summary = {
             "solved_dir": str(solved_dir),
             "base_checkpoint": str(args.base_checkpoint),
-            "validation_cache": str(validation_path),
+            "validation_cache": str(validation_path) if validation_path is not None else None,
             "initial_validation": initial_metrics,
             "trial_count": len(trial_specs),
             "results": results,
@@ -427,7 +466,7 @@ def run(args: argparse.Namespace) -> None:
         f"lr={best['learning_rate']:g} bs={best['batch_size']} "
         f"schedule={best['lr_schedule']} "
         f"adamw={best['adamw_learning_rate']:g} "
-        f"validation_value_loss={best['validation_value_loss']:.8g}",
+        f"tail_value_loss={_tail_selection_loss(best):.8g}",
         flush=True,
     )
     _print_result_table(results)
@@ -437,8 +476,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--solved-dir", required=True)
     parser.add_argument("--resolved-config", required=True)
-    parser.add_argument("--base-checkpoint", required=True)
-    parser.add_argument("--validation-cache", required=True)
+    parser.add_argument("--base-checkpoint", default=None)
+    parser.add_argument("--validation-cache", default=None)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
         "--learning-rates",
@@ -452,13 +491,6 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=None,
         help="AdamW LR values. Defaults to matching each main Muon LR.",
-    )
-    parser.add_argument(
-        "--policy-head-muon-learning-rates",
-        type=float,
-        nargs="+",
-        default=None,
-        help="Policy-head Muon LR values. Defaults to matching each main Muon LR.",
     )
     parser.add_argument(
         "--batch-sizes",
@@ -483,7 +515,19 @@ def parse_args() -> argparse.Namespace:
         default=["huber"],
     )
     parser.add_argument("--validation-eval-batch-size", type=int, default=1024)
+    parser.add_argument(
+        "--tail-steps",
+        type=int,
+        default=10,
+        help="Number of final optimizer updates to average into tail_train_stats.",
+    )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--model-seed",
+        type=int,
+        default=42,
+        help="Seed applied before constructing each trial model.",
+    )
     parser.add_argument(
         "--trial-seed-stride",
         type=int,

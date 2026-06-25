@@ -1670,6 +1670,14 @@ def run_presolve_values(
             "policy_examples": 0,
             "source_state_dataset": os.path.realpath(args.state_dataset),
             "solver_checkpoint": os.path.realpath(args.base_checkpoint),
+            "closing_leaf_checkpoint": (
+                None
+                if cfg.search.closing_leaf_checkpoint is None
+                else os.path.realpath(cfg.search.closing_leaf_checkpoint)
+            ),
+            "model_scope": str(
+                getattr(cfg.search.model_scope, "value", cfg.search.model_scope)
+            ),
             "depth": args.depth,
             "cfr_iterations": args.cfr_iterations,
             "cfr_batch_size": cfr_batch_size,

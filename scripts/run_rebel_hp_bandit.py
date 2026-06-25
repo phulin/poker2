@@ -145,8 +145,6 @@ def _make_trial_config(
         cfg.train.learning_rate_final = lr * 0.1
     if "train.adamw_learning_rate" not in arm.overrides:
         cfg.train.adamw_learning_rate = lr * 0.2
-    if "train.policy_head_muon_learning_rate" not in arm.overrides:
-        cfg.train.policy_head_muon_learning_rate = lr * 2.0
     if not keep_checkpoints:
         cfg.checkpoint_dir = str(output_dir / "scratch_checkpoints" / f"trial_{trial_index:04d}")
 
@@ -168,7 +166,6 @@ def _short_param_name(key: str) -> str:
         "train.learning_rate": "lr",
         "train.learning_rate_final": "lrfinal",
         "train.adamw_learning_rate": "adamw",
-        "train.policy_head_muon_learning_rate": "phm",
         "train.lr_schedule": "sched",
     }
     return replacements.get(key, key.split(".")[-1])
