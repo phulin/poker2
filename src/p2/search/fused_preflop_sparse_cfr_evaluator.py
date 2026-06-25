@@ -110,6 +110,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_partition_beliefs_cache: dict[
             tuple[int, int, int, int, torch.dtype], torch.Tensor
         ] = {}
+        self._preflop_partition_position_slices: dict[
+            tuple[int, int], tuple[int, int]
+        ] = {}
 
     @property
     def _compact_preflop(self) -> bool:
@@ -123,6 +126,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self._preflop_partition_node_cache = {}
         if not hasattr(self, "_preflop_partition_beliefs_cache"):
             self._preflop_partition_beliefs_cache = {}
+        if not hasattr(self, "_preflop_partition_position_slices"):
+            self._preflop_partition_position_slices = {}
         if not hasattr(self, "_model_leaf_duplicate_src"):
             self._model_leaf_duplicate_src = None
         if not hasattr(self, "_model_leaf_duplicate_dst"):
@@ -140,6 +145,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_partition_feature_cache.clear()
         self._preflop_partition_node_cache.clear()
         self._preflop_partition_beliefs_cache.clear()
+        self._preflop_partition_position_slices.clear()
 
     def _construct_subgame(
         self,
@@ -536,6 +542,78 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             hand_dim=PREFLOP_HANDS,
         )
 
+    def _use_partition_ordered_model_indices(self) -> bool:
+        return (
+            os.environ.get("P2_PREFLOP_PARTITION_ORDER_MODEL_INDICES", "1")
+            .strip()
+            .lower()
+            not in {"0", "false", "off", "no"}
+        )
+
+    def _position_slice_if_contiguous(
+        self,
+        positions: torch.Tensor,
+    ) -> tuple[int, int] | None:
+        n = int(positions.numel())
+        if n == 0:
+            return 0, 0
+        start = int(positions[0].item())
+        if bool(
+            torch.equal(
+                positions,
+                torch.arange(start, start + n, device=positions.device),
+            )
+        ):
+            return start, n
+        return None
+
+    def _register_partition_position_slices(self) -> None:
+        self._ensure_fused_attrs()
+        self._preflop_partition_position_slices.clear()
+        for positions in (
+            self.cutoff_model_positions,
+            self.new_street_baseline_model_positions,
+            self.new_street_hu_model_positions,
+        ):
+            bounds = self._position_slice_if_contiguous(positions)
+            if bounds is not None:
+                self._preflop_partition_position_slices[
+                    (int(positions.data_ptr()), int(positions.numel()))
+                ] = bounds
+
+    def _update_model_index_partitions(self) -> None:
+        if (
+            self._use_partition_ordered_model_indices()
+            and self.model_indices.numel() > 0
+            and self._model_scope() == "mixed_street"
+            and getattr(self, "closing_leaf_value_model", None) is not None
+            and self._can_project_heads_up_closing_model()
+        ):
+            new_street_at_model = self.new_street_mask[self.model_indices]
+            live_counts = self._live_counts_for_nodes(self.model_indices)
+            hu_at_model = live_counts >= 2
+            positions = torch.arange(
+                self.model_indices.numel(),
+                dtype=torch.long,
+                device=self.model_indices.device,
+            )
+            ordered_positions = torch.cat(
+                (
+                    positions[~new_street_at_model],
+                    positions[new_street_at_model & ~hu_at_model],
+                    positions[new_street_at_model & hu_at_model],
+                )
+            )
+            order_is_complete = ordered_positions.numel() == self.model_indices.numel()
+            order_changed = not torch.equal(ordered_positions, positions)
+            if order_is_complete and order_changed:
+                self.model_indices = self.model_indices[ordered_positions].contiguous()
+                self._model_leaf_beliefs_valid = False
+                self._model_leaf_slot_key = None
+
+        super()._update_model_index_partitions()
+        self._register_partition_position_slices()
+
     def _features_for_model_positions(
         self,
         features: MLPFeatures,
@@ -555,6 +633,19 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             )
         self._ensure_fused_attrs()
         rows = int(positions.numel())
+        slice_bounds = self._preflop_partition_position_slices.get(
+            (int(positions.data_ptr()), rows)
+        )
+        if slice_bounds is not None:
+            start, length = slice_bounds
+            return MLPFeatures(
+                context=features.context.narrow(0, start, length),
+                street=features.street.narrow(0, start, length),
+                to_act=features.to_act.narrow(0, start, length),
+                board=features.board.narrow(0, start, length),
+                beliefs=features.beliefs.narrow(0, start, length),
+                hand_dim=features.hand_dim,
+            )
         feature_key = (
             int(self._subgame_generation),
             int(features.context.data_ptr()),
