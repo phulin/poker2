@@ -21,6 +21,7 @@ from p2.search.fused_cfr_triton import (
     fused_average_policy_reach_beliefs_depth_preflop_multiway_,
     fused_avg_values_multiway_,
     fused_compact_regret_dcfr_update_multiway_with_tensors_,
+    fused_hu_closing_postprocess_writeback_multiway_,
     fused_model_values_postprocess_writeback_multiway_,
     fused_model_values_writeback_multiway_,
     fused_parent_sum_divide_,
@@ -88,10 +89,46 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_new_street_last_values_buf: torch.Tensor | None = None
         self._preflop_partition_last_values_valid = False
         self._preflop_partition_last_values_marker: torch.Tensor | None = None
+        self._preflop_partition_feature_cache: dict[
+            tuple[int, int, int, int, int, int],
+            tuple[
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+            ],
+        ] = {}
+        self._preflop_partition_node_cache: dict[
+            tuple[int, int, int, int], torch.Tensor
+        ] = {}
+        self._preflop_partition_beliefs_cache: dict[
+            tuple[int, int, int, int, torch.dtype], torch.Tensor
+        ] = {}
 
     @property
     def _compact_preflop(self) -> bool:
         return True
+
+    def _ensure_fused_attrs(self) -> None:
+        super()._ensure_fused_attrs()
+        if not hasattr(self, "_preflop_partition_feature_cache"):
+            self._preflop_partition_feature_cache = {}
+        if not hasattr(self, "_preflop_partition_node_cache"):
+            self._preflop_partition_node_cache = {}
+        if not hasattr(self, "_preflop_partition_beliefs_cache"):
+            self._preflop_partition_beliefs_cache = {}
+        if not hasattr(self, "_preflop_partition_last_values_valid"):
+            self._preflop_partition_last_values_valid = False
+        if not hasattr(self, "_preflop_partition_last_values_marker"):
+            self._preflop_partition_last_values_marker = None
+
+    def _invalidate_subgame_caches(self) -> None:
+        super()._invalidate_subgame_caches()
+        self._ensure_fused_attrs()
+        self._preflop_partition_feature_cache.clear()
+        self._preflop_partition_node_cache.clear()
+        self._preflop_partition_beliefs_cache.clear()
 
     def _construct_subgame(
         self,
@@ -486,6 +523,56 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             board=board,
             beliefs=beliefs_at_model.reshape(-1, self.num_players * PREFLOP_HANDS),
             hand_dim=PREFLOP_HANDS,
+        )
+
+    def _features_for_model_positions(
+        self,
+        features: MLPFeatures,
+        positions: torch.Tensor,
+        encoder=None,
+    ) -> MLPFeatures:
+        if (
+            encoder is not None
+            or not positions.is_contiguous()
+            or not features.beliefs.is_contiguous()
+            or features.hand_dim != PREFLOP_HANDS
+        ):
+            return super()._features_for_model_positions(
+                features,
+                positions,
+                encoder,
+            )
+        self._ensure_fused_attrs()
+        rows = int(positions.numel())
+        feature_key = (
+            int(self._subgame_generation),
+            int(features.context.data_ptr()),
+            int(features.beliefs.data_ptr()),
+            int(positions.data_ptr()),
+            rows,
+            int(features.hand_dim),
+        )
+        cached = self._preflop_partition_feature_cache.get(feature_key)
+        if cached is None:
+            belief_shape = (rows, features.beliefs.shape[1])
+            belief_buf = features.beliefs.new_empty(belief_shape)
+            cached = (
+                torch.index_select(features.context, 0, positions),
+                torch.index_select(features.street, 0, positions),
+                torch.index_select(features.to_act, 0, positions),
+                torch.index_select(features.board, 0, positions),
+                belief_buf,
+            )
+            self._preflop_partition_feature_cache[feature_key] = cached
+        ctx, street, to_act, board, belief_buf = cached
+        torch.index_select(features.beliefs, 0, positions, out=belief_buf)
+        return MLPFeatures(
+            context=ctx,
+            street=street,
+            to_act=to_act,
+            board=board,
+            beliefs=belief_buf,
+            hand_dim=features.hand_dim,
         )
 
     def _model_beliefs_for_values(self, beliefs: torch.Tensor) -> torch.Tensor:
@@ -1150,6 +1237,50 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self._preflop_partition_last_values_valid = False
         return buf
 
+    def _partition_node_indices_for_positions(
+        self,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        self._ensure_fused_attrs()
+        key = (
+            int(self._subgame_generation),
+            int(self.model_indices.data_ptr()),
+            int(positions.data_ptr()),
+            int(positions.numel()),
+        )
+        out = self._preflop_partition_node_cache.get(key)
+        if out is None:
+            out = torch.index_select(self.model_indices, 0, positions).contiguous()
+            self._preflop_partition_node_cache[key] = out
+        return out
+
+    def _partition_beliefs_for_positions(
+        self,
+        beliefs_at_model: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        self._ensure_fused_attrs()
+        rows = int(positions.numel())
+        shape = (rows, self.num_players, self.hand_dim)
+        key = (
+            int(beliefs_at_model.data_ptr()),
+            int(positions.data_ptr()),
+            rows,
+            int(self._subgame_generation),
+            beliefs_at_model.dtype,
+        )
+        out = self._preflop_partition_beliefs_cache.get(key)
+        if (
+            out is None
+            or out.shape != shape
+            or out.device != beliefs_at_model.device
+            or out.dtype != beliefs_at_model.dtype
+        ):
+            out = beliefs_at_model.new_empty(shape)
+            self._preflop_partition_beliefs_cache[key] = out
+        torch.index_select(beliefs_at_model, 0, positions, out=out)
+        return out
+
     def _writeback_model_values_partition(
         self,
         *,
@@ -1162,8 +1293,11 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     ) -> None:
         if positions.numel() == 0:
             return
-        position_beliefs = beliefs_at_model[positions].contiguous()
-        node_indices = self.model_indices[positions].contiguous()
+        position_beliefs = self._partition_beliefs_for_positions(
+            beliefs_at_model,
+            positions,
+        )
+        node_indices = self._partition_node_indices_for_positions(positions)
         hand_values = hand_values.contiguous()
         if store_last:
             last_out = self._partition_last_values_buffer(
@@ -1180,6 +1314,55 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             last_model_values=last_model_values,
             beliefs=position_beliefs,
             node_indices=node_indices,
+            latest_values=self.latest_values,
+            last_out=last_out,
+            has_folded=self.env.has_folded.contiguous(),
+            stacks=self.env.stacks.contiguous(),
+            starting_stacks=self.env.starting_stacks.contiguous(),
+            scale=self.env.scale.contiguous(),
+            old_plus_new_over_new=self._t_scalars.mix_onon,
+            old_over_new=self._t_scalars.mix_oon,
+            do_mix=do_mix,
+            store_last=store_last,
+        )
+
+    def _writeback_heads_up_closing_values_partition(
+        self,
+        *,
+        hand_values: torch.Tensor,
+        live_players: torch.Tensor,
+        beliefs_at_model: torch.Tensor,
+        positions: torch.Tensor,
+        last_attr: str,
+        do_mix: bool,
+        store_last: bool,
+    ) -> None:
+        if positions.numel() == 0:
+            return
+        position_beliefs = self._partition_beliefs_for_positions(
+            beliefs_at_model,
+            positions,
+        )
+        node_indices = self._partition_node_indices_for_positions(positions)
+        hand_values = hand_values.contiguous()
+        if store_last:
+            last_shape = (hand_values.shape[0], self.num_players, self.hand_dim)
+            last_out = self._partition_last_values_buffer(
+                last_attr,
+                last_shape,
+                hand_values.dtype,
+            )
+            last_model_values = last_out if do_mix else last_out
+        else:
+            last_shape = (hand_values.shape[0], self.num_players, self.hand_dim)
+            last_out = self.latest_values.new_empty(last_shape)
+            last_model_values = last_out
+        fused_hu_closing_postprocess_writeback_multiway_(
+            hand_values=hand_values,
+            last_model_values=last_model_values,
+            beliefs=position_beliefs,
+            node_indices=node_indices,
+            live_players=live_players.contiguous(),
             latest_values=self.latest_values,
             last_out=last_out,
             has_folded=self.env.has_folded.contiguous(),
@@ -1263,18 +1446,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 closing_features,
                 use_pre_head=False,
             )
-            closing_values = self._scatter_heads_up_closing_values(
-                closing_values,
-                live_players,
-                target_hand_dim=self.hand_dim,
-                node_indices=self.model_indices[hu_positions],
-                baseline=self._cached_stack_value_baseline_for_model_positions(
-                    hu_positions,
-                    self.hand_dim,
-                ),
-            )
-            self._writeback_model_values_partition(
+            self._writeback_heads_up_closing_values_partition(
                 hand_values=closing_values,
+                live_players=live_players,
                 beliefs_at_model=beliefs,
                 positions=hu_positions,
                 last_attr="_preflop_new_street_last_values_buf",

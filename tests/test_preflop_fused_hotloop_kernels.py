@@ -9,6 +9,7 @@ from p2.env.card_utils import (
     preflop_class_multiplicity_tensor,
 )
 from p2.search.fused_cfr_triton import (
+    fused_hu_closing_postprocess_writeback_multiway_,
     fused_model_values_postprocess_writeback_multiway_,
     fused_preflop169_parent_sum_opp_rank_stats_,
     fused_preflop169_parent_sum_opp_,
@@ -139,6 +140,88 @@ def test_fused_model_values_postprocess_writeback_multiway_matches_torch() -> No
         last_model_values=last_model_values.contiguous(),
         beliefs=beliefs.contiguous(),
         node_indices=node_indices.contiguous(),
+        latest_values=actual_latest,
+        last_out=actual_last,
+        has_folded=has_folded.contiguous(),
+        stacks=stacks.contiguous(),
+        starting_stacks=starting_stacks.contiguous(),
+        scale=scale.contiguous(),
+        old_plus_new_over_new=onon,
+        old_over_new=oon,
+        do_mix=True,
+        store_last=True,
+    )
+
+    torch.testing.assert_close(
+        actual_latest[node_indices],
+        expected_latest[node_indices],
+        rtol=2e-3,
+        atol=2e-3,
+    )
+    torch.testing.assert_close(actual_last, expected_last, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.skipif(not _cuda_available(), reason="requires CUDA and Triton")
+def test_fused_hu_closing_postprocess_writeback_multiway_matches_torch() -> None:
+    device = torch.device("cuda")
+    rows = 17
+    total = 41
+    players = 6
+    hand_dim = PREFLOP_HANDS
+    node_indices = torch.tensor(
+        [0, 2, 4, 5, 8, 10, 13, 16, 19, 22, 25, 27, 30, 33, 36, 38, 40],
+        dtype=torch.long,
+        device=device,
+    )
+    hand_values = torch.randn(rows, 2, hand_dim, device=device, dtype=torch.bfloat16)
+    last_model_values = torch.randn(rows, players, hand_dim, device=device)
+    beliefs = torch.rand(rows, players, hand_dim, device=device)
+    beliefs = beliefs / beliefs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    has_folded = torch.ones(total, players, device=device, dtype=torch.bool)
+    live_players = torch.empty(rows, 2, device=device, dtype=torch.long)
+    for r in range(rows):
+        live_count = 2 + (r % 3)
+        live = torch.randperm(players, device=device)[:live_count]
+        has_folded[node_indices[r], live] = False
+        live_players[r] = live[:2]
+    starting_stacks = torch.rand(total, players, device=device) * 200.0 + 800.0
+    stacks = starting_stacks + torch.randn(total, players, device=device) * 20.0
+    scale = torch.rand(total, device=device) * 100.0 + 200.0
+    onon = torch.tensor(1.2, device=device)
+    oon = torch.tensor(0.2, device=device)
+
+    folded_mask = has_folded[node_indices]
+    stack_value = (
+        (stacks[node_indices] - starting_stacks[node_indices])
+        / scale[node_indices, None].clamp_min(1.0)
+    )
+    values = stack_value[:, :, None].expand(-1, -1, hand_dim).clone()
+    values.scatter_(
+        1,
+        live_players[:, :, None].expand(-1, 2, hand_dim),
+        hand_values.float(),
+    )
+    values = torch.where(folded_mask[:, :, None], stack_value[:, :, None], values)
+    live_mask = ~folded_mask
+    denom = (beliefs * live_mask[:, :, None]).sum(dim=(1, 2), keepdim=True)
+    expected_sum = (values * beliefs).sum(dim=(1, 2), keepdim=True)
+    processed = torch.where(
+        live_mask[:, :, None],
+        values - expected_sum / denom.clamp_min(1e-12),
+        values,
+    )
+    expected_latest = torch.zeros(total, players, hand_dim, device=device)
+    expected_latest[node_indices] = processed * onon - last_model_values * oon
+    expected_last = processed
+
+    actual_latest = torch.zeros_like(expected_latest)
+    actual_last = torch.empty_like(last_model_values)
+    fused_hu_closing_postprocess_writeback_multiway_(
+        hand_values=hand_values.contiguous(),
+        last_model_values=last_model_values.contiguous(),
+        beliefs=beliefs.contiguous(),
+        node_indices=node_indices.contiguous(),
+        live_players=live_players.contiguous(),
         latest_values=actual_latest,
         last_out=actual_last,
         has_folded=has_folded.contiguous(),
