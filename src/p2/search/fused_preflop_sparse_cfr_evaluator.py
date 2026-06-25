@@ -1307,6 +1307,14 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             return True
         return not (self.num_players == 2 and bool(self.model.enforce_zero_sum))
 
+    def _defer_average_policy_materialization(self) -> bool:
+        if self.cfr_avg:
+            return False
+        return (
+            os.environ.get("P2_PREFLOP_DEFER_AVG_POLICY", "1").strip().lower()
+            not in {"0", "false", "off", "no"}
+        )
+
     def update_average_policy(
         self,
         t: int,
@@ -1314,7 +1322,13 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         update_beliefs: bool = False,
         weight_override: float | None = None,
     ) -> bool:
-        defer_avg_policy = not self.cfr_avg and self.use_final_policy_values
+        defer_avg_policy = (
+            not self.cfr_avg
+            and (
+                self.use_final_policy_values
+                or self._defer_average_policy_materialization()
+            )
+        )
         if self._uses_dcfr_backbone() and self._average_accumulation_delayed(t):
             if defer_avg_policy:
                 self.average_policy_initialized = False
@@ -2123,7 +2137,13 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 self.cfr_iteration(t)
             t += 1
 
-        if not self.cfr_avg and self.use_final_policy_values:
+        if (
+            not self.cfr_avg
+            and (
+                self.use_final_policy_values
+                or self._defer_average_policy_materialization()
+            )
+        ):
             self._finalize_deferred_average_policy()
             self.self_reach_avg[: self.root_nodes] = 1.0
             self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)

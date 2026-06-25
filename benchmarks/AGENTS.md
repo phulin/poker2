@@ -14,6 +14,7 @@ Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton ke
 - `bench_preflop_allin_3p_kernel.py`: Benchmarks the exact native-169 3-player all-in share calculation, comparing the current materialized opponent outer-product matmul path with combined-GEMM, structural-denominator, packed-symmetry, and fused Triton candidates.
 - `bench_preflop_allin_live2_entries.py`: Realistic actions_4_7 microbenchmark for exact preflop all-in value routing that evaluates only live 2-player entries instead of all seats.
 - `bench_preflop_cutoff_belief_reuse.py`: Realistic actions_4_7 microbenchmark for reusing cutoff model-input belief rows during value writeback instead of gathering the same rows twice.
+- `bench_preflop_defer_avg_policy.py`: Realistic actions_4_7 microbenchmark for deferring average-policy materialization and renormalization until the end of a default preflop solve.
 - `bench_preflop_model_leaf_scatter.py`: Realistic actions_4_7 microbenchmark for compact preflop model-leaf belief scatter, comparing direct model-index gathers against the fused propagation side-output while pausing live preflop training process groups.
 - `bench_preflop_sample_snapshot.py`: Realistic actions_4_7 microbenchmark for replacing full-tree sample policy/belief `torch.where` updates with a sparse fused snapshot copy.
 - `bench_preflop_skip_model_leaf_belief_store.py`: Realistic actions_4_7 microbenchmark for skipping full reach/belief tensor writes for model leaves when the compact model-leaf scatter side-output is active.
