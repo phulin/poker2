@@ -2161,13 +2161,24 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             device=player_beliefs.device,
             dtype=dtype,
         )
-        range_summary = torch.cat(
-            (player_beliefs @ hand_emb, player_beliefs @ hand_emb.square()),
-            dim=-1,
+        projection_mode = (
+            os.environ.get("P2_PREFLOP_COMBINED_RANGE_PROJECTION", "range")
+            .strip()
+            .lower()
         )
+        if projection_mode in {"range", "1", "true", "on", "yes"}:
+            combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
+            range_summary = player_beliefs @ combined_projection
+            bucket_mass = player_beliefs @ bucket_projection
+        else:
+            range_summary = torch.cat(
+                (player_beliefs @ hand_emb, player_beliefs @ hand_emb.square()),
+                dim=-1,
+            )
+            bucket_mass = player_beliefs @ bucket_projection
         player_tokens = (
             self.range_proj(range_summary)
-            + self.bucket_mass_proj(player_beliefs @ bucket_projection)
+            + self.bucket_mass_proj(bucket_mass)
             + self.player_context_proj(player_context.to(dtype))
         )
         if self.range_slot_moment_pool is not None:

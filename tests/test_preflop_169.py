@@ -586,6 +586,37 @@ def test_compact_preflop_gated_token_mixer_model_shapes_and_policy_loss() -> Non
     assert torch.isfinite(loss["policy_loss"])
 
 
+def test_compact_preflop_combined_range_projection_matches_uncombined(
+    monkeypatch,
+) -> None:
+    batch_size = 3
+    num_players = 4
+    features = _compact_features(batch_size, num_players)
+    value_model = BetterPreflopGatedTokenMixerValueFFN(
+        num_actions=1,
+        hidden_dim=48,
+        range_hidden_dim=16,
+        ffn_dim=96,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        transformer_heads=4,
+        enforce_zero_sum=False,
+    )
+    value_model.init_weights(torch.Generator(device="cpu").manual_seed(11))
+
+    monkeypatch.setenv("P2_PREFLOP_COMBINED_RANGE_PROJECTION", "off")
+    expected = value_model(features, include_policy=False).hand_values
+
+    monkeypatch.setenv("P2_PREFLOP_COMBINED_RANGE_PROJECTION", "range")
+    range_only = value_model(features, include_policy=False).hand_values
+
+    torch.testing.assert_close(range_only, expected, atol=1e-6, rtol=1e-6)
+
+
 def test_compact_preflop_static_hand_features_are_cached_correctly() -> None:
     model = BetterPreflopGatedTokenMixerValueFFN(
         num_actions=1,
