@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 import torch
 
 from p2.core.structured_config import CFRType
@@ -101,6 +103,11 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_partition_beliefs_cache: dict[
             tuple[int, int, int, int, torch.dtype], torch.Tensor
         ] = {}
+        self._preflop_static_model_base_fn_cache: dict[int, tuple[object, bool]] = {}
+        self._preflop_static_model_base_features_cache: dict[
+            tuple[int, int, int, int, int],
+            torch.Tensor,
+        ] = {}
         self._preflop_partition_position_slices: dict[
             tuple[int, int], tuple[int, int]
         ] = {}
@@ -118,6 +125,10 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self._preflop_partition_node_cache = {}
         if not hasattr(self, "_preflop_partition_beliefs_cache"):
             self._preflop_partition_beliefs_cache = {}
+        if not hasattr(self, "_preflop_static_model_base_fn_cache"):
+            self._preflop_static_model_base_fn_cache = {}
+        if not hasattr(self, "_preflop_static_model_base_features_cache"):
+            self._preflop_static_model_base_features_cache = {}
         if not hasattr(self, "_preflop_partition_position_slices"):
             self._preflop_partition_position_slices = {}
         if not hasattr(self, "_model_leaf_duplicate_src"):
@@ -139,6 +150,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_partition_feature_cache.clear()
         self._preflop_partition_node_cache.clear()
         self._preflop_partition_beliefs_cache.clear()
+        self._preflop_static_model_base_fn_cache.clear()
+        self._preflop_static_model_base_features_cache.clear()
         self._preflop_partition_position_slices.clear()
 
     def _construct_subgame(
@@ -1308,6 +1321,102 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             and self.num_players == 2,
             ignore_mask=self.env.done,
         )
+
+    def _eval_model_for_fused_writeback(
+        self,
+        value_model,
+        features: MLPFeatures,
+        *,
+        use_pre_head: bool,
+    ) -> tuple[torch.Tensor, bool]:
+        from p2.models.mlp.better_trm import BetterTRM
+
+        model_applied_zero_sum = False
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            model = value_model
+            base_model = getattr(model, "_orig_mod", model)
+            if type(base_model) is BetterTRM:
+                model_output = model(
+                    features,
+                    include_policy=False,
+                    latent=self.latent,
+                    apply_zero_sum=False,
+                )
+                self.latent = model_output.latent
+                model_applied_zero_sum = False
+            elif hasattr(base_model, "static_feature_base") and hasattr(
+                base_model,
+                "forward_value_static_base",
+            ):
+                model_key = id(base_model)
+                fn_entry = self._preflop_static_model_base_fn_cache.get(model_key)
+                if fn_entry is None:
+                    if (
+                        getattr(model, "_orig_mod", None) is not None
+                        or getattr(base_model, "_compiled_forward_value", None)
+                        is not None
+                    ):
+                        static_model_base_fn = torch.compile(
+                            base_model.static_feature_base,
+                            **self._compile_kwargs,
+                        )
+                    else:
+                        static_model_base_fn = base_model.static_feature_base
+                    accepts_value_head = (
+                        "value_head"
+                        in inspect.signature(
+                            base_model.forward_value_static_base
+                        ).parameters
+                    )
+                    fn_entry = (static_model_base_fn, accepts_value_head)
+                    self._preflop_static_model_base_fn_cache[model_key] = fn_entry
+                static_model_base_fn, accepts_value_head = fn_entry
+                key = (
+                    model_key,
+                    int(self._subgame_generation),
+                    int(features.context.data_ptr()),
+                    int(features.street.data_ptr()),
+                    int(features.board.data_ptr()),
+                )
+                static_base_features = (
+                    self._preflop_static_model_base_features_cache.get(key)
+                )
+                if static_base_features is None:
+                    static_base_features = static_model_base_fn(features).clone()
+                    self._preflop_static_model_base_features_cache[key] = (
+                        static_base_features
+                    )
+                value_kwargs = {"apply_zero_sum": False}
+                if accepts_value_head:
+                    value_kwargs["value_head"] = "pre" if use_pre_head else "auto"
+                call_static_value = getattr(
+                    base_model,
+                    "_call_forward_value_static_base",
+                    base_model.forward_value_static_base,
+                )
+                model_output = call_static_value(
+                    features,
+                    static_base_features,
+                    **value_kwargs,
+                )
+                model_applied_zero_sum = False
+            else:
+                if use_pre_head and hasattr(model, "forward_pre"):
+                    hand_values = model.forward_pre(
+                        features,
+                        apply_zero_sum=False,
+                    ).contiguous()
+                    model_applied_zero_sum = False
+                    model_output = None
+                else:
+                    model_output = model(
+                        features,
+                        include_policy=False,
+                        apply_zero_sum=False,
+                    )
+        if model_output is not None:
+            hand_values = model_output.hand_values.contiguous()
+        return hand_values, model_applied_zero_sum
 
     def _partition_last_values_buffer(
         self,
