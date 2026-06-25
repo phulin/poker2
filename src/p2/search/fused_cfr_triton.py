@@ -51,7 +51,6 @@ Scope / caveats
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 import torch
@@ -70,13 +69,6 @@ _PREFLOP169_NUM_HANDS = 169
 _PREFLOP169_NUM_CARDS = 52
 _PREFLOP169_NUM_RANKS = 13
 _PREFLOP169_MAX_CLASS_CARDS = 8
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except ValueError:
-        return int(default)
 
 
 def triton_is_available() -> bool:
@@ -4357,18 +4349,8 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
     else:
         leaf_slot = root_index
         leaf_out = beliefs
-    skip_model_leaf_belief_store = write_leaf and (
-        os.environ.get("P2_PREFLOP_SKIP_MODEL_LEAF_BELIEF_STORE", "1")
-        .strip()
-        .lower()
-        not in {"0", "false", "off", "no"}
-    )
-    skip_model_leaf_reach_store = write_leaf and (
-        os.environ.get("P2_PREFLOP_SKIP_MODEL_LEAF_REACH_STORE", "1")
-        .strip()
-        .lower()
-        not in {"0", "false", "off", "no"}
-    )
+    skip_model_leaf_belief_store = write_leaf
+    skip_model_leaf_reach_store = write_leaf
     if h > block_h:
         raise ValueError(f"hand dim {h} exceeds block_h {block_h}")
     mc_pow2 = 1
@@ -4399,7 +4381,7 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
         WRITE_LEAF=write_leaf,
         SKIP_MODEL_LEAF_REACH_STORE=skip_model_leaf_reach_store,
         SKIP_MODEL_LEAF_BELIEF_STORE=skip_model_leaf_belief_store,
-        num_warps=_env_int("P2_PREFLOP_POLICY_REACH_WARPS", 4),
+        num_warps=4,
     )
 
 
@@ -4443,18 +4425,8 @@ def fused_policy_reach_beliefs_depth_preflop_public_multiway_(
     else:
         leaf_slot = root_index
         leaf_out = beliefs
-    skip_model_leaf_belief_store = write_leaf and (
-        os.environ.get("P2_PREFLOP_SKIP_MODEL_LEAF_BELIEF_STORE", "1")
-        .strip()
-        .lower()
-        not in {"0", "false", "off", "no"}
-    )
-    skip_model_leaf_reach_store = write_leaf and (
-        os.environ.get("P2_PREFLOP_SKIP_MODEL_LEAF_REACH_STORE", "1")
-        .strip()
-        .lower()
-        not in {"0", "false", "off", "no"}
-    )
+    skip_model_leaf_belief_store = write_leaf
+    skip_model_leaf_reach_store = write_leaf
     if h > block_h:
         raise ValueError(f"hand dim {h} exceeds block_h {block_h}")
     mc_pow2 = 1
@@ -4485,7 +4457,7 @@ def fused_policy_reach_beliefs_depth_preflop_public_multiway_(
         WRITE_LEAF=write_leaf,
         SKIP_MODEL_LEAF_REACH_STORE=skip_model_leaf_reach_store,
         SKIP_MODEL_LEAF_BELIEF_STORE=skip_model_leaf_belief_store,
-        num_warps=_env_int("P2_PREFLOP_POLICY_REACH_WARPS", 4),
+        num_warps=4,
     )
 
 

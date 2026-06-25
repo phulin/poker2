@@ -285,12 +285,6 @@ def parse_args() -> argparse.Namespace:
         default="default",
     )
     parser.add_argument(
-        "--graph",
-        choices=("on", "off", "both"),
-        default="on",
-        help="Control P2_PREFLOP_CUDA_GRAPH_EVALUATE for timed solves.",
-    )
-    parser.add_argument(
         "--warmup-solves",
         type=int,
         default=1,
@@ -306,41 +300,33 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    graph_modes = [args.graph] if args.graph != "both" else ["off", "on"]
-    rows_out: list[dict[str, Any]] = []
-    for graph_mode in graph_modes:
-        os.environ["P2_PREFLOP_CUDA_GRAPH_EVALUATE"] = (
-            "1" if graph_mode == "on" else "0"
-        )
-        for _ in range(max(0, args.warmup_solves)):
-            ev, _ = _make_evaluator(args)
-            with torch.no_grad():
-                ev.evaluate_cfr(training_mode=True, sample_continuation=False)
-            _sync(ev.device)
-        ev, rows = _make_evaluator(args)
-        with _pause_processes(not args.no_pause, args.pause_pattern):
-            _sync(ev.device)
-            t0 = time.perf_counter()
-            with torch.no_grad():
-                ev.evaluate_cfr(training_mode=True, sample_continuation=False)
-            _sync(ev.device)
-            wall_s = time.perf_counter() - t0
-        row = {
-            "graph": graph_mode,
-            "wall_s": wall_s,
-            "wall_ms_per_iter": 1e3 * wall_s / max(1, args.cfr_iterations),
-            "rows": rows,
-            "root_nodes": int(ev.root_nodes),
-            "total_nodes": int(ev.total_nodes),
-            "model_indices": int(ev.model_indices.numel()),
-            "cfr_iterations": int(args.cfr_iterations),
-        }
-        rows_out.append(row)
-        print(
-            f"graph={graph_mode} wall={row['wall_s']:.3f}s "
-            f"ms/iter={row['wall_ms_per_iter']:.3f}",
-            flush=True,
-        )
+    for _ in range(max(0, args.warmup_solves)):
+        ev, _ = _make_evaluator(args)
+        with torch.no_grad():
+            ev.evaluate_cfr(training_mode=True, sample_continuation=False)
+        _sync(ev.device)
+    ev, rows = _make_evaluator(args)
+    with _pause_processes(not args.no_pause, args.pause_pattern):
+        _sync(ev.device)
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            ev.evaluate_cfr(training_mode=True, sample_continuation=False)
+        _sync(ev.device)
+        wall_s = time.perf_counter() - t0
+    result = {
+        "wall_s": wall_s,
+        "wall_ms_per_iter": 1e3 * wall_s / max(1, args.cfr_iterations),
+        "rows": rows,
+        "root_nodes": int(ev.root_nodes),
+        "total_nodes": int(ev.total_nodes),
+        "model_indices": int(ev.model_indices.numel()),
+        "cfr_iterations": int(args.cfr_iterations),
+    }
+    print(
+        f"wall={result['wall_s']:.3f}s "
+        f"ms/iter={result['wall_ms_per_iter']:.3f}",
+        flush=True,
+    )
     output = {
         "config": {
             "bucket": args.bucket,
@@ -354,7 +340,7 @@ def main() -> None:
             "num_policy_layers": args.num_policy_layers,
             "compile": args.compile,
         },
-        "results": rows_out,
+        "result": result,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(output, indent=2) + "\n")

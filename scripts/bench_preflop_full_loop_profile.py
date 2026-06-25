@@ -455,13 +455,9 @@ def main() -> None:
                     "tree_depth": int(ev.tree_depth),
                     "model_indices": int(ev.model_indices.numel()),
                     "showdown_indices": int(ev.showdown_indices.numel()),
-                    "rank_stats_src_weights": os.environ.get(
-                        "P2_PREFLOP_RANK_STATS_SRC_WEIGHTS", "1"
-                    ),
-                    "rank_stats_ev": os.environ.get("P2_PREFLOP_RANK_STATS_EV", "1"),
-                    "rank_stats_parent_ev": os.environ.get(
-                        "P2_PREFLOP_RANK_STATS_PARENT_EV", "1"
-                    ),
+                    "rank_stats_src_weights": True,
+                    "rank_stats_ev": True,
+                    "rank_stats_parent_ev": True,
                     "record_shapes": args.record_shapes,
                 },
                 indent=2,
@@ -509,13 +505,9 @@ def main() -> None:
             "closing_leaf_checkpoint": None
             if args.no_closing_checkpoint
             else str(args.closing_checkpoint),
-            "rank_stats_src_weights": os.environ.get(
-                "P2_PREFLOP_RANK_STATS_SRC_WEIGHTS", "1"
-            ),
-            "rank_stats_ev": os.environ.get("P2_PREFLOP_RANK_STATS_EV", "1"),
-            "rank_stats_parent_ev": os.environ.get(
-                "P2_PREFLOP_RANK_STATS_PARENT_EV", "1"
-            ),
+            "rank_stats_src_weights": True,
+            "rank_stats_ev": True,
+            "rank_stats_parent_ev": True,
             "record_shapes": args.record_shapes,
         },
         "subgame": {

@@ -243,9 +243,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._static_model_feature_fields: tuple[torch.Tensor, ...] | None = None
         self._leaf_belief_gather_indices: torch.Tensor | None = None
         self._leaf_belief_gather_key: tuple[int, int, int] | None = None
-        self._model_leaf_scatter_enabled: bool = os.environ.get(
-            "P2_FUSED_MODEL_LEAF_SCATTER", "1"
-        ).strip().lower() not in {"0", "false", "off", "no"}
+        self._model_leaf_scatter_enabled: bool = True
         self._model_leaf_beliefs_buf: torch.Tensor | None = None
         self._model_leaf_slot: torch.Tensor | None = None
         self._model_leaf_slot_key: tuple[int, int, int, int] | None = None
@@ -539,9 +537,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         if not hasattr(self, "_leaf_belief_gather_key"):
             self._leaf_belief_gather_key = None
         if not hasattr(self, "_model_leaf_scatter_enabled"):
-            self._model_leaf_scatter_enabled = os.environ.get(
-                "P2_FUSED_MODEL_LEAF_SCATTER", "1"
-            ).strip().lower() not in {"0", "false", "off", "no"}
+            self._model_leaf_scatter_enabled = True
         if not hasattr(self, "_model_leaf_beliefs_buf"):
             self._model_leaf_beliefs_buf = None
         if not hasattr(self, "_model_leaf_slot"):

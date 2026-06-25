@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import os
 from dataclasses import fields
 from functools import lru_cache
 from pathlib import Path
@@ -208,108 +207,6 @@ if triton is not None:
         )
         same_correction = total_same[:, None] - base_same_h0 - base_same_h1 + qsame_h
         denom = allowed0 * allowed1 - collision + same_correction
-        tl.store(
-            out_ptr + row[:, None] * stride_out + h[None, :],
-            denom,
-            mask=row_mask[:, None] & h_mask[None, :],
-        )
-
-    @triton.jit
-    def _denom_card_formula_kernel(
-        q0_ptr,
-        q1_ptr,
-        base0_ptr,
-        base1_ptr,
-        total0_ptr,
-        total1_ptr,
-        hero0_ptr,
-        hero1_ptr,
-        pair0_ptr,
-        pair1_ptr,
-        out_ptr,
-        rows: tl.constexpr,
-        hand_count: tl.constexpr,
-        card_count: tl.constexpr,
-        stride_out: tl.constexpr,
-        block_m: tl.constexpr,
-        block_h: tl.constexpr,
-    ) -> None:
-        row_start = tl.program_id(0) * block_m
-        h_start = tl.program_id(1) * block_h
-        row = row_start + tl.arange(0, block_m)
-        h = h_start + tl.arange(0, block_h)
-        row_mask = row < rows
-        h_mask = h < hand_count
-
-        h0 = tl.load(hero0_ptr + h, mask=h_mask, other=0)
-        h1 = tl.load(hero1_ptr + h, mask=h_mask, other=0)
-        total0 = tl.load(total0_ptr + row, mask=row_mask, other=0.0)
-        total1 = tl.load(total1_ptr + row, mask=row_mask, other=0.0)
-        base0_h0 = tl.load(
-            base0_ptr + row[:, None] * card_count + h0[None, :],
-            mask=row_mask[:, None] & h_mask[None, :],
-            other=0.0,
-        )
-        base0_h1 = tl.load(
-            base0_ptr + row[:, None] * card_count + h1[None, :],
-            mask=row_mask[:, None] & h_mask[None, :],
-            other=0.0,
-        )
-        base1_h0 = tl.load(
-            base1_ptr + row[:, None] * card_count + h0[None, :],
-            mask=row_mask[:, None] & h_mask[None, :],
-            other=0.0,
-        )
-        base1_h1 = tl.load(
-            base1_ptr + row[:, None] * card_count + h1[None, :],
-            mask=row_mask[:, None] & h_mask[None, :],
-            other=0.0,
-        )
-        q0_h = tl.load(
-            q0_ptr + row[:, None] * hand_count + h[None, :],
-            mask=row_mask[:, None] & h_mask[None, :],
-            other=0.0,
-        )
-        q1_h = tl.load(
-            q1_ptr + row[:, None] * hand_count + h[None, :],
-            mask=row_mask[:, None] & h_mask[None, :],
-            other=0.0,
-        )
-        allowed0 = total0[:, None] - base0_h0 - base0_h1 + q0_h
-        allowed1 = total1[:, None] - base1_h0 - base1_h1 + q1_h
-
-        collision = tl.zeros((block_m, block_h), dtype=tl.float32)
-        for card in range(0, card_count):
-            card_is_live = (card != h0) & (card != h1)
-            cls0 = tl.load(pair0_ptr + h * card_count + card, mask=h_mask, other=0)
-            cls1 = tl.load(pair1_ptr + h * card_count + card, mask=h_mask, other=0)
-            b0 = tl.load(base0_ptr + row * card_count + card, mask=row_mask, other=0.0)
-            b1 = tl.load(base1_ptr + row * card_count + card, mask=row_mask, other=0.0)
-            sub00 = tl.load(
-                q0_ptr + row[:, None] * hand_count + cls0[None, :],
-                mask=row_mask[:, None] & h_mask[None, :],
-                other=0.0,
-            )
-            sub01 = tl.load(
-                q0_ptr + row[:, None] * hand_count + cls1[None, :],
-                mask=row_mask[:, None] & h_mask[None, :],
-                other=0.0,
-            )
-            sub10 = tl.load(
-                q1_ptr + row[:, None] * hand_count + cls0[None, :],
-                mask=row_mask[:, None] & h_mask[None, :],
-                other=0.0,
-            )
-            sub11 = tl.load(
-                q1_ptr + row[:, None] * hand_count + cls1[None, :],
-                mask=row_mask[:, None] & h_mask[None, :],
-                other=0.0,
-            )
-            c0 = tl.where(card_is_live[None, :], b0[:, None] - sub00 - sub01, 0.0)
-            c1 = tl.where(card_is_live[None, :], b1[:, None] - sub10 - sub11, 0.0)
-            collision += c0 * c1
-
-        denom = allowed0 * allowed1 - collision
         tl.store(
             out_ptr + row[:, None] * stride_out + h[None, :],
             denom,
@@ -863,31 +760,9 @@ class PreflopAllIn169Oracle:
                 )
                 o0 = opp0_per_combo[start:end]
                 o1 = opp1_per_combo[start:end]
-                denom_correction_mode = (
-                    os.environ.get(
-                        "P2_ALLIN_SHARE3_DENOM_CORRECTION",
-                        "card_combined",
-                    )
-                    .strip()
-                    .lower()
-                )
-                use_card_correction = denom_correction_mode in {
-                    "card",
-                    "card_formula",
-                    "card_combined",
-                    "combined",
-                }
-                same = o0 * o1 if use_card_correction else None
-                if denom_correction_mode in {"card_combined", "combined"}:
-                    assert same is not None
-                    combined_base = (
-                        torch.cat((o0, o1, same), dim=0) @ class_card_counts
-                    )
-                    base0, base1, base_same = combined_base.split(rows, dim=0)
-                else:
-                    base0 = o0 @ class_card_counts
-                    base1 = o1 @ class_card_counts
-                    base_same = same @ class_card_counts if same is not None else None
+                same = o0 * o1
+                combined_base = torch.cat((o0, o1, same), dim=0) @ class_card_counts
+                base0, base1, base_same = combined_base.split(rows, dim=0)
                 total0 = base0.sum(dim=-1).mul_(0.5).contiguous()
                 total1 = base1.sum(dim=-1).mul_(0.5).contiguous()
                 denom = torch.empty(
@@ -900,55 +775,31 @@ class PreflopAllIn169Oracle:
                     triton.cdiv(rows, block_m),
                     triton.cdiv(PREFLOP_HANDS, 32),
                 )
-                if use_card_correction:
-                    assert same is not None and base_same is not None
-                    total_same = base_same.sum(dim=-1).mul_(0.5).contiguous()
-                    _denom_card_formula_with_same_kernel[denom_grid](
-                        o0,
-                        o1,
-                        same.contiguous(),
-                        base0,
-                        base1,
-                        base_same.contiguous(),
-                        total0,
-                        total1,
-                        total_same,
-                        hero0,
-                        hero1,
-                        pair0,
-                        pair1,
-                        denom,
-                        rows,
-                        PREFLOP_HANDS,
-                        52,
-                        denom.stride(0),
-                        block_m,
-                        32,
-                        num_warps=4,
-                    )
-                    denom.clamp_min_(1.0e-8)
-                else:
-                    _denom_card_formula_kernel[denom_grid](
-                        o0,
-                        o1,
-                        base0,
-                        base1,
-                        total0,
-                        total1,
-                        hero0,
-                        hero1,
-                        pair0,
-                        pair1,
-                        denom,
-                        rows,
-                        PREFLOP_HANDS,
-                        52,
-                        denom.stride(0),
-                        block_m,
-                        32,
-                        num_warps=4,
-                    )
-                    denom.add_((o0 * o1) @ self._compat2.T).clamp_min_(1.0e-8)
+                total_same = base_same.sum(dim=-1).mul_(0.5).contiguous()
+                _denom_card_formula_with_same_kernel[denom_grid](
+                    o0,
+                    o1,
+                    same.contiguous(),
+                    base0,
+                    base1,
+                    base_same.contiguous(),
+                    total0,
+                    total1,
+                    total_same,
+                    hero0,
+                    hero1,
+                    pair0,
+                    pair1,
+                    denom,
+                    rows,
+                    PREFLOP_HANDS,
+                    52,
+                    denom.stride(0),
+                    block_m,
+                    32,
+                    num_warps=4,
+                )
+                denom.clamp_min_(1.0e-8)
                 out[start:end] = numer / denom
         elif hero.shape[0] < 512:
             for start in range(0, hero.shape[0], 256):

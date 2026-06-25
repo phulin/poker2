@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import torch
 import pytest
 
@@ -149,7 +147,7 @@ def test_allin_169_oracle_sparse_live3_writeback_matches_dense_values() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_allin_169_oracle_share3_denom_correction_modes_match() -> None:
+def test_allin_169_oracle_share3_packed_cuda_matches_dense_reference() -> None:
     pytest.importorskip("triton")
     device = torch.device("cuda")
     generator = torch.Generator(device=device)
@@ -157,13 +155,14 @@ def test_allin_169_oracle_share3_denom_correction_modes_match() -> None:
     rows = 384
     oracle = PreflopAllIn169Oracle(device=device)
     oracle._exact_loaded = True
-    oracle._share3 = torch.rand(
+    share3 = torch.rand(
         PREFLOP_HANDS,
         PREFLOP_HANDS,
         PREFLOP_HANDS,
         device=device,
         generator=generator,
     )
+    oracle._share3 = 0.5 * (share3 + share3.transpose(1, 2))
     beliefs = torch.rand(
         rows,
         3,
@@ -173,25 +172,17 @@ def test_allin_169_oracle_share3_denom_correction_modes_match() -> None:
     )
     beliefs = beliefs / beliefs.sum(dim=-1, keepdim=True).clamp_min(1.0e-8)
 
-    def call_mode(mode: str | None) -> torch.Tensor:
-        old = os.environ.get("P2_ALLIN_SHARE3_DENOM_CORRECTION")
-        if mode is None:
-            os.environ.pop("P2_ALLIN_SHARE3_DENOM_CORRECTION", None)
-        else:
-            os.environ["P2_ALLIN_SHARE3_DENOM_CORRECTION"] = mode
-        try:
-            return oracle._share3_values(beliefs[:, 0], beliefs[:, 1], beliefs[:, 2])
-        finally:
-            if old is None:
-                os.environ.pop("P2_ALLIN_SHARE3_DENOM_CORRECTION", None)
-            else:
-                os.environ["P2_ALLIN_SHARE3_DENOM_CORRECTION"] = old
-
-    ref = call_mode("matmul")
-    torch.testing.assert_close(call_mode("card"), ref, atol=1.0e-5, rtol=1.0e-5)
-    card_combined = call_mode("card_combined")
-    torch.testing.assert_close(card_combined, ref, atol=1.0e-5, rtol=1.0e-5)
-    torch.testing.assert_close(call_mode(None), card_combined, atol=0.0, rtol=0.0)
+    out = oracle._share3_values(beliefs[:, 0], beliefs[:, 1], beliefs[:, 2])
+    assert oracle._compat3 is not None
+    assert oracle._share3_weighted_flat is not None
+    assert oracle._compat3_flat is not None
+    opp0 = beliefs[:, 1].to(torch.float32) / oracle._multiplicity
+    opp1 = beliefs[:, 2].to(torch.float32) / oracle._multiplicity
+    outer = (opp0[:, :, None] * opp1[:, None, :]).flatten(1)
+    numer = outer @ oracle._share3_weighted_flat
+    denom = outer @ oracle._compat3_flat
+    ref = numer / denom.clamp_min(1.0e-8)
+    torch.testing.assert_close(out, ref, atol=1.0e-5, rtol=1.0e-5)
 
 
 def _brute_class_shares(

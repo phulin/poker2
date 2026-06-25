@@ -12,16 +12,8 @@ Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton ke
 - `bench_heads_up_projection.py`: Benchmarks the n-way-to-heads-up closing-belief projection, comparing the current PyTorch row-plus-player gather with the direct Triton row/player select kernel.
 - `bench_indexed_add.py`: Indexed-add benchmark.
 - `bench_preflop_allin_3p_kernel.py`: Benchmarks the exact native-169 3-player all-in share calculation, comparing the current materialized opponent outer-product matmul path with combined-GEMM, structural-denominator, packed-symmetry, and fused Triton candidates.
-- `bench_preflop_allin_share3_denom.py`: Realistic actions_4_7 microbenchmark for exact 3-player all-in denominator correction variants, comparing the compatibility matmul against card-count formula and combined card-count projection paths.
-- `bench_preflop_allin_live2_entries.py`: Realistic actions_4_7 microbenchmark for exact preflop all-in value routing/writeback, including live-entry routing and sparse net-value writeback variants.
-- `bench_preflop_combined_range_projection.py`: Realistic actions_4_7 microbenchmark for compact preflop value-model range moment projection variants that combine the two hand-moment belief matmuls.
-- `bench_preflop_cutoff_belief_reuse.py`: Realistic actions_4_7 microbenchmark for reusing cutoff model-input belief rows during value writeback instead of gathering the same rows twice.
-- `bench_preflop_defer_avg_policy.py`: Realistic actions_4_7 microbenchmark for deferring average-policy materialization and renormalization until the end of a default preflop solve.
-- `bench_preflop_model_leaf_scatter.py`: Realistic actions_4_7 microbenchmark for compact preflop model-leaf belief scatter, comparing direct model-index gathers against the fused propagation side-output while pausing live preflop training process groups.
-- `bench_preflop_policy_reach_public.py`: Realistic actions_4_7 microbenchmark for the public-preflop policy reach/belief propagation specialization that skips allowed-hand mask and fallback-vector loads.
+- `bench_preflop_allin_share3_denom.py`: Realistic actions_4_7 microbenchmark for the production exact 3-player all-in denominator path, with a dense-reference correctness check.
 - `bench_preflop_sample_snapshot.py`: Realistic actions_4_7 microbenchmark for replacing full-tree sample policy/belief `torch.where` updates with a sparse fused snapshot copy.
-- `bench_preflop_skip_model_leaf_belief_store.py`: Realistic actions_4_7 microbenchmark for skipping full reach/belief tensor writes for model leaves when the compact model-leaf scatter side-output is active.
-- `bench_preflop_selected_hu_writeback.py`: Realistic actions_4_7 microbenchmark for HU closing value writeback from already-selected live-player beliefs instead of a full six-player belief gather.
 - `bench_reach_weights.py`: Reach-weight computation benchmark.
 - `bench_rules_triton.py`: Triton hand-rules benchmark.
 - `bench_triton_pbs_env.py`: PBSEnv versus TritonPBSEnv microbenchmarks for legal, step, reset, copy, gather, repeat, and persistent `*_into` materialization paths.

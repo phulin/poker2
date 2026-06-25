@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import os
 from collections import OrderedDict
 
 import torch
@@ -115,8 +114,8 @@ def _preflop_token_mixer_leaky_relu_triton(
     batch_size, token_count, dim = y.shape
     if token_count != 7 or w_in.shape != (28, 7) or w_out.shape != (7, 28):
         raise ValueError("specialized preflop token mixer requires 7 -> 28 -> 7")
-    block_b = int(os.environ.get("P2_PREFLOP_TOKEN_MIXER_BLOCK_B", "8"))
-    block_d = int(os.environ.get("P2_PREFLOP_TOKEN_MIXER_BLOCK_D", "32"))
+    block_b = 8
+    block_d = 32
     grid = (triton.cdiv(batch_size, block_b), triton.cdiv(dim, block_d))
     _preflop_token_mixer_leaky_relu_kernel[grid](
         y,
@@ -1571,26 +1570,22 @@ class _PreflopGatedTokenMixerBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.token_norm(x)
-        impl = os.environ.get("P2_PREFLOP_GATED_TOKEN_MIXER_IMPL", "triton")
-        if impl == "triton":
-            linear_in = self.token_mixer.linear_in
-            activation = self.token_mixer.activation
-            linear_out = self.token_mixer.linear_out
-            if (
-                y.is_cuda
-                and isinstance(activation, nn.LeakyReLU)
-                and activation.negative_slope == 0.01
-                and y.shape[1] == 7
-                and linear_in.weight.shape == (28, 7)
-                and linear_out.weight.shape == (7, 28)
-            ):
-                mixed = _preflop_token_mixer_leaky_relu_triton(
-                    y,
-                    linear_in.weight,
-                    linear_out.weight,
-                )
-            else:
-                mixed = self.token_mixer(y.transpose(1, 2)).transpose(1, 2)
+        linear_in = self.token_mixer.linear_in
+        activation = self.token_mixer.activation
+        linear_out = self.token_mixer.linear_out
+        if (
+            y.is_cuda
+            and isinstance(activation, nn.LeakyReLU)
+            and activation.negative_slope == 0.01
+            and y.shape[1] == 7
+            and linear_in.weight.shape == (28, 7)
+            and linear_out.weight.shape == (7, 28)
+        ):
+            mixed = _preflop_token_mixer_leaky_relu_triton(
+                y,
+                linear_in.weight,
+                linear_out.weight,
+            )
         else:
             mixed = self.token_mixer(y.transpose(1, 2)).transpose(1, 2)
         gate = torch.sigmoid(self.token_gate(y))
@@ -2161,21 +2156,9 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             device=player_beliefs.device,
             dtype=dtype,
         )
-        projection_mode = (
-            os.environ.get("P2_PREFLOP_COMBINED_RANGE_PROJECTION", "range")
-            .strip()
-            .lower()
-        )
-        if projection_mode in {"range", "1", "true", "on", "yes"}:
-            combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
-            range_summary = player_beliefs @ combined_projection
-            bucket_mass = player_beliefs @ bucket_projection
-        else:
-            range_summary = torch.cat(
-                (player_beliefs @ hand_emb, player_beliefs @ hand_emb.square()),
-                dim=-1,
-            )
-            bucket_mass = player_beliefs @ bucket_projection
+        combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
+        range_summary = player_beliefs @ combined_projection
+        bucket_mass = player_beliefs @ bucket_projection
         player_tokens = (
             self.range_proj(range_summary)
             + self.bucket_mass_proj(bucket_mass)

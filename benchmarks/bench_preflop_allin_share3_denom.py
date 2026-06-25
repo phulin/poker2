@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Benchmark exact 3-player preflop all-in denominator correction variants."""
+"""Benchmark exact 3-player preflop all-in denominator production path."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -108,40 +107,37 @@ def _prepare_inputs(args: argparse.Namespace):
     return ev, oracle, hero, opp0, opp1, rows
 
 
-def _call_mode(oracle, hero, opp0, opp1, mode: str) -> torch.Tensor:
-    old = os.environ.get("P2_ALLIN_SHARE3_DENOM_CORRECTION")
-    os.environ["P2_ALLIN_SHARE3_DENOM_CORRECTION"] = mode
-    try:
-        with torch.no_grad():
-            return oracle._share3_values(hero, opp0, opp1)
-    finally:
-        if old is None:
-            os.environ.pop("P2_ALLIN_SHARE3_DENOM_CORRECTION", None)
-        else:
-            os.environ["P2_ALLIN_SHARE3_DENOM_CORRECTION"] = old
+def _share3_dense_reference(oracle, hero, opp0, opp1) -> torch.Tensor:
+    with torch.no_grad():
+        oracle._share3_values(hero[:1], opp0[:1], opp1[:1])
+        assert oracle._share3_weighted_flat is not None
+        assert oracle._compat3_flat is not None
+        opp0_per_combo = opp0.to(torch.float32) / oracle._multiplicity
+        opp1_per_combo = opp1.to(torch.float32) / oracle._multiplicity
+        outer = (opp0_per_combo[:, :, None] * opp1_per_combo[:, None, :]).flatten(1)
+        numer = outer @ oracle._share3_weighted_flat
+        denom = outer @ oracle._compat3_flat
+        return numer / denom.clamp_min(1.0e-8)
+
+
+def _call_share3(oracle, hero, opp0, opp1) -> torch.Tensor:
+    with torch.no_grad():
+        return oracle._share3_values(hero, opp0, opp1)
 
 
 def run(args: argparse.Namespace) -> dict[str, object]:
     ev, oracle, hero, opp0, opp1, rows = _prepare_inputs(args)
-    modes = ["matmul", "card", "card_combined"]
-    outputs: dict[str, torch.Tensor] = {}
-    for mode in modes:
-        outputs[mode] = _call_mode(oracle, hero, opp0, opp1, mode)
+    out = _call_share3(oracle, hero, opp0, opp1)
     _sync(ev.device)
-    ref = outputs["matmul"]
-    diffs = {
-        mode: float((out - ref).abs().max().item())
-        for mode, out in outputs.items()
-    }
-    timings = {}
-    for mode in modes:
-        for _ in range(args.warmup_iters):
-            _call_mode(oracle, hero, opp0, opp1, mode)
-        timings[mode] = _event_time_ms(
-            lambda mode=mode: _call_mode(oracle, hero, opp0, opp1, mode),
-            iters=args.iters,
-            device=ev.device,
-        )
+    ref = _share3_dense_reference(oracle, hero, opp0, opp1)
+    diff = float((out - ref).abs().max().item())
+    for _ in range(args.warmup_iters):
+        _call_share3(oracle, hero, opp0, opp1)
+    timing = _event_time_ms(
+        lambda: _call_share3(oracle, hero, opp0, opp1),
+        iters=args.iters,
+        device=ev.device,
+    )
     return {
         "rows": int(rows),
         "total_nodes": int(ev.total_nodes),
@@ -149,12 +145,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "live3_entries": int(hero.shape[0]),
         "iters": int(args.iters),
         "warmup_iters": int(args.warmup_iters),
-        "diffs": diffs,
-        "timings_ms": timings,
-        "speedups_vs_matmul": {
-            mode: timings["matmul"] / value if value > 0 else float("inf")
-            for mode, value in timings.items()
-        },
+        "max_diff_vs_dense_reference": diff,
+        "share3_ms": timing,
     }
 
 

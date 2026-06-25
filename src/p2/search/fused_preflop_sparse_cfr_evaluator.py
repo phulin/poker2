@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import torch
 
 from p2.core.structured_config import CFRType
@@ -26,25 +24,16 @@ from p2.search.fused_cfr_triton import (
     fused_model_values_postprocess_writeback_multiway_,
     fused_model_values_writeback_multiway_,
     fused_parent_sum_divide_,
-    fused_preflop169_project_rows_,
     fused_preflop169_parent_sum_opp_rank_stats_,
-    fused_preflop169_parent_sum_opp_stats_,
     fused_preflop169_parent_sum_opp_,
     fused_preflop169_src_weights_rank_stats_multiway_,
-    fused_preflop169_src_weights_stats_multiway_,
-    fused_preflop169_src_weights_from_unblocked_multiway_,
-    fused_preflop169_src_weights_multiway_,
     fused_policy_reach_beliefs_depth_preflop_multiway_,
     fused_policy_reach_beliefs_depth_preflop_public_multiway_,
     fused_policy_renorm_reach_depth_multiway_,
     fused_preflop_multiway_beliefs_from_reach_,
-    fused_preflop_sample_snapshot_multiway_,
     fused_preflop_sample_snapshot_rows_multiway_,
     fused_regret_tail_multiway_,
     preflop169_unblocked_rank_stats_out_,
-    preflop169_unblocked_rank_mass_triton_out_,
-    preflop169_unblocked_mass_triton_out_,
-    preflop169_unblocked_stats_out_,
     select_actor_beliefs_and_marginal_policy_multiway_triton_out_,
 )
 from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
@@ -248,45 +237,6 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             marginal_action_buf,
         )
 
-    def _preflop_use_fused_projection(self) -> bool:
-        flag = os.environ.get("P2_PREFLOP_FUSED_PROJECTION", "0")
-        return flag.strip().lower() not in {"0", "false", "off", "no"}
-
-    def _preflop_use_fused_src_weights(self, top: int) -> bool:
-        flag = os.environ.get("P2_PREFLOP_FUSED_SRC_WEIGHTS")
-        if flag is None or flag.strip().lower() == "auto":
-            threshold = int(os.environ.get("P2_PREFLOP_FUSED_SRC_WEIGHTS_MAX_TOP", "0"))
-            return top <= threshold
-        return flag.strip().lower() not in {"0", "false", "off", "no"}
-
-    def _preflop_use_fused_src_weight_tail(self) -> bool:
-        flag = os.environ.get("P2_PREFLOP_FUSED_SRC_WEIGHT_TAIL", "1")
-        return flag.strip().lower() not in {"0", "false", "off", "no"}
-
-    def _preflop_use_rank_stats_src_weights(self) -> bool:
-        flag = os.environ.get("P2_PREFLOP_RANK_STATS_SRC_WEIGHTS", "1")
-        return flag.strip().lower() not in {"0", "false", "off", "no"}
-
-    def _preflop_use_rank_stats_ev(self) -> bool:
-        flag = os.environ.get("P2_PREFLOP_RANK_STATS_EV", "1")
-        return flag.strip().lower() not in {"0", "false", "off", "no"}
-
-    def _preflop_use_rank_stats_parent_ev(self) -> bool:
-        flag = os.environ.get("P2_PREFLOP_RANK_STATS_PARENT_EV", "1")
-        return flag.strip().lower() not in {"0", "false", "off", "no"}
-
-    def _preflop_use_compact_stats_src_weights(self) -> bool:
-        flag = os.environ.get("P2_PREFLOP_COMPACT_STATS_SRC_WEIGHTS", "0")
-        return flag.strip().lower() not in {"0", "false", "off", "no"}
-
-    def _preflop_use_compact_stats_unblocked(self) -> bool:
-        flag = os.environ.get("P2_PREFLOP_COMPACT_STATS_UNBLOCKED", "0")
-        return flag.strip().lower() not in {"0", "false", "off", "no"}
-
-    def _preflop_use_compact_stats_ev(self) -> bool:
-        flag = os.environ.get("P2_PREFLOP_COMPACT_STATS_EV", "0")
-        return flag.strip().lower() not in {"0", "false", "off", "no"}
-
     def _ensure_preflop_regret_src_weights_buf(self, top: int) -> torch.Tensor:
         shape = (top, PREFLOP_HANDS)
         buf = getattr(self, "_preflop_regret_src_weights_buf", None)
@@ -392,7 +342,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         top: int,
         to_act_top: torch.Tensor,
     ) -> torch.Tensor:
-        if beliefs.device.type == "cuda" and self._preflop_use_rank_stats_src_weights():
+        if beliefs.device.type == "cuda":
             out = self._ensure_preflop_regret_src_weights_buf(top)
             fused_preflop169_src_weights_rank_stats_multiway_(
                 class_mass=beliefs[:top].contiguous(),
@@ -405,59 +355,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             )
             return out
 
-        if (
-            beliefs.device.type == "cuda"
-            and self._preflop_use_compact_stats_src_weights()
-        ):
-            out = self._ensure_preflop_regret_src_weights_buf(top)
-            fused_preflop169_src_weights_stats_multiway_(
-                class_mass=beliefs[:top].contiguous(),
-                to_act=to_act_top,
-                allowed_weight=self._preflop_allowed_float(top),
-                out=out,
-                stats_out=self._ensure_preflop_regret_src_stats_buf(
-                    top * self.num_players
-                ),
-            )
-            return out
-
-        if beliefs.device.type == "cuda" and self._preflop_use_fused_src_weights(top):
-            out = self._ensure_preflop_regret_src_weights_buf(top)
-            projection = self._preflop_unblocked_projection_for(beliefs).contiguous()
-            fused_preflop169_src_weights_multiway_(
-                class_mass=beliefs[:top].contiguous(),
-                projection=projection,
-                to_act=to_act_top,
-                allowed_mask=self.allowed_hands[:top].contiguous(),
-                out=out,
-            )
-            return out
-
-        if (
-            beliefs.device.type == "cuda"
-            and self._preflop_use_compact_stats_unblocked()
-        ):
-            unblocked_reach = torch.empty_like(beliefs[:top])
-            flat_in = beliefs[:top].contiguous().view(top * self.num_players, -1)
-            flat_out = unblocked_reach.view(top * self.num_players, -1)
-            preflop169_unblocked_mass_triton_out_(
-                flat_in,
-                flat_out,
-                stats_out=self._ensure_preflop_regret_src_stats_buf(
-                    top * self.num_players
-                ),
-            )
-        else:
-            unblocked_reach = self._preflop_unblocked_mass(beliefs[:top]).contiguous()
-        if beliefs.device.type == "cuda" and self._preflop_use_fused_src_weight_tail():
-            out = self._ensure_preflop_regret_src_weights_buf(top)
-            fused_preflop169_src_weights_from_unblocked_multiway_(
-                unblocked=unblocked_reach,
-                to_act=to_act_top,
-                allowed_weight=self._preflop_allowed_float(top),
-                out=out,
-            )
-            return out
+        unblocked_reach = self._preflop_unblocked_mass(beliefs[:top]).contiguous()
 
         unblocked_reach.clamp_min_(1e-12)
         player_ids = self._preflop_player_ids()
@@ -548,14 +446,6 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             hand_dim=PREFLOP_HANDS,
         )
 
-    def _use_partition_ordered_model_indices(self) -> bool:
-        return (
-            os.environ.get("P2_PREFLOP_PARTITION_ORDER_MODEL_INDICES", "1")
-            .strip()
-            .lower()
-            not in {"0", "false", "off", "no"}
-        )
-
     def _position_slice_if_contiguous(
         self,
         positions: torch.Tensor,
@@ -589,8 +479,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
 
     def _update_model_index_partitions(self) -> None:
         if (
-            self._use_partition_ordered_model_indices()
-            and self.model_indices.numel() > 0
+            self.model_indices.numel() > 0
             and self._model_scope() == "mixed_street"
             and getattr(self, "closing_leaf_value_model", None) is not None
             and self._can_project_heads_up_closing_model()
@@ -695,13 +584,6 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             and self._model_leaf_beliefs_buf.dtype == beliefs.dtype
         ):
             return self._model_leaf_beliefs_buf
-        if (
-            os.environ.get("P2_PREFLOP_MODEL_BELIEF_GATHER_OUT", "1")
-            .strip()
-            .lower()
-            in {"0", "false", "off", "no"}
-        ):
-            return beliefs[self.model_indices]
         m = int(self.model_indices.numel())
         if beliefs.dim() != 3 or beliefs.shape[1:] != (
             self.num_players,
@@ -994,96 +876,27 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             max_children=self.num_actions,
             block_h=256,
         )
-        if beliefs_c.device.type == "cuda" and self._preflop_use_rank_stats_ev():
+        if beliefs_c.device.type == "cuda":
             actor_rank_stats, marginal_rank_stats = (
                 self._ensure_preflop_ev_rank_stats_bufs(
                     top,
                     parent_index_bottom.numel(),
                 )
             )
-            if self._preflop_use_rank_stats_parent_ev():
-                preflop169_unblocked_rank_stats_out_(actor_beliefs, actor_rank_stats)
-                preflop169_unblocked_rank_stats_out_(
-                    marginal_policy,
-                    marginal_rank_stats,
-                )
-                for depth in range(self.tree_depth - 1, -1, -1):
-                    fused_preflop169_parent_sum_opp_rank_stats_(
-                        values=values,
-                        prev_actor=prev_actor_c,
-                        policy=policy_c,
-                        actor_beliefs=actor_beliefs,
-                        marginal_policy=marginal_policy,
-                        actor_stats=actor_rank_stats,
-                        marginal_stats=marginal_rank_stats,
-                        child_offsets=self._child_offsets_by_depth[depth],
-                        child_count=self._child_count_by_depth[depth],
-                        parent_base=self.depth_offsets[depth],
-                        child_base=bottom,
-                        max_children=self.num_actions,
-                        max_children_pow2=self._child_count_pow2_by_depth[depth],
-                        leaf_values=leaf_values if use_leaf_source else None,
-                        leaf_mask=(
-                            self.leaf_mask.contiguous() if use_leaf_source else None
-                        ),
-                        has_folded=(
-                            self.env.has_folded.contiguous()
-                            if hasattr(self.env, "has_folded")
-                            else None
-                        ),
-                    )
-            else:
-                preflop169_unblocked_rank_mass_triton_out_(
-                    actor_beliefs,
-                    denom_unblocked,
-                    stats_out=actor_rank_stats,
-                )
-                preflop169_unblocked_rank_mass_triton_out_(
-                    marginal_policy,
-                    numer_unblocked,
-                    stats_out=marginal_rank_stats,
-                    row_sum=marginal_action_policy,
-                )
-                for depth in range(self.tree_depth - 1, -1, -1):
-                    fused_preflop169_parent_sum_opp_(
-                        values=values,
-                        prev_actor=prev_actor_c,
-                        policy=policy_c,
-                        marginal_action_policy=marginal_action_policy,
-                        numer_unblocked=numer_unblocked,
-                        denom_unblocked=denom_unblocked,
-                        child_offsets=self._child_offsets_by_depth[depth],
-                        child_count=self._child_count_by_depth[depth],
-                        parent_base=self.depth_offsets[depth],
-                        child_base=bottom,
-                        max_children=self.num_actions,
-                        max_children_pow2=self._child_count_pow2_by_depth[depth],
-                        leaf_values=leaf_values if use_leaf_source else None,
-                        leaf_mask=(
-                            self.leaf_mask.contiguous() if use_leaf_source else None
-                        ),
-                        has_folded=(
-                            self.env.has_folded.contiguous()
-                            if hasattr(self.env, "has_folded")
-                            else None
-                        ),
-                    )
-        elif self._preflop_use_compact_stats_ev():
-            actor_stats, marginal_stats = self._ensure_preflop_ev_stats_bufs(
-                top,
-                parent_index_bottom.numel(),
+            preflop169_unblocked_rank_stats_out_(actor_beliefs, actor_rank_stats)
+            preflop169_unblocked_rank_stats_out_(
+                marginal_policy,
+                marginal_rank_stats,
             )
-            preflop169_unblocked_stats_out_(actor_beliefs, actor_stats)
-            preflop169_unblocked_stats_out_(marginal_policy, marginal_stats)
             for depth in range(self.tree_depth - 1, -1, -1):
-                fused_preflop169_parent_sum_opp_stats_(
+                fused_preflop169_parent_sum_opp_rank_stats_(
                     values=values,
                     prev_actor=prev_actor_c,
                     policy=policy_c,
                     actor_beliefs=actor_beliefs,
                     marginal_policy=marginal_policy,
-                    actor_stats=actor_stats,
-                    marginal_stats=marginal_stats,
+                    actor_stats=actor_rank_stats,
+                    marginal_stats=marginal_rank_stats,
                     child_offsets=self._child_offsets_by_depth[depth],
                     child_count=self._child_count_by_depth[depth],
                     parent_base=self.depth_offsets[depth],
@@ -1100,22 +913,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 )
         else:
             projection = self._preflop_unblocked_projection_for(beliefs_c).contiguous()
-            if self._preflop_use_fused_projection():
-                fused_preflop169_project_rows_(
-                    actor_beliefs,
-                    projection,
-                    denom_unblocked,
-                )
-                fused_preflop169_project_rows_(
-                    marginal_policy,
-                    projection,
-                    numer_unblocked,
-                    row_sum=marginal_action_policy,
-                )
-            else:
-                torch.mm(actor_beliefs, projection, out=denom_unblocked)
-                torch.mm(marginal_policy, projection, out=numer_unblocked)
-                torch.sum(marginal_policy, dim=-1, out=marginal_action_policy)
+            torch.mm(actor_beliefs, projection, out=denom_unblocked)
+            torch.mm(marginal_policy, projection, out=numer_unblocked)
+            torch.sum(marginal_policy, dim=-1, out=marginal_action_policy)
 
             for depth in range(self.tree_depth - 1, -1, -1):
                 fused_preflop169_parent_sum_opp_(
@@ -1235,10 +1035,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             scatter_depth = (
                 depth < len(leaf_depth_has_slot) and leaf_depth_has_slot[depth]
             )
-            if (
-                self._preflop_all_hands_allowed
-                and self._use_public_policy_reach_beliefs()
-            ):
+            if self._preflop_all_hands_allowed:
                 fused_policy_reach_beliefs_depth_preflop_public_multiway_(
                     policy=policy,
                     reach=reach,
@@ -1337,22 +1134,12 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
 
     def _defer_average_reach_beliefs(self) -> bool:
-        if (
-            os.environ.get("P2_PREFLOP_DEFER_AVG_BELIEFS", "1").strip().lower()
-            in {"0", "false", "off", "no"}
-        ):
-            return False
         if self.use_final_policy_values:
             return True
         return not (self.num_players == 2 and bool(self.model.enforce_zero_sum))
 
     def _defer_average_policy_materialization(self) -> bool:
-        if self.cfr_avg:
-            return False
-        return (
-            os.environ.get("P2_PREFLOP_DEFER_AVG_POLICY", "1").strip().lower()
-            not in {"0", "false", "off", "no"}
-        )
+        return not self.cfr_avg
 
     def update_average_policy(
         self,
@@ -1522,54 +1309,6 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             ignore_mask=self.env.done,
         )
 
-    def _use_partitioned_model_writeback(self) -> bool:
-        return (
-            os.environ.get("P2_PREFLOP_PARTITIONED_MODEL_WRITEBACK", "1")
-            .strip()
-            .lower()
-            not in {"0", "false", "off", "no"}
-        )
-
-    def _reuse_cutoff_feature_beliefs_for_writeback(self) -> bool:
-        return (
-            os.environ.get("P2_PREFLOP_REUSE_CUTOFF_FEATURE_BELIEFS", "1")
-            .strip()
-            .lower()
-            not in {"0", "false", "off", "no"}
-        )
-
-    def _use_selected_hu_closing_beliefs_for_writeback(self) -> bool:
-        return (
-            os.environ.get("P2_PREFLOP_SELECTED_HU_CLOSING_BELIEFS", "1")
-            .strip()
-            .lower()
-            not in {"0", "false", "off", "no"}
-        )
-
-    def _use_fused_sample_snapshot(self) -> bool:
-        return (
-            os.environ.get("P2_PREFLOP_FUSED_SAMPLE_SNAPSHOT", "1")
-            .strip()
-            .lower()
-            not in {"0", "false", "off", "no"}
-        )
-
-    def _use_sparse_sample_snapshot(self) -> bool:
-        return (
-            os.environ.get("P2_PREFLOP_SPARSE_SAMPLE_SNAPSHOT", "1")
-            .strip()
-            .lower()
-            not in {"0", "false", "off", "no"}
-        )
-
-    def _use_public_policy_reach_beliefs(self) -> bool:
-        return (
-            os.environ.get("P2_PREFLOP_PUBLIC_POLICY_REACH_BELIEFS", "1")
-            .strip()
-            .lower()
-            not in {"0", "false", "off", "no"}
-        )
-
     def _partition_last_values_buffer(
         self,
         attr: str,
@@ -1711,10 +1450,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             last_shape = (hand_values.shape[0], self.num_players, self.hand_dim)
             last_out = self.latest_values.new_empty(last_shape)
             last_model_values = last_out
-        if (
-            selected_beliefs is not None
-            and self._use_selected_hu_closing_beliefs_for_writeback()
-        ):
+        if selected_beliefs is not None:
             fused_hu_closing_selected_beliefs_writeback_multiway_(
                 hand_values=hand_values,
                 last_model_values=last_model_values,
@@ -1763,8 +1499,6 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         beliefs: torch.Tensor,
         features: MLPFeatures,
     ) -> bool:
-        if not self._use_partitioned_model_writeback():
-            return False
         if self._model_scope() != "mixed_street":
             return False
         if self.closing_leaf_value_model is None:
@@ -1796,11 +1530,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 hand_values=cutoff_values,
                 beliefs_at_model=beliefs,
                 positions=cutoff_positions,
-                position_beliefs=(
-                    cutoff_features.beliefs
-                    if self._reuse_cutoff_feature_beliefs_for_writeback()
-                    else None
-                ),
+                position_beliefs=cutoff_features.beliefs,
                 last_attr="_preflop_cutoff_last_values_buf",
                 do_mix=do_mix,
                 store_last=store_last,
@@ -1981,44 +1711,18 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self.apply_schedules(t)
         self._refresh_fused_t_scalars(t)
 
-        if self._use_sparse_sample_snapshot():
-            self._prepare_sample_update_table()
-            assert self._sample_update_rows is not None
-            assert self._sample_update_counts is not None
-            fused_preflop_sample_snapshot_rows_multiway_(
-                self.policy_probs,
-                self.policy_probs_sample,
-                self.beliefs,
-                self.beliefs_sample,
-                self._sample_update_rows,
-                self._sample_update_counts,
-                self._t_scalars.t_tensor,
-            )
-        elif self._use_fused_sample_snapshot():
-            fused_preflop_sample_snapshot_multiway_(
-                self.policy_probs,
-                self.policy_probs_sample,
-                self.beliefs,
-                self.beliefs_sample,
-                self.t_sample.contiguous(),
-                self._t_scalars.t_tensor,
-                block_m=8,
-                block_h=256,
-            )
-        else:
-            sample_mask = self.t_sample == self._t_scalars.t_tensor
-            torch.where(
-                sample_mask[:, None],
-                self.policy_probs,
-                self.policy_probs_sample,
-                out=self.policy_probs_sample,
-            )
-            torch.where(
-                sample_mask[:, None, None],
-                self.beliefs,
-                self.beliefs_sample,
-                out=self.beliefs_sample,
-            )
+        self._prepare_sample_update_table()
+        assert self._sample_update_rows is not None
+        assert self._sample_update_counts is not None
+        fused_preflop_sample_snapshot_rows_multiway_(
+            self.policy_probs,
+            self.policy_probs_sample,
+            self.beliefs,
+            self.beliefs_sample,
+            self._sample_update_rows,
+            self._sample_update_counts,
+            self._t_scalars.t_tensor,
+        )
 
         self._prepare_tree_slices()
         top = self._top
@@ -2158,7 +1862,13 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def evaluate_cfr(
         self, training_mode: bool = True, sample_continuation: bool = True
     ):
-        if not self._preflop_cuda_graph_evaluate_enabled():
+        if self.device.type != "cuda" or (
+            self.cfr_type == CFRType.linear
+            or (
+                self.cfr_type in (CFRType.pcfr, CFRType.sapcfr)
+                and not self._predictive_cfr_uses_dcfr()
+            )
+        ):
             return CFREvaluator.evaluate_cfr(self, training_mode, sample_continuation)
 
         self._ensure_fused_attrs()
@@ -2174,8 +1884,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self.values_avg[:] = self.latest_values
 
         self.t_sample = self._get_sampling_schedule()
-        if self._use_sparse_sample_snapshot():
-            self._prepare_sample_update_table()
+        self._prepare_sample_update_table()
         start = self.warm_start_iterations
         end = self.cfr_iterations
         stat_iters = self._record_stats_percentile_ts()
@@ -2207,18 +1916,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 self.cfr_iteration(t)
             t += 1
 
-        if (
-            not self.cfr_avg
-            and (
-                self.use_final_policy_values
-                or self._defer_average_policy_materialization()
-            )
-        ):
+        if not self.cfr_avg:
             self._finalize_deferred_average_policy()
-            self.self_reach_avg[: self.root_nodes] = 1.0
-            self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
-            self._refresh_average_beliefs()
-        elif not self.cfr_avg and self._defer_average_reach_beliefs():
             self.self_reach_avg[: self.root_nodes] = 1.0
             self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
             self._refresh_average_beliefs()
@@ -2234,19 +1933,6 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             return None
         return self.sample_leaves(training_mode)
 
-    def _preflop_cuda_graph_evaluate_enabled(self) -> bool:
-        graph_flag = os.environ.get("P2_PREFLOP_CUDA_GRAPH_EVALUATE")
-        if graph_flag is not None and graph_flag.lower() in {"0", "false", "no", "off"}:
-            return False
-        if self.device.type != "cuda":
-            return False
-        return not (
-            self.cfr_type == CFRType.linear
-            or (
-                self.cfr_type in (CFRType.pcfr, CFRType.sapcfr)
-                and not self._predictive_cfr_uses_dcfr()
-            )
-        )
 
     def _compute_exploitability(self) -> ExploitabilityStats:
         local = torch.zeros(self.root_nodes, dtype=self.float_dtype, device=self.device)

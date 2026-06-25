@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import torch
 
 from p2.allin.oracle import PreflopAllIn169Oracle
@@ -498,20 +496,6 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         if not hasattr(self, "preflop_allin_indices_by_live_count"):
             self._cache_preflop_allin_live_partitions()
         oracle = self._ensure_preflop_allin_169_oracle()
-        use_live2_entries = (
-            os.environ.get("P2_PREFLOP_ALLIN_LIVE2_ENTRIES", "1").strip().lower()
-            not in {"0", "false", "off", "no"}
-        )
-        use_sparse_writeback = (
-            os.environ.get("P2_PREFLOP_ALLIN_SPARSE_WRITEBACK", "1").strip().lower()
-            not in {"0", "false", "off", "no"}
-        )
-        use_direct_entry_beliefs = (
-            os.environ.get("P2_PREFLOP_ALLIN_DIRECT_ENTRY_BELIEFS", "1")
-            .strip()
-            .lower()
-            not in {"0", "false", "off", "no"}
-        )
         for live_players in range(2, min(3, self.num_players) + 1):
             node_idx = self.preflop_allin_indices_by_live_count[live_players]
             if node_idx.numel() == 0:
@@ -523,9 +507,6 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             scale = self.env.scale[node_idx].to(torch.float32)
             if (
                 live_players == 2
-                and use_live2_entries
-                and use_sparse_writeback
-                and use_direct_entry_beliefs
                 and hasattr(oracle, "write_live2_entry_values_from_beliefs_")
             ):
                 entry_nodes = self.preflop_allin_live2_entry_nodes
@@ -557,8 +538,6 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                 continue
             if (
                 live_players == 3
-                and use_sparse_writeback
-                and use_direct_entry_beliefs
                 and hasattr(oracle, "write_live3_entry_values_from_beliefs_")
             ):
                 entry_nodes = self.preflop_allin_live3_entry_nodes
@@ -597,7 +576,6 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                 continue
             if (
                 live_players == 2
-                and use_live2_entries
                 and hasattr(oracle, "values_for_live2_entries")
             ):
                 beliefs_at_nodes = beliefs[node_idx]

@@ -26,6 +26,7 @@ from p2.models.mlp.better_ffn import (
     BetterPreflopTransformerValueFFN,
     BetterPreflopValueFFN,
     _PreflopGatedTokenMixerBlock,
+    _preflop_token_mixer_leaky_relu_triton,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
@@ -586,9 +587,7 @@ def test_compact_preflop_gated_token_mixer_model_shapes_and_policy_loss() -> Non
     assert torch.isfinite(loss["policy_loss"])
 
 
-def test_compact_preflop_combined_range_projection_matches_uncombined(
-    monkeypatch,
-) -> None:
+def test_compact_preflop_combined_range_projection_forward() -> None:
     batch_size = 3
     num_players = 4
     features = _compact_features(batch_size, num_players)
@@ -608,13 +607,10 @@ def test_compact_preflop_combined_range_projection_matches_uncombined(
     )
     value_model.init_weights(torch.Generator(device="cpu").manual_seed(11))
 
-    monkeypatch.setenv("P2_PREFLOP_COMBINED_RANGE_PROJECTION", "off")
-    expected = value_model(features, include_policy=False).hand_values
+    hand_values = value_model(features, include_policy=False).hand_values
 
-    monkeypatch.setenv("P2_PREFLOP_COMBINED_RANGE_PROJECTION", "range")
-    range_only = value_model(features, include_policy=False).hand_values
-
-    torch.testing.assert_close(range_only, expected, atol=1e-6, rtol=1e-6)
+    assert hand_values.shape == (batch_size, num_players, PREFLOP_HANDS)
+    assert torch.isfinite(hand_values).all()
 
 
 def test_compact_preflop_static_hand_features_are_cached_correctly() -> None:
@@ -668,7 +664,7 @@ def test_compact_preflop_static_hand_features_are_cached_correctly() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_preflop_gated_token_mixer_triton_matches_linear(monkeypatch) -> None:
+def test_preflop_gated_token_mixer_triton_matches_linear() -> None:
     torch.manual_seed(10)
     block = _PreflopGatedTokenMixerBlock(
         192,
@@ -679,12 +675,13 @@ def test_preflop_gated_token_mixer_triton_matches_linear(monkeypatch) -> None:
     x = torch.randn(17, 7, 192, device="cuda", dtype=torch.bfloat16)
     block = block.to(dtype=torch.bfloat16)
 
-    monkeypatch.setenv("P2_PREFLOP_GATED_TOKEN_MIXER_IMPL", "linear")
-    expected = block(x)
-    torch.cuda.synchronize()
-
-    monkeypatch.setenv("P2_PREFLOP_GATED_TOKEN_MIXER_IMPL", "triton")
-    actual = block(x)
+    y = block.token_norm(x)
+    expected = block.token_mixer(y.transpose(1, 2)).transpose(1, 2)
+    actual = _preflop_token_mixer_leaky_relu_triton(
+        y,
+        block.token_mixer.linear_in.weight,
+        block.token_mixer.linear_out.weight,
+    )
     torch.cuda.synchronize()
 
     torch.testing.assert_close(actual, expected, atol=3e-2, rtol=3e-2)
