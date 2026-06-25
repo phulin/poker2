@@ -1425,6 +1425,7 @@ def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
         def __init__(self) -> None:
             self.live_counts: list[int] = []
             self.batch_sizes: list[int] = []
+            self.live2_entries: list[tuple[list[int], list[int], list[int]]] = []
             self.live3_entries: list[
                 tuple[list[int], list[int], list[int], list[int]]
             ] = []
@@ -1434,6 +1435,25 @@ def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
             self.live_counts.append(live_players)
             self.batch_sizes.append(int(beliefs.shape[0]))
             return torch.full_like(beliefs, float(live_players))
+
+        def values_for_live2_entries(
+            self,
+            *,
+            beliefs,
+            live_entry_rows,
+            hero_players,
+            opp_players,
+            **kwargs,
+        ):
+            del kwargs
+            self.live2_entries.append(
+                (
+                    live_entry_rows.tolist(),
+                    hero_players.tolist(),
+                    opp_players.tolist(),
+                )
+            )
+            return torch.full_like(beliefs, 2.0)
 
         def values_for_live3_entries(
             self,
@@ -1469,8 +1489,9 @@ def test_preflop_sparse_allin_values_route_by_precomputed_live_count() -> None:
     ]
     assert evaluator.preflop_allin_exact_indices.tolist() == [0, 1]
     assert evaluator.preflop_allin_model_indices.tolist() == [2, 3, 4]
-    assert fake.live_counts == [2, 6]
-    assert fake.batch_sizes == [1, 3]
+    assert fake.live_counts == [6]
+    assert fake.batch_sizes == [3]
+    assert fake.live2_entries == [([0, 0], [0, 1], [1, 0])]
     assert fake.live3_entries == [([0, 0, 0], [0, 1, 2], [1, 0, 0], [2, 2, 1])]
     assert_close(
         evaluator.latest_values[0], torch.full((num_players, PREFLOP_HANDS), 2.0)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import torch
 
 from p2.allin.oracle import PreflopAllIn169Oracle
@@ -246,6 +248,9 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         )
         self.preflop_allin_exact_indices = empty
         self.preflop_allin_model_indices = empty
+        self.preflop_allin_live2_entry_rows = empty
+        self.preflop_allin_live2_hero_players = empty
+        self.preflop_allin_live2_opp_players = empty
         self.preflop_allin_live3_entry_rows = empty
         self.preflop_allin_live3_hero_players = empty
         self.preflop_allin_live3_opp0_players = empty
@@ -262,6 +267,9 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             )
             self.preflop_allin_exact_indices = empty
             self.preflop_allin_model_indices = empty
+            self.preflop_allin_live2_entry_rows = empty
+            self.preflop_allin_live2_hero_players = empty
+            self.preflop_allin_live2_opp_players = empty
             self.preflop_allin_live3_entry_rows = empty
             self.preflop_allin_live3_hero_players = empty
             self.preflop_allin_live3_opp0_players = empty
@@ -287,6 +295,21 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             if self.num_players >= 4
             else empty
         )
+        live2_idx = indices_by_count[2] if self.num_players >= 2 else empty
+        if live2_idx.numel() > 0:
+            live2 = ~self.env.has_folded[live2_idx]
+            rows, hero_players = torch.nonzero(live2, as_tuple=True)
+            opp_mask = live2[rows].clone()
+            entry = torch.arange(rows.shape[0], device=self.device)
+            opp_mask[entry, hero_players] = False
+            opp_players = torch.nonzero(opp_mask, as_tuple=False)[:, 1]
+            self.preflop_allin_live2_entry_rows = rows.contiguous()
+            self.preflop_allin_live2_hero_players = hero_players.contiguous()
+            self.preflop_allin_live2_opp_players = opp_players.contiguous()
+        else:
+            self.preflop_allin_live2_entry_rows = empty
+            self.preflop_allin_live2_hero_players = empty
+            self.preflop_allin_live2_opp_players = empty
         live3_idx = indices_by_count[3] if self.num_players >= 3 else empty
         if live3_idx.numel() > 0:
             live3 = ~self.env.has_folded[live3_idx]
@@ -443,6 +466,10 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         if not hasattr(self, "preflop_allin_indices_by_live_count"):
             self._cache_preflop_allin_live_partitions()
         oracle = self._ensure_preflop_allin_169_oracle()
+        use_live2_entries = (
+            os.environ.get("P2_PREFLOP_ALLIN_LIVE2_ENTRIES", "1").strip().lower()
+            not in {"0", "false", "off", "no"}
+        )
         for live_players in range(2, min(3, self.num_players) + 1):
             node_idx = self.preflop_allin_indices_by_live_count[live_players]
             if node_idx.numel() == 0:
@@ -453,7 +480,23 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             stacks_after = self.env.stacks[node_idx].to(torch.float32)
             folded_mask = self.env.has_folded[node_idx]
             scale = self.env.scale[node_idx].to(torch.float32)
-            if live_players == 3 and hasattr(oracle, "values_for_live3_entries"):
+            if (
+                live_players == 2
+                and use_live2_entries
+                and hasattr(oracle, "values_for_live2_entries")
+            ):
+                values = oracle.values_for_live2_entries(
+                    beliefs=beliefs_at_nodes,
+                    starting_stacks=starting_stacks,
+                    committed=committed,
+                    stacks_after=stacks_after,
+                    folded_mask=folded_mask,
+                    scale=scale,
+                    live_entry_rows=self.preflop_allin_live2_entry_rows,
+                    hero_players=self.preflop_allin_live2_hero_players,
+                    opp_players=self.preflop_allin_live2_opp_players,
+                )
+            elif live_players == 3 and hasattr(oracle, "values_for_live3_entries"):
                 values = oracle.values_for_live3_entries(
                     beliefs=beliefs_at_nodes,
                     starting_stacks=starting_stacks,

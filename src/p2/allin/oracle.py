@@ -758,6 +758,38 @@ class PreflopAllIn169Oracle:
         return share
 
     @torch.no_grad()
+    def values_for_live2_entries(
+        self,
+        *,
+        beliefs: torch.Tensor,
+        starting_stacks: torch.Tensor,
+        committed: torch.Tensor,
+        stacks_after: torch.Tensor,
+        folded_mask: torch.Tensor,
+        scale: torch.Tensor,
+        live_entry_rows: torch.Tensor,
+        hero_players: torch.Tensor,
+        opp_players: torch.Tensor,
+    ) -> torch.Tensor:
+        if beliefs.shape[-1] != PREFLOP_HANDS:
+            raise ValueError(f"expected 169-class beliefs, got {beliefs.shape}")
+        share = torch.zeros_like(beliefs)
+        if live_entry_rows.numel() > 0:
+            values = self._share2_values(
+                beliefs[live_entry_rows, hero_players],
+                beliefs[live_entry_rows, opp_players],
+            )
+            share[live_entry_rows, hero_players] = values
+        return eligible_pot_share_to_net_values_169(
+            share,
+            starting_stacks=starting_stacks,
+            committed=committed,
+            stacks_after=stacks_after,
+            folded_mask=folded_mask,
+            scale=scale,
+        ).to(beliefs.dtype)
+
+    @torch.no_grad()
     def values_for_live3_entries(
         self,
         *,
