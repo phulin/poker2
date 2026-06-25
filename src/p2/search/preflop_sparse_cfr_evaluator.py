@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from p2.allin.oracle import PreflopAllIn169Oracle
+from p2.allin.oracle import PreflopAllIn169Oracle, _max_eligible_to_win
 from p2.core.structured_config import Config
 from p2.env.card_utils import (
     NUM_HANDS,
@@ -21,6 +21,33 @@ from p2.rl.target_provenance import (
 )
 from p2.search.cfr_evaluator import ExploitabilityStats
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
+
+
+def _preflop_allin_writeback_inputs_for(
+    env: HUNLTensorEnv | PBSEnv,
+    node_idx: torch.Tensor,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    starting_stacks = env.starting_stacks[node_idx].to(torch.float32)
+    committed = env.chips_placed[node_idx].to(torch.float32)
+    stacks_after = env.stacks[node_idx].to(torch.float32)
+    folded_mask = env.has_folded[node_idx]
+    scale = env.scale[node_idx].to(torch.float32)
+    max_eligible = _max_eligible_to_win(committed, folded_mask).to(torch.float32)
+    return (
+        starting_stacks,
+        committed,
+        stacks_after,
+        folded_mask,
+        scale,
+        max_eligible,
+    )
 
 
 class PreflopSparseCFREvaluator(SparseCFREvaluator):
@@ -255,6 +282,8 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
         self.preflop_allin_live3_hero_players = empty
         self.preflop_allin_live3_opp0_players = empty
         self.preflop_allin_live3_opp1_players = empty
+        self.preflop_allin_live2_writeback_inputs = None
+        self.preflop_allin_live3_writeback_inputs = None
 
     def _cache_preflop_allin_live_partitions(self) -> None:
         empty = torch.empty(0, dtype=torch.long, device=self.device)
@@ -276,6 +305,8 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             self.preflop_allin_live3_hero_players = empty
             self.preflop_allin_live3_opp0_players = empty
             self.preflop_allin_live3_opp1_players = empty
+            self.preflop_allin_live2_writeback_inputs = None
+            self.preflop_allin_live3_writeback_inputs = None
             return
 
         live_counts = (~self.env.has_folded[self.allin_call_indices]).sum(dim=1)
@@ -309,11 +340,15 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             self.preflop_allin_live2_entry_nodes = live2_idx[rows].contiguous()
             self.preflop_allin_live2_hero_players = hero_players.contiguous()
             self.preflop_allin_live2_opp_players = opp_players.contiguous()
+            self.preflop_allin_live2_writeback_inputs = (
+                _preflop_allin_writeback_inputs_for(self.env, live2_idx)
+            )
         else:
             self.preflop_allin_live2_entry_rows = empty
             self.preflop_allin_live2_entry_nodes = empty
             self.preflop_allin_live2_hero_players = empty
             self.preflop_allin_live2_opp_players = empty
+            self.preflop_allin_live2_writeback_inputs = None
         live3_idx = indices_by_count[3] if self.num_players >= 3 else empty
         if live3_idx.numel() > 0:
             live3 = ~self.env.has_folded[live3_idx]
@@ -327,12 +362,16 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             self.preflop_allin_live3_hero_players = hero_players.contiguous()
             self.preflop_allin_live3_opp0_players = opps[:, 0].contiguous()
             self.preflop_allin_live3_opp1_players = opps[:, 1].contiguous()
+            self.preflop_allin_live3_writeback_inputs = (
+                _preflop_allin_writeback_inputs_for(self.env, live3_idx)
+            )
         else:
             self.preflop_allin_live3_entry_rows = empty
             self.preflop_allin_live3_entry_nodes = empty
             self.preflop_allin_live3_hero_players = empty
             self.preflop_allin_live3_opp0_players = empty
             self.preflop_allin_live3_opp1_players = empty
+            self.preflop_allin_live3_writeback_inputs = None
 
     def _cache_allin_call_street_partitions(self, parent_streets: torch.Tensor) -> None:
         empty = torch.empty(0, dtype=torch.long, device=self.device)
@@ -500,11 +539,29 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
             node_idx = self.preflop_allin_indices_by_live_count[live_players]
             if node_idx.numel() == 0:
                 continue
-            starting_stacks = self.env.starting_stacks[node_idx].to(torch.float32)
-            committed = self.env.chips_placed[node_idx].to(torch.float32)
-            stacks_after = self.env.stacks[node_idx].to(torch.float32)
-            folded_mask = self.env.has_folded[node_idx]
-            scale = self.env.scale[node_idx].to(torch.float32)
+            writeback_inputs = getattr(
+                self,
+                f"preflop_allin_live{live_players}_writeback_inputs",
+                None,
+            )
+            if writeback_inputs is None:
+                writeback_inputs = _preflop_allin_writeback_inputs_for(
+                    self.env,
+                    node_idx,
+                )
+                setattr(
+                    self,
+                    f"preflop_allin_live{live_players}_writeback_inputs",
+                    writeback_inputs,
+                )
+            (
+                starting_stacks,
+                committed,
+                stacks_after,
+                folded_mask,
+                scale,
+                max_eligible,
+            ) = writeback_inputs
             if (
                 live_players == 2
                 and hasattr(oracle, "write_live2_entry_values_from_beliefs_")
@@ -534,6 +591,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                     scale=scale,
                     live_entry_rows=self.preflop_allin_live2_entry_rows,
                     hero_players=self.preflop_allin_live2_hero_players,
+                    max_eligible=max_eligible,
                 )
                 continue
             if (
@@ -572,6 +630,7 @@ class PreflopSparseCFREvaluator(SparseCFREvaluator):
                     scale=scale,
                     live_entry_rows=self.preflop_allin_live3_entry_rows,
                     hero_players=self.preflop_allin_live3_hero_players,
+                    max_eligible=max_eligible,
                 )
                 continue
             if (

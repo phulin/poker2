@@ -979,6 +979,7 @@ class PreflopAllIn169Oracle:
         scale: torch.Tensor,
         live_entry_rows: torch.Tensor,
         hero_players: torch.Tensor,
+        max_eligible: torch.Tensor | None = None,
     ) -> None:
         share = torch.zeros(
             starting_stacks.shape[0],
@@ -989,14 +990,26 @@ class PreflopAllIn169Oracle:
         )
         if live_entry_rows.numel() > 0:
             share[live_entry_rows, hero_players] = share_values
-        values = eligible_pot_share_to_net_values_169(
-            share,
-            starting_stacks=starting_stacks,
-            committed=committed,
-            stacks_after=stacks_after,
-            folded_mask=folded_mask,
-            scale=scale,
-        )
+        if max_eligible is None:
+            values = eligible_pot_share_to_net_values_169(
+                share,
+                starting_stacks=starting_stacks,
+                committed=committed,
+                stacks_after=stacks_after,
+                folded_mask=folded_mask,
+                scale=scale,
+            )
+        else:
+            scale_f = scale[:, None, None].to(share.dtype).clamp_min(1.0)
+            values = (
+                stacks_after[:, :, None].to(share.dtype)
+                + share * max_eligible[:, :, None].to(share.dtype)
+                - starting_stacks[:, :, None].to(share.dtype)
+            ) / scale_f
+            folded_value = (
+                stacks_after - starting_stacks
+            )[:, :, None].to(share.dtype) / scale_f
+            values = torch.where(folded_mask[:, :, None], folded_value, values)
         output[node_indices] = values.to(output.dtype)
 
     def _write_entry_values_triton_(
@@ -1012,6 +1025,7 @@ class PreflopAllIn169Oracle:
         scale: torch.Tensor,
         live_entry_rows: torch.Tensor,
         hero_players: torch.Tensor,
+        max_eligible: torch.Tensor | None = None,
     ) -> None:
         if (
             triton is None
@@ -1029,11 +1043,15 @@ class PreflopAllIn169Oracle:
                 scale=scale,
                 live_entry_rows=live_entry_rows,
                 hero_players=hero_players,
+                max_eligible=max_eligible,
             )
             return
         rows, players = starting_stacks.shape
         hands = share_values.shape[-1]
-        max_eligible = _max_eligible_to_win(committed, folded_mask).to(torch.float32)
+        if max_eligible is None:
+            max_eligible = _max_eligible_to_win(committed, folded_mask).to(torch.float32)
+        else:
+            max_eligible = max_eligible.to(torch.float32)
         block = 256
         total_default = rows * players * hands
         _fill_allin_folded_value_kernel[(triton.cdiv(total_default, block),)](
@@ -1095,6 +1113,7 @@ class PreflopAllIn169Oracle:
         live_entry_rows: torch.Tensor,
         hero_players: torch.Tensor,
         opp_players: torch.Tensor,
+        max_eligible: torch.Tensor | None = None,
     ) -> None:
         if beliefs.shape[-1] != PREFLOP_HANDS:
             raise ValueError(f"expected 169-class beliefs, got {beliefs.shape}")
@@ -1113,6 +1132,7 @@ class PreflopAllIn169Oracle:
             scale=scale,
             live_entry_rows=live_entry_rows,
             hero_players=hero_players,
+            max_eligible=max_eligible,
         )
 
     @torch.no_grad()
@@ -1130,6 +1150,7 @@ class PreflopAllIn169Oracle:
         scale: torch.Tensor,
         live_entry_rows: torch.Tensor,
         hero_players: torch.Tensor,
+        max_eligible: torch.Tensor | None = None,
     ) -> None:
         if hero_beliefs.shape[-1] != PREFLOP_HANDS:
             raise ValueError(f"expected 169-class beliefs, got {hero_beliefs.shape}")
@@ -1145,6 +1166,7 @@ class PreflopAllIn169Oracle:
             scale=scale,
             live_entry_rows=live_entry_rows,
             hero_players=hero_players,
+            max_eligible=max_eligible,
         )
 
     @torch.no_grad()
@@ -1163,6 +1185,7 @@ class PreflopAllIn169Oracle:
         hero_players: torch.Tensor,
         opp0_players: torch.Tensor,
         opp1_players: torch.Tensor,
+        max_eligible: torch.Tensor | None = None,
     ) -> None:
         if beliefs.shape[-1] != PREFLOP_HANDS:
             raise ValueError(f"expected 169-class beliefs, got {beliefs.shape}")
@@ -1182,6 +1205,7 @@ class PreflopAllIn169Oracle:
             scale=scale,
             live_entry_rows=live_entry_rows,
             hero_players=hero_players,
+            max_eligible=max_eligible,
         )
 
     @torch.no_grad()
@@ -1200,6 +1224,7 @@ class PreflopAllIn169Oracle:
         scale: torch.Tensor,
         live_entry_rows: torch.Tensor,
         hero_players: torch.Tensor,
+        max_eligible: torch.Tensor | None = None,
     ) -> None:
         if hero_beliefs.shape[-1] != PREFLOP_HANDS:
             raise ValueError(f"expected 169-class beliefs, got {hero_beliefs.shape}")
@@ -1215,6 +1240,7 @@ class PreflopAllIn169Oracle:
             scale=scale,
             live_entry_rows=live_entry_rows,
             hero_players=hero_players,
+            max_eligible=max_eligible,
         )
 
     @torch.no_grad()
