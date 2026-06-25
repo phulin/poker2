@@ -560,6 +560,10 @@ class PreflopBucketTrainingConfig:
     actions_8_11_cfr_batch_size: int | None = None
     actions_12_15_epochs: int = 1
     depth: int = 4
+    actions_12_15_depth: int | None = None
+    actions_8_11_depth: int | None = None
+    actions_4_7_depth: int | None = None
+    actions_0_3_depth: int | None = None
     cfr_iterations: int = 400
     warm_start_iterations: int = 0
     sparse_fused: bool = True

@@ -924,7 +924,7 @@ def _validation_cache_metadata(
         "validation_cfr_iterations": int(args.validation_cfr_iterations),
         "cfr_batch_size": _bucket_cfr_batch_size(args, bucket_label),
         "validation_seed": int(args.seed) + 900_000,
-        "depth": int(args.depth),
+        "depth": int(cfg.search.depth),
         "warm_start_iterations": int(args.warm_start_iterations),
         "sparse_fused": bool(args.sparse_fused),
         "belief_mode": str(args.belief_mode),
@@ -1802,6 +1802,7 @@ def run_train_specialists(
                 checkpoint_dir=bucket_dir / "checkpoints",
                 num_steps=bucket_updates_guess,
                 num_envs=cfr_batch_size,
+                bucket_label=bucket_label,
             )
             write_resolved_config(
                 cfg,
@@ -2137,7 +2138,9 @@ def run_train_specialists(
                 "write_solved_shards": bool(args.write_solved_shards),
                 "source_state_dataset": os.path.realpath(args.state_dataset),
                 "solver_checkpoint": os.path.realpath(previous_value_checkpoint),
-                "depth": args.depth,
+                "depth": int(cfg.search.depth),
+                "bet_bins_by_depth": _jsonable(cfg.search.bet_bins_by_depth),
+                "allin_by_depth": _jsonable(cfg.search.allin_by_depth),
                 "cfr_iterations": args.cfr_iterations,
                 "cfr_batch_size": cfr_batch_size,
                 "belief_mode": args.belief_mode,

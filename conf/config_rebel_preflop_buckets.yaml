@@ -27,6 +27,10 @@ preflop_buckets:
   actions_8_11_cfr_batch_size: null
   actions_12_15_epochs: 1
   depth: 4
+  actions_12_15_depth: null
+  actions_8_11_depth: null
+  actions_4_7_depth: null
+  actions_0_3_depth: null
   cfr_iterations: 400
   warm_start_iterations: 0
   sparse_fused: true

@@ -18,6 +18,10 @@ class PreflopBucketExecutionConfig:
     device: str
     seed: int
     depth: int
+    actions_12_15_depth: int | None
+    actions_8_11_depth: int | None
+    actions_4_7_depth: int | None
+    actions_0_3_depth: int | None
     cfr_iterations: int
     warm_start_iterations: int
     sparse_fused: bool
@@ -78,6 +82,64 @@ def _validate_bucket_run_config(cfg: Config) -> None:
         )
 
 
+def _bucket_depth(
+    execution: PreflopBucketExecutionConfig,
+    bucket_label: str | None,
+) -> int:
+    overrides = {
+        "actions_12_15": execution.actions_12_15_depth,
+        "actions_8_11": execution.actions_8_11_depth,
+        "actions_4_7": execution.actions_4_7_depth,
+        "actions_0_3": execution.actions_0_3_depth,
+    }
+    if bucket_label is not None and bucket_label in overrides:
+        override = overrides[bucket_label]
+        if override is not None:
+            return max(1, int(override))
+    return max(1, int(execution.depth))
+
+
+def _resize_depth_schedule(values: object, depth: int) -> list[list[float]] | None:
+    if values is None:
+        return None
+    schedule = [[float(x) for x in row] for row in values]
+    if len(schedule) >= depth:
+        return schedule[:depth]
+    fill = next((row for row in reversed(schedule) if row), [])
+    while len(schedule) < depth:
+        schedule.append(list(fill))
+    return schedule
+
+
+def _resize_bool_schedule(values: object, depth: int) -> list[bool] | None:
+    if values is None:
+        return None
+    schedule = [bool(x) for x in values]
+    if len(schedule) >= depth:
+        return schedule[:depth]
+    fill = schedule[-1] if schedule else True
+    while len(schedule) < depth:
+        schedule.append(fill)
+    return schedule
+
+
+def _apply_bucket_depth(
+    cfg: Config,
+    execution: PreflopBucketExecutionConfig,
+    bucket_label: str | None,
+) -> None:
+    depth = _bucket_depth(execution, bucket_label)
+    cfg.search.depth = depth
+    cfg.search.bet_bins_by_depth = _resize_depth_schedule(
+        cfg.search.bet_bins_by_depth,
+        depth,
+    )
+    cfg.search.allin_by_depth = _resize_bool_schedule(
+        cfg.search.allin_by_depth,
+        depth,
+    )
+
+
 def build_run_config(
     base_cfg: Config,
     execution: PreflopBucketExecutionConfig,
@@ -85,6 +147,7 @@ def build_run_config(
     checkpoint_dir: Path,
     num_steps: int,
     num_envs: int | None = None,
+    bucket_label: str | None = None,
 ) -> Config:
     cfg = copy.deepcopy(base_cfg)
     cfg.device = execution.device
@@ -105,7 +168,7 @@ def build_run_config(
     cfg.train.save_replay_buffers = False
     cfg.model.enforce_zero_sum = False
     cfg.model.board_interaction_dim = 0
-    cfg.search.depth = int(execution.depth)
+    _apply_bucket_depth(cfg, execution, bucket_label)
     cfg.search.iterations = int(execution.cfr_iterations)
     cfg.search.iterations_final = None
     cfg.search.warm_start_iterations = int(execution.warm_start_iterations)
