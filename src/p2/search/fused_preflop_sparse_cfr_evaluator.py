@@ -22,6 +22,7 @@ from p2.search.fused_cfr_triton import (
     fused_avg_values_multiway_,
     fused_compact_regret_dcfr_update_multiway_with_tensors_,
     fused_hu_closing_postprocess_writeback_multiway_,
+    fused_hu_closing_selected_beliefs_writeback_multiway_,
     fused_model_values_postprocess_writeback_multiway_,
     fused_model_values_writeback_multiway_,
     fused_parent_sum_divide_,
@@ -1360,6 +1361,14 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             not in {"0", "false", "off", "no"}
         )
 
+    def _use_selected_hu_closing_beliefs_for_writeback(self) -> bool:
+        return (
+            os.environ.get("P2_PREFLOP_SELECTED_HU_CLOSING_BELIEFS", "1")
+            .strip()
+            .lower()
+            not in {"0", "false", "off", "no"}
+        )
+
     def _partition_last_values_buffer(
         self,
         attr: str,
@@ -1480,16 +1489,13 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         live_players: torch.Tensor,
         beliefs_at_model: torch.Tensor,
         positions: torch.Tensor,
+        selected_beliefs: torch.Tensor | None = None,
         last_attr: str,
         do_mix: bool,
         store_last: bool,
     ) -> None:
         if positions.numel() == 0:
             return
-        position_beliefs = self._partition_beliefs_for_positions(
-            beliefs_at_model,
-            positions,
-        )
         node_indices = self._partition_node_indices_for_positions(positions)
         hand_values = hand_values.contiguous()
         if store_last:
@@ -1504,23 +1510,51 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             last_shape = (hand_values.shape[0], self.num_players, self.hand_dim)
             last_out = self.latest_values.new_empty(last_shape)
             last_model_values = last_out
-        fused_hu_closing_postprocess_writeback_multiway_(
-            hand_values=hand_values,
-            last_model_values=last_model_values,
-            beliefs=position_beliefs,
-            node_indices=node_indices,
-            live_players=live_players.contiguous(),
-            latest_values=self.latest_values,
-            last_out=last_out,
-            has_folded=self.env.has_folded.contiguous(),
-            stacks=self.env.stacks.contiguous(),
-            starting_stacks=self.env.starting_stacks.contiguous(),
-            scale=self.env.scale.contiguous(),
-            old_plus_new_over_new=self._t_scalars.mix_onon,
-            old_over_new=self._t_scalars.mix_oon,
-            do_mix=do_mix,
-            store_last=store_last,
-        )
+        if (
+            selected_beliefs is not None
+            and self._use_selected_hu_closing_beliefs_for_writeback()
+        ):
+            fused_hu_closing_selected_beliefs_writeback_multiway_(
+                hand_values=hand_values,
+                last_model_values=last_model_values,
+                selected_beliefs=selected_beliefs.view(
+                    hand_values.shape[0], 2, self.hand_dim
+                ).contiguous(),
+                node_indices=node_indices,
+                live_players=live_players.contiguous(),
+                latest_values=self.latest_values,
+                last_out=last_out,
+                has_folded=self.env.has_folded.contiguous(),
+                stacks=self.env.stacks.contiguous(),
+                starting_stacks=self.env.starting_stacks.contiguous(),
+                scale=self.env.scale.contiguous(),
+                old_plus_new_over_new=self._t_scalars.mix_onon,
+                old_over_new=self._t_scalars.mix_oon,
+                do_mix=do_mix,
+                store_last=store_last,
+            )
+        else:
+            position_beliefs = self._partition_beliefs_for_positions(
+                beliefs_at_model,
+                positions,
+            )
+            fused_hu_closing_postprocess_writeback_multiway_(
+                hand_values=hand_values,
+                last_model_values=last_model_values,
+                beliefs=position_beliefs,
+                node_indices=node_indices,
+                live_players=live_players.contiguous(),
+                latest_values=self.latest_values,
+                last_out=last_out,
+                has_folded=self.env.has_folded.contiguous(),
+                stacks=self.env.stacks.contiguous(),
+                starting_stacks=self.env.starting_stacks.contiguous(),
+                scale=self.env.scale.contiguous(),
+                old_plus_new_over_new=self._t_scalars.mix_onon,
+                old_over_new=self._t_scalars.mix_oon,
+                do_mix=do_mix,
+                store_last=store_last,
+            )
 
     def _try_set_model_values_partitioned(
         self,
@@ -1606,6 +1640,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 live_players=live_players,
                 beliefs_at_model=beliefs,
                 positions=hu_positions,
+                selected_beliefs=closing_features.beliefs,
                 last_attr="_preflop_new_street_last_values_buf",
                 do_mix=do_mix,
                 store_last=store_last,
