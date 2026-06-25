@@ -38,6 +38,7 @@ from p2.search.fused_cfr_triton import (
     fused_policy_renorm_reach_depth_multiway_,
     fused_preflop_multiway_beliefs_from_reach_,
     fused_preflop_sample_snapshot_multiway_,
+    fused_preflop_sample_snapshot_rows_multiway_,
     fused_regret_tail_multiway_,
     preflop169_unblocked_rank_stats_out_,
     preflop169_unblocked_rank_mass_triton_out_,
@@ -1530,6 +1531,14 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             not in {"0", "false", "off", "no"}
         )
 
+    def _use_sparse_sample_snapshot(self) -> bool:
+        return (
+            os.environ.get("P2_PREFLOP_SPARSE_SAMPLE_SNAPSHOT", "1")
+            .strip()
+            .lower()
+            not in {"0", "false", "off", "no"}
+        )
+
     def _partition_last_values_buffer(
         self,
         attr: str,
@@ -1941,7 +1950,20 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self.apply_schedules(t)
         self._refresh_fused_t_scalars(t)
 
-        if self._use_fused_sample_snapshot():
+        if self._use_sparse_sample_snapshot():
+            self._prepare_sample_update_table()
+            assert self._sample_update_rows is not None
+            assert self._sample_update_counts is not None
+            fused_preflop_sample_snapshot_rows_multiway_(
+                self.policy_probs,
+                self.policy_probs_sample,
+                self.beliefs,
+                self.beliefs_sample,
+                self._sample_update_rows,
+                self._sample_update_counts,
+                self._t_scalars.t_tensor,
+            )
+        elif self._use_fused_sample_snapshot():
             fused_preflop_sample_snapshot_multiway_(
                 self.policy_probs,
                 self.policy_probs_sample,
@@ -2121,6 +2143,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self.values_avg[:] = self.latest_values
 
         self.t_sample = self._get_sampling_schedule()
+        if self._use_sparse_sample_snapshot():
+            self._prepare_sample_update_table()
         start = self.warm_start_iterations
         end = self.cfr_iterations
         stat_iters = self._record_stats_percentile_ts()

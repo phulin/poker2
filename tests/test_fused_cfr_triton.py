@@ -1344,6 +1344,51 @@ def test_fused_policy_sample_update_matches_where() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_preflop_sample_snapshot_rows_multiway_matches_where() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import (
+        fused_preflop_sample_snapshot_rows_multiway_,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(71)
+    total, players, h, num_iters = 97, 6, 169, 13
+    policy = torch.rand(total, h, device=device)
+    policy_sample = torch.rand(total, h, device=device)
+    beliefs = torch.rand(total, players, h, device=device)
+    beliefs_sample = torch.rand(total, players, h, device=device)
+    t_sample = torch.randint(0, num_iters, (total,), device=device)
+
+    counts_cpu = torch.bincount(t_sample.cpu(), minlength=num_iters)
+    max_updates = int(counts_cpu.max().item())
+    rows_cpu = torch.zeros(num_iters, max_updates, dtype=torch.long)
+    for t_idx in range(num_iters):
+        rows = torch.nonzero(t_sample.cpu() == t_idx, as_tuple=False).flatten()
+        rows_cpu[t_idx, : rows.numel()] = rows
+    rows = rows_cpu.to(device)
+    counts = counts_cpu.to(device)
+
+    for t_idx in [0, 5, 11]:
+        mask = t_sample == t_idx
+        ref_policy = torch.where(mask[:, None], policy, policy_sample)
+        ref_beliefs = torch.where(mask[:, None, None], beliefs, beliefs_sample)
+        out_policy = policy_sample.clone().contiguous()
+        out_beliefs = beliefs_sample.clone().contiguous()
+        t_tensor = torch.tensor(t_idx, device=device, dtype=torch.long)
+        fused_preflop_sample_snapshot_rows_multiway_(
+            policy.contiguous(),
+            out_policy,
+            beliefs.contiguous(),
+            out_beliefs,
+            rows.contiguous(),
+            counts.contiguous(),
+            t_tensor,
+        )
+        torch.testing.assert_close(out_policy, ref_policy, rtol=0, atol=0)
+        torch.testing.assert_close(out_beliefs, ref_beliefs, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fused_sibling_sum_matches_scatter_plus_gather() -> None:
     pytest.importorskip("triton")
     from p2.search.fused_cfr_triton import fused_sibling_sum

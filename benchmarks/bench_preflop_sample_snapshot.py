@@ -17,6 +17,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from p2.search.fused_cfr_triton import (  # noqa: E402
     fused_preflop_sample_snapshot_multiway_,
+    fused_preflop_sample_snapshot_rows_multiway_,
 )
 from scripts.bench_preflop_evaluate_cfr_loop import (  # noqa: E402
     DEFAULT_BASE_CHECKPOINT,
@@ -79,6 +80,7 @@ def _prepare_evaluator(args: argparse.Namespace):
         ev.initialize_policy_and_beliefs()
         ev.t_sample = ev._get_sampling_schedule()
         ev._ensure_fused_attrs()
+        ev._prepare_sample_update_table()
     root_schedule = ev.t_sample[: ev.root_nodes]
     unique, counts = root_schedule.unique(return_counts=True)
     t = int(unique[counts.argmax()].item())
@@ -113,17 +115,37 @@ def _new_snapshot(ev) -> None:
     )
 
 
+def _sparse_snapshot(ev) -> None:
+    fused_preflop_sample_snapshot_rows_multiway_(
+        ev.policy_probs,
+        ev.policy_probs_sample,
+        ev.beliefs,
+        ev.beliefs_sample,
+        ev._sample_update_rows,
+        ev._sample_update_counts,
+        ev._t_scalars.t_tensor,
+    )
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
     ev_old, rows, t, sampled_roots = _prepare_evaluator(args)
     ev_new, _rows, _t, _sampled_roots = _prepare_evaluator(args)
+    ev_sparse, _rows, _t, _sampled_roots = _prepare_evaluator(args)
     ev_new.t_sample.copy_(ev_old.t_sample)
+    ev_sparse.t_sample.copy_(ev_old.t_sample)
+    ev_sparse._sample_update_key = None
+    ev_sparse._prepare_sample_update_table()
     ev_new.policy_probs_sample.copy_(ev_old.policy_probs_sample)
     ev_new.beliefs_sample.copy_(ev_old.beliefs_sample)
+    ev_sparse.policy_probs_sample.copy_(ev_old.policy_probs_sample)
+    ev_sparse.beliefs_sample.copy_(ev_old.beliefs_sample)
     ev_new._t_scalars.t_tensor.fill_(t)
+    ev_sparse._t_scalars.t_tensor.fill_(t)
 
     with torch.no_grad():
         _old_snapshot(ev_old)
         _new_snapshot(ev_new)
+        _sparse_snapshot(ev_sparse)
     _sync(ev_old.device)
     policy_diff = float(
         (ev_new.policy_probs_sample - ev_old.policy_probs_sample).abs().max().item()
@@ -131,16 +153,28 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     belief_diff = float(
         (ev_new.beliefs_sample - ev_old.beliefs_sample).abs().max().item()
     )
+    sparse_policy_diff = float(
+        (ev_sparse.policy_probs_sample - ev_old.policy_probs_sample).abs().max().item()
+    )
+    sparse_belief_diff = float(
+        (ev_sparse.beliefs_sample - ev_old.beliefs_sample).abs().max().item()
+    )
 
     ev_old_t, _rows, _t, _sampled_roots = _prepare_evaluator(args)
     ev_new_t, _rows, _t, _sampled_roots = _prepare_evaluator(args)
+    ev_sparse_t, _rows, _t, _sampled_roots = _prepare_evaluator(args)
     ev_new_t.t_sample.copy_(ev_old_t.t_sample)
+    ev_sparse_t.t_sample.copy_(ev_old_t.t_sample)
+    ev_sparse_t._sample_update_key = None
+    ev_sparse_t._prepare_sample_update_table()
     ev_new_t._t_scalars.t_tensor.fill_(t)
+    ev_sparse_t._t_scalars.t_tensor.fill_(t)
     ev_old_t._t_scalars.t_tensor.fill_(t)
 
     for _ in range(args.warmup_iters):
         _old_snapshot(ev_old_t)
         _new_snapshot(ev_new_t)
+        _sparse_snapshot(ev_sparse_t)
 
     old_ms = _event_time_ms(
         lambda: _old_snapshot(ev_old_t),
@@ -152,6 +186,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         iters=args.iters,
         device=ev_new_t.device,
     )
+    sparse_ms = _event_time_ms(
+        lambda: _sparse_snapshot(ev_sparse_t),
+        iters=args.iters,
+        device=ev_sparse_t.device,
+    )
     return {
         "rows": int(rows),
         "root_nodes": int(ev_old.root_nodes),
@@ -160,11 +199,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "model_indices": int(ev_old.model_indices.numel()),
         "t": t,
         "sampled_roots_at_t": sampled_roots,
+        "sampled_rows_at_t": int(ev_sparse_t._sample_update_counts[t].item()),
+        "max_sampled_rows": int(ev_sparse_t._sample_update_rows.shape[1]),
         "policy_max_diff": policy_diff,
         "belief_max_diff": belief_diff,
+        "sparse_policy_max_diff": sparse_policy_diff,
+        "sparse_belief_max_diff": sparse_belief_diff,
         "old_where_ms": old_ms,
         "fused_snapshot_ms": new_ms,
+        "sparse_snapshot_ms": sparse_ms,
         "speedup": old_ms / new_ms if new_ms > 0 else float("inf"),
+        "sparse_speedup_vs_where": old_ms / sparse_ms
+        if sparse_ms > 0
+        else float("inf"),
+        "sparse_speedup_vs_fused": new_ms / sparse_ms
+        if sparse_ms > 0
+        else float("inf"),
     }
 
 
@@ -218,9 +268,13 @@ def main() -> None:
         result = run(args)
     print(
         "rows={rows} nodes={total_nodes} sampled_roots={sampled_roots_at_t} "
-        "old={old_where_ms:.6f}ms fused={fused_snapshot_ms:.6f}ms "
-        "speedup={speedup:.3f} policy_diff={policy_max_diff:.3g} "
-        "belief_diff={belief_max_diff:.3g}".format(**result),
+        "sampled_rows={sampled_rows_at_t} old={old_where_ms:.6f}ms "
+        "fused={fused_snapshot_ms:.6f}ms sparse={sparse_snapshot_ms:.6f}ms "
+        "sparse_vs_fused={sparse_speedup_vs_fused:.3f} "
+        "policy_diff={policy_max_diff:.3g}/{sparse_policy_max_diff:.3g} "
+        "belief_diff={belief_max_diff:.3g}/{sparse_belief_max_diff:.3g}".format(
+            **result
+        ),
         flush=True,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)

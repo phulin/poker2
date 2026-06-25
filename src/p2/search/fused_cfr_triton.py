@@ -4274,6 +4274,43 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
 if triton is not None:
 
     @triton.jit
+    def _preflop_sample_snapshot_rows_multiway_kernel(
+        policy_ptr,  # [total, H]
+        policy_sample_ptr,  # [total, H]
+        beliefs_ptr,  # [total, P, H]
+        beliefs_sample_ptr,  # [total, P, H]
+        rows_ptr,  # [num_iters, max_updates]
+        counts_ptr,  # [num_iters]
+        t_ptr,  # scalar int64
+        max_updates,
+        H: tl.constexpr,
+        NUM_PLAYERS: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        slot = tl.program_id(0)
+        h_start = tl.program_id(1) * BLOCK_H
+        t = tl.load(t_ptr)
+        count = tl.load(counts_ptr + t)
+        valid = slot < count
+        row = tl.load(rows_ptr + t * max_updates + slot, mask=valid, other=0)
+        hands = h_start + tl.arange(0, BLOCK_H)
+        mask = valid & (hands < H)
+
+        policy_vals = tl.load(policy_ptr + row * H + hands, mask=mask, other=0.0)
+        tl.store(policy_sample_ptr + row * H + hands, policy_vals, mask=mask)
+        for player in tl.static_range(0, NUM_PLAYERS):
+            belief_vals = tl.load(
+                beliefs_ptr + (row * NUM_PLAYERS + player) * H + hands,
+                mask=mask,
+                other=0.0,
+            )
+            tl.store(
+                beliefs_sample_ptr + (row * NUM_PLAYERS + player) * H + hands,
+                belief_vals,
+                mask=mask,
+            )
+
+    @triton.jit
     def _preflop_sample_snapshot_multiway_kernel(
         policy_ptr,  # [total, H]
         policy_sample_ptr,  # [total, H]
@@ -4361,6 +4398,52 @@ def fused_preflop_sample_snapshot_multiway_(
         h,
         NUM_PLAYERS=players,
         BLOCK_M=block_m,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+def fused_preflop_sample_snapshot_rows_multiway_(
+    policy: torch.Tensor,
+    policy_sample: torch.Tensor,
+    beliefs: torch.Tensor,
+    beliefs_sample: torch.Tensor,
+    sample_rows: torch.Tensor,
+    sample_counts: torch.Tensor,
+    t_tensor: torch.Tensor,
+    block_h: int = 256,
+) -> None:
+    """Copy sampled policy/belief rows from a precomputed row table."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert policy.is_contiguous() and policy.dim() == 2
+    assert policy_sample.is_contiguous() and policy_sample.shape == policy.shape
+    assert beliefs.is_contiguous() and beliefs.dim() == 3
+    assert beliefs_sample.is_contiguous() and beliefs_sample.shape == beliefs.shape
+    assert sample_rows.is_contiguous() and sample_rows.dim() == 2
+    assert sample_counts.is_contiguous() and sample_counts.dim() == 1
+    assert t_tensor.is_cuda and t_tensor.dim() == 0
+    total, h = policy.shape
+    players = beliefs.shape[1]
+    assert beliefs.shape == (total, players, h)
+    max_updates = sample_rows.shape[1]
+    if max_updates == 0:
+        return
+    if h > block_h:
+        raise ValueError(f"hand dim {h} exceeds block_h {block_h}")
+    _preflop_sample_snapshot_rows_multiway_kernel[
+        (max_updates, triton.cdiv(h, block_h))
+    ](
+        policy,
+        policy_sample,
+        beliefs,
+        beliefs_sample,
+        sample_rows,
+        sample_counts,
+        t_tensor,
+        max_updates,
+        H=h,
+        NUM_PLAYERS=players,
         BLOCK_H=block_h,
         num_warps=4,
     )

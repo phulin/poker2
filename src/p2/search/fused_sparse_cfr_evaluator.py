@@ -216,6 +216,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._sample_root_rows: torch.Tensor | None = None
         self._sample_root_counts: torch.Tensor | None = None
         self._sample_root_key: tuple[int, int, int] | None = None
+        self._sample_update_rows: torch.Tensor | None = None
+        self._sample_update_counts: torch.Tensor | None = None
+        self._sample_update_key: tuple[int, int, int] | None = None
         self._sample_leaf_enabled: bool = False
         self._sample_leaf_training_mode: bool = True
         self._sample_leaf_epsilon: float = 0.0
@@ -485,6 +488,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._sample_root_counts = None
         if not hasattr(self, "_sample_root_key"):
             self._sample_root_key = None
+        if not hasattr(self, "_sample_update_rows"):
+            self._sample_update_rows = None
+        if not hasattr(self, "_sample_update_counts"):
+            self._sample_update_counts = None
+        if not hasattr(self, "_sample_update_key"):
+            self._sample_update_key = None
         if not hasattr(self, "_sample_leaf_enabled"):
             self._sample_leaf_enabled = False
         if not hasattr(self, "_sample_leaf_training_mode"):
@@ -624,6 +633,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._sample_root_rows = None
         self._sample_root_counts = None
         self._sample_root_key = None
+        self._sample_update_rows = None
+        self._sample_update_counts = None
+        self._sample_update_key = None
         self._sample_leaf_enabled = False
         self._sample_leaf_players = None
         self._sample_leaf_hands = None
@@ -1611,6 +1623,47 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._sample_root_rows = rows.contiguous()
         self._sample_root_counts = counts
         self._sample_root_key = key
+
+    def _prepare_sample_update_table(self) -> None:
+        total = self.total_nodes
+        key = (
+            int(self.t_sample.data_ptr()),
+            int(total),
+            int(self.cfr_iterations),
+        )
+        if self._sample_update_key == key:
+            return
+
+        t_sample_all = self.t_sample[:total].to(device=self.device, dtype=torch.long)
+        valid_sample = t_sample_all < self.cfr_iterations
+        valid_rows = torch.nonzero(valid_sample, as_tuple=False).flatten()
+        t_sample_valid = t_sample_all.index_select(0, valid_rows)
+        counts = torch.bincount(
+            t_sample_valid,
+            minlength=self.cfr_iterations,
+        )[: self.cfr_iterations].contiguous()
+        max_updates = int(counts.max().item()) if counts.numel() else 0
+        rows = torch.full(
+            (self.cfr_iterations, max_updates),
+            total,
+            dtype=torch.long,
+            device=self.device,
+        )
+        if max_updates > 0:
+            order = torch.argsort(t_sample_valid, stable=True)
+            sorted_t = t_sample_valid.index_select(0, order)
+            sorted_rows = valid_rows.index_select(0, order)
+            starts = torch.cumsum(counts, dim=0) - counts
+            position = torch.arange(
+                order.numel(),
+                device=self.device,
+                dtype=torch.long,
+            ) - starts.index_select(0, sorted_t)
+            rows[sorted_t, position] = sorted_rows
+
+        self._sample_update_rows = rows.contiguous()
+        self._sample_update_counts = counts
+        self._sample_update_key = key
 
     def _prepare_compact_leaf_sampling(self, training_mode: bool) -> None:
         self._prepare_sample_root_table()
