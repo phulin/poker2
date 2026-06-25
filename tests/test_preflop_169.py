@@ -663,6 +663,18 @@ def test_compact_preflop_token_static_base_caches_player_tokens() -> None:
     torch.testing.assert_close(cached_tokens, baseline)
     torch.testing.assert_close(cached_prefix, baseline)
 
+    value_model.eval()
+    with torch.no_grad():
+        hand_emb_a = value_model._hand_embedding()
+        hand_emb_b = value_model._hand_embedding()
+    assert hand_emb_a.data_ptr() == hand_emb_b.data_ptr()
+
+    value_model.train()
+    value_model.eval()
+    with torch.no_grad():
+        hand_emb_c = value_model._hand_embedding()
+    assert hand_emb_c.data_ptr() != hand_emb_a.data_ptr()
+
 
 def test_compact_preflop_static_hand_features_are_cached_correctly() -> None:
     model = BetterPreflopGatedTokenMixerValueFFN(

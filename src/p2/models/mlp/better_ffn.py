@@ -2098,13 +2098,30 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
     def _class_static_features(self) -> torch.Tensor:
         return self.preflop_class_static_features
 
+    def train(self, mode: bool = True):
+        self._preflop_hand_embedding_cache = None
+        return super().train(mode)
+
     def _hand_embedding(self) -> torch.Tensor:
-        return self.hand_encoder(
-            self._class_static_features().to(
-                device=self.class_hi_rank.device,
-                dtype=self.hand_encoder[0].weight.dtype,
-            )
+        hand_static = self._class_static_features().to(
+            device=self.class_hi_rank.device,
+            dtype=self.hand_encoder[0].weight.dtype,
         )
+        if self.training or torch.is_grad_enabled():
+            return self.hand_encoder(hand_static)
+        cache_key = (
+            hand_static.device,
+            hand_static.dtype,
+            tuple(int(p._version) for p in self.hand_encoder.parameters()),
+        )
+        cached = getattr(self, "_preflop_hand_embedding_cache", None)
+        if cached is not None:
+            cached_key, cached_value = cached
+            if cached_key == cache_key:
+                return cached_value
+        hand_emb = self.hand_encoder(hand_static)
+        self._preflop_hand_embedding_cache = (cache_key, hand_emb)
+        return hand_emb
 
     def _split_context(
         self, context: torch.Tensor
@@ -2154,7 +2171,7 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             device=self.class_hi_rank.device,
             dtype=self.hand_encoder[0].weight.dtype,
         )
-        hand_emb = self.hand_encoder(hand_static)
+        hand_emb = self._hand_embedding()
         dtype = hand_emb.dtype
         game_token = None
         static_player_tokens = None
