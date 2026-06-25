@@ -78,6 +78,22 @@ def triton_is_available() -> bool:
 if triton is not None:
 
     @triton.jit
+    def _fused_accumulate_weighted_values_kernel(
+        accum_ptr,
+        latest_ptr,
+        weight_ptr,
+        n_elements,
+        BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < n_elements
+        weight = tl.load(weight_ptr)
+        accum = tl.load(accum_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        latest = tl.load(latest_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        tl.store(accum_ptr + offs, accum + latest * weight, mask=mask)
+
+    @triton.jit
     def _fused_dcfr_update_kernel(
         regrets_ptr,
         cumul_ptr,
@@ -764,6 +780,31 @@ def fused_avg_values_multiway_(
         BLOCK_P=block_p,
         BLOCK_H=block_h,
         num_warps=8,
+    )
+
+
+def fused_accumulate_weighted_values_(
+    values_accum: torch.Tensor,
+    latest_values: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: int = 1024,
+) -> None:
+    """In-place flat accumulation: ``values_accum += weight * latest_values``."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert values_accum.is_contiguous() and latest_values.is_contiguous()
+    assert values_accum.shape == latest_values.shape
+    assert weight.numel() == 1
+    n_elements = values_accum.numel()
+    if n_elements == 0:
+        return
+    _fused_accumulate_weighted_values_kernel[(triton.cdiv(n_elements, block_size),)](
+        values_accum,
+        latest_values,
+        weight,
+        n_elements,
+        block_size,
+        num_warps=4,
     )
 
 

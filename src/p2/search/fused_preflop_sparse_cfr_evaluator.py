@@ -19,6 +19,7 @@ from p2.search.fused_cfr_triton import (
     GraphedCFRIteration,
     fused_average_policy_mix_multiway_with_tensors_,
     fused_average_policy_reach_beliefs_depth_preflop_multiway_,
+    fused_accumulate_weighted_values_,
     fused_avg_values_multiway_,
     fused_compact_regret_dcfr_update_multiway_with_tensors_,
     fused_hu_closing_postprocess_writeback_multiway_,
@@ -112,6 +113,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             tuple[int, int], tuple[int, int]
         ] = {}
         self._preflop_all_hands_allowed = False
+        self._preflop_values_avg_deferred_active = False
+        self._preflop_values_avg_deferred_normalized = True
+        self._preflop_values_avg_deferred_weight = 0.0
 
     @property
     def _compact_preflop(self) -> bool:
@@ -143,6 +147,12 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self._preflop_partition_last_values_marker = None
         if not hasattr(self, "_preflop_all_hands_allowed"):
             self._preflop_all_hands_allowed = False
+        if not hasattr(self, "_preflop_values_avg_deferred_active"):
+            self._preflop_values_avg_deferred_active = False
+        if not hasattr(self, "_preflop_values_avg_deferred_normalized"):
+            self._preflop_values_avg_deferred_normalized = True
+        if not hasattr(self, "_preflop_values_avg_deferred_weight"):
+            self._preflop_values_avg_deferred_weight = 0.0
 
     def _invalidate_subgame_caches(self) -> None:
         super()._invalidate_subgame_caches()
@@ -153,6 +163,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_static_model_base_fn_cache.clear()
         self._preflop_static_model_base_features_cache.clear()
         self._preflop_partition_position_slices.clear()
+        self._reset_deferred_average_values()
 
     def _construct_subgame(
         self,
@@ -1325,6 +1336,19 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         old, new = self._get_mixing_weights(t)
         if old + new == 0:
             return
+        if self._defer_average_values_materialization():
+            if not self._preflop_values_avg_deferred_active:
+                self.values_avg.zero_()
+                self._preflop_values_avg_deferred_active = True
+                self._preflop_values_avg_deferred_normalized = False
+                self._preflop_values_avg_deferred_weight = 0.0
+            fused_accumulate_weighted_values_(
+                self.values_avg,
+                self.latest_values.contiguous(),
+                self._t_scalars.mix_new,
+            )
+            self._preflop_values_avg_deferred_weight += float(new)
+            return
         fused_avg_values_multiway_(
             values_avg=self.values_avg,
             latest_values=self.latest_values,
@@ -1336,6 +1360,46 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             and self.num_players == 2,
             ignore_mask=self.env.done,
         )
+
+    def _defer_average_values_materialization(self) -> bool:
+        return (
+            not self.cfr_avg
+            and not self.use_final_policy_values
+            and not (bool(self.model.enforce_zero_sum) and self.num_players == 2)
+        )
+
+    def _reset_deferred_average_values(self) -> None:
+        self._preflop_values_avg_deferred_active = False
+        self._preflop_values_avg_deferred_normalized = True
+        self._preflop_values_avg_deferred_weight = 0.0
+
+    def _average_value_weight_for_range(self, start: int, end: int) -> float:
+        return float(
+            sum(
+                self._get_average_policy_weight(t)
+                for t in range(int(start), int(end))
+            )
+        )
+
+    def _finalize_deferred_average_values(
+        self,
+        *,
+        total_weight: float | None = None,
+    ) -> None:
+        if not getattr(self, "_preflop_values_avg_deferred_active", False):
+            return
+        if getattr(self, "_preflop_values_avg_deferred_normalized", True):
+            return
+        if total_weight is None:
+            total_weight = float(
+                getattr(self, "_preflop_values_avg_deferred_weight", 0.0)
+            )
+        if total_weight <= 0.0:
+            self._reset_deferred_average_values()
+            return
+        self.values_avg.mul_(1.0 / float(total_weight))
+        self._preflop_values_avg_deferred_weight = float(total_weight)
+        self._preflop_values_avg_deferred_normalized = True
 
     def _eval_model_for_fused_writeback(
         self,
@@ -1983,6 +2047,10 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         )
         return out
 
+    def training_data(self, *args, **kwargs):
+        self._finalize_deferred_average_values()
+        return super().training_data(*args, **kwargs)
+
     def evaluate_cfr(
         self, training_mode: bool = True, sample_continuation: bool = True
     ):
@@ -2006,6 +2074,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self.set_leaf_values(0)
         self.compute_expected_values()
         self.values_avg[:] = self.latest_values
+        self._reset_deferred_average_values()
 
         self.t_sample = self._get_sampling_schedule()
         self._prepare_sample_update_table()
@@ -2048,6 +2117,10 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
 
         if self.use_final_policy_values:
             self.update_average_values_final()
+        else:
+            self._finalize_deferred_average_values(
+                total_weight=self._average_value_weight_for_range(start, end)
+            )
 
         self._record_action_mix()
         self._record_cfr_entropy()

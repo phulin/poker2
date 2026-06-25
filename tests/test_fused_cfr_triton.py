@@ -923,6 +923,23 @@ def test_multiway_average_values_update_matches_pytorch() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_accumulate_weighted_values_matches_pytorch() -> None:
+    pytest.importorskip("triton")
+    from p2.search.fused_cfr_triton import fused_accumulate_weighted_values_
+
+    device = torch.device("cuda")
+    torch.manual_seed(1905)
+    accum = torch.randn(17, 6, 169, device=device)
+    latest = torch.randn_like(accum)
+    weight = torch.tensor(0.375, device=device)
+    ref = accum + latest * weight
+
+    out = accum.clone().contiguous()
+    fused_accumulate_weighted_values_(out, latest.contiguous(), weight)
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_multiway_model_values_writeback_matches_pytorch() -> None:
     pytest.importorskip("triton")
     from p2.search.fused_cfr_triton import fused_model_values_writeback_multiway_
