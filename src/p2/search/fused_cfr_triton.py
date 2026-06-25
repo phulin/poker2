@@ -6020,6 +6020,150 @@ def fused_model_values_writeback_multiway_(
 if triton is not None:
 
     @triton.jit
+    def _fused_model_values_postprocess_writeback_multiway_kernel(
+        h_ptr,  # [M, P, H] raw hand_values
+        l_ptr,  # [M, P, H] previous postprocessed last values
+        b_ptr,  # [M, P, H] beliefs
+        idx_ptr,  # [M] absolute latest/env row
+        latest_ptr,  # [T, P, H]
+        last_out_ptr,  # [M, P, H]
+        folded_ptr,  # [T, P] bool
+        stacks_ptr,  # [T, P]
+        starting_stacks_ptr,  # [T, P]
+        scale_ptr,  # [T]
+        onon_ptr,  # 0-D (old + new) / new
+        oon_ptr,  # 0-D old / new
+        M,
+        H,
+        NUM_PLAYERS: tl.constexpr,
+        DO_MIX: tl.constexpr,
+        STORE_LAST: tl.constexpr,
+        BLOCK_P: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        m = tl.program_id(0)
+        if m >= M:
+            return
+        row = tl.load(idx_ptr + m)
+        onon = tl.load(onon_ptr)
+        oon = tl.load(oon_ptr)
+
+        players = tl.arange(0, BLOCK_P)
+        offs = tl.arange(0, BLOCK_H)
+        player_mask = players < NUM_PLAYERS
+        hand_mask = offs < H
+        mask = player_mask[:, None] & hand_mask[None, :]
+        model_ptrs = (m * NUM_PLAYERS + players[:, None]) * H + offs[None, :]
+        latest_ptrs = (row * NUM_PLAYERS + players[:, None]) * H + offs[None, :]
+        env_player_ptrs = row * NUM_PLAYERS + players
+
+        raw = tl.load(h_ptr + model_ptrs, mask=mask, other=0.0).to(tl.float32)
+        beliefs = tl.load(b_ptr + model_ptrs, mask=mask, other=0.0).to(tl.float32)
+        folded = tl.load(folded_ptr + env_player_ptrs, mask=player_mask, other=1)
+        scale = tl.load(scale_ptr + row).to(tl.float32)
+        scale = tl.maximum(scale, 1.0)
+        stack_value = (
+            tl.load(stacks_ptr + env_player_ptrs, mask=player_mask, other=0.0).to(
+                tl.float32
+            )
+            - tl.load(
+                starting_stacks_ptr + env_player_ptrs,
+                mask=player_mask,
+                other=0.0,
+            ).to(tl.float32)
+        ) / scale
+        live = ~folded
+        live_mask = live[:, None] & mask
+        values = tl.where(live[:, None], raw, stack_value[:, None])
+
+        denom = tl.sum(tl.where(live_mask, beliefs, 0.0))
+        expected_sum = tl.sum(tl.where(mask, values * beliefs, 0.0))
+        correction = expected_sum / tl.maximum(denom, 1.0e-12)
+        processed = tl.where(live[:, None], values - correction, values)
+
+        out_vals = processed
+        if DO_MIX:
+            last_vals = tl.load(l_ptr + model_ptrs, mask=mask, other=0.0).to(
+                tl.float32
+            )
+            out_vals = processed * onon - last_vals * oon
+
+        tl.store(latest_ptr + latest_ptrs, out_vals, mask=mask)
+        if STORE_LAST:
+            tl.store(last_out_ptr + model_ptrs, processed, mask=mask)
+
+
+def fused_model_values_postprocess_writeback_multiway_(
+    hand_values: torch.Tensor,  # [M, P, H]
+    last_model_values: torch.Tensor,  # [M, P, H]
+    beliefs: torch.Tensor,  # [M, P, H]
+    node_indices: torch.Tensor,  # [M]
+    latest_values: torch.Tensor,  # [T, P, H]
+    last_out: torch.Tensor,  # [M, P, H]
+    has_folded: torch.Tensor,  # [T, P]
+    stacks: torch.Tensor,  # [T, P]
+    starting_stacks: torch.Tensor,  # [T, P]
+    scale: torch.Tensor,  # [T]
+    old_plus_new_over_new: torch.Tensor,  # 0-D
+    old_over_new: torch.Tensor,  # 0-D
+    do_mix: bool,
+    store_last: bool = True,
+    block_h: int = 256,
+) -> None:
+    """Postprocess multiway model leaf values and write them back in one pass."""
+    if not triton_is_available():
+        raise RuntimeError("Triton is not installed.")
+    assert hand_values.is_contiguous()
+    assert last_model_values.is_contiguous()
+    assert beliefs.is_contiguous()
+    assert node_indices.is_contiguous()
+    assert latest_values.is_contiguous()
+    assert last_out.is_contiguous()
+    assert has_folded.is_contiguous()
+    assert stacks.is_contiguous()
+    assert starting_stacks.is_contiguous()
+    assert scale.is_contiguous()
+    assert (
+        hand_values.shape == last_model_values.shape == beliefs.shape == last_out.shape
+    )
+    assert hand_values.dim() == 3 and hand_values.shape[1] >= 2
+    m, players, h = hand_values.shape
+    assert node_indices.shape == (m,)
+    assert latest_values.shape[1:] == (players, h)
+    assert has_folded.shape == (latest_values.shape[0], players)
+    assert stacks.shape == starting_stacks.shape == (latest_values.shape[0], players)
+    assert scale.shape == (latest_values.shape[0],)
+    assert h <= block_h, f"BLOCK_H={block_h} must cover H={h}"
+    block_p = 1
+    while block_p < players:
+        block_p *= 2
+    _fused_model_values_postprocess_writeback_multiway_kernel[(m,)](
+        hand_values,
+        last_model_values,
+        beliefs,
+        node_indices,
+        latest_values,
+        last_out,
+        has_folded,
+        stacks,
+        starting_stacks,
+        scale,
+        old_plus_new_over_new,
+        old_over_new,
+        m,
+        h,
+        NUM_PLAYERS=players,
+        DO_MIX=do_mix,
+        STORE_LAST=store_last,
+        BLOCK_P=block_p,
+        BLOCK_H=block_h,
+        num_warps=4,
+    )
+
+
+if triton is not None:
+
+    @triton.jit
     def _fused_weighted_parent_sum_inline_opp_both_kernel(
         values_ptr,  # [total, 2, H] in/out
         leaf_values_ptr,  # optional [total, 2, H]

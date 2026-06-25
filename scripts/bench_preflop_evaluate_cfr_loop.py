@@ -65,10 +65,29 @@ DEFAULT_OUT = (
 )
 
 
-def _iter_processes() -> list[tuple[int, str]]:
+def _ancestor_pids(pid: int) -> set[int]:
+    pids: set[int] = set()
     proc_dir = Path("/proc")
-    own = {os.getpid(), os.getppid()}
-    out: list[tuple[int, str]] = []
+    current = pid
+    while current > 0 and current not in pids:
+        pids.add(current)
+        try:
+            for line in (proc_dir / str(current) / "status").read_text().splitlines():
+                if line.startswith("PPid:"):
+                    current = int(line.split()[1])
+                    break
+            else:
+                break
+        except OSError:
+            break
+    return pids
+
+
+def _iter_processes() -> list[tuple[int, int, str]]:
+    proc_dir = Path("/proc")
+    own = _ancestor_pids(os.getpid())
+    own_pgrp = os.getpgrp()
+    out: list[tuple[int, int, str]] = []
     if not proc_dir.exists():
         return out
     for entry in proc_dir.iterdir():
@@ -78,6 +97,9 @@ def _iter_processes() -> list[tuple[int, str]]:
         if pid in own:
             continue
         try:
+            pgid = os.getpgid(pid)
+            if pgid == own_pgrp:
+                continue
             cmd = (
                 (entry / "cmdline")
                 .read_bytes()
@@ -86,7 +108,8 @@ def _iter_processes() -> list[tuple[int, str]]:
             )
         except OSError:
             continue
-        out.append((pid, cmd))
+        if cmd:
+            out.append((pid, pgid, cmd))
     return out
 
 
@@ -94,29 +117,33 @@ def _iter_processes() -> list[tuple[int, str]]:
 def _pause_processes(enabled: bool, pattern: str):
     paused: list[int] = []
     if enabled:
-        for pid, cmd in _iter_processes():
+        seen_groups: set[int] = set()
+        for _pid, pgid, cmd in _iter_processes():
             if pattern not in cmd:
                 continue
+            if pgid in seen_groups:
+                continue
+            seen_groups.add(pgid)
             try:
-                os.kill(pid, signal.SIGSTOP)
-                paused.append(pid)
+                os.killpg(pgid, signal.SIGSTOP)
+                paused.append(pgid)
             except ProcessLookupError:
                 continue
         if paused:
-            print(f"Paused train processes: {paused}", flush=True)
+            print(f"Paused train process groups: {paused}", flush=True)
             time.sleep(0.5)
         else:
             print(f"No process matched pause pattern {pattern!r}.", flush=True)
     try:
         yield
     finally:
-        for pid in paused:
+        for pgid in paused:
             try:
-                os.kill(pid, signal.SIGCONT)
+                os.killpg(pgid, signal.SIGCONT)
             except ProcessLookupError:
                 continue
         if paused:
-            print(f"Resumed train processes: {paused}", flush=True)
+            print(f"Resumed train process groups: {paused}", flush=True)
 
 
 def _sync(device: torch.device) -> None:
@@ -272,7 +299,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-closing-checkpoint", action="store_true")
     parser.add_argument("--skip-load-weights", action="store_true")
     parser.add_argument("--no-pause", action="store_true")
-    parser.add_argument("--pause-pattern", default="train_rebel")
+    parser.add_argument("--pause-pattern", default="preflop_backward_induction")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     return parser.parse_args()
 

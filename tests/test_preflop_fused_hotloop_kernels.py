@@ -9,6 +9,7 @@ from p2.env.card_utils import (
     preflop_class_multiplicity_tensor,
 )
 from p2.search.fused_cfr_triton import (
+    fused_model_values_postprocess_writeback_multiway_,
     fused_preflop169_parent_sum_opp_rank_stats_,
     fused_preflop169_parent_sum_opp_,
     fused_preflop169_project_rows_,
@@ -71,6 +72,92 @@ def test_select_heads_up_beliefs_triton_matches_torch_gather() -> None:
         hand_dim=PREFLOP_HANDS,
     )
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.skipif(not _cuda_available(), reason="requires CUDA and Triton")
+def test_fused_model_values_postprocess_writeback_multiway_matches_torch() -> None:
+    device = torch.device("cuda")
+    rows = 13
+    total = 29
+    players = 6
+    hand_dim = PREFLOP_HANDS
+    node_indices = torch.tensor(
+        [0, 3, 5, 7, 11, 13, 17, 19, 23, 27, 1, 9, 21],
+        dtype=torch.long,
+        device=device,
+    )
+    hand_values = torch.randn(
+        rows,
+        players,
+        hand_dim,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    last_model_values = torch.randn(
+        rows,
+        players,
+        hand_dim,
+        device=device,
+    )
+    beliefs = torch.rand(rows, players, hand_dim, device=device)
+    beliefs = beliefs / beliefs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    has_folded = torch.rand(total, players, device=device) < 0.2
+    has_folded[:, 0] = False
+    starting_stacks = torch.rand(total, players, device=device) * 200.0 + 800.0
+    stacks = starting_stacks + torch.randn(total, players, device=device) * 20.0
+    scale = torch.rand(total, device=device) * 100.0 + 200.0
+    onon = torch.tensor(1.25, device=device)
+    oon = torch.tensor(0.25, device=device)
+
+    folded_mask = has_folded[node_indices]
+    stack_value = (
+        (stacks[node_indices] - starting_stacks[node_indices])
+        / scale[node_indices, None].clamp_min(1.0)
+    )
+    values = torch.where(
+        folded_mask[:, :, None],
+        stack_value[:, :, None],
+        hand_values.float(),
+    )
+    live_mask = ~folded_mask
+    denom = (beliefs * live_mask[:, :, None]).sum(dim=(1, 2), keepdim=True)
+    expected_sum = (values * beliefs).sum(dim=(1, 2), keepdim=True)
+    processed = torch.where(
+        live_mask[:, :, None],
+        values - expected_sum / denom.clamp_min(1e-12),
+        values,
+    )
+
+    expected_latest = torch.zeros(total, players, hand_dim, device=device)
+    expected_latest[node_indices] = processed * onon - last_model_values * oon
+    expected_last = processed
+
+    actual_latest = torch.zeros_like(expected_latest)
+    actual_last = torch.empty_like(last_model_values)
+    fused_model_values_postprocess_writeback_multiway_(
+        hand_values=hand_values.contiguous(),
+        last_model_values=last_model_values.contiguous(),
+        beliefs=beliefs.contiguous(),
+        node_indices=node_indices.contiguous(),
+        latest_values=actual_latest,
+        last_out=actual_last,
+        has_folded=has_folded.contiguous(),
+        stacks=stacks.contiguous(),
+        starting_stacks=starting_stacks.contiguous(),
+        scale=scale.contiguous(),
+        old_plus_new_over_new=onon,
+        old_over_new=oon,
+        do_mix=True,
+        store_last=True,
+    )
+
+    torch.testing.assert_close(
+        actual_latest[node_indices],
+        expected_latest[node_indices],
+        rtol=2e-3,
+        atol=2e-3,
+    )
+    torch.testing.assert_close(actual_last, expected_last, rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.skipif(not _cuda_available(), reason="requires CUDA and Triton")
