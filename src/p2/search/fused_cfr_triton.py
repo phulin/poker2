@@ -4061,6 +4061,8 @@ if triton is not None:
         BLOCK_P: tl.constexpr,
         BLOCK_H: tl.constexpr,
         WRITE_LEAF: tl.constexpr,
+        SKIP_MODEL_LEAF_REACH_STORE: tl.constexpr,
+        SKIP_MODEL_LEAF_BELIEF_STORE: tl.constexpr,
     ):
         p = tl.program_id(0)
         parent = parent_base + p
@@ -4116,13 +4118,24 @@ if triton is not None:
                     parent_reach,
                 )
                 child_reach = tl.where(allowed[None, :], child_reach, 0.0)
-                tl.store(
-                    reach_ptr
-                    + (child * NUM_PLAYERS + players[:, None]) * H
-                    + hands[None, :],
-                    child_reach,
-                    mask=value_mask,
-                )
+                if WRITE_LEAF:
+                    slot_raw = tl.load(leaf_slot_ptr + child)
+                    if (not SKIP_MODEL_LEAF_REACH_STORE) or slot_raw < 0:
+                        tl.store(
+                            reach_ptr
+                            + (child * NUM_PLAYERS + players[:, None]) * H
+                            + hands[None, :],
+                            child_reach,
+                            mask=value_mask,
+                        )
+                else:
+                    tl.store(
+                        reach_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + hands[None, :],
+                        child_reach,
+                        mask=value_mask,
+                    )
 
                 root = tl.load(root_index_ptr + child)
                 root_belief = tl.load(
@@ -4144,15 +4157,7 @@ if triton is not None:
                     unnorm / tl.maximum(belief_denom[:, None], EPS),
                     fallback[None, :],
                 )
-                tl.store(
-                    beliefs_ptr
-                    + (child * NUM_PLAYERS + players[:, None]) * H
-                    + hands[None, :],
-                    out,
-                    mask=value_mask,
-                )
                 if WRITE_LEAF:
-                    slot_raw = tl.load(leaf_slot_ptr + child)
                     if slot_raw >= 0:
                         slot = slot_raw.to(tl.int64)
                         tl.store(
@@ -4162,6 +4167,22 @@ if triton is not None:
                             out,
                             mask=value_mask,
                         )
+                    if (not SKIP_MODEL_LEAF_BELIEF_STORE) or slot_raw < 0:
+                        tl.store(
+                            beliefs_ptr
+                            + (child * NUM_PLAYERS + players[:, None]) * H
+                            + hands[None, :],
+                            out,
+                            mask=value_mask,
+                        )
+                else:
+                    tl.store(
+                        beliefs_ptr
+                        + (child * NUM_PLAYERS + players[:, None]) * H
+                        + hands[None, :],
+                        out,
+                        mask=value_mask,
+                    )
 
 
 def fused_policy_reach_beliefs_depth_preflop_multiway_(
@@ -4204,6 +4225,18 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
     else:
         leaf_slot = root_index
         leaf_out = beliefs
+    skip_model_leaf_belief_store = write_leaf and (
+        os.environ.get("P2_PREFLOP_SKIP_MODEL_LEAF_BELIEF_STORE", "1")
+        .strip()
+        .lower()
+        not in {"0", "false", "off", "no"}
+    )
+    skip_model_leaf_reach_store = write_leaf and (
+        os.environ.get("P2_PREFLOP_SKIP_MODEL_LEAF_REACH_STORE", "1")
+        .strip()
+        .lower()
+        not in {"0", "false", "off", "no"}
+    )
     if h > block_h:
         raise ValueError(f"hand dim {h} exceeds block_h {block_h}")
     mc_pow2 = 1
@@ -4232,6 +4265,8 @@ def fused_policy_reach_beliefs_depth_preflop_multiway_(
         BLOCK_P=block_p,
         BLOCK_H=block_h,
         WRITE_LEAF=write_leaf,
+        SKIP_MODEL_LEAF_REACH_STORE=skip_model_leaf_reach_store,
+        SKIP_MODEL_LEAF_BELIEF_STORE=skip_model_leaf_belief_store,
         num_warps=_env_int("P2_PREFLOP_POLICY_REACH_WARPS", 4),
     )
 
