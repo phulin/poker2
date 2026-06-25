@@ -526,6 +526,7 @@ class PreflopAllIn169Oracle:
         self.compile_model = bool(compile_model)
         self._exact_loaded = False
         self._share2: torch.Tensor | None = None
+        self._share2_combined_flat: torch.Tensor | None = None
         self._share3: torch.Tensor | None = None
         self._share3_weighted_flat: torch.Tensor | None = None
         self._compat3_flat: torch.Tensor | None = None
@@ -605,10 +606,18 @@ class PreflopAllIn169Oracle:
     ) -> torch.Tensor:
         self._ensure_exact()
         assert self._share2 is not None
+        if self._share2_combined_flat is None:
+            weighted = self._compat2 * self._share2
+            self._share2_combined_flat = torch.cat(
+                (weighted.T, self._compat2.T),
+                dim=-1,
+            ).contiguous()
+        combined_flat = self._share2_combined_flat
+        assert combined_flat is not None
         opp_per_combo = opp.to(torch.float32) / self._multiplicity
-        weighted = self._compat2 * self._share2
-        numer = opp_per_combo @ weighted.T
-        denom = (opp_per_combo @ self._compat2.T).clamp_min(1.0e-8)
+        combined = opp_per_combo @ combined_flat
+        numer, denom = combined.split(PREFLOP_HANDS, dim=-1)
+        denom = denom.clamp_min(1.0e-8)
         return (numer / denom).to(hero.dtype)
 
     def _share3_values(
