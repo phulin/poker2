@@ -2450,9 +2450,11 @@ class BetterPreflopTransformerValueFFN(_BetterPreflopTransformerBase):
         apply_zero_sum: bool = True,
     ) -> ModelOutput:
         hand_value = self.value_hand_proj(hand_emb)
-        state_value = self.value_scale(player_state)
-        hand_values_raw = torch.einsum("bpd,hd->bph", state_value, hand_value)
-        hand_values_raw = hand_values_raw / math.sqrt(float(self.hidden_dim))
+        combined_weight = self.value_scale.weight.t().matmul(hand_value.t())
+        combined_weight = combined_weight / math.sqrt(float(self.hidden_dim))
+        hand_values_raw = player_state.flatten(0, 1).matmul(combined_weight).view(
+            -1, self.num_players, PREFLOP_HANDS
+        )
         hand_values_raw = hand_values_raw + self.value_bias(player_state)
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
