@@ -37,6 +37,7 @@ from p2.search.fused_cfr_triton import (
     fused_policy_reach_beliefs_depth_preflop_multiway_,
     fused_policy_renorm_reach_depth_multiway_,
     fused_preflop_multiway_beliefs_from_reach_,
+    fused_preflop_sample_snapshot_multiway_,
     fused_regret_tail_multiway_,
     preflop169_unblocked_rank_stats_out_,
     preflop169_unblocked_rank_mass_triton_out_,
@@ -1369,6 +1370,14 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             not in {"0", "false", "off", "no"}
         )
 
+    def _use_fused_sample_snapshot(self) -> bool:
+        return (
+            os.environ.get("P2_PREFLOP_FUSED_SAMPLE_SNAPSHOT", "1")
+            .strip()
+            .lower()
+            not in {"0", "false", "off", "no"}
+        )
+
     def _partition_last_values_buffer(
         self,
         attr: str,
@@ -1780,19 +1789,31 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self.apply_schedules(t)
         self._refresh_fused_t_scalars(t)
 
-        sample_mask = self.t_sample == self._t_scalars.t_tensor
-        torch.where(
-            sample_mask[:, None],
-            self.policy_probs,
-            self.policy_probs_sample,
-            out=self.policy_probs_sample,
-        )
-        torch.where(
-            sample_mask[:, None, None],
-            self.beliefs,
-            self.beliefs_sample,
-            out=self.beliefs_sample,
-        )
+        if self._use_fused_sample_snapshot():
+            fused_preflop_sample_snapshot_multiway_(
+                self.policy_probs,
+                self.policy_probs_sample,
+                self.beliefs,
+                self.beliefs_sample,
+                self.t_sample.contiguous(),
+                self._t_scalars.t_tensor,
+                block_m=8,
+                block_h=256,
+            )
+        else:
+            sample_mask = self.t_sample == self._t_scalars.t_tensor
+            torch.where(
+                sample_mask[:, None],
+                self.policy_probs,
+                self.policy_probs_sample,
+                out=self.policy_probs_sample,
+            )
+            torch.where(
+                sample_mask[:, None, None],
+                self.beliefs,
+                self.beliefs_sample,
+                out=self.beliefs_sample,
+            )
 
         self._prepare_tree_slices()
         top = self._top
