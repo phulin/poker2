@@ -1288,13 +1288,24 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def update_policy(self, t: int) -> None:
         self._refresh_fused_t_scalars(t)
         self._regret_match_current_policy(t)
+        defer_avg_beliefs = not self.cfr_avg and self._defer_average_reach_beliefs()
         avg_beliefs_updated = self.update_average_policy(
             t,
-            update_reach=True,
-            update_beliefs=True,
+            update_reach=not defer_avg_beliefs,
+            update_beliefs=not defer_avg_beliefs,
         )
-        if not avg_beliefs_updated:
+        if not avg_beliefs_updated and not defer_avg_beliefs:
             self._propagate_all_beliefs(self.beliefs_avg, self.self_reach_avg)
+
+    def _defer_average_reach_beliefs(self) -> bool:
+        if (
+            os.environ.get("P2_PREFLOP_DEFER_AVG_BELIEFS", "1").strip().lower()
+            in {"0", "false", "off", "no"}
+        ):
+            return False
+        if self.use_final_policy_values:
+            return True
+        return not (self.num_players == 2 and bool(self.model.enforce_zero_sum))
 
     def update_average_policy(
         self,
@@ -1387,6 +1398,27 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             )
             return bool(update_reach and update_beliefs)
         return False
+
+    def _finalize_deferred_average_policy(self) -> None:
+        self._prepare_tree_slices()
+        root_count = self.root_nodes
+        numerator, denominator = self._ensure_average_policy_buffers()
+        parent_index_all = self._parent_index_all
+        assert parent_index_all is not None
+        fused_average_policy_mix_multiway_with_tensors_(
+            policy_probs_avg=self.policy_probs_avg,
+            average_policy_numerator=numerator,
+            average_policy_denominator=denominator,
+            policy_probs=self.policy_probs,
+            self_reach=self.self_reach,
+            to_act=self.env.to_act.contiguous(),
+            parent_index=parent_index_all,
+            new=self._t_scalars.zero,
+            bottom=root_count,
+            block_h=512,
+        )
+        self.average_policy_initialized = True
+        self._renormalize_average_policy(update_reach=False)
 
     def _renormalize_average_policy(
         self,
@@ -2090,6 +2122,16 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             else:
                 self.cfr_iteration(t)
             t += 1
+
+        if not self.cfr_avg and self.use_final_policy_values:
+            self._finalize_deferred_average_policy()
+            self.self_reach_avg[: self.root_nodes] = 1.0
+            self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
+            self._refresh_average_beliefs()
+        elif not self.cfr_avg and self._defer_average_reach_beliefs():
+            self.self_reach_avg[: self.root_nodes] = 1.0
+            self._calculate_reach_weights(self.self_reach_avg, self.policy_probs_avg)
+            self._refresh_average_beliefs()
 
         if self.use_final_policy_values:
             self.update_average_values_final()
