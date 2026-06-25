@@ -38,6 +38,8 @@ from p2.models.mlp import RebelFFN
 from p2.models.mlp.better_features import context_length
 from p2.models.mlp.better_ffn import (
     BetterPolicyFFN,
+    BetterPreflopGatedTokenMixerPolicyFFN,
+    BetterPreflopGatedTokenMixerValueFFN,
     BetterPreflopPolicyFFN,
     BetterPreflopTransformerPolicyFFN,
     BetterPreflopTransformerValueFFN,
@@ -718,22 +720,36 @@ class RebelCFRTrainer:
         if int(cfg.model.preflop_hand_dim) == 169:
             if preflop_context_in_dim is not None:
                 common["context_in_dim"] = int(preflop_context_in_dim)
-            if cfg.model.preflop_model_type is PreflopModelType.transformer:
-                transformer_common = dict(
+            if cfg.model.preflop_model_type in {
+                PreflopModelType.transformer,
+                PreflopModelType.gated_token_mixer,
+            }:
+                token_common = dict(
                     common,
                     transformer_heads=int(cfg.model.preflop_transformer_heads),
-                    range_attention_slots=int(
-                        cfg.model.preflop_range_attention_slots
+                    range_slot_moment_slots=int(
+                        cfg.model.preflop_range_slot_moment_slots
                     ),
                 )
+                if cfg.model.preflop_model_type is PreflopModelType.gated_token_mixer:
+                    return BetterSplitFFN(
+                        policy_model=BetterPreflopGatedTokenMixerPolicyFFN(
+                            num_actions=model_num_actions, **token_common
+                        ),
+                        value_model=BetterPreflopGatedTokenMixerValueFFN(
+                            num_actions=1,
+                            value_heads=cfg.model.street_value_heads,
+                            **token_common,
+                        ),
+                    )
                 return BetterSplitFFN(
                     policy_model=BetterPreflopTransformerPolicyFFN(
-                        num_actions=model_num_actions, **transformer_common
+                        num_actions=model_num_actions, **token_common
                     ),
                     value_model=BetterPreflopTransformerValueFFN(
                         num_actions=1,
                         value_heads=cfg.model.street_value_heads,
-                        **transformer_common,
+                        **token_common,
                     ),
                 )
             return BetterSplitFFN(

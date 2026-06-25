@@ -1440,60 +1440,124 @@ class _PreflopTokenEncoderBlock(nn.Module):
         return x + self.ffn(x) / math.sqrt(2.0)
 
 
-class _PreflopRangeAttentionPool(nn.Module):
-    """Learned attention summaries over one player's compact preflop range."""
+class _PreflopGatedTokenMixerBlock(nn.Module):
+    """Position-sensitive token mixer for the compact preflop token stream."""
 
     def __init__(
         self,
-        hand_dim: int,
+        dim: int,
+        *,
+        token_count: int,
+        ffn_dim: int,
+        nonlinearity: NonlinearityType,
+    ) -> None:
+        super().__init__()
+        if token_count <= 1:
+            raise ValueError("token_count must be greater than one")
+        token_hidden = max(token_count, min(32, token_count * 4))
+        self.token_count = int(token_count)
+        self.token_norm = nn.RMSNorm(dim, eps=1e-5)
+        self.token_mixer = nn.Sequential(
+            OrderedDict(
+                [
+                    ("linear_in", nn.Linear(token_count, token_hidden, bias=False)),
+                    ("activation", get_activation(nonlinearity)),
+                    ("linear_out", nn.Linear(token_hidden, token_count, bias=False)),
+                ]
+            )
+        )
+        self.token_gate = nn.Linear(dim, dim, bias=True)
+        self.ffn = ffn_block(dim, ffn_dim, dim, nonlinearity)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.token_norm(x)
+        mixed = self.token_mixer(y.transpose(1, 2)).transpose(1, 2)
+        gate = torch.sigmoid(self.token_gate(y))
+        x = x + mixed * gate / math.sqrt(2.0)
+        return x + self.ffn(x) / math.sqrt(2.0)
+
+
+class _PreflopRangeSlotMomentPool(nn.Module):
+    """Learned soft-slot moments over one player's compact preflop range.
+
+    This intentionally avoids constructing per-hand hidden tokens. The only
+    hand-axis tensors are tiny static slot bases/features; leaf-batch memory is
+    proportional to ``slots`` rather than ``PREFLOP_HANDS * hidden_dim``.
+    """
+
+    def __init__(
+        self,
+        hand_feature_dim: int,
         player_context_dim: int,
         hidden_dim: int,
         slots: int,
+        nonlinearity: NonlinearityType,
     ) -> None:
         super().__init__()
         if slots <= 0:
             raise ValueError("slots must be positive")
-        self.hand_dim = int(hand_dim)
+        if hand_feature_dim <= 0:
+            raise ValueError("hand_feature_dim must be positive")
+        self.hand_feature_dim = int(hand_feature_dim)
         self.slots = int(slots)
-        self.slot_queries = nn.Parameter(torch.empty(slots, hand_dim))
-        self.log_key_proj = nn.Linear(1, hand_dim, bias=False)
-        self.log_value_proj = nn.Linear(1, hand_dim, bias=False)
-        self.context_query_proj = nn.Linear(player_context_dim, hand_dim, bias=False)
-        self.context_key_proj = nn.Linear(player_context_dim, hand_dim, bias=False)
-        self.context_value_proj = nn.Linear(player_context_dim, hand_dim, bias=False)
-        self.query_norm = nn.RMSNorm(hand_dim, eps=1e-5)
-        self.key_norm = nn.RMSNorm(hand_dim, eps=1e-5)
-        self.value_norm = nn.RMSNorm(hand_dim, eps=1e-5)
-        self.output_proj = nn.Linear(slots * hand_dim, hidden_dim, bias=False)
-        nn.init.normal_(self.slot_queries, mean=0.0, std=0.02)
+        self.slot_logits = nn.Parameter(torch.empty(PREFLOP_HANDS, slots))
+        slot_width = max(16, min(64, hidden_dim // 4))
+        slot_input_dim = self.hand_feature_dim + player_context_dim + 2
+        self.slot_mlp = nn.Sequential(
+            nn.Linear(slot_input_dim, slot_width, bias=False),
+            nn.RMSNorm(slot_width, eps=1e-5),
+            get_activation(nonlinearity),
+            nn.Linear(slot_width, slot_width, bias=False),
+            nn.RMSNorm(slot_width, eps=1e-5),
+            get_activation(nonlinearity),
+        )
+        self.slot_embedding = nn.Parameter(torch.empty(slots, slot_width))
+        self.output_proj = nn.Linear(slots * slot_width, hidden_dim, bias=False)
+        nn.init.normal_(self.slot_logits, mean=0.0, std=0.02)
+        nn.init.normal_(self.slot_embedding, mean=0.0, std=0.02)
 
     def forward(
         self,
         player_beliefs: torch.Tensor,
-        hand_emb: torch.Tensor,
+        hand_features: torch.Tensor,
         player_context: torch.Tensor,
     ) -> torch.Tensor:
-        log_beliefs = player_beliefs.clamp_min(1.0e-8).log()
-        log_features = log_beliefs[..., None]
-        hand_tokens = hand_emb[None, None, :, :]
-        context_query = self.context_query_proj(player_context)[:, :, None, :]
-        context_key = self.context_key_proj(player_context)[:, :, None, :]
-        context_value = self.context_value_proj(player_context)[:, :, None, :]
-        queries = self.query_norm(
-            self.slot_queries[None, None, :, :] + context_query
+        if hand_features.shape != (PREFLOP_HANDS, self.hand_feature_dim):
+            raise ValueError(
+                "hand_features must have shape "
+                f"({PREFLOP_HANDS}, {self.hand_feature_dim})"
+            )
+        dtype = player_beliefs.dtype
+        assignment = torch.softmax(self.slot_logits, dim=-1).to(dtype)
+        hand_features = hand_features.to(device=player_beliefs.device, dtype=dtype)
+        slot_mass = player_beliefs @ assignment
+        weighted_features = (
+            assignment[:, :, None] * hand_features[:, None, :]
+        ).reshape(PREFLOP_HANDS, self.slots * self.hand_feature_dim)
+        slot_moments = (player_beliefs @ weighted_features).view(
+            *player_beliefs.shape[:-1],
+            self.slots,
+            self.hand_feature_dim,
         )
-        keys = self.key_norm(
-            hand_tokens + self.log_key_proj(log_features) + context_key
+        slot_moments = slot_moments / slot_mass.clamp_min(1.0e-8)[..., None]
+        context = player_context[:, :, None, :].expand(
+            -1,
+            -1,
+            self.slots,
+            -1,
         )
-        values = self.value_norm(
-            hand_tokens + self.log_value_proj(log_features) + context_value
+        slot_input = torch.cat(
+            (
+                slot_mass[..., None],
+                slot_mass.clamp_min(1.0e-8).log()[..., None],
+                slot_moments,
+                context,
+            ),
+            dim=-1,
         )
-        scores = torch.einsum("bpsd,bphd->bpsh", queries, keys)
-        scores = scores / math.sqrt(float(self.hand_dim))
-        scores = scores + log_beliefs[:, :, None, :]
-        weights = torch.softmax(scores, dim=-1)
-        pooled = torch.einsum("bpsh,bphd->bpsd", weights, values)
-        return self.output_proj(pooled.flatten(2))
+        slot_vecs = self.slot_mlp(slot_input)
+        slot_vecs = slot_vecs + self.slot_embedding.to(dtype)[None, None, :, :]
+        return self.output_proj(slot_vecs.flatten(2))
 
 
 class _BetterPreflopCompactFFN(BaseMLPModel):
@@ -1766,14 +1830,14 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         policy_hand_bias_rank: int = 32,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
         transformer_heads: int = 8,
-        range_attention_slots: int = 0,
+        range_slot_moment_slots: int = 0,
     ) -> None:
         super().__init__()
         _validate_internal_zero_sum(num_players, enforce_zero_sum)
         if range_hidden_dim < 0:
             raise ValueError("range_hidden_dim must be non-negative")
-        if range_attention_slots < 0:
-            raise ValueError("range_attention_slots must be non-negative")
+        if range_slot_moment_slots < 0:
+            raise ValueError("range_slot_moment_slots must be non-negative")
         if board_interaction_dim != 0:
             raise ValueError("compact preflop models do not support board interaction")
         if policy_rank <= 0:
@@ -1782,7 +1846,7 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             raise ValueError("policy_hand_bias_rank must be positive")
         if transformer_heads <= 0:
             raise ValueError("preflop_transformer_heads must be positive")
-        if hidden_dim % transformer_heads != 0:
+        if self._uses_attention_heads() and hidden_dim % transformer_heads != 0:
             raise ValueError(
                 "hidden_dim must be divisible by preflop_transformer_heads"
             )
@@ -1801,7 +1865,7 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         self.policy_hand_bias_rank = int(policy_hand_bias_rank)
         self.nonlinearity = nonlinearity
         self.transformer_heads = int(transformer_heads)
-        self.range_attention_slots = int(range_attention_slots)
+        self.range_slot_moment_slots = int(range_slot_moment_slots)
 
         self.scalar_context_dim = context_length(num_players) - num_players * 13
         self.player_context_dim = 13
@@ -1837,14 +1901,15 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             nn.RMSNorm(hidden_dim, eps=1e-5),
             get_activation(nonlinearity),
         )
-        self.range_attention_pool = (
-            _PreflopRangeAttentionPool(
-                hand_embed_dim,
+        self.range_slot_moment_pool = (
+            _PreflopRangeSlotMomentPool(
+                HAND_STATIC_FEATURE_DIM,
                 self.player_context_dim,
                 hidden_dim,
-                self.range_attention_slots,
+                self.range_slot_moment_slots,
+                nonlinearity,
             )
-            if self.range_attention_slots > 0
+            if self.range_slot_moment_slots > 0
             else None
         )
         self.game_context_proj = nn.Sequential(
@@ -1858,20 +1923,23 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             get_activation(nonlinearity),
         )
         self.encoder = nn.ModuleList(
-            [
-                _PreflopTokenEncoderBlock(
-                    hidden_dim,
-                    num_heads=transformer_heads,
-                    ffn_dim=ffn_dim,
-                    nonlinearity=nonlinearity,
-                )
-                for _ in range(num_hidden_layers)
-            ]
+            [self._make_token_encoder_block() for _ in range(num_hidden_layers)]
         )
         self.player_state = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.RMSNorm(hidden_dim, eps=1e-5),
             get_activation(nonlinearity),
+        )
+
+    def _uses_attention_heads(self) -> bool:
+        return True
+
+    def _make_token_encoder_block(self) -> nn.Module:
+        return _PreflopTokenEncoderBlock(
+            self.hidden_dim,
+            num_heads=self.transformer_heads,
+            ffn_dim=self.ffn_dim,
+            nonlinearity=self.nonlinearity,
         )
 
     def _class_static_features(self) -> torch.Tensor:
@@ -1941,7 +2009,11 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             )
         player_beliefs = features.beliefs.view(-1, self.num_players, PREFLOP_HANDS)
         _, player_context = self._split_context(features.context)
-        hand_emb = self._hand_embedding()
+        hand_static = self._class_static_features().to(
+            device=self.class_hi_rank.device,
+            dtype=self.hand_encoder[0].weight.dtype,
+        )
+        hand_emb = self.hand_encoder(hand_static)
         dtype = hand_emb.dtype
         player_beliefs = player_beliefs.to(dtype)
         bucket_projection = self.preflop_bucket_projection.to(
@@ -1957,10 +2029,10 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             + self.bucket_mass_proj(player_beliefs @ bucket_projection)
             + self.player_context_proj(player_context.to(dtype))
         )
-        if self.range_attention_pool is not None:
-            player_tokens = player_tokens + self.range_attention_pool(
+        if self.range_slot_moment_pool is not None:
+            player_tokens = player_tokens + self.range_slot_moment_pool(
                 player_beliefs,
-                hand_emb,
+                hand_static,
                 player_context.to(dtype),
             )
         game_token = (
@@ -2046,15 +2118,7 @@ class BetterPreflopTransformerValueFFN(_BetterPreflopTransformerBase):
         super().__init__(*args, **kwargs)
         del value_heads
         self.value_encoder = nn.ModuleList(
-            [
-                _PreflopTokenEncoderBlock(
-                    self.hidden_dim,
-                    num_heads=self.transformer_heads,
-                    ffn_dim=self.ffn_dim,
-                    nonlinearity=self.nonlinearity,
-                )
-                for _ in range(self.num_value_layers)
-            ]
+            [self._make_token_encoder_block() for _ in range(self.num_value_layers)]
         )
         self.value_hand_proj = nn.Linear(
             self.preflop_hand_embed_dim, self.hidden_dim, bias=False
@@ -2189,15 +2253,7 @@ class BetterPreflopTransformerPolicyFFN(_BetterPreflopTransformerBase):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.policy_encoder = nn.ModuleList(
-            [
-                _PreflopTokenEncoderBlock(
-                    self.hidden_dim,
-                    num_heads=self.transformer_heads,
-                    ffn_dim=self.ffn_dim,
-                    nonlinearity=self.nonlinearity,
-                )
-                for _ in range(self.num_policy_layers)
-            ]
+            [self._make_token_encoder_block() for _ in range(self.num_policy_layers)]
         )
         self.policy_hand_proj = output_projection(
             self.preflop_hand_embed_dim, self.policy_rank
@@ -2278,6 +2334,39 @@ class BetterPreflopTransformerPolicyFFN(_BetterPreflopTransformerBase):
             device=device,
             dtype=dtype,
         )
+
+
+class _BetterPreflopGatedTokenMixerMixin:
+    """Compact token encoder that mixes fixed token slots without attention."""
+
+    def _uses_attention_heads(self) -> bool:
+        return False
+
+    def _make_token_encoder_block(self) -> nn.Module:
+        return _PreflopGatedTokenMixerBlock(
+            self.hidden_dim,
+            token_count=self.num_players + 1,
+            ffn_dim=self.ffn_dim,
+            nonlinearity=self.nonlinearity,
+        )
+
+
+class BetterPreflopGatedTokenMixerValueFFN(
+    _BetterPreflopGatedTokenMixerMixin,
+    BetterPreflopTransformerValueFFN,
+):
+    """Compact 169-hand preflop value model with gated token mixing."""
+
+    pass
+
+
+class BetterPreflopGatedTokenMixerPolicyFFN(
+    _BetterPreflopGatedTokenMixerMixin,
+    BetterPreflopTransformerPolicyFFN,
+):
+    """Compact 169-hand preflop policy model with gated token mixing."""
+
+    pass
 
 
 class BetterPreflopValueFFN(_BetterPreflopCompactFFN):

@@ -17,6 +17,8 @@ from p2.env.card_utils import (
 )
 from p2.models.mlp.better_features import context_length
 from p2.models.mlp.better_ffn import (
+    BetterPreflopGatedTokenMixerPolicyFFN,
+    BetterPreflopGatedTokenMixerValueFFN,
     BetterPreflopPolicyFFN,
     BetterPreflopTransformerPolicyFFN,
     BetterPreflopTransformerValueFFN,
@@ -510,6 +512,77 @@ def test_compact_preflop_transformer_model_shapes_and_policy_loss() -> None:
     assert torch.isfinite(loss["policy_loss"])
 
 
+def test_compact_preflop_gated_token_mixer_model_shapes_and_policy_loss() -> None:
+    batch_size = 2
+    num_players = 3
+    num_actions = 5
+    features = _compact_features(batch_size, num_players)
+    features.to_act[:] = torch.tensor([0, 2], dtype=torch.long)
+    value_model = BetterPreflopGatedTokenMixerValueFFN(
+        num_actions=1,
+        hidden_dim=50,
+        range_hidden_dim=16,
+        ffn_dim=96,
+        num_hidden_layers=2,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        transformer_heads=8,
+        enforce_zero_sum=False,
+    )
+    policy_model = BetterPreflopGatedTokenMixerPolicyFFN(
+        num_actions=num_actions,
+        hidden_dim=50,
+        range_hidden_dim=16,
+        ffn_dim=96,
+        num_hidden_layers=2,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=num_players,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+        transformer_heads=8,
+        enforce_zero_sum=False,
+    )
+    value_model.init_weights(torch.Generator(device="cpu").manual_seed(8))
+    policy_model.init_weights(torch.Generator(device="cpu").manual_seed(9))
+
+    assert len(value_model.encoder) == 2
+    assert len(value_model.value_encoder) == 1
+    assert len(policy_model.encoder) == 2
+    assert len(policy_model.policy_encoder) == 1
+
+    value_output = value_model(features, include_policy=False)
+    policy_output = policy_model(features, include_policy=True, include_value=False)
+
+    assert value_output.hand_values.shape == (
+        batch_size,
+        num_players,
+        PREFLOP_HANDS,
+    )
+    assert policy_output.policy_logits.shape == (
+        batch_size,
+        PREFLOP_HANDS,
+        num_actions,
+    )
+    targets = torch.full(
+        (batch_size, PREFLOP_HANDS, num_actions),
+        1.0 / num_actions,
+    )
+    batch = RebelBatch(
+        features=features,
+        legal_masks=torch.ones(batch_size, num_actions, dtype=torch.bool),
+        policy_targets=targets,
+    )
+    loss = RebelSupervisedLoss(num_players=num_players).forward_policy(
+        policy_output,
+        batch,
+    )
+    assert torch.isfinite(loss["policy_loss"])
+
+
 def test_compact_preflop_transformer_head_layers_work_without_shared_layers() -> None:
     features = _compact_features(batch_size=2, num_players=3)
     value_model = BetterPreflopTransformerValueFFN(
@@ -555,7 +628,7 @@ def test_compact_preflop_transformer_head_layers_work_without_shared_layers() ->
     ).policy_logits.shape == (2, PREFLOP_HANDS, 5)
 
 
-def test_compact_preflop_transformer_range_attention_pool_shapes() -> None:
+def test_compact_preflop_transformer_slot_moment_pool_shapes() -> None:
     features = _compact_features(batch_size=2, num_players=3)
     value_model = BetterPreflopTransformerValueFFN(
         num_actions=1,
@@ -569,7 +642,7 @@ def test_compact_preflop_transformer_range_attention_pool_shapes() -> None:
         policy_rank=8,
         policy_hand_bias_rank=4,
         transformer_heads=4,
-        range_attention_slots=3,
+        range_slot_moment_slots=3,
         enforce_zero_sum=False,
     )
     policy_model = BetterPreflopTransformerPolicyFFN(
@@ -584,14 +657,15 @@ def test_compact_preflop_transformer_range_attention_pool_shapes() -> None:
         policy_rank=8,
         policy_hand_bias_rank=4,
         transformer_heads=4,
-        range_attention_slots=3,
+        range_slot_moment_slots=3,
         enforce_zero_sum=False,
     )
     value_model.init_weights(torch.Generator(device="cpu").manual_seed(6))
     policy_model.init_weights(torch.Generator(device="cpu").manual_seed(7))
 
-    assert value_model.range_attention_pool is not None
-    assert value_model.range_attention_pool.slots == 3
+    assert value_model.range_slot_moment_pool is not None
+    assert value_model.range_slot_moment_pool.slots == 3
+    assert value_model.range_slot_moment_pool.slot_logits.shape == (PREFLOP_HANDS, 3)
     value_output = value_model(features, include_policy=False)
     policy_output = policy_model(features, include_policy=True, include_value=False)
 

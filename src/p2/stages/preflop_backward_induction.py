@@ -172,12 +172,13 @@ def _checkpoint_model_config(base_cfg: Config, checkpoint_path: str) -> Config:
 
     cfg.model.hidden_dim = int(street_embedding.shape[1])
     is_transformer = any(key.endswith(".qkv.weight") for key in state)
-    if is_transformer:
+    is_gated_token_mixer = any(".token_mixer." in key for key in state)
+    if is_transformer or is_gated_token_mixer:
         hand_encoder = state.get("policy_model.hand_encoder.0.weight")
         ffn_in = state.get("policy_model.policy_encoder.0.ffn.linear_in.weight")
         if hand_encoder is None or ffn_in is None:
             raise ValueError(
-                f"Cannot infer transformer preflop dimensions from {checkpoint_path}"
+                f"Cannot infer token preflop dimensions from {checkpoint_path}"
             )
         cfg.model.range_hidden_dim = int(hand_encoder.shape[0])
         cfg.model.ffn_dim = int(ffn_in.shape[0])
@@ -188,7 +189,11 @@ def _checkpoint_model_config(base_cfg: Config, checkpoint_path: str) -> Config:
         cfg.model.num_value_layers = _checkpoint_encoder_depth(
             state, "value_model.value_encoder"
         )
-        cfg.model.preflop_model_type = PreflopModelType.transformer
+        cfg.model.preflop_model_type = (
+            PreflopModelType.transformer
+            if is_transformer
+            else PreflopModelType.gated_token_mixer
+        )
     else:
         class_embedding = state.get("policy_model.class_hi_embedding.weight")
         ffn_in = _first_checkpoint_tensor(
@@ -218,7 +223,27 @@ def _checkpoint_model_config(base_cfg: Config, checkpoint_path: str) -> Config:
     cfg.model.preflop_hand_dim = PREFLOP_HANDS
     cfg.model.board_interaction_dim = 0
     cfg.model.enforce_zero_sum = False
+    cfg.model.preflop_range_slot_moment_slots = _checkpoint_range_slot_moment_slots(
+        state
+    )
     return cfg
+
+
+def _checkpoint_range_slot_moment_slots(state: dict[str, torch.Tensor]) -> int:
+    slots: list[int] = []
+    for prefix in ("policy_model", "value_model"):
+        slot_logits = state.get(f"{prefix}.range_slot_moment_pool.slot_logits")
+        if slot_logits is not None:
+            slots.append(int(slot_logits.shape[1]))
+    if not slots:
+        return 0
+    first = slots[0]
+    if any(value != first for value in slots):
+        raise ValueError(
+            "Checkpoint policy/value range pool slot counts do not match: "
+            f"{slots}"
+        )
+    return first
 
 
 def _first_checkpoint_tensor(
@@ -793,7 +818,7 @@ def _bootstrap_distill_student_metadata(cfg: Config) -> dict[str, Any]:
         "range_hidden_dim",
         "ffn_dim",
         "preflop_transformer_heads",
-        "preflop_range_attention_slots",
+        "preflop_range_slot_moment_slots",
         "num_hidden_layers",
         "num_value_layers",
         "num_policy_layers",

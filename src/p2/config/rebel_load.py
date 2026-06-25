@@ -37,7 +37,11 @@ _LIVE_ROOT_SOURCES = frozenset(
     }
 )
 _PREFLOP_MODEL_TYPES = frozenset(
-    {PreflopModelType.ffn, PreflopModelType.transformer}
+    {
+        PreflopModelType.ffn,
+        PreflopModelType.transformer,
+        PreflopModelType.gated_token_mixer,
+    }
 )
 
 
@@ -86,7 +90,8 @@ def validate_rebel_config(cfg: Config) -> None:
         )
     if cfg.model.preflop_model_type not in _PREFLOP_MODEL_TYPES:
         raise ValueError(
-            "model.preflop_model_type must be one of: ffn, transformer; "
+            "model.preflop_model_type must be one of: "
+            "ffn, transformer, gated_token_mixer; "
             f"got {cfg.model.preflop_model_type!r}"
         )
     if cfg.env.num_players < 2:
