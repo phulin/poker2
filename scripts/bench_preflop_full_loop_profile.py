@@ -371,7 +371,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-type",
         choices=("transformer", "ffn", "gated_token_mixer"),
-        default="transformer",
+        default="gated_token_mixer",
     )
     parser.add_argument("--hidden-dim", type=int, default=192)
     parser.add_argument("--range-hidden-dim", type=int, default=256)
