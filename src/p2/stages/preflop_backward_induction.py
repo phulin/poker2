@@ -906,13 +906,20 @@ def _validation_cache_metadata(
     *,
     bucket_label: str,
     cutoff_checkpoint: str,
+    cfg: Config,
 ) -> dict[str, Any]:
+    closing_checkpoint = cfg.search.closing_leaf_checkpoint
     return {
         "kind": "preflop_backward_induction_validation_cache",
-        "format_version": 2,
+        "format_version": 3,
         "bucket_label": bucket_label,
         "state_dataset": os.path.realpath(args.state_dataset),
         "cutoff_checkpoint": _checkpoint_signature(cutoff_checkpoint),
+        "closing_leaf_checkpoint": (
+            None
+            if closing_checkpoint is None
+            else _checkpoint_signature(str(closing_checkpoint))
+        ),
         "validation_items": int(args.validation_items),
         "validation_cfr_iterations": int(args.validation_cfr_iterations),
         "cfr_batch_size": _bucket_cfr_batch_size(args, bucket_label),
@@ -921,6 +928,32 @@ def _validation_cache_metadata(
         "warm_start_iterations": int(args.warm_start_iterations),
         "sparse_fused": bool(args.sparse_fused),
         "belief_mode": str(args.belief_mode),
+        "model_scope": _jsonable(cfg.search.model_scope),
+        "bet_bins_by_depth": _jsonable(cfg.search.bet_bins_by_depth),
+        "allin_by_depth": _jsonable(cfg.search.allin_by_depth),
+        "allin_call_terminal_abstraction": bool(
+            cfg.search.allin_call_terminal_abstraction
+        ),
+        "value_targets_from_final_policy": bool(
+            cfg.search.value_targets_from_final_policy
+        ),
+        "preflop_allin_table_path": (
+            None
+            if cfg.search.preflop_allin_table_path is None
+            else os.path.realpath(cfg.search.preflop_allin_table_path)
+        ),
+        "preflop_allin_169_cache_path": (
+            None
+            if cfg.search.preflop_allin_169_cache_path is None
+            else os.path.realpath(cfg.search.preflop_allin_169_cache_path)
+        ),
+        "preflop_allin_169_model_checkpoint": (
+            None
+            if cfg.search.preflop_allin_169_model_checkpoint is None
+            else _checkpoint_signature(
+                str(cfg.search.preflop_allin_169_model_checkpoint)
+            )
+        ),
     }
 
 
@@ -1192,6 +1225,7 @@ def _build_validation_cache(
         args,
         bucket_label=bucket_label,
         cutoff_checkpoint=cutoff_checkpoint,
+        cfg=cfg,
     )
     cache_path = _validation_cache_path(metadata)
     legacy_cache_path = _legacy_validation_cache_path(bucket_dir, metadata)
