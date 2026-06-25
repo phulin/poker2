@@ -80,6 +80,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_allowed_float_buf: torch.Tensor | None = None
         self._preflop_allowed_float_key: tuple[int, int, int, torch.dtype] | None = None
         self._preflop_player_ids_buf: torch.Tensor | None = None
+        self._preflop_model_beliefs_buf: torch.Tensor | None = None
+        self._preflop_model_beliefs_key: tuple[int, int, int, int, torch.dtype] | None = None
 
     @property
     def _compact_preflop(self) -> bool:
@@ -478,6 +480,47 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             board=board,
             beliefs=beliefs_at_model.reshape(-1, self.num_players * PREFLOP_HANDS),
             hand_dim=PREFLOP_HANDS,
+        )
+
+    def _model_beliefs_for_values(self, beliefs: torch.Tensor) -> torch.Tensor:
+        if (
+            os.environ.get("P2_PREFLOP_MODEL_BELIEF_GATHER_OUT", "1")
+            .strip()
+            .lower()
+            in {"0", "false", "off", "no"}
+        ):
+            return beliefs[self.model_indices]
+        m = int(self.model_indices.numel())
+        if beliefs.dim() != 3 or beliefs.shape[1:] != (
+            self.num_players,
+            PREFLOP_HANDS,
+        ):
+            return beliefs[self.model_indices]
+        shape = (m, self.num_players, PREFLOP_HANDS)
+        key = (
+            int(self._subgame_generation),
+            int(beliefs.data_ptr()),
+            int(self.model_indices.data_ptr()),
+            m,
+            beliefs.dtype,
+        )
+        buf = getattr(self, "_preflop_model_beliefs_buf", None)
+        if (
+            buf is None
+            or getattr(self, "_preflop_model_beliefs_key", None) != key
+            or buf.shape != shape
+            or buf.device != beliefs.device
+            or buf.dtype != beliefs.dtype
+        ):
+            self._preflop_model_beliefs_buf = beliefs.new_empty(shape)
+            self._preflop_model_beliefs_key = key
+            buf = self._preflop_model_beliefs_buf
+        assert buf is not None
+        return torch.index_select(
+            beliefs,
+            0,
+            self.model_indices.contiguous(),
+            out=buf,
         )
 
     def _init_hand_rank_data(self) -> None:
@@ -1141,7 +1184,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         if self.model_indices.numel() > 0:
-            beliefs_at_model = beliefs[self.model_indices]
+            beliefs_at_model = self._model_beliefs_for_values(beliefs)
             features_at_model = self._model_features_for_beliefs(beliefs_at_model)
             self._set_model_values(t, beliefs_at_model, features_at_model)
         else:

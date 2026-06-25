@@ -1549,8 +1549,17 @@ def test_fused_preflop_sparse_evaluator_is_compact_only(monkeypatch) -> None:
     )
 
     evaluator.initialize_subgame(env, torch.arange(1, device=device))
+    beliefs_at_model = evaluator._model_beliefs_for_values(evaluator.beliefs)
+    torch.testing.assert_close(
+        beliefs_at_model,
+        evaluator.beliefs[evaluator.model_indices],
+    )
+    assert beliefs_at_model.is_contiguous()
+    assert evaluator._model_beliefs_for_values(evaluator.beliefs).data_ptr() == (
+        beliefs_at_model.data_ptr()
+    )
     features = evaluator._model_features_for_beliefs(
-        evaluator.beliefs[evaluator.model_indices]
+        beliefs_at_model
     )
 
     assert evaluator.hand_dim == PREFLOP_HANDS
