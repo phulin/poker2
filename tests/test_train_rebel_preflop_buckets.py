@@ -4,11 +4,15 @@ from pathlib import Path
 
 import hydra
 import pytest
+import torch
 from omegaconf import DictConfig
 
 from p2.cli import train_rebel_preflop_buckets as preflop_cli
 from p2.config.rebel_load import load_rebel_config
 from p2.core.structured_config import Config
+from p2.env.card_utils import PREFLOP_HANDS
+from p2.models.mlp.mlp_features import MLPFeatures
+from p2.rl.rebel_batch import RebelBatch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +26,37 @@ def _base_config(tmp_path: Path) -> Config:
     cfg.preflop_buckets.base_checkpoint = str(tmp_path / "base.pt")
     cfg.preflop_buckets.output_dir = str(tmp_path / "out")
     return cfg
+
+
+def _policy_batch(rows: int) -> RebelBatch:
+    return RebelBatch(
+        features=MLPFeatures(
+            context=torch.arange(rows * 4, dtype=torch.float32).view(rows, 4),
+            street=torch.zeros(rows, dtype=torch.long),
+            to_act=torch.zeros(rows, dtype=torch.long),
+            board=torch.full((rows, 5), -1, dtype=torch.long),
+            beliefs=torch.ones(rows, 2 * PREFLOP_HANDS),
+            hand_dim=PREFLOP_HANDS,
+        ),
+        legal_masks=torch.ones(rows, 2, dtype=torch.bool),
+        policy_targets=torch.full((rows, PREFLOP_HANDS, 2), 0.5),
+        value_targets=None,
+    )
+
+
+def test_preflop_policy_minibatch_padding_zero_weights_duplicates() -> None:
+    batch = _policy_batch(3)
+    part = batch[1:3]
+
+    padded = preflop_cli.preflop_bi._pad_policy_minibatch(part, batch, 5)
+
+    assert len(padded) == 5
+    torch.testing.assert_close(
+        padded.statistics["policy_loss_weight"],
+        torch.tensor([1.0, 1.0, 0.0, 0.0, 0.0]),
+    )
+    torch.testing.assert_close(padded.features.context[:2], part.features.context)
+    torch.testing.assert_close(padded.features.context[2:], batch.features.context)
 
 
 def test_config_rebel_preflop_buckets_resolves() -> None:

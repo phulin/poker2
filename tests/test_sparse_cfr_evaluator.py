@@ -1080,6 +1080,179 @@ def test_preflop_sparse_evaluator_runs_compact_iteration_and_policy_batch() -> N
     assert "has_folded" in policy_batch.statistics
 
 
+def _assert_rebel_batches_close(actual, expected, *, atol: float, rtol: float) -> None:
+    if actual is None or expected is None:
+        assert actual is expected
+        return
+    assert len(actual) == len(expected)
+    torch.testing.assert_close(actual.features.context, expected.features.context)
+    torch.testing.assert_close(actual.features.street, expected.features.street)
+    torch.testing.assert_close(actual.features.to_act, expected.features.to_act)
+    torch.testing.assert_close(actual.features.board, expected.features.board)
+    torch.testing.assert_close(
+        actual.features.beliefs,
+        expected.features.beliefs,
+        atol=atol,
+        rtol=rtol,
+    )
+    torch.testing.assert_close(actual.legal_masks, expected.legal_masks)
+    if actual.value_targets is None or expected.value_targets is None:
+        assert actual.value_targets is expected.value_targets
+    else:
+        torch.testing.assert_close(
+            actual.value_targets,
+            expected.value_targets,
+            atol=atol,
+            rtol=rtol,
+        )
+    if actual.policy_targets is None or expected.policy_targets is None:
+        assert actual.policy_targets is expected.policy_targets
+    else:
+        torch.testing.assert_close(
+            actual.policy_targets,
+            expected.policy_targets,
+            atol=atol,
+            rtol=rtol,
+        )
+    assert actual.statistics.keys() == expected.statistics.keys()
+    for key, actual_value in actual.statistics.items():
+        expected_value = expected.statistics[key]
+        if actual_value.dtype in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+            torch.float64,
+        ):
+            torch.testing.assert_close(
+                actual_value,
+                expected_value,
+                atol=atol,
+                rtol=rtol,
+            )
+        else:
+            torch.testing.assert_close(actual_value, expected_value)
+
+
+def test_fused_preflop_sparse_evaluator_matches_non_fused_training_targets() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA to exercise the fused preflop evaluator")
+    pytest.importorskip("triton")
+    from p2.search.fused_preflop_sparse_cfr_evaluator import (
+        FusedPreflopSparseCFREvaluator,
+    )
+
+    device = torch.device("cuda")
+    num_players = 3
+    bet_bins = [0.5]
+    force_deck = torch.tensor(
+        [[10, 11, 12, 13, 14], [15, 16, 17, 18, 19]],
+        dtype=torch.long,
+        device=device,
+    )
+    prior = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    prior = prior / prior.sum()
+    initial_beliefs = prior.expand(2, num_players, PREFLOP_HANDS).clone()
+
+    def make_preflop_cfg(*, sparse_fused: bool) -> Config:
+        cfg = make_config(bet_bins)
+        cfg.device = "cuda"
+        cfg.env.num_players = num_players
+        cfg.search.depth = 2
+        cfg.search.iterations = 3
+        cfg.search.cfr_type = CFRType.discounted
+        cfg.search.cfr_avg = True
+        cfg.search.sparse_fused = sparse_fused
+        cfg.search.allin_call_terminal_abstraction = False
+        cfg.model.compile = "off"
+        return cfg
+
+    def make_preflop_env(cfg: Config) -> PBSEnv:
+        env = PBSEnv(
+            num_envs=2,
+            num_players=num_players,
+            mean_stack=1000,
+            sb=5,
+            bb=10,
+            default_bet_bins=cfg.env.bet_bins,
+            device=device,
+        )
+        env.reset(
+            force_button=torch.zeros(2, dtype=torch.long, device=device),
+            force_deck=force_deck,
+        )
+        return env
+
+    def make_preflop_model(cfg: Config) -> CompactPreflopMockModel:
+        return CompactPreflopMockModel(
+            num_actions=len(cfg.env.bet_bins) + 3,
+            num_players=num_players,
+            device=device,
+        )
+
+    non_fused_cfg = make_preflop_cfg(sparse_fused=False)
+    fused_cfg = make_preflop_cfg(sparse_fused=True)
+    non_fused = PreflopSparseCFREvaluator(
+        model=make_preflop_model(non_fused_cfg),  # type: ignore[arg-type]
+        device=device,
+        cfg=non_fused_cfg,
+        generator=torch.Generator(device=device).manual_seed(17),
+    )
+    fused = FusedPreflopSparseCFREvaluator(
+        model=make_preflop_model(fused_cfg),  # type: ignore[arg-type]
+        device=device,
+        cfg=fused_cfg,
+        generator=torch.Generator(device=device).manual_seed(17),
+        compile_model=False,
+    )
+
+    root_indices = torch.arange(2, device=device)
+    non_fused.initialize_subgame(
+        make_preflop_env(non_fused_cfg),
+        root_indices,
+        initial_beliefs,
+    )
+    fused.initialize_subgame(
+        make_preflop_env(fused_cfg),
+        root_indices,
+        initial_beliefs,
+    )
+
+    non_fused.evaluate_cfr(training_mode=False, sample_continuation=False)
+    fused.evaluate_cfr(training_mode=False, sample_continuation=False)
+    non_fused_batches = non_fused.training_data(
+        exclude_start=False,
+        include_pre_chance_value_batch=False,
+    )
+    fused_batches = fused.training_data(
+        exclude_start=False,
+        include_pre_chance_value_batch=False,
+    )
+
+    torch.testing.assert_close(
+        fused.policy_probs_avg,
+        non_fused.policy_probs_avg,
+        atol=2e-5,
+        rtol=2e-5,
+    )
+    torch.testing.assert_close(
+        fused.beliefs_avg,
+        non_fused.beliefs_avg,
+        atol=2e-5,
+        rtol=2e-5,
+    )
+    for fused_batch, non_fused_batch in zip(
+        fused_batches,
+        non_fused_batches,
+        strict=True,
+    ):
+        _assert_rebel_batches_close(
+            fused_batch,
+            non_fused_batch,
+            atol=2e-5,
+            rtol=2e-5,
+        )
+
+
 def test_preflop_sparse_ev_uses_marginal_action_policy_for_folded_players() -> None:
     device = get_device()
     num_players = 3

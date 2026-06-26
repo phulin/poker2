@@ -15,6 +15,7 @@ from p2.core.structured_config import (
 )
 from p2.env.card_utils import (
     NUM_HANDS,
+    PREFLOP_HANDS,
     combo_suit_permutation_inverse_tensor,
     hand_combos_tensor,
     mask_conflicting_combos,
@@ -1013,6 +1014,53 @@ def test_rebel_policy_loss_supports_node_reach_weighting_modes():
         < losses[PolicyNodeWeighting.sqrt_reach]
     )
     assert losses[PolicyNodeWeighting.sqrt_reach] < losses[PolicyNodeWeighting.uniform]
+
+
+def test_rebel_policy_loss_supports_explicit_loss_weights():
+    batch_size, num_actions = 2, 2
+    beliefs = torch.full((batch_size, 2, PREFLOP_HANDS), 1.0 / PREFLOP_HANDS)
+    logits = torch.zeros(batch_size, PREFLOP_HANDS, num_actions)
+    logits[:, :, 0] = 8.0
+    policy_targets = torch.zeros(batch_size, PREFLOP_HANDS, num_actions)
+    policy_targets[0, :, 0] = 1.0
+    policy_targets[1, :, 1] = 1.0
+    features = MLPFeatures(
+        context=torch.randn(batch_size, 4),
+        street=torch.zeros(batch_size, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, dtype=torch.long),
+        beliefs=beliefs.view(batch_size, -1),
+        hand_dim=PREFLOP_HANDS,
+    )
+    weighted_batch = RebelBatch(
+        features=features,
+        policy_targets=policy_targets,
+        value_targets=None,
+        legal_masks=torch.ones(batch_size, num_actions, dtype=torch.bool),
+        statistics={
+            "policy_loss_weight": torch.tensor([1.0, 0.0]),
+            "policy_node_reach": torch.tensor([1.0, 100.0]),
+        },
+    )
+    first_row_batch = weighted_batch[:1]
+    output = ModelOutput(policy_logits=logits, value=None, hand_values=None)
+    first_row_output = ModelOutput(
+        policy_logits=logits[:1],
+        value=None,
+        hand_values=None,
+    )
+
+    uniform = RebelSupervisedLoss()
+    reach = RebelSupervisedLoss(policy_node_weighting=PolicyNodeWeighting.reach)
+
+    torch.testing.assert_close(
+        uniform.forward_policy(output, weighted_batch)["policy_loss"],
+        uniform.forward_policy(first_row_output, first_row_batch)["policy_loss"],
+    )
+    torch.testing.assert_close(
+        reach.forward_policy(output, weighted_batch)["policy_loss"],
+        reach.forward_policy(first_row_output, first_row_batch)["policy_loss"],
+    )
 
 
 def test_rebel_policy_loss_type_switches_objective_without_changing_kl_metric():
