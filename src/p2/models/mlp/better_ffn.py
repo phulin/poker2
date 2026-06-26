@@ -2452,10 +2452,16 @@ class BetterPreflopTransformerValueFFN(_BetterPreflopTransformerBase):
         hand_value = self.value_hand_proj(hand_emb)
         combined_weight = self.value_scale.weight.t().matmul(hand_value.t())
         combined_weight = combined_weight / math.sqrt(float(self.hidden_dim))
-        hand_values_raw = player_state.flatten(0, 1).matmul(combined_weight).view(
+        value_bias_weight = self.value_bias.weight.t().to(dtype=combined_weight.dtype)
+        fused_weight = torch.cat((combined_weight, value_bias_weight), dim=1)
+        raw_and_bias = player_state.flatten(0, 1).matmul(fused_weight)
+        hand_values_raw = raw_and_bias[:, :PREFLOP_HANDS].view(
             -1, self.num_players, PREFLOP_HANDS
         )
-        hand_values_raw = hand_values_raw + self.value_bias(player_state)
+        value_bias = raw_and_bias[:, PREFLOP_HANDS:].view(-1, self.num_players, 1)
+        if self.value_bias.bias is not None:
+            value_bias = value_bias + self.value_bias.bias.to(dtype=value_bias.dtype)
+        hand_values_raw = hand_values_raw + value_bias
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
                 (hand_values_raw * player_beliefs)
