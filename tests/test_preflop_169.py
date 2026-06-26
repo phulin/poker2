@@ -763,6 +763,41 @@ def test_preflop_gated_token_mixer_triton_matches_linear() -> None:
     torch.testing.assert_close(actual_gated, expected_gated, atol=4e-2, rtol=4e-2)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_preflop_gated_token_mixer_training_keeps_gradients() -> None:
+    torch.manual_seed(11)
+    block = _PreflopGatedTokenMixerBlock(
+        64,
+        token_count=7,
+        ffn_dim=128,
+        nonlinearity=NonlinearityType.leaky_relu,
+    ).cuda()
+    block = block.to(dtype=torch.bfloat16)
+    block.train()
+    x = torch.randn(
+        4,
+        7,
+        64,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+
+    loss = block(x).float().square().mean()
+    loss.backward()
+    torch.cuda.synchronize()
+
+    assert x.grad is not None
+    assert block.token_norm.weight.grad is not None
+    assert block.token_gate.weight.grad is not None
+    assert block.token_mixer.linear_in.weight.grad is not None
+    assert block.token_mixer.linear_out.weight.grad is not None
+    assert x.grad.float().abs().sum() > 0
+    assert block.token_gate.weight.grad.float().abs().sum() > 0
+    assert block.token_mixer.linear_in.weight.grad.float().abs().sum() > 0
+    assert block.token_mixer.linear_out.weight.grad.float().abs().sum() > 0
+
+
 def test_compact_preflop_transformer_head_layers_work_without_shared_layers() -> None:
     features = _compact_features(batch_size=2, num_players=3)
     value_model = BetterPreflopTransformerValueFFN(

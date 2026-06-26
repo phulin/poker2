@@ -1708,6 +1708,8 @@ class _PreflopGatedTokenMixerBlock(nn.Module):
         gate = self.token_gate(y)
         if (
             x.is_cuda
+            and not self.training
+            and not torch.is_grad_enabled()
             and isinstance(activation, nn.LeakyReLU)
             and activation.negative_slope == 0.01
             and x.shape[1] == 7
