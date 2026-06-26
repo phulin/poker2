@@ -2365,15 +2365,35 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         self, encoded: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         game_state = encoded[:, 0]
-        player_state = self.player_state(
-            torch.cat(
-                (
-                    encoded[:, 1:],
-                    game_state[:, None, :].expand(-1, self.num_players, -1),
-                ),
-                dim=-1,
+        player_tokens = encoded[:, 1:]
+        linear = self.player_state[0]
+        norm = self.player_state[1]
+        activation = self.player_state[2]
+        if (
+            isinstance(linear, nn.Linear)
+            and isinstance(norm, nn.RMSNorm)
+            and linear.in_features == self.hidden_dim * 2
+            and linear.out_features == self.hidden_dim
+        ):
+            player_weight, game_weight = linear.weight.split(self.hidden_dim, dim=1)
+            player_pre = player_tokens.flatten(0, 1).matmul(player_weight.t()).view(
+                -1, self.num_players, self.hidden_dim
             )
-        )
+            game_pre = game_state.matmul(game_weight.t())[:, None, :]
+            player_pre = player_pre + game_pre
+            if linear.bias is not None:
+                player_pre = player_pre + linear.bias.to(dtype=player_pre.dtype)
+            player_state = activation(norm(player_pre))
+        else:
+            player_state = self.player_state(
+                torch.cat(
+                    (
+                        player_tokens,
+                        game_state[:, None, :].expand(-1, self.num_players, -1),
+                    ),
+                    dim=-1,
+                )
+            )
         return game_state, player_state
 
     def _encode_tokens(
