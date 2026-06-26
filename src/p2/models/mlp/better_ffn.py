@@ -2462,13 +2462,13 @@ class BetterPreflopTransformerValueFFN(_BetterPreflopTransformerBase):
         self.value_scale = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
         self.value_bias = nn.Linear(self.hidden_dim, 1)
 
-    def _value_from_tokens(
+    def _hand_values_from_tokens(
         self,
         player_beliefs: torch.Tensor,
         player_state: torch.Tensor,
         hand_emb: torch.Tensor,
         apply_zero_sum: bool = True,
-    ) -> ModelOutput:
+    ) -> torch.Tensor:
         hand_value = self.value_hand_proj(hand_emb)
         combined_weight = self.value_scale.weight.t().matmul(hand_value.t())
         combined_weight = combined_weight / math.sqrt(float(self.hidden_dim))
@@ -2488,9 +2488,22 @@ class BetterPreflopTransformerValueFFN(_BetterPreflopTransformerBase):
                 .sum(dim=2, keepdim=True)
                 .mean(dim=1, keepdim=True)
             )
-            hand_values = hand_values_raw - hand_value_sums
-        else:
-            hand_values = hand_values_raw
+            return hand_values_raw - hand_value_sums
+        return hand_values_raw
+
+    def _value_from_tokens(
+        self,
+        player_beliefs: torch.Tensor,
+        player_state: torch.Tensor,
+        hand_emb: torch.Tensor,
+        apply_zero_sum: bool = True,
+    ) -> ModelOutput:
+        hand_values = self._hand_values_from_tokens(
+            player_beliefs,
+            player_state,
+            hand_emb,
+            apply_zero_sum=apply_zero_sum,
+        )
         return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
 
     def forward_policy(self, features: MLPFeatures, latent=None) -> torch.Tensor:
@@ -2533,6 +2546,27 @@ class BetterPreflopTransformerValueFFN(_BetterPreflopTransformerBase):
             apply_zero_sum=apply_zero_sum,
             static_base_features=static_base_features,
             value_head=value_head,
+        )
+
+    def forward_hand_values_static_base(
+        self,
+        features: MLPFeatures,
+        static_base_features: torch.Tensor,
+        latent=None,
+        apply_zero_sum: bool = True,
+        value_head: str = "auto",
+    ) -> torch.Tensor:
+        del latent, value_head
+        player_beliefs, _, player_state, hand_emb = self._encode_tokens(
+            features,
+            static_game_token=static_base_features,
+            extra_encoder=self.value_encoder,
+        )
+        return self._hand_values_from_tokens(
+            player_beliefs,
+            player_state,
+            hand_emb,
+            apply_zero_sum=apply_zero_sum,
         )
 
     def forward_pre(self, features: MLPFeatures, **kwargs) -> torch.Tensor:
@@ -2736,12 +2770,12 @@ class BetterPreflopValueFFN(_BetterPreflopCompactFFN):
         )
         self.value_head = nn.Sequential(*layers)
 
-    def _value_from_base(
+    def _hand_values_from_base(
         self,
         player_beliefs: torch.Tensor,
         x: torch.Tensor,
         apply_zero_sum: bool = True,
-    ) -> ModelOutput:
+    ) -> torch.Tensor:
         hand_values_raw = self.value_head(x).view(-1, self.num_players, PREFLOP_HANDS)
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
@@ -2749,9 +2783,20 @@ class BetterPreflopValueFFN(_BetterPreflopCompactFFN):
                 .sum(dim=2, keepdim=True)
                 .mean(dim=1, keepdim=True)
             )
-            hand_values = hand_values_raw - hand_value_sums
-        else:
-            hand_values = hand_values_raw
+            return hand_values_raw - hand_value_sums
+        return hand_values_raw
+
+    def _value_from_base(
+        self,
+        player_beliefs: torch.Tensor,
+        x: torch.Tensor,
+        apply_zero_sum: bool = True,
+    ) -> ModelOutput:
+        hand_values = self._hand_values_from_base(
+            player_beliefs,
+            x,
+            apply_zero_sum=apply_zero_sum,
+        )
         return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
 
     def forward_policy(self, features: MLPFeatures, latent=None) -> torch.Tensor:
@@ -2788,6 +2833,25 @@ class BetterPreflopValueFFN(_BetterPreflopCompactFFN):
             apply_zero_sum=apply_zero_sum,
             static_base_features=static_base_features,
             value_head=value_head,
+        )
+
+    def forward_hand_values_static_base(
+        self,
+        features: MLPFeatures,
+        static_base_features: torch.Tensor,
+        latent=None,
+        apply_zero_sum: bool = True,
+        value_head: str = "auto",
+    ) -> torch.Tensor:
+        del latent, value_head
+        player_beliefs, _, x, _ = self._forward_base_from_static(
+            features,
+            static_base_features,
+        )
+        return self._hand_values_from_base(
+            player_beliefs,
+            x,
+            apply_zero_sum=apply_zero_sum,
         )
 
     def forward_both(

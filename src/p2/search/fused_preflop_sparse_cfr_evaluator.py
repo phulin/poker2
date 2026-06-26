@@ -105,6 +105,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             tuple[int, int, int, int, torch.dtype], torch.Tensor
         ] = {}
         self._preflop_static_model_base_fn_cache: dict[int, tuple[object, bool]] = {}
+        self._preflop_static_hand_values_fn_cache: dict[
+            int, tuple[object, bool]
+        ] = {}
         self._preflop_static_model_base_features_cache: dict[
             tuple[int, int, int, int, int],
             torch.Tensor,
@@ -131,6 +134,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self._preflop_partition_beliefs_cache = {}
         if not hasattr(self, "_preflop_static_model_base_fn_cache"):
             self._preflop_static_model_base_fn_cache = {}
+        if not hasattr(self, "_preflop_static_hand_values_fn_cache"):
+            self._preflop_static_hand_values_fn_cache = {}
         if not hasattr(self, "_preflop_static_model_base_features_cache"):
             self._preflop_static_model_base_features_cache = {}
         if not hasattr(self, "_preflop_partition_position_slices"):
@@ -161,6 +166,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_partition_node_cache.clear()
         self._preflop_partition_beliefs_cache.clear()
         self._preflop_static_model_base_fn_cache.clear()
+        self._preflop_static_hand_values_fn_cache.clear()
         self._preflop_static_model_base_features_cache.clear()
         self._preflop_partition_position_slices.clear()
         self._reset_deferred_average_values()
@@ -1468,16 +1474,64 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 value_kwargs = {"apply_zero_sum": False}
                 if accepts_value_head:
                     value_kwargs["value_head"] = "pre" if use_pre_head else "auto"
-                call_static_value = getattr(
-                    base_model,
-                    "_call_forward_value_static_base",
-                    base_model.forward_value_static_base,
+                hand_values_entry = self._preflop_static_hand_values_fn_cache.get(
+                    model_key
                 )
-                model_output = call_static_value(
-                    features,
-                    static_base_features,
-                    **value_kwargs,
-                )
+                if hand_values_entry is None:
+                    static_hand_values_fn = getattr(
+                        base_model,
+                        "forward_hand_values_static_base",
+                        None,
+                    )
+                    if static_hand_values_fn is not None:
+                        if (
+                            getattr(model, "_orig_mod", None) is not None
+                            or getattr(base_model, "_compiled_forward_value", None)
+                            is not None
+                        ):
+                            static_hand_values_fn = torch.compile(
+                                static_hand_values_fn,
+                                **self._compile_kwargs,
+                            )
+                        accepts_hand_value_head = (
+                            "value_head"
+                            in inspect.signature(
+                                base_model.forward_hand_values_static_base
+                            ).parameters
+                        )
+                    else:
+                        accepts_hand_value_head = False
+                    hand_values_entry = (
+                        static_hand_values_fn,
+                        accepts_hand_value_head,
+                    )
+                    self._preflop_static_hand_values_fn_cache[model_key] = (
+                        hand_values_entry
+                    )
+                static_hand_values_fn, accepts_hand_value_head = hand_values_entry
+                if static_hand_values_fn is not None:
+                    hand_value_kwargs = {"apply_zero_sum": False}
+                    if accepts_hand_value_head:
+                        hand_value_kwargs["value_head"] = (
+                            "pre" if use_pre_head else "auto"
+                        )
+                    hand_values = static_hand_values_fn(
+                        features,
+                        static_base_features,
+                        **hand_value_kwargs,
+                    )
+                    model_output = None
+                else:
+                    call_static_value = getattr(
+                        base_model,
+                        "_call_forward_value_static_base",
+                        base_model.forward_value_static_base,
+                    )
+                    model_output = call_static_value(
+                        features,
+                        static_base_features,
+                        **value_kwargs,
+                    )
                 model_applied_zero_sum = False
             else:
                 if use_pre_head and hasattr(model, "forward_pre"):
