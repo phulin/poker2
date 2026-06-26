@@ -2334,13 +2334,13 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             dtype=dtype,
         )
         combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
-        range_summary = player_beliefs @ combined_projection
+        range_projection = combined_projection.matmul(self.range_proj.weight.t())
         bucket_mass = player_beliefs @ bucket_projection
         if static_player_tokens is None:
             _, player_context = self._split_context(features.context)
             static_player_tokens = self.player_context_proj(player_context.to(dtype))
         player_tokens = (
-            self.range_proj(range_summary)
+            player_beliefs @ range_projection
             + self.bucket_mass_proj(bucket_mass)
             + static_player_tokens
         )
