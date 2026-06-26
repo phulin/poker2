@@ -964,22 +964,32 @@ class RebelSupervisedLoss(nn.Module):
     def _policy_node_weights(
         self, batch: RebelBatch, dtype: torch.dtype
     ) -> torch.Tensor | None:
+        loss_weight = batch.statistics.get("policy_loss_weight")
+        if loss_weight is not None:
+            loss_weight = loss_weight.to(
+                device=batch.legal_masks.device,
+                dtype=dtype,
+            ).clamp_min(0.0)
         if self.policy_node_weighting == PolicyNodeWeighting.uniform:
-            return None
+            return loss_weight
         reach = batch.statistics.get("policy_node_reach")
         if reach is None:
-            return None
+            return loss_weight
         reach = reach.to(dtype=dtype).clamp(min=0.0)
         if self.policy_node_weighting == PolicyNodeWeighting.reach:
-            return reach
-        if self.policy_node_weighting == PolicyNodeWeighting.sqrt_reach:
-            return reach.sqrt()
-        if self.policy_node_weighting == PolicyNodeWeighting.clipped_reach:
+            node_weight = reach
+        elif self.policy_node_weighting == PolicyNodeWeighting.sqrt_reach:
+            node_weight = reach.sqrt()
+        elif self.policy_node_weighting == PolicyNodeWeighting.clipped_reach:
             relative = reach / reach.mean().clamp(min=1e-8)
-            return relative.clamp(min=0.1, max=10.0)
-        raise ValueError(
-            f"Unsupported policy node weighting: {self.policy_node_weighting}"
-        )
+            node_weight = relative.clamp(min=0.1, max=10.0)
+        else:
+            raise ValueError(
+                f"Unsupported policy node weighting: {self.policy_node_weighting}"
+            )
+        if loss_weight is not None:
+            node_weight = node_weight * loss_weight
+        return node_weight
 
     def _reduce_policy_node_metric(
         self, per_node: torch.Tensor, node_weights: torch.Tensor | None

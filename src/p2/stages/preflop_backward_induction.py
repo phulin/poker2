@@ -1091,6 +1091,38 @@ def _slice_batch(batch: RebelBatch, start: int, end: int) -> RebelBatch:
     return batch[slice(start, end)]
 
 
+def _pad_policy_minibatch(
+    part: RebelBatch,
+    source: RebelBatch,
+    batch_size: int,
+) -> RebelBatch:
+    original_count = len(part)
+    if original_count >= batch_size:
+        return part
+    pad_count = batch_size - original_count
+    pad_indices = (
+        torch.arange(
+            pad_count,
+            device=source.legal_masks.device,
+            dtype=torch.long,
+        )
+        % len(source)
+    )
+    padded = RebelBatch.cat([part, source[pad_indices]])
+    existing = padded.statistics.get("policy_loss_weight")
+    if existing is None:
+        loss_weight = torch.ones(
+            len(padded),
+            device=source.legal_masks.device,
+            dtype=torch.float32,
+        )
+    else:
+        loss_weight = existing.to(device=source.legal_masks.device).clone()
+    loss_weight[original_count:] = 0.0
+    padded.statistics["policy_loss_weight"] = loss_weight
+    return padded
+
+
 def _aggregate_minibatch_stats(
     weighted_stats: list[tuple[int, dict[str, Any]]],
 ) -> dict[str, float]:
@@ -1151,13 +1183,7 @@ def _train_policy_minibatches(
         part = _slice_batch(batch, start, min(start + batch_size, len(batch)))
         original_count = len(part)
         if original_count < batch_size:
-            pad_count = batch_size - original_count
-            pad_indices = torch.arange(
-                pad_count,
-                device=batch.legal_masks.device,
-                dtype=torch.long,
-            ) % len(batch)
-            part = RebelBatch.cat([part, batch[pad_indices]])
+            part = _pad_policy_minibatch(part, batch, batch_size)
         stats = _policy_update(
             trainer,
             part,
