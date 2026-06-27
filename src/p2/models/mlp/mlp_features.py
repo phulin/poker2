@@ -10,10 +10,8 @@ from p2.env.card_utils import (
 )
 
 
-# Inductor fuses integer tensor gathers across all five fields. Boolean masks
-# are intentionally kept eager in __getitem__: mask indexing lowers through
-# nonzero, whose data-dependent output shape causes graph breaks and recompiles.
-@torch.compile(dynamic=True)
+# Keep feature indexing eager. These gathers are not on the expensive CFR path,
+# and compiling this small helper specializes on singleton ragged batches.
 def _index_all(
     context: torch.Tensor,
     street: torch.Tensor,

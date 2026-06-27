@@ -23,6 +23,7 @@ from p2.config.rebel_schema import RebelExperimentConfig
 from p2.core.structured_config import Config, PreflopModelType
 from p2.env.card_utils import PREFLOP_HANDS, preflop_class_multiplicity_tensor
 from p2.env.pbs_env import PBSEnv
+from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.checkpoint_io import CheckpointIO
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
@@ -1091,36 +1092,88 @@ def _slice_batch(batch: RebelBatch, start: int, end: int) -> RebelBatch:
     return batch[slice(start, end)]
 
 
+def _select_batch_rows(batch: RebelBatch, indices: torch.Tensor) -> RebelBatch:
+    features = MLPFeatures(
+        context=torch.index_select(batch.features.context, 0, indices).contiguous(),
+        street=torch.index_select(batch.features.street, 0, indices).contiguous(),
+        to_act=torch.index_select(batch.features.to_act, 0, indices).contiguous(),
+        board=torch.index_select(batch.features.board, 0, indices).contiguous(),
+        beliefs=torch.index_select(batch.features.beliefs, 0, indices).contiguous(),
+        hand_dim=batch.features.hand_dim,
+    )
+    policy_targets = (
+        torch.index_select(batch.policy_targets, 0, indices).contiguous()
+        if batch.policy_targets is not None
+        else None
+    )
+    value_targets = (
+        torch.index_select(batch.value_targets, 0, indices).contiguous()
+        if batch.value_targets is not None
+        else None
+    )
+    return RebelBatch(
+        features=features,
+        legal_masks=torch.index_select(batch.legal_masks, 0, indices).contiguous(),
+        policy_targets=policy_targets,
+        value_targets=value_targets,
+        statistics={
+            key: torch.index_select(value, 0, indices).contiguous()
+            for key, value in batch.statistics.items()
+        },
+    )
+
+
+def _set_loss_weight(batch: RebelBatch, key: str, weights: torch.Tensor) -> RebelBatch:
+    stats = dict(batch.statistics)
+    stats[key] = weights
+    return RebelBatch(
+        features=batch.features,
+        legal_masks=batch.legal_masks,
+        policy_targets=batch.policy_targets,
+        value_targets=batch.value_targets,
+        statistics=stats,
+    )
+
+
+def _loss_weighted_minibatch(
+    part: RebelBatch,
+    source: RebelBatch,
+    batch_size: int,
+    *,
+    key: str,
+) -> RebelBatch:
+    original_count = len(part)
+    if original_count < batch_size:
+        pad_count = batch_size - original_count
+        pad_indices = (
+            torch.arange(
+                pad_count,
+                device=source.legal_masks.device,
+                dtype=torch.long,
+            )
+            % len(source)
+        )
+        part = RebelBatch.cat([part, _select_batch_rows(source, pad_indices)])
+    loss_weight = torch.ones(
+        len(part),
+        device=source.legal_masks.device,
+        dtype=torch.float32,
+    )
+    loss_weight[original_count:] = 0.0
+    return _set_loss_weight(part, key, loss_weight)
+
+
 def _pad_policy_minibatch(
     part: RebelBatch,
     source: RebelBatch,
     batch_size: int,
 ) -> RebelBatch:
-    original_count = len(part)
-    if original_count >= batch_size:
-        return part
-    pad_count = batch_size - original_count
-    pad_indices = (
-        torch.arange(
-            pad_count,
-            device=source.legal_masks.device,
-            dtype=torch.long,
-        )
-        % len(source)
+    return _loss_weighted_minibatch(
+        part,
+        source,
+        batch_size,
+        key="policy_loss_weight",
     )
-    padded = RebelBatch.cat([part, source[pad_indices]])
-    existing = padded.statistics.get("policy_loss_weight")
-    if existing is None:
-        loss_weight = torch.ones(
-            len(padded),
-            device=source.legal_masks.device,
-            dtype=torch.float32,
-        )
-    else:
-        loss_weight = existing.to(device=source.legal_masks.device).clone()
-    loss_weight[original_count:] = 0.0
-    padded.statistics["policy_loss_weight"] = loss_weight
-    return padded
 
 
 def _aggregate_minibatch_stats(
@@ -1161,12 +1214,19 @@ def _train_value_minibatches(
     schedule_step = int(step)
     for start in range(0, len(batch), batch_size):
         part = _slice_batch(batch, start, min(start + batch_size, len(batch)))
+        original_count = len(part)
+        part = _loss_weighted_minibatch(
+            part,
+            batch,
+            batch_size,
+            key="value_loss_weight",
+        )
         stats = trainer.train_value_batch(
             part,
             schedule_step,
             sync_inference_model=True,
         )
-        weighted_stats.append((len(part), stats))
+        weighted_stats.append((original_count, stats))
     return _aggregate_minibatch_stats(weighted_stats), len(weighted_stats)
 
 
@@ -1182,8 +1242,7 @@ def _train_policy_minibatches(
     for start in range(0, len(batch), batch_size):
         part = _slice_batch(batch, start, min(start + batch_size, len(batch)))
         original_count = len(part)
-        if original_count < batch_size:
-            part = _pad_policy_minibatch(part, batch, batch_size)
+        part = _pad_policy_minibatch(part, batch, batch_size)
         stats = _policy_update(
             trainer,
             part,
@@ -1884,7 +1943,7 @@ def run_train_specialists(
         num_steps=total_updates_guess,
         num_envs=_max_cfr_batch_size(args),
     )
-    setup_torch_runtime(base_cfg, device, recompile_limit=64)
+    setup_torch_runtime(base_cfg, device, recompile_limit=16)
     if resume_path is not None:
         base_cfg.resume_from = str(resume_path)
     write_resolved_config(

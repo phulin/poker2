@@ -160,6 +160,57 @@ def _scheduled_learning_rate(
     return lr_start
 
 
+def _pot_relative_value_error_metrics(
+    output: Any,
+    batch: RebelBatch,
+    loss_dict: dict[str, Any],
+) -> dict[str, torch.Tensor]:
+    if output.hand_values is None or batch.value_targets is None:
+        return {}
+    pot = batch.statistics.get("pot")
+    scale = batch.statistics.get("scale")
+    if pot is None or scale is None:
+        return {}
+
+    corrected = loss_dict.get("value_predictions")
+    predictions = (
+        corrected.float()
+        if isinstance(corrected, torch.Tensor)
+        else output.hand_values.float()
+    )
+    targets = batch.value_targets.to(
+        device=predictions.device,
+        dtype=predictions.dtype,
+    )
+    scale_tensor = scale.to(
+        device=predictions.device,
+        dtype=predictions.dtype,
+    ).clamp_min(1.0)
+    pot_scale = pot.to(
+        device=predictions.device,
+        dtype=predictions.dtype,
+    ).clamp_min(1.0)
+    while scale_tensor.ndim < predictions.ndim:
+        scale_tensor = scale_tensor.unsqueeze(-1)
+    while pot_scale.ndim < predictions.ndim:
+        pot_scale = pot_scale.unsqueeze(-1)
+
+    relative_abs_error = (predictions - targets).abs() * scale_tensor / pot_scale
+    relative_sq_error = relative_abs_error.square()
+    weights = loss_dict.get("value_weights")
+    if isinstance(weights, torch.Tensor):
+        value_weights = weights.to(device=predictions.device, dtype=predictions.dtype)
+    else:
+        value_weights = torch.ones_like(relative_abs_error)
+    denom = value_weights.sum().clamp_min(1.0e-8)
+    relative_mse = (relative_sq_error * value_weights).sum() / denom
+    return {
+        "pot_relative_mae": (relative_abs_error * value_weights).sum() / denom,
+        "pot_relative_mse": relative_mse,
+        "pot_relative_rmse": relative_mse.sqrt(),
+    }
+
+
 def _compile_setting(cfg: Config) -> str:
     value = str(cfg.model.compile).strip().lower()
     if value in {"0", "false", "no", "none"}:
@@ -419,8 +470,6 @@ class RebelCFRTrainer:
 
         self.inference_model = self._make_eval_twin(compile_model=False)
         self._sync_inference_model()
-        if self.device.type == "cuda" and _compile_setting(cfg) != "off":
-            self.inference_model.compile_forward_modes(**_compile_kwargs(cfg))
         init_trace("inference model ready")
         eval_model = self.inference_model
         if self.target_update_block_batches > 0:
@@ -432,8 +481,6 @@ class RebelCFRTrainer:
                 )
             self.cfr_target_model = self._make_eval_twin(compile_model=False)
             self._sync_cfr_target_model(step=0)
-            if self.device.type == "cuda" and _compile_setting(cfg) != "off":
-                self.cfr_target_model.compile_forward_modes(**_compile_kwargs(cfg))
             eval_model = self.cfr_target_model
             init_trace(
                 "block CFR target model ready "
@@ -477,13 +524,16 @@ class RebelCFRTrainer:
             from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
             evaluator_cls = FusedSparseCFREvaluator
-        self.cfr_evaluator = evaluator_cls(
-            model=eval_model,
-            device=self.device,
-            cfg=cfg,
-            generator=self.rng,
-            closing_leaf_model=closing_leaf_model,
-        )
+        evaluator_kwargs: dict[str, Any] = {
+            "model": eval_model,
+            "device": self.device,
+            "cfg": cfg,
+            "generator": self.rng,
+            "closing_leaf_model": closing_leaf_model,
+        }
+        if evaluator_cls.__name__.startswith("Fused"):
+            evaluator_kwargs["compile_model"] = False
+        self.cfr_evaluator = evaluator_cls(**evaluator_kwargs)
         init_trace(f"evaluator ready ({evaluator_cls.__name__})")
         root_sampler = None
         random_street_sources = {
@@ -617,12 +667,11 @@ class RebelCFRTrainer:
 
         self.aggression_analyzer = AggressionAnalyzer(device=self.device)
 
-        # TrueSkill tracker reuses the dedicated inference model as the
-        # candidate-side compiled instance and creates a second compiled
-        # instance for the opponent.
+        # TrueSkill tracker reuses the dedicated inference model for the
+        # candidate side and creates a second frozen model for the opponent.
         self.trueskill_tracker: TrueSkillTracker | None = None
         if cfg.trueskill.enabled:
-            opponent_model = self._make_eval_twin()
+            opponent_model = self._make_eval_twin(compile_model=False)
             self.trueskill_tracker = TrueSkillTracker(
                 cfg=cfg,
                 candidate_model=self.inference_model,
@@ -931,8 +980,6 @@ class RebelCFRTrainer:
         model.eval()
         for param in model.parameters():
             param.requires_grad = False
-        if self.device.type == "cuda" and _compile_setting(frozen_cfg) != "off":
-            model.compile_forward_modes(**_compile_kwargs(frozen_cfg))
         return model
 
     def _load_street_model_registry(
@@ -2641,6 +2688,11 @@ class RebelCFRTrainer:
         loss_dict = self.loss_fn._call_forward_value(
             value_output_permuted, permuted_batch
         )
+        pot_relative_metrics = _pot_relative_value_error_metrics(
+            value_output_permuted,
+            permuted_batch,
+            loss_dict,
+        )
         permutation_loss = self._compute_permutation_loss(
             value_output_orig, value_output_permuted, suit_permutations_idxs
         )
@@ -2675,7 +2727,7 @@ class RebelCFRTrainer:
         )
         total_loss_detached = total_loss.detach()
         value_loss = loss_dict["value_loss"].detach()
-        return {
+        stats = {
             "step": step + 1,
             "loss": float(total_loss_detached.item()),
             "total_loss": float(total_loss_detached.item()),
@@ -2688,6 +2740,13 @@ class RebelCFRTrainer:
             "evaluator_street": evaluator_street,
             "learning_rate": current_lr,
         }
+        stats.update(
+            {
+                key: float(value.detach().item())
+                for key, value in pot_relative_metrics.items()
+            }
+        )
+        return stats
 
     @profile
     def _update_model(

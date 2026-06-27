@@ -175,8 +175,7 @@ def build_run_config(
     cfg.search.warm_start_iterations = int(execution.warm_start_iterations)
     cfg.search.sparse = True
     cfg.search.sparse_fused = execution.sparse_fused
-    if execution.compile is not None:
-        cfg.model.compile = execution.compile
+    cfg.model.compile = execution.compile if execution.compile is not None else "off"
     _validate_bucket_run_config(cfg)
     return cfg
 

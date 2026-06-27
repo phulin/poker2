@@ -20,6 +20,7 @@ from p2.env.card_utils import (
     PREFLOP_HANDS,
     combo_suit_permutation_tensor,
     hand_combos_tensor,
+    preflop_class_compatibility_counts_tensor,
     preflop_class_multiplicity_tensor,
     preflop_class_unblocked_mass,
 )
@@ -778,6 +779,9 @@ class RebelSupervisedLoss(nn.Module):
 
     def compile_forward_modes(self, **kwargs):
         """Compile fixed-mode loss forwards without compiling optional dispatch."""
+        device = self._combo_card_a.device
+        preflop_class_compatibility_counts_tensor(device=device)
+        preflop_class_multiplicity_tensor(device=device)
         self._compiled_forward_policy = torch.compile(self.forward_policy, **kwargs)
         self._compiled_forward_value = torch.compile(self.forward_value, **kwargs)
         self._compiled_forward_both = torch.compile(self.forward_both, **kwargs)
@@ -1172,6 +1176,13 @@ class RebelSupervisedLoss(nn.Module):
     ) -> dict[str, torch.Tensor]:
         device = hand_values.device
         value_weights = self._compact_value_weights(batch, hand_values.dtype)
+        loss_weight = batch.statistics.get("value_loss_weight")
+        if loss_weight is not None:
+            loss_weight = loss_weight.to(
+                device=value_weights.device,
+                dtype=value_weights.dtype,
+            ).clamp_min(0.0)
+            value_weights = value_weights * loss_weight.view(-1, 1, 1)
         sq_error = F.mse_loss(hand_values, value_targets, reduction="none")
         value_loss_all = sq_error.detach() * value_weights
         value_loss = (sq_error * value_weights).sum() / value_weights.sum().clamp(
