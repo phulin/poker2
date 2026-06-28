@@ -61,6 +61,7 @@ def _execution_config_from_config(cfg: Config) -> PreflopBucketExecutionConfig:
         belief_mode=preflop.belief_mode,
         states_per_bucket=preflop.states_per_bucket,
         train_batch_size=preflop.train_batch_size,
+        policy_train_batch_size=preflop.policy_train_batch_size,
         cfr_batch_size=preflop.cfr_batch_size,
         actions_12_15_cfr_batch_size=preflop.actions_12_15_cfr_batch_size,
         actions_8_11_cfr_batch_size=preflop.actions_8_11_cfr_batch_size,

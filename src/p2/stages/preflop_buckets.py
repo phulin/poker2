@@ -30,6 +30,7 @@ class PreflopBucketExecutionConfig:
     belief_mode: str
     states_per_bucket: int
     train_batch_size: int
+    policy_train_batch_size: int | None
     cfr_batch_size: int
     actions_12_15_cfr_batch_size: int | None
     actions_8_11_cfr_batch_size: int | None

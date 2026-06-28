@@ -626,12 +626,13 @@ def _policy_update(
     batch: RebelBatch,
     *,
     step: int,
+    sync_inference_model: bool = True,
 ) -> dict[str, float]:
     stats = trainer.supervise_policy_batch(
         batch,
         step=step,
         apply_schedules=True,
-        sync_inference_model=True,
+        sync_inference_model=sync_inference_model,
         sync_cfr_target_model=True,
     )
     return _float_metrics(stats)
@@ -754,6 +755,12 @@ def _bucket_cfr_batch_size(
     if override is not None:
         return max(1, int(override))
     return max(1, int(args.cfr_batch_size))
+
+
+def _policy_train_batch_size(args: PreflopBucketExecutionConfig) -> int:
+    if args.policy_train_batch_size is not None:
+        return max(1, int(args.policy_train_batch_size))
+    return max(1, int(args.train_batch_size))
 
 
 def _max_cfr_batch_size(args: PreflopBucketExecutionConfig) -> int:
@@ -1225,6 +1232,7 @@ def _train_value_minibatches(
     *,
     step: int,
     batch_size: int,
+    sync_inference_model: bool = True,
 ) -> tuple[dict[str, float], int]:
     weighted_stats: list[tuple[int, dict[str, Any]]] = []
     schedule_step = int(step)
@@ -1240,7 +1248,7 @@ def _train_value_minibatches(
         stats = trainer.train_value_batch(
             part,
             schedule_step,
-            sync_inference_model=True,
+            sync_inference_model=sync_inference_model,
         )
         weighted_stats.append((original_count, stats))
     return _aggregate_minibatch_stats(weighted_stats), len(weighted_stats)
@@ -1252,6 +1260,7 @@ def _train_policy_minibatches(
     *,
     step: int,
     batch_size: int,
+    sync_inference_model: bool = True,
 ) -> tuple[dict[str, float], int]:
     weighted_stats: list[tuple[int, dict[str, Any]]] = []
     schedule_step = int(step)
@@ -1263,6 +1272,7 @@ def _train_policy_minibatches(
             trainer,
             part,
             step=schedule_step,
+            sync_inference_model=sync_inference_model,
         )
         weighted_stats.append((original_count, stats))
     return _aggregate_minibatch_stats(weighted_stats), len(weighted_stats)
@@ -1698,7 +1708,7 @@ def _run_bootstrap_distill_for_bucket(
                 trainer,
                 policy_batch,
                 step=schedule_step,
-                batch_size=max(1, int(args.train_batch_size)),
+                batch_size=_policy_train_batch_size(args),
             )
             roots_total += rows
             epoch_roots += rows
@@ -2136,6 +2146,7 @@ def run_train_specialists(
                 )
             bucket_start = time.time()
             train_batch_size = max(1, int(args.train_batch_size))
+            policy_train_batch_size = _policy_train_batch_size(args)
             progress_interval = max(int(args.progress_roots), cfr_batch_size)
             next_progress_roots = (
                 (roots_solved // progress_interval) + 1
@@ -2217,7 +2228,8 @@ def run_train_specialists(
                     f"cfr_batch={cfr_batch_size} step={global_step} "
                     f"bucket_step={bucket_step} "
                     f"bucket_train_step={bucket_train_step} "
-                    f"train_batch={train_batch_size} "
+                    f"value_batch={train_batch_size} "
+                    f"policy_batch={policy_train_batch_size} "
                     f"roots/s={roots_per_s:.2f} "
                     f"interval={interval_s:.1f}s elapsed={elapsed:.1f}s",
                     flush=True,
@@ -2283,6 +2295,7 @@ def run_train_specialists(
                             value_stream,
                             step=schedule_step,
                             batch_size=train_batch_size,
+                            sync_inference_model=False,
                         )
                         trained_this_step = True
                     else:
@@ -2296,13 +2309,15 @@ def run_train_specialists(
                             trainer,
                             policy_stream,
                             step=schedule_step,
-                            batch_size=train_batch_size,
+                            batch_size=policy_train_batch_size,
+                            sync_inference_model=False,
                         )
                         trained_this_step = True
                     else:
                         policy_stats = {}
                         policy_minibatches = 0
                     if trained_this_step:
+                        trainer.sync_inference_model()
                         global_step += 1
                         bucket_train_step += 1
 
@@ -2322,6 +2337,8 @@ def run_train_specialists(
                         f"{bucket_label}/bucket_schedule_steps": bucket_updates_guess,
                         f"{bucket_label}/cfr_batch_size": cfr_batch_size,
                         f"{bucket_label}/train_batch_size": train_batch_size,
+                        f"{bucket_label}/value_train_batch_size": train_batch_size,
+                        f"{bucket_label}/policy_train_batch_size": policy_train_batch_size,
                         f"{bucket_label}/global_step": global_step,
                         f"{bucket_label}/value_examples": value_examples,
                         f"{bucket_label}/policy_examples": policy_examples,
@@ -2721,16 +2738,20 @@ def run_distill(
                     value_stats = student.train_value_batch(
                         value_batch,
                         step_before_updates,
-                        sync_inference_model=True,
+                        sync_inference_model=False,
                     )
                     trained_this_step = True
                 else:
                     value_stats = {}
                 policy_stats = _policy_update(
-                    student, policy_batch, step=step_before_updates
+                    student,
+                    policy_batch,
+                    step=step_before_updates,
+                    sync_inference_model=False,
                 )
                 trained_this_step = True
                 if trained_this_step:
+                    student.sync_inference_model()
                     global_step += 1
                 roots += rows
                 payload = {

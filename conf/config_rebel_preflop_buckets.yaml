@@ -15,13 +15,13 @@ wandb_tags: ["rebel", "cfr", "preflop", "backward-induction"]
 
 train:
   batch_size: 256
-  learning_rate: 0.00105
-  learning_rate_final: 0.0001575
+  learning_rate: 0.0015
+  learning_rate_final: 0.000225
   lr_schedule: wsd
   lr_wsd_decay_fraction: 0.6
   warmup_steps: 0
   optimizer: muon
-  adamw_learning_rate: 0.000875
+  adamw_learning_rate: 0.00125
   weight_decay: 0.01
   grad_clip: 1.0
   replay_buffer_batches: 1
@@ -67,7 +67,8 @@ preflop_buckets:
   train_bucket: null
   belief_mode: random
   states_per_bucket: 5000000
-  train_batch_size: 256
+  train_batch_size: 512
+  policy_train_batch_size: 2048
   cfr_batch_size: 512
   actions_12_15_cfr_batch_size: 8192
   actions_8_11_cfr_batch_size: 2048

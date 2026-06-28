@@ -7,13 +7,14 @@ import argparse
 import json
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
 import hydra
 import torch
 from omegaconf import DictConfig
+from torch.profiler import ProfilerActivity, profile, record_function
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -35,6 +36,7 @@ from p2.stages.preflop_backward_induction import (  # noqa: E402
     _load_model_weights,
     _make_env_from_manifest,
     _policy_only,
+    _policy_train_batch_size,
     _random_beliefs,
     _seed_for_label,
     _train_policy_minibatches,
@@ -60,6 +62,7 @@ DEFAULT_TRAINER_CHECKPOINT = (
     DEFAULT_RUN_DIR / "actions_8_11/checkpoints/specialist_inprogress.pt"
 )
 DEFAULT_OUT = REPO_ROOT / "outputs/preflop_outer_step_profile/profile.json"
+DEFAULT_PROFILER_DIR = REPO_ROOT / "outputs/preflop_outer_step_profile/torch_profiler"
 
 
 def _sync(device: torch.device) -> None:
@@ -81,6 +84,71 @@ class PhaseTimer:
         self.rows.append(
             {"step": step, "phase": phase, "wall_s": time.perf_counter() - start}
         )
+
+
+@contextmanager
+def _phase(
+    timer: PhaseTimer,
+    phase: str,
+    *,
+    step: int,
+    use_timer: bool,
+    use_profiler: bool,
+) -> Any:
+    record_ctx = record_function(phase) if use_profiler else nullcontext()
+    timer_ctx = timer.time(phase, step=step) if use_timer else nullcontext()
+    with record_ctx:
+        with timer_ctx:
+            yield
+
+
+def _prof_device_us(evt: Any) -> float:
+    value = getattr(evt, "device_time_total", None)
+    if value is not None:
+        return float(value or 0.0)
+    return float(getattr(evt, "cuda_time_total", 0.0) or 0.0)
+
+
+def _prof_self_device_us(evt: Any) -> float:
+    value = getattr(evt, "self_device_time_total", None)
+    if value is not None:
+        return float(value or 0.0)
+    return float(getattr(evt, "self_cuda_time_total", 0.0) or 0.0)
+
+
+def _profiler_rows(prof: Any, steps: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for evt in prof.key_averages():
+        self_device_us = _prof_self_device_us(evt)
+        device_us = _prof_device_us(evt)
+        self_cpu_us = float(getattr(evt, "self_cpu_time_total", 0.0) or 0.0)
+        cpu_us = float(getattr(evt, "cpu_time_total", 0.0) or 0.0)
+        count = int(getattr(evt, "count", 1) or 1)
+        rows.append(
+            {
+                "name": evt.key,
+                "count_total": count,
+                "count_per_step": count / max(1, steps),
+                "self_device_ms_per_step": self_device_us / 1e3 / max(1, steps),
+                "device_ms_per_step": device_us / 1e3 / max(1, steps),
+                "self_cpu_ms_per_step": self_cpu_us / 1e3 / max(1, steps),
+                "cpu_ms_per_step": cpu_us / 1e3 / max(1, steps),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            float(row["self_device_ms_per_step"]),
+            float(row["self_cpu_ms_per_step"]),
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+def _profiler_cpu_rows(prof: Any, steps: int) -> list[dict[str, Any]]:
+    rows = _profiler_rows(prof, steps)
+    rows.sort(key=lambda row: float(row["self_cpu_ms_per_step"]), reverse=True)
+    return rows
 
 
 def _load_cfg(args: argparse.Namespace):
@@ -225,6 +293,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile-cfr-models", action="store_true")
     parser.add_argument("--skip-validation", action="store_true")
     parser.add_argument("--skip-training", action="store_true")
+    parser.add_argument(
+        "--torch-profiler",
+        action="store_true",
+        help=(
+            "Profile active outer steps with torch.profiler. Active steps use "
+            "record_function phase labels and only synchronize at step end."
+        ),
+    )
+    parser.add_argument("--profiler-record-shapes", action="store_true")
+    parser.add_argument("--profiler-with-stack", action="store_true")
+    parser.add_argument("--profiler-out-dir", type=Path, default=DEFAULT_PROFILER_DIR)
     return parser.parse_args()
 
 
@@ -237,6 +316,7 @@ def main() -> None:
     base_template, execution = _load_cfg(args)
     cfr_batch_size = _bucket_cfr_batch_size(execution, args.bucket)
     train_batch_size = max(1, int(execution.train_batch_size))
+    policy_train_batch_size = _policy_train_batch_size(execution)
     bucket_index = ("actions_12_15", "actions_8_11", "actions_4_7", "actions_0_3").index(
         args.bucket
     )
@@ -330,65 +410,156 @@ def main() -> None:
         skip_rows=args.skip_rows,
     )
     step_summaries: list[dict[str, Any]] = []
+    profiler_obj = None
+    profiler_ctx = None
+    profiler_trace_path: Path | None = None
+    profiler_summary_path: Path | None = None
+    profiler_active_wall_s: list[float] = []
     for step in range(total_steps):
         active_step = step >= args.warmup_steps
+        profile_active = bool(args.torch_profiler and active_step)
+        if profile_active and profiler_ctx is None:
+            args.profiler_out_dir.mkdir(parents=True, exist_ok=True)
+            profiler_trace_path = args.profiler_out_dir / "trace.json"
+            profiler_summary_path = args.profiler_out_dir / "summary.json"
+            activities = [ProfilerActivity.CPU]
+            if device.type == "cuda":
+                activities.append(ProfilerActivity.CUDA)
+            profiler_ctx = profile(
+                activities=activities,
+                record_shapes=args.profiler_record_shapes,
+                with_stack=args.profiler_with_stack,
+                profile_memory=False,
+            )
+            profiler_obj = profiler_ctx.__enter__()
         states = next(state_iter)
         phase_step = step - args.warmup_steps if active_step else -1 - step
-        with timer.time("copy_public_states_to_env", step=phase_step):
-            rows = _copy_public_states_to_env(env, states)
-        with timer.time("random_beliefs", step=phase_step):
-            beliefs = _random_beliefs(
-                rows,
-                solver.num_players,
-                device=device,
-                rng=rng,
-                mode=execution.belief_mode,
-            )
-        roots = torch.arange(rows, device=device)
-        evaluator = solver.cfr_evaluator
-        with timer.time("initialize_subgame", step=phase_step):
-            evaluator.initialize_subgame(env, roots, beliefs)
-        with timer.time("evaluate_cfr_total", step=phase_step):
-            if args.timed_cfr_internals:
-                _evaluate_cfr_timed(evaluator, timer, step=phase_step)
-            else:
-                evaluator.evaluate_cfr(training_mode=True, sample_continuation=False)
-        with timer.time("training_data", step=phase_step):
-            value_batch, _unused, policy_batch = evaluator.training_data(
-                include_pre_chance_value_batch=False,
-                include_policy_batch=True,
-            )
-        with timer.time("filter_bucket", step=phase_step):
-            value_batch = _filter_batch_by_action_bucket(
-                value_batch,
-                low=spec.low,
-                high=spec.high,
-            )
-            policy_batch = _filter_batch_by_action_bucket(
-                policy_batch,
-                low=spec.low,
-                high=spec.high,
-            )
-            value_stream = _value_only(value_batch) if train_value else None
-            policy_stream = _policy_only(policy_batch)
-        value_examples = 0 if value_stream is None else len(value_stream)
-        policy_examples = 0 if policy_stream is None else len(policy_stream)
-        if value_stream is not None and not args.skip_training:
-            with timer.time("train_value_minibatches", step=phase_step):
-                _train_value_minibatches(
-                    trainer,
-                    value_stream,
-                    step=int(loaded_step) + step,
-                    batch_size=train_batch_size,
+        step_start = time.perf_counter() if profile_active else 0.0
+        step_record = record_function("outer_active_step") if profile_active else nullcontext()
+        with step_record:
+            with _phase(
+                timer,
+                "copy_public_states_to_env",
+                step=phase_step,
+                use_timer=not profile_active,
+                use_profiler=profile_active,
+            ):
+                rows = _copy_public_states_to_env(env, states)
+            with _phase(
+                timer,
+                "random_beliefs",
+                step=phase_step,
+                use_timer=not profile_active,
+                use_profiler=profile_active,
+            ):
+                beliefs = _random_beliefs(
+                    rows,
+                    solver.num_players,
+                    device=device,
+                    rng=rng,
+                    mode=execution.belief_mode,
                 )
-        if policy_stream is not None and not args.skip_training:
-            with timer.time("train_policy_minibatches", step=phase_step):
-                _train_policy_minibatches(
-                    trainer,
-                    policy_stream,
-                    step=int(loaded_step) + step,
-                    batch_size=train_batch_size,
+            roots = torch.arange(rows, device=device)
+            evaluator = solver.cfr_evaluator
+            with _phase(
+                timer,
+                "initialize_subgame",
+                step=phase_step,
+                use_timer=not profile_active,
+                use_profiler=profile_active,
+            ):
+                evaluator.initialize_subgame(env, roots, beliefs)
+            with _phase(
+                timer,
+                "evaluate_cfr_total",
+                step=phase_step,
+                use_timer=not profile_active,
+                use_profiler=profile_active,
+            ):
+                if args.timed_cfr_internals and not profile_active:
+                    _evaluate_cfr_timed(evaluator, timer, step=phase_step)
+                else:
+                    evaluator.evaluate_cfr(
+                        training_mode=True,
+                        sample_continuation=False,
+                    )
+            with _phase(
+                timer,
+                "training_data",
+                step=phase_step,
+                use_timer=not profile_active,
+                use_profiler=profile_active,
+            ):
+                value_batch, _unused, policy_batch = evaluator.training_data(
+                    include_pre_chance_value_batch=False,
+                    include_policy_batch=True,
                 )
+            with _phase(
+                timer,
+                "filter_bucket",
+                step=phase_step,
+                use_timer=not profile_active,
+                use_profiler=profile_active,
+            ):
+                value_batch = _filter_batch_by_action_bucket(
+                    value_batch,
+                    low=spec.low,
+                    high=spec.high,
+                )
+                policy_batch = _filter_batch_by_action_bucket(
+                    policy_batch,
+                    low=spec.low,
+                    high=spec.high,
+                )
+                value_stream = _value_only(value_batch) if train_value else None
+                policy_stream = _policy_only(policy_batch)
+            value_examples = 0 if value_stream is None else len(value_stream)
+            policy_examples = 0 if policy_stream is None else len(policy_stream)
+            trained_this_step = False
+            if value_stream is not None and not args.skip_training:
+                with _phase(
+                    timer,
+                    "train_value_minibatches",
+                    step=phase_step,
+                    use_timer=not profile_active,
+                    use_profiler=profile_active,
+                ):
+                    _train_value_minibatches(
+                        trainer,
+                        value_stream,
+                        step=int(loaded_step) + step,
+                        batch_size=train_batch_size,
+                        sync_inference_model=False,
+                    )
+                trained_this_step = True
+            if policy_stream is not None and not args.skip_training:
+                with _phase(
+                    timer,
+                    "train_policy_minibatches",
+                    step=phase_step,
+                    use_timer=not profile_active,
+                    use_profiler=profile_active,
+                ):
+                    _train_policy_minibatches(
+                        trainer,
+                        policy_stream,
+                        step=int(loaded_step) + step,
+                        batch_size=policy_train_batch_size,
+                        sync_inference_model=False,
+                    )
+                trained_this_step = True
+            if trained_this_step:
+                with _phase(
+                    timer,
+                    "sync_inference_model",
+                    step=phase_step,
+                    use_timer=not profile_active,
+                    use_profiler=profile_active,
+                ):
+                    trainer.sync_inference_model()
+        if profile_active:
+            _sync(device)
+            profiler_active_wall_s.append(time.perf_counter() - step_start)
         if active_step:
             step_summaries.append(
                 {
@@ -408,6 +579,40 @@ def main() -> None:
             f"value={value_examples} policy={policy_examples}",
             flush=True,
         )
+    if profiler_ctx is not None:
+        profiler_ctx.__exit__(None, None, None)
+        assert profiler_obj is not None
+        assert profiler_trace_path is not None
+        assert profiler_summary_path is not None
+        profiler_obj.export_chrome_trace(str(profiler_trace_path))
+        steps = max(1, len(profiler_active_wall_s))
+        profiler_summary = {
+            "active_wall_s": profiler_active_wall_s,
+            "wall_ms_per_step": 1e3
+            * sum(profiler_active_wall_s)
+            / max(1, len(profiler_active_wall_s)),
+            "top_device": _profiler_rows(profiler_obj, steps)[:80],
+            "top_cpu": _profiler_cpu_rows(profiler_obj, steps)[:80],
+        }
+        profiler_summary_path.write_text(
+            json.dumps(profiler_summary, indent=2) + "\n"
+        )
+        print(f"torch profiler trace: {profiler_trace_path}", flush=True)
+        print(f"torch profiler summary: {profiler_summary_path}", flush=True)
+        print("top device ops:", flush=True)
+        for row in profiler_summary["top_device"][:20]:
+            print(
+                f"  {row['self_device_ms_per_step']:>8.3f} ms/step "
+                f"{row['count_per_step']:>8.1f}x {row['name']}",
+                flush=True,
+            )
+        print("top CPU ops:", flush=True)
+        for row in profiler_summary["top_cpu"][:20]:
+            print(
+                f"  {row['self_cpu_ms_per_step']:>8.3f} ms/step "
+                f"{row['count_per_step']:>8.1f}x {row['name']}",
+                flush=True,
+            )
 
     active_rows = [row for row in timer.rows if int(row["step"]) >= 0]
     output = {
@@ -415,6 +620,8 @@ def main() -> None:
             "bucket": args.bucket,
             "cfr_batch_size": cfr_batch_size,
             "train_batch_size": train_batch_size,
+            "value_train_batch_size": train_batch_size,
+            "policy_train_batch_size": policy_train_batch_size,
             "warmup_steps": args.warmup_steps,
             "active_steps": args.active_steps,
             "skip_rows": args.skip_rows,

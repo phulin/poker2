@@ -555,6 +555,7 @@ class PreflopBucketTrainingConfig:
     belief_mode: str = "random"
     states_per_bucket: int = 100_000
     train_batch_size: int = 1024
+    policy_train_batch_size: int | None = None
     cfr_batch_size: int = 512
     actions_12_15_cfr_batch_size: int | None = None
     actions_8_11_cfr_batch_size: int | None = None
