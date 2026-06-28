@@ -13,36 +13,81 @@ use_wandb: true
 wandb_project: poker-rebel-preflop-backward-induction
 wandb_tags: ["rebel", "cfr", "preflop", "backward-induction"]
 
+train:
+  batch_size: 256
+  learning_rate: 0.00105
+  learning_rate_final: 0.0001575
+  lr_schedule: wsd
+  lr_wsd_decay_fraction: 0.6
+  warmup_steps: 0
+  optimizer: muon
+  adamw_learning_rate: 0.000875
+  weight_decay: 0.01
+  grad_clip: 1.0
+  replay_buffer_batches: 1
+  save_replay_buffers: false
+
+model:
+  hidden_dim: 192
+  range_hidden_dim: 256
+  ffn_dim: 256
+  board_interaction_dim: 0
+  preflop_model_type: gated_token_mixer
+  preflop_hand_dim: 169
+  preflop_range_slot_moment_slots: 0
+  num_hidden_layers: 0
+  num_policy_layers: 4
+  num_value_layers: 5
+  enforce_zero_sum: false
+
+env:
+  num_players: 6
+
+search:
+  model_scope: mixed_street
+  depth: 4
+  iterations: 300
+  iterations_final: null
+  warm_start_iterations: 0
+  sparse: true
+  sparse_fused: true
+  allin_call_terminal_abstraction: true
+  preflop_allin_table_path: outputs/preflop_allin_table.pt.zst
+  preflop_allin_169_cache_path: outputs/precompute/preflop_allin_169_u16.pt.zst
+  preflop_allin_169_model_checkpoint: outputs/checkpoints_allin_169_transformer/allin_256k_xf4_h192_hd128_mainlr00025_adamw0004_bs1024_maskfold_s16384_b1024_min4/latest.pt
+  preflop_allin_169_compile_model: true
+  closing_leaf_checkpoint: outputs/epreflop_6p_live_pair/full_b16384_s5260_muon2e-2_adamw2e-3_warmup10_linear_shuffled_per_player_val/checkpoints/distilled_final.pt
+
 preflop_buckets:
   command: train_specialists
-  state_dataset: null
-  base_checkpoint: null
+  state_dataset: outputs/preflop_policy_states/eroymcd2_unique_buckets_20m_n5_cap5m_packed_20260622
+  base_checkpoint: outputs/epreflop_6p_live_pair/full_b16384_s5260_muon2e-2_adamw2e-3_warmup10_linear_shuffled_per_player_val/checkpoints/distilled_final.pt
   output_dir: outputs/preflop_backward_induction
   presolve_bucket: actions_12_15
   train_bucket: null
   belief_mode: random
-  states_per_bucket: 100000
-  train_batch_size: 1024
+  states_per_bucket: 5000000
+  train_batch_size: 256
   cfr_batch_size: 512
-  actions_12_15_cfr_batch_size: null
-  actions_8_11_cfr_batch_size: null
-  actions_12_15_epochs: 1
+  actions_12_15_cfr_batch_size: 8192
+  actions_8_11_cfr_batch_size: 2048
+  actions_12_15_epochs: 10
   depth: 4
-  actions_12_15_depth: null
-  actions_8_11_depth: null
-  actions_4_7_depth: null
-  actions_0_3_depth: null
-  cfr_iterations: 400
+  actions_12_15_depth: 7
+  actions_8_11_depth: 4
+  actions_4_7_depth: 4
+  actions_0_3_depth: 4
+  cfr_iterations: 300
   warm_start_iterations: 0
   sparse_fused: true
-  compile: null
+  compile: default
   validation_items: 4096
   validation_cfr_iterations: 10000
   validation_interval_steps: 10
   validation_eval_batch_size: 1024
   replay_buffer_batches: 1
   storage_dtype: bfloat16
-  write_solved_shards: true
+  write_solved_shards: false
   allow_partial: false
   overwrite: false
   progress_roots: 10000

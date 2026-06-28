@@ -1077,6 +1077,22 @@ def _load_validation_cache(
     return cached
 
 
+def _validation_to_device(validation: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    return {
+        **validation,
+        "value_batch": (
+            validation["value_batch"].to(device)
+            if validation.get("value_batch") is not None
+            else None
+        ),
+        "policy_batch": (
+            validation["policy_batch"].to(device)
+            if validation.get("policy_batch") is not None
+            else None
+        ),
+    }
+
+
 def _promote_validation_cache(source: Path, destination: Path) -> None:
     if source == destination or destination.exists():
         return
@@ -2009,6 +2025,7 @@ def run_train_specialists(
                     solved_dir.exists()
                     and any(solved_dir.iterdir())
                     and not args.overwrite
+                    and not resume_current_bucket
                 ):
                     raise FileExistsError(f"{solved_dir} exists; pass --overwrite")
                 solved_dir.mkdir(parents=True, exist_ok=True)
@@ -2045,6 +2062,7 @@ def run_train_specialists(
                 device=device,
                 bucket_index=bucket_index,
             )
+            validation = _validation_to_device(validation, device)
             solver = RebelCFRTrainer(
                 cfg=copy.deepcopy(cutoff_cfg), device=device, pregeneration_only=True
             )
@@ -2081,6 +2099,7 @@ def run_train_specialists(
                 RebelSolvedDatasetWriter(
                     solved_dir,
                     storage_float_dtype=args.storage_dtype,
+                    resume_existing=resume_current_bucket,
                 )
                 if args.write_solved_shards
                 else None

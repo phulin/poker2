@@ -89,6 +89,32 @@ def test_config_rebel_preflop_buckets_resolves() -> None:
     assert cfg.preflop_buckets.snapshot_interval_steps == 50
     assert cfg.preflop_buckets.distill_buckets is None
     assert cfg.preflop_buckets.distill_checkpoints.checkpoint_12_15 is None
+    assert cfg.preflop_buckets.states_per_bucket == 5_000_000
+    assert cfg.preflop_buckets.train_batch_size == 256
+    assert cfg.preflop_buckets.cfr_iterations == 300
+    assert cfg.preflop_buckets.actions_12_15_cfr_batch_size == 8192
+    assert cfg.preflop_buckets.actions_8_11_cfr_batch_size == 2048
+    assert cfg.preflop_buckets.actions_12_15_epochs == 10
+    assert cfg.preflop_buckets.actions_12_15_depth == 7
+    assert cfg.preflop_buckets.actions_4_7_depth == 4
+    assert cfg.train.learning_rate == 0.00105
+    assert cfg.train.learning_rate_final == 0.0001575
+    assert cfg.train.adamw_learning_rate == 0.000875
+    assert str(cfg.train.lr_schedule) == "LrSchedule.wsd"
+    assert cfg.train.lr_wsd_decay_fraction == 0.6
+    assert cfg.train.optimizer == "muon"
+    assert cfg.model.preflop_model_type.value == "gated_token_mixer"
+    assert cfg.model.hidden_dim == 192
+    assert cfg.model.range_hidden_dim == 256
+    assert cfg.model.ffn_dim == 256
+    assert cfg.model.num_policy_layers == 4
+    assert cfg.model.num_value_layers == 5
+    assert cfg.env.num_players == 6
+    assert str(cfg.search.model_scope) == "ModelScope.mixed_street"
+    assert cfg.search.closing_leaf_checkpoint is not None
+    assert cfg.search.closing_leaf_checkpoint.endswith("distilled_final.pt")
+    assert cfg.search.allin_call_terminal_abstraction is True
+    assert cfg.search.preflop_allin_169_model_checkpoint is not None
 
 
 def test_preflop_hydra_cli_dispatches_train_specialists(monkeypatch, tmp_path) -> None:

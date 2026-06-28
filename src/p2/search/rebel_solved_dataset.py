@@ -319,6 +319,7 @@ class RebelSolvedDatasetWriter:
         output_dir: str | Path,
         *,
         storage_float_dtype: torch.dtype | str | None = None,
+        resume_existing: bool = False,
     ) -> None:
         self.root = Path(output_dir)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -350,29 +351,12 @@ class RebelSolvedDatasetWriter:
         self.leaf_target_source_counts: dict[str, int] = {}
         self.street_values: set[int] = set()
         self.example_batch: RebelBatch | None = None
+        if resume_existing:
+            self._load_existing_shards()
 
-    def append(self, stream: StreamName, batch: RebelBatch) -> None:
-        _validate_stream_batch(batch, stream)
-        if len(batch) == 0:
-            return
+    def _record_batch_metadata(self, stream: StreamName, batch: RebelBatch) -> None:
         if self.example_batch is None:
             self.example_batch = batch
-
-        stream_dir = self.root / stream
-        stream_dir.mkdir(parents=True, exist_ok=True)
-        shard_idx = len(self.shards[stream])
-        start = self.examples[stream]
-        end = start + len(batch)
-        rel_path = f"{stream}/shard_{shard_idx:06d}.pt"
-        torch.save(
-            rebel_batch_to_tensors(
-                batch, storage_float_dtype=self.storage_dtype_name
-            ),
-            self.root / rel_path,
-        )
-        self.shards[stream].append({"file": rel_path, "start": start, "end": end})
-        self.examples[stream] = end
-
         self.street_values.update(int(x) for x in batch.features.street.unique().tolist())
         _add_count_dict(self.street_counts[stream], _count_tensor_values([batch], "street"))
         _add_count_dict(self.depth_counts[stream], _count_tensor_values([batch], "node_depth"))
@@ -389,6 +373,58 @@ class RebelSolvedDatasetWriter:
                 self.leaf_target_source_counts,
                 _leaf_target_source_counts([batch]),
             )
+
+    def _load_existing_shards(self) -> None:
+        for stream in ("value", "policy"):
+            stream_dir = self.root / stream
+            if not stream_dir.exists():
+                continue
+            expected_idx = 0
+            for path in sorted(stream_dir.glob("shard_*.pt")):
+                expected_name = f"shard_{expected_idx:06d}.pt"
+                if path.name != expected_name:
+                    raise ValueError(
+                        f"Cannot resume solved shards with non-contiguous files: "
+                        f"expected {expected_name}, got {path.name}"
+                    )
+                tensors = torch.load(path, map_location="cpu", weights_only=False)
+                batch = rebel_batch_from_tensors(
+                    tensors,
+                    device=torch.device("cpu"),
+                    float_dtype=None,
+                )
+                _validate_stream_batch(batch, stream)
+                start = self.examples[stream]
+                end = start + len(batch)
+                rel_path = f"{stream}/{path.name}"
+                self.shards[stream].append(
+                    {"file": rel_path, "start": start, "end": end}
+                )
+                self.examples[stream] = end
+                self._record_batch_metadata(stream, batch)
+                expected_idx += 1
+
+    def append(self, stream: StreamName, batch: RebelBatch) -> None:
+        _validate_stream_batch(batch, stream)
+        if len(batch) == 0:
+            return
+
+        stream_dir = self.root / stream
+        stream_dir.mkdir(parents=True, exist_ok=True)
+        shard_idx = len(self.shards[stream])
+        start = self.examples[stream]
+        end = start + len(batch)
+        rel_path = f"{stream}/shard_{shard_idx:06d}.pt"
+        torch.save(
+            rebel_batch_to_tensors(
+                batch, storage_float_dtype=self.storage_dtype_name
+            ),
+            self.root / rel_path,
+        )
+        self.shards[stream].append({"file": rel_path, "start": start, "end": end})
+        self.examples[stream] = end
+
+        self._record_batch_metadata(stream, batch)
 
     def finalize(self, metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:
         example_batch = self.example_batch

@@ -88,6 +88,9 @@ class PBSEnv:
             else torch.device("mps" if torch.backends.mps.is_available() else "cpu")
         )
         self.float_dtype = float_dtype
+        self._default_bet_bins_tensor = torch.tensor(
+            self.default_bet_bins, dtype=torch.float32, device=self.device
+        )
         self.rng = rng if rng is not None else torch.Generator(device=self.device)
 
         self.arange_n = torch.arange(self.N, device=self.device)
@@ -164,6 +167,11 @@ class PBSEnv:
             self.board_indices.fill_(-1)
             self.last_board_indices.fill_(-1)
             self.board_onehot.zero_()
+
+    def _bet_bins_tensor(self, bet_bins: list[float]) -> torch.Tensor:
+        if bet_bins is self.default_bet_bins or list(bet_bins) == self.default_bet_bins:
+            return self._default_bet_bins_tensor
+        return torch.tensor(bet_bins, dtype=torch.float32, device=self.device)
 
     @classmethod
     def from_proto(
@@ -332,7 +340,7 @@ class PBSEnv:
         amounts[:, 1] = torch.minimum(to_call, actor_stack)
         mask[:, 1] = can_act
 
-        bet_bins_t = torch.tensor(bet_bins, dtype=torch.float32, device=self.device)
+        bet_bins_t = self._bet_bins_tensor(bet_bins)
         additional = (self.pot[:, None].to(torch.float32) * bet_bins_t[None, :]).long()
         bet_amounts = to_call[:, None] + additional
         amounts[:, 2:-1] = bet_amounts
@@ -375,7 +383,7 @@ class PBSEnv:
         to_call = max_committed - actor_committed
 
         amounts[:, 1] = torch.minimum(to_call, actor_stack)
-        bet_bins_t = torch.tensor(bet_bins, dtype=torch.float32, device=self.device)
+        bet_bins_t = self._bet_bins_tensor(bet_bins)
         additional = (
             self.pot[indices, None].to(torch.float32) * bet_bins_t[None, :]
         ).long()

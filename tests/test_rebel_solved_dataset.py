@@ -17,6 +17,7 @@ from p2.rl.target_provenance import (
 )
 from p2.search.rebel_solved_dataset import (
     MANIFEST_NAME,
+    RebelSolvedDatasetWriter,
     RebelSolvedDataset,
     rebel_batch_from_tensors,
     rebel_batch_to_tensors,
@@ -228,6 +229,37 @@ def test_rebel_solved_dataset_reads_wrapped_batches(tmp_path):
     assert policy.value_targets is None
     assert policy.policy_targets is not None
     torch.testing.assert_close(policy.features.context, _policy_batch(10, 2).features.context)
+
+
+def test_rebel_solved_dataset_writer_resumes_unfinished_shards(tmp_path):
+    writer = RebelSolvedDatasetWriter(tmp_path)
+    writer.append("value", _value_batch(0, 2))
+    writer.append("policy", _policy_batch(10, 1))
+
+    resumed = RebelSolvedDatasetWriter(
+        tmp_path,
+        resume_existing=True,
+    )
+    assert resumed.examples == {"value": 2, "policy": 1}
+    resumed.append("value", _value_batch(2, 1))
+    resumed.append("policy", _policy_batch(11, 2))
+    manifest = resumed.finalize({"stage": "resume"})
+
+    assert manifest["value_examples"] == 3
+    assert manifest["policy_examples"] == 3
+    assert [shard["file"] for shard in manifest["shards"]["value"]] == [
+        "value/shard_000000.pt",
+        "value/shard_000001.pt",
+    ]
+    assert [shard["file"] for shard in manifest["shards"]["policy"]] == [
+        "policy/shard_000000.pt",
+        "policy/shard_000001.pt",
+    ]
+
+    dataset = RebelSolvedDataset(tmp_path)
+    value = dataset.get_batch("value", 0, 3)
+    expected_value = RebelBatch.cat([_value_batch(0, 2), _value_batch(2, 1)])
+    torch.testing.assert_close(value.value_targets, expected_value.value_targets)
 
 
 def test_rebel_solved_dataset_supports_compressed_float_storage(tmp_path):

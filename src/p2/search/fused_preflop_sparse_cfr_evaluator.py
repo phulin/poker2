@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 
 import torch
 
@@ -1741,14 +1742,20 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         beliefs: torch.Tensor,
         features: MLPFeatures,
     ) -> bool:
+        if os.environ.get("P2_DISABLE_PREFLOP_PARTITIONED_WRITEBACK"):
+            return False
         if self._model_scope() != "mixed_street":
             return False
         if self.closing_leaf_value_model is None:
             return False
-        if not self._can_project_heads_up_closing_model():
-            return False
 
         self._ensure_model_index_partitions()
+        can_project_heads_up = self._can_project_heads_up_closing_model()
+        if not can_project_heads_up and (
+            self._closing_model_num_players() != self.num_players
+            or self._closing_model_hand_dim() != self.hand_dim
+        ):
+            return False
         store_last = bool(self.cfr_avg)
         do_mix = (
             store_last
@@ -1778,6 +1785,43 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 store_last=store_last,
             )
             wrote_any = True
+
+        if not can_project_heads_up:
+            closing_positions = self.new_street_model_positions
+            if closing_positions.numel() > 0:
+                closing_features = self._features_for_model_positions(
+                    features,
+                    closing_positions,
+                    self.closing_leaf_value_encoder,
+                )
+                closing_values, _ = self._eval_model_for_fused_writeback(
+                    self.closing_leaf_value_model,
+                    closing_features,
+                    use_pre_head=False,
+                )
+                self._writeback_model_values_partition(
+                    hand_values=closing_values,
+                    beliefs_at_model=beliefs,
+                    positions=closing_positions,
+                    position_beliefs=closing_features.beliefs,
+                    last_attr="_preflop_new_street_last_values_buf",
+                    do_mix=do_mix,
+                    store_last=store_last,
+                )
+                wrote_any = True
+
+            self._preflop_partition_last_values_valid = bool(store_last and wrote_any)
+            if store_last and wrote_any:
+                marker = getattr(self, "_preflop_partition_last_values_marker", None)
+                if marker is None:
+                    marker = self.latest_values.new_empty(
+                        (0, self.num_players, self.hand_dim)
+                    )
+                    self._preflop_partition_last_values_marker = marker
+                self.last_model_values = marker
+            else:
+                self.last_model_values = None
+            return wrote_any
 
         baseline_positions = self.new_street_baseline_model_positions
         if baseline_positions.numel() > 0:

@@ -27,6 +27,16 @@ class _BetterFeatureEncoderBase:
         self.env = env
         self.device = device or env.device
         self.dtype = dtype or torch.float32
+        self._bb_tensor = torch.tensor(
+            float(self.env.bb), device=self.device, dtype=self.dtype
+        ).clamp_min(1.0)
+        self._log_max_stack_bb_tensor = torch.log(
+            torch.tensor(
+                float(max(self.env.max_stack_bb, 2)),
+                device=self.device,
+                dtype=self.dtype,
+            )
+        )
 
     def _pre_chance_mask(
         self, N: int, pre_chance_node: torch.Tensor | bool | None
@@ -265,8 +275,7 @@ class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
         scalar_context[:, ScalarContext.ACTIONS_ROUND.value] = actions_round
         pot = self._env_tensor("pot", indices)
         scale = self._env_tensor("scale", indices).to(self.dtype).clamp_min(1.0)
-        bb = torch.as_tensor(float(self.env.bb), device=self.device, dtype=self.dtype)
-        bb = bb.clamp_min(1.0)
+        bb = self._bb_tensor
         pot_float = pot.to(self.dtype)
         stack_depth_bb = scale / bb
         pot_bb = pot_float / bb
@@ -276,13 +285,7 @@ class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
         )
         scalar_context[:, ScalarContext.LOG_STACK_DEPTH_BB.value] = torch.log(
             stack_depth_bb.clamp_min(1.0)
-        ) / torch.log(
-            torch.as_tensor(
-                float(max(self.env.max_stack_bb, 2)),
-                device=self.device,
-                dtype=self.dtype,
-            )
-        )
+        ) / self._log_max_stack_bb_tensor
         scalar_context[:, ScalarContext.LOG_POT_BB.value] = torch.log1p(pot_bb)
         self._fill_policy_betting_context(
             scalar_context,
@@ -363,8 +366,7 @@ class BetterStreetValueFeatureEncoder(_BetterFeatureEncoderBase):
 
         pot = self._env_tensor("pot", indices)
         scale = self._env_tensor("scale", indices).to(self.dtype).clamp_min(1.0)
-        bb = torch.as_tensor(float(self.env.bb), device=self.device, dtype=self.dtype)
-        bb = bb.clamp_min(1.0)
+        bb = self._bb_tensor
         pot_float = pot.to(self.dtype)
         stack_depth_bb = scale / bb
         pot_bb = pot_float / bb
@@ -374,13 +376,7 @@ class BetterStreetValueFeatureEncoder(_BetterFeatureEncoderBase):
         )
         scalar_context[:, ValueScalarContext.LOG_STACK_DEPTH_BB.value] = torch.log(
             stack_depth_bb.clamp_min(1.0)
-        ) / torch.log(
-            torch.as_tensor(
-                float(max(self.env.max_stack_bb, 2)),
-                device=self.device,
-                dtype=self.dtype,
-            )
-        )
+        ) / self._log_max_stack_bb_tensor
         scalar_context[:, ValueScalarContext.LOG_POT_BB.value] = torch.log1p(pot_bb)
         self._fill_value_betting_context(
             scalar_context,
