@@ -118,6 +118,12 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             tuple[int, int, int, int, int],
             torch.Tensor,
         ] = {}
+        self._preflop_iteration_schedule_key: tuple[object, ...] | None = None
+        self._preflop_alpha_schedule: list[float] = []
+        self._preflop_beta_schedule: list[float] = []
+        self._preflop_gamma_schedule: list[float] = []
+        self._preflop_average_weight_schedule: list[float] = []
+        self._preflop_average_weight_prefix: list[float] = []
         self._preflop_partition_position_slices: dict[
             tuple[int, int], tuple[int, int]
         ] = {}
@@ -196,6 +202,140 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
 
     def warm_start(self) -> None:
         return None
+
+    def _preflop_iteration_schedule_config(self) -> tuple[object, ...]:
+        return (
+            self.cfr_type,
+            int(self.cfr_iterations),
+            int(self.warm_start_iterations),
+            int(self.dcfr_delay),
+            float(self.dcfr_alpha_initial),
+            float(self.dcfr_beta_initial),
+            float(self.dcfr_gamma_initial),
+            self.dcfr_alpha_final,
+            self.dcfr_beta_final,
+            self.dcfr_gamma_final,
+            bool(self._predictive_cfr_uses_dcfr()),
+        )
+
+    def _initialize_preflop_iteration_schedule(self) -> None:
+        key = self._preflop_iteration_schedule_config()
+        if self._preflop_iteration_schedule_key == key:
+            return
+
+        total_iterations = max(1, self.cfr_iterations - self.warm_start_iterations)
+        average_window = max(1, self.cfr_iterations - self.dcfr_delay)
+        uses_dcfr_average = (
+            self.cfr_type == CFRType.discounted or self._predictive_cfr_uses_dcfr()
+        )
+        uses_linear_average = self.cfr_type == CFRType.linear or (
+            self.cfr_type in (CFRType.pcfr, CFRType.sapcfr)
+            and not self._predictive_cfr_uses_dcfr()
+        )
+        count = max(0, int(self.cfr_iterations))
+        alpha: list[float] = []
+        beta: list[float] = []
+        gamma: list[float] = []
+        average_weights: list[float] = []
+        prefix: list[float] = [0.0]
+        for t in range(count):
+            iteration_progress = max(0, t - self.warm_start_iterations)
+            t_normalized = min(
+                1.0,
+                max(0.0, iteration_progress / float(total_iterations)),
+            )
+            alpha_t = (
+                float(self.dcfr_alpha_initial)
+                if self.dcfr_alpha_final is None
+                else float(
+                    self.dcfr_alpha_initial
+                    + (self.dcfr_alpha_final - self.dcfr_alpha_initial)
+                    * t_normalized
+                )
+            )
+            beta_t = (
+                float(self.dcfr_beta_initial)
+                if self.dcfr_beta_final is None
+                else float(
+                    self.dcfr_beta_initial
+                    + (self.dcfr_beta_final - self.dcfr_beta_initial)
+                    * t_normalized
+                )
+            )
+            gamma_t = (
+                float(self.dcfr_gamma_initial)
+                if self.dcfr_gamma_final is None
+                else float(
+                    self.dcfr_gamma_initial
+                    + (self.dcfr_gamma_final - self.dcfr_gamma_initial)
+                    * t_normalized
+                )
+            )
+            if uses_dcfr_average:
+                if t <= self.dcfr_delay:
+                    weight = 0.0
+                else:
+                    progress = max(0.0, float(t - self.dcfr_delay)) / float(
+                        average_window
+                    )
+                    weight = float(progress**gamma_t)
+            elif self.cfr_type == CFRType.standard:
+                weight = 1.0
+            elif uses_linear_average:
+                weight = 2.0
+            else:
+                raise ValueError(f"Unsupported CFR type: {self.cfr_type}")
+            alpha.append(alpha_t)
+            beta.append(beta_t)
+            gamma.append(gamma_t)
+            average_weights.append(weight)
+            prefix.append(prefix[-1] + weight)
+
+        self._preflop_iteration_schedule_key = key
+        self._preflop_alpha_schedule = alpha
+        self._preflop_beta_schedule = beta
+        self._preflop_gamma_schedule = gamma
+        self._preflop_average_weight_schedule = average_weights
+        self._preflop_average_weight_prefix = prefix
+
+    def apply_schedules(self, t: int) -> None:
+        self._initialize_preflop_iteration_schedule()
+        if 0 <= t < len(self._preflop_alpha_schedule):
+            self.dcfr_alpha = self._preflop_alpha_schedule[t]
+            self.dcfr_beta = self._preflop_beta_schedule[t]
+            self.dcfr_gamma = self._preflop_gamma_schedule[t]
+            return
+        CFREvaluator.apply_schedules(self, t)
+
+    def _get_dcfr_gamma_for_iteration(self, t: int) -> float:
+        self._initialize_preflop_iteration_schedule()
+        if 0 <= t < len(self._preflop_gamma_schedule):
+            return self._preflop_gamma_schedule[t]
+        return CFREvaluator._get_dcfr_gamma_for_iteration(self, t)
+
+    def _get_average_policy_weight(self, t: int) -> float:
+        self._initialize_preflop_iteration_schedule()
+        if 0 <= t < len(self._preflop_average_weight_schedule):
+            return self._preflop_average_weight_schedule[t]
+        return CFREvaluator._get_average_policy_weight(self, t)
+
+    def _get_mixing_weights(self, t: int) -> tuple[float, float]:
+        if self.cfr_type != CFRType.discounted and not self._predictive_cfr_uses_dcfr():
+            return CFREvaluator._get_mixing_weights(self, t)
+        self._initialize_preflop_iteration_schedule()
+        if 0 <= t < len(self._preflop_average_weight_schedule):
+            new = self._preflop_average_weight_schedule[t]
+            if new == 0.0:
+                return 0.0, 0.0
+            start = min(
+                max(0, int(self.warm_start_iterations)),
+                len(self._preflop_average_weight_prefix) - 1,
+            )
+            end = min(t, len(self._preflop_average_weight_prefix) - 1)
+            old = self._preflop_average_weight_prefix[end]
+            old -= self._preflop_average_weight_prefix[start]
+            return float(old), float(new)
+        return CFREvaluator._get_mixing_weights(self, t)
 
     def _record_action_mix(self) -> None:
         return None
@@ -1493,12 +1633,13 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_values_avg_deferred_weight = 0.0
 
     def _average_value_weight_for_range(self, start: int, end: int) -> float:
-        return float(
-            sum(
-                self._get_average_policy_weight(t)
-                for t in range(int(start), int(end))
-            )
-        )
+        self._initialize_preflop_iteration_schedule()
+        prefix = self._preflop_average_weight_prefix
+        if not prefix:
+            return 0.0
+        lo = min(max(0, int(start)), len(prefix) - 1)
+        hi = min(max(lo, int(end)), len(prefix) - 1)
+        return float(prefix[hi] - prefix[lo])
 
     def _finalize_deferred_average_values(
         self,
