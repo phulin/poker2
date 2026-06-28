@@ -1290,6 +1290,143 @@ def test_fused_preflop_sparse_evaluator_matches_non_fused_training_targets() -> 
         )
 
 
+def test_fused_preflop_prepared_partitions_match_legacy_mixed_street() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA to exercise the fused preflop evaluator")
+    pytest.importorskip("triton")
+    from p2.search.fused_preflop_sparse_cfr_evaluator import (
+        FusedPreflopSparseCFREvaluator,
+    )
+
+    class LegacyPartitionFusedPreflopSparseCFREvaluator(
+        FusedPreflopSparseCFREvaluator
+    ):
+        def _try_set_model_values_prepared_partitions(
+            self,
+            t: int,
+            beliefs: torch.Tensor,
+        ) -> bool:
+            del t, beliefs
+            return False
+
+    device = torch.device("cuda")
+    num_players = 6
+    bet_bins = [0.5]
+    force_deck = torch.tensor(
+        [[10, 11, 12, 13, 14], [15, 16, 17, 18, 19]],
+        dtype=torch.long,
+        device=device,
+    )
+    prior = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+    prior = prior / prior.sum()
+    initial_beliefs = prior.expand(2, num_players, PREFLOP_HANDS).clone()
+
+    def make_cfg() -> Config:
+        cfg = make_config(bet_bins)
+        cfg.device = "cuda"
+        cfg.env.num_players = num_players
+        cfg.search.depth = 4
+        cfg.search.iterations = 7
+        cfg.search.cfr_type = CFRType.discounted
+        cfg.search.cfr_avg = False
+        cfg.search.sparse_fused = True
+        cfg.search.model_scope = ModelScope.mixed_street
+        cfg.search.allin_call_terminal_abstraction = True
+        cfg.model.compile = "off"
+        return cfg
+
+    def make_env(cfg: Config) -> PBSEnv:
+        env = PBSEnv(
+            num_envs=2,
+            num_players=num_players,
+            mean_stack=1000,
+            sb=5,
+            bb=10,
+            default_bet_bins=cfg.env.bet_bins,
+            device=device,
+        )
+        env.reset(
+            force_button=torch.zeros(2, dtype=torch.long, device=device),
+            force_deck=force_deck,
+        )
+        return env
+
+    cfg = make_cfg()
+    model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    closing_model = CompactPreflopMockModel(
+        num_actions=len(cfg.env.bet_bins) + 3,
+        num_players=num_players,
+        device=device,
+    )
+    prepared = FusedPreflopSparseCFREvaluator(
+        model=model,  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+        generator=torch.Generator(device=device).manual_seed(23),
+        closing_leaf_model=closing_model,  # type: ignore[arg-type]
+        compile_model=False,
+    )
+    legacy = LegacyPartitionFusedPreflopSparseCFREvaluator(
+        model=CompactPreflopMockModel(
+            num_actions=len(cfg.env.bet_bins) + 3,
+            num_players=num_players,
+            device=device,
+        ),  # type: ignore[arg-type]
+        device=device,
+        cfg=cfg,
+        generator=torch.Generator(device=device).manual_seed(23),
+        closing_leaf_model=CompactPreflopMockModel(
+            num_actions=len(cfg.env.bet_bins) + 3,
+            num_players=num_players,
+            device=device,
+        ),  # type: ignore[arg-type]
+        compile_model=False,
+    )
+
+    root_indices = torch.arange(2, device=device)
+    prepared.initialize_subgame(make_env(cfg), root_indices, initial_beliefs)
+    legacy.initialize_subgame(make_env(cfg), root_indices, initial_beliefs)
+
+    prepared.evaluate_cfr(training_mode=False, sample_continuation=False)
+    legacy.evaluate_cfr(training_mode=False, sample_continuation=False)
+
+    torch.testing.assert_close(
+        prepared.latest_values,
+        legacy.latest_values,
+        atol=2e-5,
+        rtol=2e-5,
+    )
+    torch.testing.assert_close(
+        prepared.policy_probs,
+        legacy.policy_probs,
+        atol=2e-5,
+        rtol=2e-5,
+    )
+    prepared_batches = prepared.training_data(
+        exclude_start=False,
+        include_pre_chance_value_batch=False,
+    )
+    legacy_batches = legacy.training_data(
+        exclude_start=False,
+        include_pre_chance_value_batch=False,
+    )
+    for prepared_batch, legacy_batch in zip(
+        prepared_batches,
+        legacy_batches,
+        strict=True,
+    ):
+        _assert_rebel_batches_close(
+            prepared_batch,
+            legacy_batch,
+            atol=2e-5,
+            rtol=2e-5,
+        )
+
+
 def test_fused_preflop_prepared_partitions_gather_direct_beliefs() -> None:
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA to exercise the fused preflop evaluator")
@@ -1336,9 +1473,9 @@ def test_fused_preflop_prepared_partitions_gather_direct_beliefs() -> None:
     evaluator._preflop_encoded_partition_encoder = None
     evaluator._preflop_encoded_partition_positions = None
     evaluator._preflop_encoded_partition_features = None
-    evaluator._preflop_cutoff_node_indices = None
+    evaluator._preflop_cutoff_belief_indices = None
     evaluator._preflop_cutoff_features = None
-    evaluator._preflop_new_street_node_indices = None
+    evaluator._preflop_new_street_belief_indices = None
     evaluator._preflop_new_street_features = None
     evaluator._preflop_static_model_base_fn_cache = {}
     evaluator._preflop_static_hand_values_fn_cache = {}

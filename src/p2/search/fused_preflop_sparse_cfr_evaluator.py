@@ -104,9 +104,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_encoded_partition_encoder: object | None = None
         self._preflop_encoded_partition_positions: torch.Tensor | None = None
         self._preflop_encoded_partition_features: MLPFeatures | None = None
-        self._preflop_cutoff_node_indices: torch.Tensor | None = None
+        self._preflop_cutoff_belief_indices: torch.Tensor | None = None
         self._preflop_cutoff_features: MLPFeatures | None = None
-        self._preflop_new_street_node_indices: torch.Tensor | None = None
+        self._preflop_new_street_belief_indices: torch.Tensor | None = None
         self._preflop_new_street_features: MLPFeatures | None = None
         self._preflop_partition_node_cache: dict[
             tuple[int, int, int, int], torch.Tensor
@@ -183,9 +183,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_encoded_partition_encoder = None
         self._preflop_encoded_partition_positions = None
         self._preflop_encoded_partition_features = None
-        self._preflop_cutoff_node_indices = None
+        self._preflop_cutoff_belief_indices = None
         self._preflop_cutoff_features = None
-        self._preflop_new_street_node_indices = None
+        self._preflop_new_street_belief_indices = None
         self._preflop_new_street_features = None
         self._preflop_partition_node_cache.clear()
         self._preflop_partition_beliefs_cache.clear()
@@ -656,7 +656,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                         PREFLOP_HANDS,
                     )
                 )
-                self._preflop_cutoff_node_indices = cutoff_node_indices
+                self._preflop_cutoff_belief_indices = cutoff_positions
                 self._preflop_cutoff_features = MLPFeatures(
                     context=cutoff_static.context,
                     street=cutoff_static.street,
@@ -702,7 +702,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             beliefs=belief_buf,
             hand_dim=PREFLOP_HANDS,
         )
-        self._preflop_new_street_node_indices = node_indices
+        self._preflop_new_street_belief_indices = positions
         self._preflop_new_street_features = MLPFeatures(
             context=encoded.context,
             street=encoded.street,
@@ -769,12 +769,12 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def _refresh_prepared_partition_features(
         self,
         features: MLPFeatures | None,
-        node_indices: torch.Tensor | None,
+        belief_indices: torch.Tensor | None,
         beliefs: torch.Tensor,
     ) -> MLPFeatures | None:
-        if features is None or node_indices is None:
+        if features is None or belief_indices is None:
             return None
-        rows = int(node_indices.numel())
+        rows = int(belief_indices.numel())
         if rows == 0:
             return None
         if beliefs.dim() != 3 or beliefs.shape[1:] != (
@@ -792,7 +792,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         ):
             return None
         beliefs_out = features.beliefs.view(rows, self.num_players, PREFLOP_HANDS)
-        torch.index_select(beliefs, 0, node_indices, out=beliefs_out)
+        torch.index_select(beliefs, 0, belief_indices, out=beliefs_out)
         features.beliefs = beliefs_out.reshape(flat_shape)
         return features
 
@@ -2241,14 +2241,15 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             and not self._average_accumulation_delayed(t)
         )
         wrote_any = False
+        beliefs_at_model = self._model_beliefs_for_values(beliefs)
 
         cutoff_positions = self.cutoff_model_positions
         cutoff_features = None
         if cutoff_positions.numel() > 0:
             cutoff_features = self._refresh_prepared_partition_features(
                 self._preflop_cutoff_features,
-                self._preflop_cutoff_node_indices,
-                beliefs,
+                self._preflop_cutoff_belief_indices,
+                beliefs_at_model,
             )
             if cutoff_features is None:
                 return False
@@ -2258,8 +2259,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         if closing_positions.numel() > 0:
             closing_features = self._refresh_prepared_partition_features(
                 self._preflop_new_street_features,
-                self._preflop_new_street_node_indices,
-                beliefs,
+                self._preflop_new_street_belief_indices,
+                beliefs_at_model,
             )
             if closing_features is None:
                 return False
