@@ -2166,6 +2166,8 @@ def run_train_specialists(
                     bucket_index=bucket_index,
                 )
             bucket_start = time.time()
+            last_progress_roots = roots_solved
+            last_progress_time = bucket_start
 
             def log_validation(epoch: int, epoch_roots: int) -> None:
                 if run is None:
@@ -2200,9 +2202,13 @@ def run_train_specialists(
                 *,
                 epoch: int,
                 epoch_roots: int,
-                elapsed: float,
             ) -> None:
-                roots_per_s = roots_solved / max(elapsed, 1.0e-9)
+                nonlocal last_progress_roots, last_progress_time
+                now = time.time()
+                elapsed = now - bucket_start
+                interval_roots = roots_solved - last_progress_roots
+                interval_s = now - last_progress_time
+                roots_per_s = interval_roots / max(interval_s, 1.0e-9)
                 print(
                     f"{bucket_label}: {reason} epoch={epoch + 1}/{bucket_epochs} "
                     f"roots={roots_solved:,} epoch_roots={epoch_roots:,} "
@@ -2212,9 +2218,12 @@ def run_train_specialists(
                     f"bucket_step={bucket_step} "
                     f"bucket_train_step={bucket_train_step} "
                     f"train_batch={train_batch_size} "
-                    f"roots/s={roots_per_s:.2f} elapsed={elapsed:.1f}s",
+                    f"roots/s={roots_per_s:.2f} "
+                    f"interval={interval_s:.1f}s elapsed={elapsed:.1f}s",
                     flush=True,
                 )
+                last_progress_roots = roots_solved
+                last_progress_time = now
 
             if args.validation_interval_steps > 0 and not resume_current_bucket:
                 log_validation(epoch=0, epoch_roots=0)
@@ -2300,7 +2309,10 @@ def run_train_specialists(
                     roots_solved += rows
                     epoch_roots += rows
                     bucket_step += 1
-                    elapsed = time.time() - bucket_start
+                    now = time.time()
+                    elapsed = now - bucket_start
+                    interval_s = now - last_progress_time
+                    interval_roots = roots_solved - last_progress_roots
                     log_payload = {
                         f"{bucket_label}/roots_solved": roots_solved,
                         f"{bucket_label}/epoch": epoch,
@@ -2316,8 +2328,8 @@ def run_train_specialists(
                         f"{bucket_label}/value_minibatches": value_minibatches,
                         f"{bucket_label}/policy_minibatches": policy_minibatches,
                         f"{bucket_label}/elapsed_s": elapsed,
-                        f"{bucket_label}/roots_per_s": roots_solved
-                        / max(elapsed, 1.0e-9),
+                        f"{bucket_label}/roots_per_s": interval_roots
+                        / max(interval_s, 1.0e-9),
                         "global_step": global_step,
                     }
                     log_payload.update(
@@ -2389,7 +2401,6 @@ def run_train_specialists(
                             "progress",
                             epoch=epoch,
                             epoch_roots=epoch_roots,
-                            elapsed=elapsed,
                         )
                         while next_progress_roots <= roots_solved:
                             next_progress_roots += progress_interval
@@ -2400,7 +2411,6 @@ def run_train_specialists(
                         "epoch_complete",
                         epoch=epoch,
                         epoch_roots=epoch_roots,
-                        elapsed=time.time() - bucket_start,
                     )
 
             if value_examples == 0 and policy_examples == 0:
