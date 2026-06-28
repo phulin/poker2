@@ -21,6 +21,7 @@ train:
   lr_wsd_decay_fraction: 0.6
   warmup_steps: 0
   optimizer: muon
+  muon_compile_step: false
   adamw_learning_rate: 0.00125
   weight_decay: 0.01
   grad_clip: 1.0
