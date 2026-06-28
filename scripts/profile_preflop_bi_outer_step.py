@@ -291,6 +291,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-cpu-validation", action="store_true")
     parser.add_argument("--timed-cfr-internals", action="store_true")
     parser.add_argument("--compile-cfr-models", action="store_true")
+    parser.add_argument("--fullgraph-cfr-models", action="store_true")
     parser.add_argument("--skip-validation", action="store_true")
     parser.add_argument("--skip-training", action="store_true")
     parser.add_argument(
@@ -340,6 +341,9 @@ def main() -> None:
     if args.compile_cfr_models and device.type == "cuda":
         print("compiling CFR inference models", flush=True)
         compile_kwargs = _compile_kwargs(cutoff_cfg)
+        if args.fullgraph_cfr_models:
+            compile_kwargs["fullgraph"] = True
+            solver.cfr_evaluator._compile_kwargs = dict(compile_kwargs)
         cfr_models = [
             getattr(solver.cfr_evaluator, "model", None),
             getattr(solver.cfr_evaluator, "closing_leaf_value_model", None),
