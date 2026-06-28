@@ -18,6 +18,7 @@ dependencies = [
   "hydra-core>=1.3.0",
   "omegaconf>=2.3.0",
   "zstandard>=0.25.0",
+  "flash-muon",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -57,6 +58,7 @@ torchvision = [
   { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
   { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
 ]
+flash-muon = { git = "https://github.com/nil0x9/flash-muon" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

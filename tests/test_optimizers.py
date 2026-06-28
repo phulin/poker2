@@ -5,6 +5,7 @@ import torch.nn as nn
 from p2.core.structured_config import Config, LrSchedule, TrainingConfig
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.optimizers import (
+    FlashMuon,
     NorMuon,
     SplitOptimizer,
     _normuon_matrix_update,
@@ -258,6 +259,25 @@ def test_muon_split_optimizer_steps_matrix_and_non_matrix_params():
     loss = model(torch.randn(8, 4)).square().mean()
     loss.backward()
     optimizer.step()
+
+    for name, param in model.named_parameters():
+        assert not torch.equal(before[name], param.detach())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_flash_muon_split_optimizer_steps_cuda_params():
+    model = nn.Sequential(nn.Linear(4, 3), nn.LayerNorm(3)).cuda()
+    cfg = TrainingConfig(optimizer="muon", learning_rate=1e-3, weight_decay=0.0)
+    optimizer = build_optimizer(model, cfg, torch.device("cuda"))
+
+    assert isinstance(optimizer, SplitOptimizer)
+    assert isinstance(optimizer.optimizers[0][1], FlashMuon)
+    before = {name: param.detach().clone() for name, param in model.named_parameters()}
+
+    loss = model(torch.randn(8, 4, device="cuda")).square().mean()
+    loss.backward()
+    optimizer.step()
+    torch.cuda.synchronize()
 
     for name, param in model.named_parameters():
         assert not torch.equal(before[name], param.detach())

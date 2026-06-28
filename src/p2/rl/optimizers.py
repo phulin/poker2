@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
+from collections.abc import MutableMapping
 from typing import Any
 
 import torch
 import torch.nn as nn
+from torch import Tensor
+
+from flash_muon.muon import fast_newtonschulz
 
 from p2.core.structured_config import TrainingConfig
 from p2.models.mlp.better_ffn import BetterSplitFFN
@@ -63,6 +67,153 @@ class SplitOptimizer:
 
 
 TrainOptimizer = torch.optim.Optimizer | SplitOptimizer
+
+
+_MUON_DEFAULT_NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)
+_MUON_DEFAULT_EPS = 1e-7
+
+
+def _adjust_muon_lr(
+    lr: float,
+    adjust_lr_fn: str | None,
+    param_shape: torch.Size,
+) -> float:
+    rows, cols = param_shape[:2]
+    if adjust_lr_fn is None or adjust_lr_fn == "original":
+        ratio = math.sqrt(max(1.0, float(rows) / float(cols)))
+    elif adjust_lr_fn == "match_rms_adamw":
+        ratio = 0.2 * math.sqrt(max(float(rows), float(cols)))
+    else:
+        ratio = 1.0
+    return lr * ratio
+
+
+class FlashMuon(torch.optim.Optimizer):
+    """Muon optimizer using flash-muon's fused Newton-Schulz kernel.
+
+    This mirrors PyTorch's single-tensor Muon update and keeps this codebase's
+    existing Muon config surface, while avoiding flash-muon's distributed
+    optimizer wrapper.
+    """
+
+    def __init__(
+        self,
+        params: Iterable[nn.Parameter],
+        *,
+        lr: float = 1e-3,
+        weight_decay: float = 0.1,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_coefficients: tuple[float, float, float] = _MUON_DEFAULT_NS_COEFFICIENTS,
+        eps: float = _MUON_DEFAULT_EPS,
+        ns_steps: int = 5,
+        adjust_lr_fn: str | None = None,
+    ) -> None:
+        if isinstance(lr, Tensor) and lr.numel() != 1:
+            raise ValueError("Tensor lr must be 1-element")
+        if lr < 0.0:
+            raise ValueError(f"Learning rate should be >= 0 but is: {lr}")
+        if momentum < 0.0:
+            raise ValueError(f"momentum should be >= 0 but is: {momentum}")
+        if weight_decay < 0.0:
+            raise ValueError(f"weight decay should be >= 0 but is: {weight_decay}")
+        if adjust_lr_fn is not None and adjust_lr_fn not in {
+            "original",
+            "match_rms_adamw",
+        }:
+            raise ValueError(
+                f"Adjust learning rate function {adjust_lr_fn} is not supported"
+            )
+        if ns_coefficients != _MUON_DEFAULT_NS_COEFFICIENTS:
+            raise ValueError(
+                "FlashMuon requires the default Muon Newton-Schulz coefficients"
+            )
+        if float(eps) != _MUON_DEFAULT_EPS:
+            raise ValueError("FlashMuon requires muon_eps=1e-7")
+        if ns_steps <= 0:
+            raise ValueError("FlashMuon ns_steps must be positive")
+
+        defaults = {
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "momentum": momentum,
+            "nesterov": nesterov,
+            "ns_coefficients": ns_coefficients,
+            "eps": eps,
+            "ns_steps": ns_steps,
+            "adjust_lr_fn": adjust_lr_fn,
+        }
+        super().__init__(params, defaults)
+
+        for group in self.param_groups:
+            for param in group["params"]:
+                if param.ndim != 2:
+                    raise ValueError(
+                        "FlashMuon only supports 2D parameters whereas we found "
+                        f"a parameter with size: {param.size()}"
+                    )
+
+    def _init_group(
+        self,
+        group: MutableMapping[str, Any],
+        params_with_grad: list[Tensor],
+        grads: list[Tensor],
+        momentum_bufs: list[Tensor],
+    ) -> None:
+        for param in group["params"]:
+            if param.grad is None:
+                continue
+            if torch.is_complex(param):
+                raise RuntimeError("FlashMuon does not support complex parameters")
+            if param.grad.is_sparse:
+                raise RuntimeError("FlashMuon does not support sparse gradients")
+
+            params_with_grad.append(param)
+            grads.append(param.grad)
+
+            state = self.state[param]
+            if "momentum_buffer" not in state:
+                state["momentum_buffer"] = torch.zeros_like(
+                    param.grad,
+                    memory_format=torch.preserve_format,
+                )
+            momentum_bufs.append(state["momentum_buffer"])
+
+    @torch.no_grad()
+    def step(self, closure: Any | None = None) -> Any | None:
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = float(group["lr"])
+            weight_decay = float(group["weight_decay"])
+            momentum = float(group["momentum"])
+            nesterov = bool(group["nesterov"])
+            ns_steps = int(group["ns_steps"])
+            adjust_lr_fn = group["adjust_lr_fn"]
+
+            params_with_grad: list[Tensor] = []
+            grads: list[Tensor] = []
+            momentum_bufs: list[Tensor] = []
+            self._init_group(group, params_with_grad, grads, momentum_bufs)
+
+            for param, grad, buf in zip(params_with_grad, grads, momentum_bufs):
+                if grad.ndim != 2:
+                    raise ValueError("Param gradient must be a 2D matrix")
+                if param.device.type != "cuda":
+                    raise RuntimeError("FlashMuon requires CUDA parameters")
+
+                buf.lerp_(grad, 1.0 - momentum)
+                update = grad.lerp(buf, momentum) if nesterov else buf
+                update = fast_newtonschulz(update, steps=ns_steps)
+                adjusted_lr = _adjust_muon_lr(lr, adjust_lr_fn, param.shape)
+
+                param.mul_(1.0 - lr * weight_decay)
+                param.add_(update, alpha=-adjusted_lr)
+
+        return loss
 
 
 def _normuon_ns5(
@@ -322,7 +473,19 @@ def _muon(
     params: Iterable[nn.Parameter],
     train_cfg: TrainingConfig,
     lr: float,
+    device: torch.device,
 ) -> torch.optim.Optimizer:
+    if device.type == "cuda":
+        return FlashMuon(
+            params,
+            lr=lr,
+            weight_decay=train_cfg.weight_decay,
+            momentum=train_cfg.muon_momentum,
+            nesterov=train_cfg.muon_nesterov,
+            eps=train_cfg.muon_eps,
+            ns_steps=train_cfg.muon_ns_steps,
+            adjust_lr_fn=train_cfg.muon_adjust_lr_fn,
+        )
     muon_cls = getattr(torch.optim, "Muon", None)
     if muon_cls is None:
         raise RuntimeError(
@@ -418,6 +581,7 @@ def build_optimizer(
                 matrix_params,
                 train_cfg,
                 train_cfg.learning_rate,
+                device,
             )
         else:
             matrix_optimizer = _normuon(
