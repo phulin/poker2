@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -195,6 +195,43 @@ class CompactPreflopMockModel:
 
     def eval(self) -> None:
         pass
+
+
+class CompactRecordingValueModel:
+    hand_dim = PREFLOP_HANDS
+
+    def __init__(self, value: float, *, num_players: int, device: torch.device) -> None:
+        self.value = float(value)
+        self.num_players = num_players
+        self.device = device
+        self.enforce_zero_sum = False
+        self.call_contexts: list[torch.Tensor] = []
+        self.call_beliefs: list[torch.Tensor] = []
+
+    def __call__(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = False,
+        **kwargs,
+    ) -> ModelOutput:
+        del include_policy, kwargs
+        self.call_contexts.append(features.context.detach().clone())
+        self.call_beliefs.append(
+            features.beliefs.view(len(features), self.num_players, PREFLOP_HANDS)
+            .detach()
+            .clone()
+        )
+        hand_values = torch.full(
+            (len(features), self.num_players, PREFLOP_HANDS),
+            self.value,
+            device=features.context.device,
+            dtype=features.context.dtype,
+        )
+        return ModelOutput(
+            policy_logits=None,
+            value=hand_values.mean(dim=-1),
+            hand_values=hand_values,
+        )
 
 
 class PreOnlyMockModel(MockModel):
@@ -1251,6 +1288,114 @@ def test_fused_preflop_sparse_evaluator_matches_non_fused_training_targets() -> 
             atol=2e-5,
             rtol=2e-5,
         )
+
+
+def test_fused_preflop_prepared_partitions_gather_direct_beliefs() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA to exercise the fused preflop evaluator")
+    pytest.importorskip("triton")
+    from p2.search.fused_preflop_sparse_cfr_evaluator import (
+        FusedPreflopSparseCFREvaluator,
+    )
+
+    device = torch.device("cuda")
+    num_players = 3
+    evaluator = object.__new__(FusedPreflopSparseCFREvaluator)
+    evaluator.cfg = _scope_cfg()
+    evaluator.device = device
+    evaluator.float_dtype = torch.float32
+    evaluator.num_players = num_players
+    evaluator.hand_dim = PREFLOP_HANDS
+    evaluator.cfr_type = CFRType.discounted
+    evaluator.cfr_avg = False
+    evaluator.value_model = CompactRecordingValueModel(
+        1.0, num_players=num_players, device=device
+    )
+    evaluator.model = evaluator.value_model
+    evaluator.closing_leaf_value_model = CompactRecordingValueModel(
+        2.0, num_players=num_players, device=device
+    )
+    evaluator.value_feature_encoder = OffsetFeatureEncoder(0.0)
+    evaluator.closing_leaf_value_encoder = OffsetFeatureEncoder(100.0)
+    evaluator.model_indices = torch.tensor([1, 2, 3], dtype=torch.long, device=device)
+    evaluator.new_street_mask = torch.tensor(
+        [False, False, True, False, False], device=device
+    )
+    evaluator.beliefs = torch.zeros(
+        5, num_players, PREFLOP_HANDS, device=device, dtype=torch.float32
+    )
+    evaluator._model_leaf_scatter_enabled = False
+    evaluator._preflop_model_beliefs_buf = None
+    evaluator._preflop_model_beliefs_key = None
+    evaluator._preflop_model_features = None
+    evaluator._static_model_feature_fields = None
+    evaluator._static_model_feature_key = None
+    evaluator._preflop_partition_node_cache = {}
+    evaluator._preflop_partition_beliefs_cache = {}
+    evaluator._preflop_partition_feature_cache = {}
+    evaluator._preflop_encoded_partition_encoder = None
+    evaluator._preflop_encoded_partition_positions = None
+    evaluator._preflop_encoded_partition_features = None
+    evaluator._preflop_cutoff_node_indices = None
+    evaluator._preflop_cutoff_features = None
+    evaluator._preflop_new_street_node_indices = None
+    evaluator._preflop_new_street_features = None
+    evaluator._preflop_static_model_base_fn_cache = {}
+    evaluator._preflop_static_hand_values_fn_cache = {}
+    evaluator._preflop_static_model_base_features_cache = {}
+    evaluator._preflop_partition_position_slices = {}
+    evaluator._preflop_partition_last_values_valid = False
+    evaluator._preflop_partition_last_values_marker = None
+    evaluator._subgame_generation = 1
+
+    writes: list[tuple[torch.Tensor, torch.Tensor, str]] = []
+
+    def record_writeback(self, **kwargs) -> None:
+        del self
+        position_beliefs = kwargs["position_beliefs"].view(
+            int(kwargs["positions"].numel()), num_players, PREFLOP_HANDS
+        )
+        writes.append(
+            (
+                kwargs["positions"].detach().clone(),
+                position_beliefs.detach().clone(),
+                kwargs["last_attr"],
+            )
+        )
+
+    evaluator._writeback_model_values_partition = MethodType(
+        record_writeback, evaluator
+    )
+    evaluator._prepare_preflop_model_feature_tensors()
+
+    dynamic_beliefs = torch.arange(
+        5 * num_players * PREFLOP_HANDS,
+        device=device,
+        dtype=torch.float32,
+    ).view(5, num_players, PREFLOP_HANDS)
+
+    assert evaluator._try_set_model_values_prepared_partitions(0, dynamic_beliefs)
+
+    torch.testing.assert_close(
+        evaluator.value_model.call_beliefs[0],
+        dynamic_beliefs[torch.tensor([1, 3], device=device)],
+    )
+    torch.testing.assert_close(
+        evaluator.closing_leaf_value_model.call_beliefs[0],
+        dynamic_beliefs[torch.tensor([2], device=device)],
+    )
+    torch.testing.assert_close(
+        evaluator.value_model.call_contexts[0].flatten(),
+        torch.tensor([1.0, 3.0], device=device),
+    )
+    torch.testing.assert_close(
+        evaluator.closing_leaf_value_model.call_contexts[0].flatten(),
+        torch.tensor([102.0], device=device),
+    )
+    assert [write[2] for write in writes] == [
+        "_preflop_cutoff_last_values_buf",
+        "_preflop_new_street_last_values_buf",
+    ]
 
 
 def test_preflop_sparse_ev_uses_marginal_action_policy_for_folded_players() -> None:

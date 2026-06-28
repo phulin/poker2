@@ -104,6 +104,10 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_encoded_partition_encoder: object | None = None
         self._preflop_encoded_partition_positions: torch.Tensor | None = None
         self._preflop_encoded_partition_features: MLPFeatures | None = None
+        self._preflop_cutoff_node_indices: torch.Tensor | None = None
+        self._preflop_cutoff_features: MLPFeatures | None = None
+        self._preflop_new_street_node_indices: torch.Tensor | None = None
+        self._preflop_new_street_features: MLPFeatures | None = None
         self._preflop_partition_node_cache: dict[
             tuple[int, int, int, int], torch.Tensor
         ] = {}
@@ -179,6 +183,10 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_encoded_partition_encoder = None
         self._preflop_encoded_partition_positions = None
         self._preflop_encoded_partition_features = None
+        self._preflop_cutoff_node_indices = None
+        self._preflop_cutoff_features = None
+        self._preflop_new_street_node_indices = None
+        self._preflop_new_street_features = None
         self._preflop_partition_node_cache.clear()
         self._preflop_partition_beliefs_cache.clear()
         self._preflop_static_model_base_fn_cache.clear()
@@ -624,6 +632,40 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             int(self.model_indices.numel()),
         )
 
+        if (
+            self._model_scope() == "mixed_street"
+            and self.closing_leaf_value_model is not None
+        ):
+            cutoff_positions = self.cutoff_model_positions
+            if cutoff_positions.numel() > 0:
+                cutoff_node_indices = self._partition_node_indices_for_positions(
+                    cutoff_positions
+                )
+                cutoff_static = self.value_feature_encoder.encode(
+                    self.beliefs,
+                    pre_chance_node=self.new_street_mask,
+                    indices=cutoff_node_indices,
+                )
+                cutoff_beliefs = self.beliefs.new_empty(
+                    (
+                        int(cutoff_node_indices.numel()),
+                        self.num_players,
+                        PREFLOP_HANDS,
+                    )
+                )
+                self._preflop_cutoff_node_indices = cutoff_node_indices
+                self._preflop_cutoff_features = MLPFeatures(
+                    context=cutoff_static.context,
+                    street=cutoff_static.street,
+                    to_act=cutoff_static.to_act,
+                    board=cutoff_static.board,
+                    beliefs=cutoff_beliefs.reshape(
+                        -1,
+                        self.num_players * PREFLOP_HANDS,
+                    ),
+                    hand_dim=PREFLOP_HANDS,
+                )
+
         encoder = self.closing_leaf_value_encoder
         if encoder is None or self.closing_leaf_value_model is None:
             return
@@ -650,6 +692,15 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_encoded_partition_encoder = encoder
         self._preflop_encoded_partition_positions = positions
         self._preflop_encoded_partition_features = MLPFeatures(
+            context=encoded.context,
+            street=encoded.street,
+            to_act=encoded.to_act,
+            board=encoded.board,
+            beliefs=belief_buf,
+            hand_dim=PREFLOP_HANDS,
+        )
+        self._preflop_new_street_node_indices = node_indices
+        self._preflop_new_street_features = MLPFeatures(
             context=encoded.context,
             street=encoded.street,
             to_act=encoded.to_act,
@@ -711,6 +762,36 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             beliefs=beliefs_at_model.reshape(-1, self.num_players * PREFLOP_HANDS),
             hand_dim=PREFLOP_HANDS,
         )
+
+    def _refresh_prepared_partition_features(
+        self,
+        features: MLPFeatures | None,
+        node_indices: torch.Tensor | None,
+        beliefs: torch.Tensor,
+    ) -> MLPFeatures | None:
+        if features is None or node_indices is None:
+            return None
+        rows = int(node_indices.numel())
+        if rows == 0:
+            return None
+        if beliefs.dim() != 3 or beliefs.shape[1:] != (
+            self.num_players,
+            PREFLOP_HANDS,
+        ):
+            return None
+        if features.hand_dim != PREFLOP_HANDS:
+            return None
+        flat_shape = (rows, self.num_players * PREFLOP_HANDS)
+        if (
+            features.beliefs.shape != flat_shape
+            or features.beliefs.device != beliefs.device
+            or features.beliefs.dtype != beliefs.dtype
+        ):
+            return None
+        beliefs_out = features.beliefs.view(rows, self.num_players, PREFLOP_HANDS)
+        torch.index_select(beliefs, 0, node_indices, out=beliefs_out)
+        features.beliefs = beliefs_out.reshape(flat_shape)
+        return features
 
     def _position_slice_if_contiguous(
         self,
@@ -2013,7 +2094,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         do_mix = (
             store_last
             and t > 1
-            and getattr(self, "_preflop_partition_last_values_valid", False)
+            and self._preflop_partition_last_values_valid
             and not self._average_accumulation_delayed(t)
         )
         wrote_any = False
@@ -2130,6 +2211,103 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self.last_model_values = None
         return wrote_any
 
+    def _try_set_model_values_prepared_partitions(
+        self,
+        t: int,
+        beliefs: torch.Tensor,
+    ) -> bool:
+        if os.environ.get("P2_DISABLE_PREFLOP_PARTITIONED_WRITEBACK"):
+            return False
+        if self._model_scope() != "mixed_street":
+            return False
+        if self.closing_leaf_value_model is None:
+            return False
+        if self._can_project_heads_up_closing_model():
+            return False
+        if (
+            self._closing_model_num_players() != self.num_players
+            or self._closing_model_hand_dim() != self.hand_dim
+        ):
+            return False
+
+        store_last = bool(self.cfr_avg)
+        do_mix = (
+            store_last
+            and t > 1
+            and self._preflop_partition_last_values_valid
+            and not self._average_accumulation_delayed(t)
+        )
+        wrote_any = False
+
+        cutoff_positions = self.cutoff_model_positions
+        cutoff_features = None
+        if cutoff_positions.numel() > 0:
+            cutoff_features = self._refresh_prepared_partition_features(
+                self._preflop_cutoff_features,
+                self._preflop_cutoff_node_indices,
+                beliefs,
+            )
+            if cutoff_features is None:
+                return False
+
+        closing_positions = self.new_street_model_positions
+        closing_features = None
+        if closing_positions.numel() > 0:
+            closing_features = self._refresh_prepared_partition_features(
+                self._preflop_new_street_features,
+                self._preflop_new_street_node_indices,
+                beliefs,
+            )
+            if closing_features is None:
+                return False
+
+        if cutoff_features is not None:
+            cutoff_values, _ = self._eval_model_for_fused_writeback(
+                self.value_model,
+                cutoff_features,
+                use_pre_head=False,
+            )
+            self._writeback_model_values_partition(
+                hand_values=cutoff_values,
+                beliefs_at_model=beliefs,
+                positions=cutoff_positions,
+                position_beliefs=cutoff_features.beliefs,
+                last_attr="_preflop_cutoff_last_values_buf",
+                do_mix=do_mix,
+                store_last=store_last,
+            )
+            wrote_any = True
+
+        if closing_features is not None:
+            closing_values, _ = self._eval_model_for_fused_writeback(
+                self.closing_leaf_value_model,
+                closing_features,
+                use_pre_head=False,
+            )
+            self._writeback_model_values_partition(
+                hand_values=closing_values,
+                beliefs_at_model=beliefs,
+                positions=closing_positions,
+                position_beliefs=closing_features.beliefs,
+                last_attr="_preflop_new_street_last_values_buf",
+                do_mix=do_mix,
+                store_last=store_last,
+            )
+            wrote_any = True
+
+        self._preflop_partition_last_values_valid = bool(store_last and wrote_any)
+        if store_last and wrote_any:
+            marker = self._preflop_partition_last_values_marker
+            if marker is None:
+                marker = self.latest_values.new_empty(
+                    (0, self.num_players, self.hand_dim)
+                )
+                self._preflop_partition_last_values_marker = marker
+            self.last_model_values = marker
+        else:
+            self.last_model_values = None
+        return wrote_any
+
     def _set_model_values_impl(
         self,
         t: int,
@@ -2204,9 +2382,10 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         if self.model_indices.numel() > 0:
-            beliefs_at_model = self._model_beliefs_for_values(beliefs)
-            features_at_model = self._model_features_for_beliefs(beliefs_at_model)
-            self._set_model_values(t, beliefs_at_model, features_at_model)
+            if not self._try_set_model_values_prepared_partitions(t, beliefs):
+                beliefs_at_model = self._model_beliefs_for_values(beliefs)
+                features_at_model = self._model_features_for_beliefs(beliefs_at_model)
+                self._set_model_values(t, beliefs_at_model, features_at_model)
         else:
             empty_shape = (0, self.num_players, PREFLOP_HANDS)
             if self._last_model_values_buf is None or (
