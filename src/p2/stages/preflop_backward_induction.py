@@ -1105,7 +1105,7 @@ def _promote_validation_cache(source: Path, destination: Path) -> None:
 
 
 def _slice_batch(batch: RebelBatch, start: int, end: int) -> RebelBatch:
-    return batch[slice(start, end)]
+    return batch[slice(start, end)].clone()
 
 
 def _select_batch_rows(batch: RebelBatch, indices: torch.Tensor) -> RebelBatch:

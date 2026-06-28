@@ -290,7 +290,7 @@ class CFREvaluator(ABC):
     ) -> torch.Tensor:
         """Return per-hand action targets for selected policy nodes."""
         policy_targets = self._pull_back(self.policy_probs_avg)
-        return policy_targets[:top].permute(0, 2, 1)[node_indices]
+        return policy_targets[:top].permute(0, 2, 1)[node_indices].contiguous()
 
     def _pull_back_sum(
         self, tensor: torch.Tensor, out: torch.Tensor, level: int | None = None

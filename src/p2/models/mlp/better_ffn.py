@@ -2244,6 +2244,8 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             device=self.class_hi_rank.device,
             dtype=self.hand_encoder[0].weight.dtype,
         )
+        if torch.compiler.is_compiling():
+            return self.hand_encoder(hand_static)
         if self.training or torch.is_grad_enabled():
             return self.hand_encoder(hand_static)
         cache_key = (
@@ -2296,7 +2298,6 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
     def _encode_base_tokens(
         self,
         features: MLPFeatures,
-        static_game_token: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if features.hand_dim != PREFLOP_HANDS:
             raise ValueError(
@@ -2310,26 +2311,71 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         )
         hand_emb = self._hand_embedding()
         dtype = hand_emb.dtype
-        game_token = None
-        static_player_tokens = None
-        if static_game_token is not None:
-            static_game_token = static_game_token.to(dtype)
-            if static_game_token.ndim == 3:
-                if static_game_token.shape[1] != self.num_players + 1:
-                    raise ValueError(
-                        "static preflop token cache must have shape "
-                        f"[batch, {self.num_players + 1}, hidden_dim], got "
-                        f"{tuple(static_game_token.shape)}"
-                    )
-                game_token = static_game_token[:, 0]
-                static_player_tokens = static_game_token[:, 1:]
-            elif static_game_token.ndim == 2:
-                game_token = static_game_token
-            else:
+        player_beliefs = player_beliefs.to(dtype)
+        bucket_projection = self.preflop_bucket_projection.to(
+            device=player_beliefs.device,
+            dtype=dtype,
+        )
+        combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
+        range_projection = combined_projection.matmul(self.range_proj.weight.t())
+        bucket_mass = player_beliefs @ bucket_projection
+        _, player_context = self._split_context(features.context)
+        static_player_tokens = self.player_context_proj(player_context.to(dtype))
+        player_tokens = (
+            player_beliefs @ range_projection
+            + self.bucket_mass_proj(bucket_mass)
+            + static_player_tokens
+        )
+        if self.range_slot_moment_pool is not None:
+            player_tokens = player_tokens + self.range_slot_moment_pool(
+                player_beliefs,
+                hand_static,
+                player_context.to(dtype),
+            )
+        game_token = self.static_feature_prefix(features.context, features.street).to(
+            dtype
+        )
+        encoded = torch.cat((game_token[:, None, :], player_tokens), dim=1)
+        for block in self.encoder:
+            encoded = block(encoded)
+        return player_beliefs, encoded, hand_emb
+
+    def _encode_base_tokens_static(
+        self,
+        features: MLPFeatures,
+        static_game_token: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if features.hand_dim != PREFLOP_HANDS:
+            raise ValueError(
+                f"compact preflop transformer requires hand_dim={PREFLOP_HANDS}, "
+                f"got {features.hand_dim}"
+            )
+        player_beliefs = features.beliefs.view(-1, self.num_players, PREFLOP_HANDS)
+        hand_static = self._class_static_features().to(
+            device=self.class_hi_rank.device,
+            dtype=self.hand_encoder[0].weight.dtype,
+        )
+        hand_emb = self._hand_embedding()
+        dtype = hand_emb.dtype
+        static_game_token = static_game_token.to(dtype)
+        if static_game_token.ndim == 3:
+            if static_game_token.shape[1] != self.num_players + 1:
                 raise ValueError(
-                    "static preflop features must be either a game-token tensor "
-                    "or a cached token tensor"
+                    "static preflop token cache must have shape "
+                    f"[batch, {self.num_players + 1}, hidden_dim], got "
+                    f"{tuple(static_game_token.shape)}"
                 )
+            game_token = static_game_token[:, 0]
+            static_player_tokens = static_game_token[:, 1:]
+        elif static_game_token.ndim == 2:
+            game_token = static_game_token
+            _, player_context = self._split_context(features.context)
+            static_player_tokens = self.player_context_proj(player_context.to(dtype))
+        else:
+            raise ValueError(
+                "static preflop features must be either a game-token tensor "
+                "or a cached token tensor"
+            )
         player_context = None
         player_beliefs = player_beliefs.to(dtype)
         bucket_projection = self.preflop_bucket_projection.to(
@@ -2339,26 +2385,18 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
         range_projection = combined_projection.matmul(self.range_proj.weight.t())
         bucket_mass = player_beliefs @ bucket_projection
-        if static_player_tokens is None:
-            _, player_context = self._split_context(features.context)
-            static_player_tokens = self.player_context_proj(player_context.to(dtype))
         player_tokens = (
             player_beliefs @ range_projection
             + self.bucket_mass_proj(bucket_mass)
             + static_player_tokens
         )
         if self.range_slot_moment_pool is not None:
-            if player_context is None:
-                _, player_context = self._split_context(features.context)
+            _, player_context = self._split_context(features.context)
             player_tokens = player_tokens + self.range_slot_moment_pool(
                 player_beliefs,
                 hand_static,
                 player_context.to(dtype),
             )
-        if game_token is None:
-            game_token = self.static_feature_prefix(
-                features.context, features.street
-            ).to(dtype)
         encoded = torch.cat((game_token[:, None, :], player_tokens), dim=1)
         for block in self.encoder:
             encoded = block(encoded)
@@ -2405,9 +2443,12 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         static_game_token: torch.Tensor | None = None,
         extra_encoder: nn.ModuleList | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        player_beliefs, encoded, hand_emb = self._encode_base_tokens(
-            features, static_game_token=static_game_token
-        )
+        if static_game_token is None:
+            player_beliefs, encoded, hand_emb = self._encode_base_tokens(features)
+        else:
+            player_beliefs, encoded, hand_emb = self._encode_base_tokens_static(
+                features, static_game_token
+            )
         if extra_encoder is not None:
             for block in extra_encoder:
                 encoded = block(encoded)
@@ -3019,17 +3060,60 @@ class BetterSplitFFN(BaseMLPModel):
 
     def compile_forward_modes(self, **kwargs):
         """Compile split child fixed-mode forwards used by the wrapper hot path."""
+        policy_model = self.policy_model
+        policy_ns = {"policy_model": policy_model}
+        exec(
+            "def policy_forward_features_only(features):\n"
+            "    return policy_model.forward_policy(features)\n",
+            policy_ns,
+        )
+
         self.policy_model._compiled_forward_policy = torch.compile(
-            self.policy_model.forward_policy, **kwargs
+            policy_ns["policy_forward_features_only"], **kwargs
+        )
+        value_model = self.value_model
+        value_ns = {"value_model": value_model}
+        exec(
+            "def value_forward(features, latent=None, apply_zero_sum=True, "
+            "static_base_features=None, value_head='auto'):\n"
+            "    return value_model.forward_value(\n"
+            "        features,\n"
+            "        latent=latent,\n"
+            "        apply_zero_sum=apply_zero_sum,\n"
+            "        static_base_features=static_base_features,\n"
+            "        value_head=value_head,\n"
+            "    )\n",
+            value_ns,
+        )
+        exec(
+            "def value_forward_both(features, latent=None, apply_zero_sum=True):\n"
+            "    return value_model.forward_both(\n"
+            "        features,\n"
+            "        latent=latent,\n"
+            "        apply_zero_sum=apply_zero_sum,\n"
+            "    )\n",
+            value_ns,
+        )
+        exec(
+            "def value_forward_static_base(features, static_base_features, "
+            "latent=None, apply_zero_sum=True, value_head='auto'):\n"
+            "    return value_model.forward_value_static_base(\n"
+            "        features,\n"
+            "        static_base_features,\n"
+            "        latent=latent,\n"
+            "        apply_zero_sum=apply_zero_sum,\n"
+            "        value_head=value_head,\n"
+            "    )\n",
+            value_ns,
         )
         self.value_model._compiled_forward_value = torch.compile(
-            self.value_model.forward_value, **kwargs
+            value_ns["value_forward"], **kwargs
         )
         self.value_model._compiled_forward_both = torch.compile(
-            self.value_model.forward_both, **kwargs
+            value_ns["value_forward_both"], **kwargs
         )
         self.value_model._compiled_forward_value_static_base = torch.compile(
-            self.value_model.forward_value_static_base, **kwargs
+            value_ns["value_forward_static_base"], **kwargs
         )
         return super().compile_forward_modes(**kwargs)
 

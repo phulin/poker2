@@ -749,7 +749,7 @@ class SparseCFREvaluator(CFREvaluator):
             device=self.device,
         )
         if node_indices.numel() == 0 or self.total_nodes <= self.depth_offsets[1]:
-            return out.permute(0, 2, 1)
+            return out.permute(0, 2, 1).contiguous()
 
         cols = torch.arange(self.num_actions, dtype=torch.long, device=self.device)
         counts = self.child_count[node_indices]
@@ -764,7 +764,7 @@ class SparseCFREvaluator(CFREvaluator):
         out[rows[valid], actions[valid]] = self.policy_probs_avg[
             safe_child_indices[valid]
         ]
-        return out.permute(0, 2, 1)
+        return out.permute(0, 2, 1).contiguous()
 
     def _pull_back_sum(
         self, tensor: torch.Tensor, out: torch.Tensor, level: int | None = None

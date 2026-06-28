@@ -69,6 +69,23 @@ class RebelBatch:
             },
         )
 
+    def clone(self) -> RebelBatch:
+        return RebelBatch(
+            features=self.features.clone(),
+            policy_targets=(
+                self.policy_targets.clone()
+                if self.policy_targets is not None
+                else None
+            ),
+            value_targets=(
+                self.value_targets.clone()
+                if self.value_targets is not None
+                else None
+            ),
+            legal_masks=self.legal_masks.clone(),
+            statistics={key: value.clone() for key, value in self.statistics.items()},
+        )
+
     def with_permuted_targets(
         self,
         suit_permutations: torch.Tensor,
