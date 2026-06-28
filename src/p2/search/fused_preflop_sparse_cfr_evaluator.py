@@ -99,6 +99,16 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 torch.Tensor,
             ],
         ] = {}
+        self._preflop_encoded_partition_feature_cache: dict[
+            tuple[int, int, int, int, int, int, int],
+            tuple[
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+            ],
+        ] = {}
         self._preflop_partition_node_cache: dict[
             tuple[int, int, int, int], torch.Tensor
         ] = {}
@@ -164,6 +174,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         super()._invalidate_subgame_caches()
         self._ensure_fused_attrs()
         self._preflop_partition_feature_cache.clear()
+        self._preflop_encoded_partition_feature_cache.clear()
         self._preflop_partition_node_cache.clear()
         self._preflop_partition_beliefs_cache.clear()
         self._preflop_static_model_base_fn_cache.clear()
@@ -547,8 +558,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         encoder=None,
     ) -> MLPFeatures:
         if (
-            encoder is not None
-            or not positions.is_contiguous()
+            not positions.is_contiguous()
             or not features.beliefs.is_contiguous()
             or features.hand_dim != PREFLOP_HANDS
         ):
@@ -559,6 +569,48 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             )
         self._ensure_fused_attrs()
         rows = int(positions.numel())
+        if encoder is not None:
+            feature_key = (
+                int(self._subgame_generation),
+                id(encoder),
+                int(self.model_indices.data_ptr()),
+                int(self.new_street_mask.data_ptr()),
+                int(positions.data_ptr()),
+                rows,
+                int(features.hand_dim),
+            )
+            cached = self._preflop_encoded_partition_feature_cache.get(feature_key)
+            if cached is None:
+                node_indices = self._partition_node_indices_for_positions(positions)
+                encoded = encoder.encode(
+                    self.beliefs,
+                    pre_chance_node=self.new_street_mask,
+                    indices=node_indices,
+                )
+                if encoded.hand_dim != features.hand_dim:
+                    encoded.beliefs = features.beliefs[positions]
+                    return encoded
+                belief_buf = features.beliefs.new_empty(
+                    (rows, features.beliefs.shape[1])
+                )
+                cached = (
+                    encoded.context,
+                    encoded.street,
+                    encoded.to_act,
+                    encoded.board,
+                    belief_buf,
+                )
+                self._preflop_encoded_partition_feature_cache[feature_key] = cached
+            ctx, street, to_act, board, belief_buf = cached
+            torch.index_select(features.beliefs, 0, positions, out=belief_buf)
+            return MLPFeatures(
+                context=ctx,
+                street=street,
+                to_act=to_act,
+                board=board,
+                beliefs=belief_buf,
+                hand_dim=features.hand_dim,
+            )
         slice_bounds = self._preflop_partition_position_slices.get(
             (int(positions.data_ptr()), rows)
         )
