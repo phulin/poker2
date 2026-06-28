@@ -96,6 +96,7 @@ class RebelTrainingConfig:
     muon_eps: float
     muon_ns_steps: int
     muon_adjust_lr_fn: str | None
+    muon_compile_step: bool
     normuon_beta1: float
     normuon_beta2: float
     normuon_eps: float
@@ -150,6 +151,7 @@ class RebelTrainingConfig:
             muon_eps=cfg.muon_eps,
             muon_ns_steps=cfg.muon_ns_steps,
             muon_adjust_lr_fn=cfg.muon_adjust_lr_fn,
+            muon_compile_step=cfg.muon_compile_step,
             normuon_beta1=cfg.normuon_beta1,
             normuon_beta2=cfg.normuon_beta2,
             normuon_eps=cfg.normuon_eps,
@@ -204,6 +206,7 @@ class RebelTrainingConfig:
         cfg.muon_eps = self.muon_eps
         cfg.muon_ns_steps = self.muon_ns_steps
         cfg.muon_adjust_lr_fn = self.muon_adjust_lr_fn
+        cfg.muon_compile_step = self.muon_compile_step
         cfg.normuon_beta1 = self.normuon_beta1
         cfg.normuon_beta2 = self.normuon_beta2
         cfg.normuon_eps = self.normuon_eps

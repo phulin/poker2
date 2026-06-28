@@ -229,11 +229,6 @@ wheels = [
 ]
 
 [[package]]
-name = "flash-muon"
-version = "0.1.0"
-source = { git = "https://github.com/nil0x9/flash-muon#80ac87fb49afc792b84eccb393d051b1ed8eee32" }
-
-[[package]]
 name = "fsspec"
 version = "2026.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -697,7 +692,6 @@ name = "p2"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "flash-muon" },
     { name = "hydra-core" },
     { name = "omegaconf" },
     { name = "pyyaml" },
@@ -720,7 +714,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "flash-muon", git = "https://github.com/nil0x9/flash-muon" },
     { name = "hydra-core", specifier = ">=1.3.0" },
     { name = "omegaconf", specifier = ">=2.3.0" },
     { name = "pyyaml", specifier = ">=5.4.0" },

@@ -5,7 +5,7 @@ import torch.nn as nn
 from p2.core.structured_config import Config, LrSchedule, TrainingConfig
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.optimizers import (
-    FlashMuon,
+    CompiledStepOptimizer,
     NorMuon,
     SplitOptimizer,
     _normuon_matrix_update,
@@ -25,9 +25,15 @@ def _adamw_param_groups(optimizer: torch.optim.AdamW):
     return decay_groups, no_decay_groups
 
 
-def test_muon_optimizer_splits_matrix_params_from_other_params():
-    if not hasattr(torch.optim, "Muon"):
+def _torch_muon_type() -> type[torch.optim.Optimizer]:
+    try:
+        return torch.optim.Muon
+    except AttributeError:
         pytest.skip("torch.optim.Muon is not available")
+
+
+def test_muon_optimizer_splits_matrix_params_from_other_params():
+    muon_type = _torch_muon_type()
 
     model = nn.Sequential(
         nn.Embedding(8, 4),
@@ -40,7 +46,7 @@ def test_muon_optimizer_splits_matrix_params_from_other_params():
 
     assert isinstance(optimizer, SplitOptimizer)
     assert [name for name, _ in optimizer.optimizers] == ["muon", "adamw"]
-    assert isinstance(optimizer.optimizers[0][1], torch.optim.Muon)
+    assert isinstance(optimizer.optimizers[0][1], muon_type)
     assert isinstance(optimizer.optimizers[1][1], torch.optim.AdamW)
     assert optimizer.optimizers[0][1].param_groups[0]["params"][0] is model[1].weight
     adamw = optimizer.optimizers[1][1]
@@ -78,8 +84,7 @@ def test_adamw_optimizer_uses_separate_adamw_lr():
 
 
 def test_muon_optimizer_uses_separate_adamw_lr_for_all_adamw_params():
-    if not hasattr(torch.optim, "Muon"):
-        pytest.skip("torch.optim.Muon is not available")
+    _torch_muon_type()
 
     model = nn.Sequential(
         nn.Embedding(8, 4),
@@ -112,8 +117,7 @@ def test_muon_optimizer_uses_separate_adamw_lr_for_all_adamw_params():
 
 
 def test_muon_optimizer_includes_policy_head_matrices_in_main_group():
-    if not hasattr(torch.optim, "Muon"):
-        pytest.skip("torch.optim.Muon is not available")
+    _torch_muon_type()
 
     class Model(nn.Module):
         def __init__(self) -> None:
@@ -248,8 +252,7 @@ def test_cfr_train_step_logs_schedule_and_cfr_iterations():
 
 
 def test_muon_split_optimizer_steps_matrix_and_non_matrix_params():
-    if not hasattr(torch.optim, "Muon"):
-        pytest.skip("torch.optim.Muon is not available")
+    _torch_muon_type()
 
     model = nn.Sequential(nn.Linear(4, 3), nn.LayerNorm(3))
     cfg = TrainingConfig(optimizer="muon", learning_rate=1e-3, weight_decay=0.0)
@@ -265,13 +268,15 @@ def test_muon_split_optimizer_steps_matrix_and_non_matrix_params():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
-def test_flash_muon_split_optimizer_steps_cuda_params():
+def test_compiled_torch_muon_split_optimizer_steps_cuda_params():
+    muon_type = _torch_muon_type()
     model = nn.Sequential(nn.Linear(4, 3), nn.LayerNorm(3)).cuda()
     cfg = TrainingConfig(optimizer="muon", learning_rate=1e-3, weight_decay=0.0)
     optimizer = build_optimizer(model, cfg, torch.device("cuda"))
 
     assert isinstance(optimizer, SplitOptimizer)
-    assert isinstance(optimizer.optimizers[0][1], FlashMuon)
+    assert isinstance(optimizer.optimizers[0][1], CompiledStepOptimizer)
+    assert isinstance(optimizer.optimizers[0][1].optimizer, muon_type)
     before = {name: param.detach().clone() for name, param in model.named_parameters()}
 
     loss = model(torch.randn(8, 4, device="cuda")).square().mean()
@@ -284,8 +289,7 @@ def test_flash_muon_split_optimizer_steps_cuda_params():
 
 
 def test_muon_split_optimizer_state_dict_round_trips():
-    if not hasattr(torch.optim, "Muon"):
-        pytest.skip("torch.optim.Muon is not available")
+    _torch_muon_type()
 
     cfg = TrainingConfig(optimizer="muon", learning_rate=1e-3, weight_decay=0.0)
     model = nn.Sequential(nn.Linear(4, 3), nn.LayerNorm(3))

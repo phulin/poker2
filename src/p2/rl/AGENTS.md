@@ -8,7 +8,7 @@ Reinforcement learning and ReBeL training support: PPO losses, replay buffers, o
 - `checkpoint_io.py`: Shared ReBeL checkpoint helpers for metadata reads, floating tensor dtype restoration, and staged model-weight loading.
 - `rebel_loop.py`: Shared ReBeL training loop runner for step execution, metric printing, checkpoint cadence/cleanup, optional preflop analyzer printing, final checkpointing, and TrueSkill snapshots.
 - `losses.py`: PPO variants, CFR distillation loss, and ReBeL supervised loss with compact 169-hand preflop value/policy branches, including live-player masks for folded-player-aware policy/value weighting.
-- `optimizers.py`: Optimizer construction helpers, including optional Muon or eager NorMuon matrix optimization with AdamW fallback splitting for ReBeL/all-in training and split BetterFFN policy-head grouping.
+- `optimizers.py`: Optimizer construction helpers, including PyTorch Muon with an optional compiled CUDA step, eager NorMuon matrix optimization, AdamW fallback splitting for ReBeL/all-in training, and split BetterFFN policy-head grouping.
 - `self_play.py`: SelfPlayTrainer and model-history support.
 - `replay.py`: Scalar trajectory storage and GAE/PPO batch preparation.
 - `vectorized_replay.py`: Batched replay buffer for tensorized environments.
