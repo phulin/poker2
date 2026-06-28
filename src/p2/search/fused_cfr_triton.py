@@ -8784,30 +8784,31 @@ class TScalars:
     def __init__(
         self, device: torch.device, dtype: torch.dtype = torch.float32
     ) -> None:
-        def _z():
-            return torch.zeros((), dtype=dtype, device=device)
-
         self.device = device
         self.dtype = dtype
-        self.zero = _z()
+        self._float_values = torch.zeros(12, dtype=dtype, device=device)
+        self._long_values = torch.zeros(2, dtype=torch.long, device=device)
+        self._float_host = torch.zeros(12, dtype=dtype, device="cpu")
+        self._long_host = torch.zeros(2, dtype=torch.long, device="cpu")
+        self.zero = self._float_values[0]
         # DCFR rescale scalars (all fp)
-        self.t_alpha_num = _z()
-        self.t_beta_num = _z()
-        self.t_alpha_den = _z()
-        self.t_beta_den = _z()
+        self.t_alpha_num = self._float_values[1]
+        self.t_beta_num = self._float_values[2]
+        self.t_alpha_den = self._float_values[3]
+        self.t_beta_den = self._float_values[4]
         # Policy/value averaging mix (old, new, old+new, 1/(old+new))
-        self.mix_old = _z()
-        self.mix_new = _z()
-        self.mix_total = _z()
-        self.mix_inv_total = _z()
+        self.mix_old = self._float_values[5]
+        self.mix_new = self._float_values[6]
+        self.mix_total = self._float_values[7]
+        self.mix_inv_total = self._float_values[8]
         # Predictive CFR policy extraction.
-        self.predictive_scale = _z()
-        self.current_player = torch.zeros((), dtype=torch.long, device=device)
+        self.predictive_scale = self._float_values[9]
+        self.current_player = self._long_values[0]
         # Model-values mix (for _set_model_values_impl): (old+new)/new and old/new
-        self.mix_onon = _z()  # (old + new) / new
-        self.mix_oon = _z()  # old / new
+        self.mix_onon = self._float_values[10]  # (old + new) / new
+        self.mix_oon = self._float_values[11]  # old / new
         # t as int64 device scalar (for t_sample == t comparisons)
-        self.t_tensor = torch.zeros((), dtype=torch.long, device=device)
+        self.t_tensor = self._long_values[1]
 
     def update(
         self,
@@ -8821,27 +8822,32 @@ class TScalars:
     ) -> None:
         """Write t-derived scalars into the device tensors.
 
-        Always a host→device copy via ``.fill_(python_float)`` — call OUTSIDE
-        any captured region (before ``graph.replay()``).
+        Always a host→device copy — call OUTSIDE any captured region (before
+        ``graph.replay()``).  Scalars are packed so update costs two copies
+        instead of one tiny CUDA fill kernel per scalar.
         """
         t_discount = max(1, int(t))
         t_alpha_num = float(t_discount**dcfr_alpha)
         t_beta_num = float(t_discount**dcfr_beta)
-        self.t_alpha_num.fill_(t_alpha_num)
-        self.t_beta_num.fill_(t_beta_num)
-        self.t_alpha_den.fill_(t_alpha_num + 1.0)
-        self.t_beta_den.fill_(t_beta_num + 1.0)
         total = float(mix_old) + float(mix_new)
-        self.mix_old.fill_(float(mix_old))
-        self.mix_new.fill_(float(mix_new))
-        self.mix_total.fill_(total)
-        self.mix_inv_total.fill_(1.0 / total if total != 0.0 else 1.0)
+        floats = self._float_host
+        floats[1] = t_alpha_num
+        floats[2] = t_beta_num
+        floats[3] = t_alpha_num + 1.0
+        floats[4] = t_beta_num + 1.0
+        floats[5] = float(mix_old)
+        floats[6] = float(mix_new)
+        floats[7] = total
+        floats[8] = 1.0 / total if total != 0.0 else 1.0
         if float(mix_new) != 0.0:
-            self.mix_onon.fill_(total / float(mix_new))
-            self.mix_oon.fill_(float(mix_old) / float(mix_new))
-        self.predictive_scale.fill_(float(predictive_scale))
-        self.current_player.fill_(int(current_player))
-        self.t_tensor.fill_(int(t))
+            floats[10] = total / float(mix_new)
+            floats[11] = float(mix_old) / float(mix_new)
+        floats[9] = float(predictive_scale)
+        longs = self._long_host
+        longs[0] = int(current_player)
+        longs[1] = int(t)
+        self._float_values.copy_(floats, non_blocking=True)
+        self._long_values.copy_(longs, non_blocking=True)
 
 
 # ---------------------------------------------------------------------------
