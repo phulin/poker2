@@ -197,6 +197,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def warm_start(self) -> None:
         return None
 
+    def _record_action_mix(self) -> None:
+        return None
+
     def _preflop_unblocked_mass(self, class_mass: torch.Tensor) -> torch.Tensor:
         return PreflopSparseCFREvaluator._preflop_unblocked_mass(self, class_mass)
 
