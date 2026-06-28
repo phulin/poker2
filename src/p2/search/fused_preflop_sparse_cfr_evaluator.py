@@ -90,6 +90,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_partition_last_values_valid = False
         self._preflop_partition_last_values_marker: torch.Tensor | None = None
         self._preflop_model_features: MLPFeatures | None = None
+        self._preflop_record_stats_percentile_ts: set[int] = set()
         self._preflop_partition_feature_cache: dict[
             tuple[int, int, int, int, int, int],
             tuple[
@@ -2176,6 +2177,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self.compute_expected_values()
         if not self.use_final_policy_values:
             self.update_average_values(t, refresh_t_scalars=False)
+
+    def _record_stats_percentile_ts(self) -> set[int]:
+        return self._preflop_record_stats_percentile_ts
 
     def _record_stats(self, t: int, old_policy_probs: torch.Tensor) -> None:
         return None
