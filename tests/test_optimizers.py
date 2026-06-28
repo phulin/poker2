@@ -268,10 +268,35 @@ def test_muon_split_optimizer_steps_matrix_and_non_matrix_params():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
-def test_compiled_torch_muon_split_optimizer_steps_cuda_params():
+def test_torch_muon_split_optimizer_defaults_to_uncompiled_cuda_params():
     muon_type = _torch_muon_type()
     model = nn.Sequential(nn.Linear(4, 3), nn.LayerNorm(3)).cuda()
     cfg = TrainingConfig(optimizer="muon", learning_rate=1e-3, weight_decay=0.0)
+    optimizer = build_optimizer(model, cfg, torch.device("cuda"))
+
+    assert isinstance(optimizer, SplitOptimizer)
+    assert isinstance(optimizer.optimizers[0][1], muon_type)
+    before = {name: param.detach().clone() for name, param in model.named_parameters()}
+
+    loss = model(torch.randn(8, 4, device="cuda")).square().mean()
+    loss.backward()
+    optimizer.step()
+    torch.cuda.synchronize()
+
+    for name, param in model.named_parameters():
+        assert not torch.equal(before[name], param.detach())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_compiled_torch_muon_split_optimizer_steps_cuda_params_when_enabled():
+    muon_type = _torch_muon_type()
+    model = nn.Sequential(nn.Linear(4, 3), nn.LayerNorm(3)).cuda()
+    cfg = TrainingConfig(
+        optimizer="muon",
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        muon_compile_step=True,
+    )
     optimizer = build_optimizer(model, cfg, torch.device("cuda"))
 
     assert isinstance(optimizer, SplitOptimizer)

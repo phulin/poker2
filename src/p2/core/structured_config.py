@@ -205,7 +205,7 @@ class TrainingConfig:
     muon_eps: float = 1e-7
     muon_ns_steps: int = 5
     muon_adjust_lr_fn: str | None = None
-    muon_compile_step: bool = True
+    muon_compile_step: bool = False
     normuon_beta1: float = 0.95
     normuon_beta2: float = 0.95
     normuon_eps: float = 1e-8
