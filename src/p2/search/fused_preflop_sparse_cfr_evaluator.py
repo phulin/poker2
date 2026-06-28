@@ -89,6 +89,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_new_street_last_values_buf: torch.Tensor | None = None
         self._preflop_partition_last_values_valid = False
         self._preflop_partition_last_values_marker: torch.Tensor | None = None
+        self._preflop_model_features: MLPFeatures | None = None
         self._preflop_partition_feature_cache: dict[
             tuple[int, int, int, int, int, int],
             tuple[
@@ -166,6 +167,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def _invalidate_subgame_caches(self) -> None:
         super()._invalidate_subgame_caches()
         self._ensure_fused_attrs()
+        self._preflop_model_features = None
         self._preflop_partition_feature_cache.clear()
         self._preflop_encoded_partition_encoder = None
         self._preflop_encoded_partition_positions = None
@@ -448,10 +450,22 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         if self.closing_leaf_value_model is not None:
             self._ensure_model_index_partitions()
 
+        beliefs_at_model = self._model_beliefs_for_values(self.beliefs)
         static_features = self.value_feature_encoder.encode(
             self.beliefs,
             pre_chance_node=self.new_street_mask,
             indices=self.model_indices,
+        )
+        self._preflop_model_features = MLPFeatures(
+            context=static_features.context,
+            street=static_features.street,
+            to_act=static_features.to_act,
+            board=static_features.board,
+            beliefs=beliefs_at_model.reshape(
+                -1,
+                self.num_players * PREFLOP_HANDS,
+            ),
+            hand_dim=PREFLOP_HANDS,
         )
         self._static_model_feature_fields = (
             static_features.context,
@@ -508,6 +522,18 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     def _model_features_for_beliefs(
         self, beliefs_at_model: torch.Tensor
     ) -> MLPFeatures:
+        prepared = self._preflop_model_features
+        if (
+            prepared is not None
+            and prepared.context.shape[0] == beliefs_at_model.shape[0]
+            and beliefs_at_model.shape[1:] == (self.num_players, PREFLOP_HANDS)
+        ):
+            prepared.beliefs = beliefs_at_model.reshape(
+                -1,
+                self.num_players * PREFLOP_HANDS,
+            )
+            return prepared
+
         key = (
             int(self._subgame_generation),
             int(self.model_indices.data_ptr()),
