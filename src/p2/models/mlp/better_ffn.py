@@ -2496,6 +2496,7 @@ class _PreflopGatedTokenMixerBlock(nn.Module):
                 ffn_norm is not None
                 and ffn_norm.weight is not None
                 and x.shape[0] <= _PREFLOP_NEXT_NORM_MAX_BATCH
+                and not torch.compiler.is_compiling()
             ):
                 return _preflop_token_mixer_gate_residual_next_norm_triton(
                     x,

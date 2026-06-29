@@ -241,9 +241,11 @@ def block_from_token_norm(
     block: _PreflopGatedTokenMixerBlock,
     x: torch.Tensor,
     y: torch.Tensor,
+    *,
+    inner_norm_mode: str = "current",
 ) -> torch.Tensor:
     gate = block.token_gate(y)
-    if x.shape[0] <= NEXT_NORM_CUTOFF:
+    if _use_inner_next_norm(x.shape[0], inner_norm_mode):
         token_out, ffn_in = _preflop_token_mixer_gate_residual_next_norm_triton(
             x,
             y,
@@ -277,9 +279,10 @@ def block_with_next_token_norm(
     next_norm: nn.RMSNorm,
     *,
     block_b: int,
+    inner_norm_mode: str = "current",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     gate = block.token_gate(y)
-    if x.shape[0] <= NEXT_NORM_CUTOFF:
+    if _use_inner_next_norm(x.shape[0], inner_norm_mode):
         token_out, ffn_in = _preflop_token_mixer_gate_residual_next_norm_triton(
             x,
             y,
@@ -311,6 +314,16 @@ def block_with_next_token_norm(
         block_b=block_b,
         num_warps=8,
     )
+
+
+def _use_inner_next_norm(batch_size: int, mode: str) -> bool:
+    if mode == "current":
+        return batch_size <= NEXT_NORM_CUTOFF
+    if mode == "never":
+        return False
+    if mode == "always":
+        return True
+    raise ValueError(f"unknown inner norm mode: {mode!r}")
 
 
 def current_stack_path(blocks: Sequence[_PreflopGatedTokenMixerBlock], x: torch.Tensor) -> torch.Tensor:
@@ -345,6 +358,7 @@ def cross_norm_stack_path(
     x: torch.Tensor,
     *,
     block_b: int,
+    inner_norm_mode: str = "current",
 ) -> torch.Tensor:
     precomputed_y: torch.Tensor | None = None
     for index, block in enumerate(blocks):
@@ -357,9 +371,10 @@ def cross_norm_stack_path(
                 y,
                 next_block.token_norm,
                 block_b=block_b,
+                inner_norm_mode=inner_norm_mode,
             )
         else:
-            x = block_from_token_norm(block, x, y)
+            x = block_from_token_norm(block, x, y, inner_norm_mode=inner_norm_mode)
             precomputed_y = None
     return x
 
@@ -377,6 +392,7 @@ def benchmark_batch(
     use_autocast: bool,
     include_compiled_naive: bool,
     include_compiled_wired: bool,
+    include_inner_norm_modes: bool,
     compile_dynamic: bool,
     timing_mode: str,
     warmup: int,
@@ -405,6 +421,8 @@ def benchmark_batch(
     compiled_wired = None
     compiled_disabled_wired = None
     compiled_cross_b2 = None
+    compiled_cross_b2_never = None
+    compiled_cross_b2_always = None
     if include_compiled_wired:
         compiled_wired = torch.compile(
             lambda inp: wired_stack_path(blocks, inp),
@@ -418,6 +436,25 @@ def benchmark_batch(
             lambda inp: cross_norm_stack_path(blocks, inp, block_b=2),
             dynamic=compile_dynamic,
         )
+        if include_inner_norm_modes:
+            compiled_cross_b2_never = torch.compile(
+                lambda inp: cross_norm_stack_path(
+                    blocks,
+                    inp,
+                    block_b=2,
+                    inner_norm_mode="never",
+                ),
+                dynamic=compile_dynamic,
+            )
+            compiled_cross_b2_always = torch.compile(
+                lambda inp: cross_norm_stack_path(
+                    blocks,
+                    inp,
+                    block_b=2,
+                    inner_norm_mode="always",
+                ),
+                dynamic=compile_dynamic,
+            )
 
     with torch.no_grad():
         expected = with_autocast(lambda: current_stack_path(blocks, x))
@@ -442,8 +479,42 @@ def benchmark_batch(
             if compiled_cross_b2 is None
             else with_autocast(lambda: compiled_cross_b2(x))
         )
+        compiled_cross_b2_never_out = (
+            None
+            if compiled_cross_b2_never is None
+            else with_autocast(lambda: compiled_cross_b2_never(x))
+        )
+        compiled_cross_b2_always_out = (
+            None
+            if compiled_cross_b2_always is None
+            else with_autocast(lambda: compiled_cross_b2_always(x))
+        )
         cross_b1 = with_autocast(lambda: cross_norm_stack_path(blocks, x, block_b=1))
         cross_b2 = with_autocast(lambda: cross_norm_stack_path(blocks, x, block_b=2))
+        cross_b2_never = (
+            None
+            if not include_inner_norm_modes
+            else with_autocast(
+                lambda: cross_norm_stack_path(
+                    blocks,
+                    x,
+                    block_b=2,
+                    inner_norm_mode="never",
+                )
+            )
+        )
+        cross_b2_always = (
+            None
+            if not include_inner_norm_modes
+            else with_autocast(
+                lambda: cross_norm_stack_path(
+                    blocks,
+                    x,
+                    block_b=2,
+                    inner_norm_mode="always",
+                )
+            )
+        )
         sync(device)
 
         errors = {
@@ -466,6 +537,22 @@ def benchmark_batch(
         if compiled_cross_b2_out is not None:
             errors["compiled_cross_boundary_norm_b2"] = (
                 compiled_cross_b2_out.float() - expected.float()
+            ).abs().max().item()
+        if compiled_cross_b2_never_out is not None:
+            errors["compiled_cross_boundary_norm_b2_inner_never"] = (
+                compiled_cross_b2_never_out.float() - expected.float()
+            ).abs().max().item()
+        if compiled_cross_b2_always_out is not None:
+            errors["compiled_cross_boundary_norm_b2_inner_always"] = (
+                compiled_cross_b2_always_out.float() - expected.float()
+            ).abs().max().item()
+        if cross_b2_never is not None:
+            errors["cross_boundary_norm_b2_inner_never"] = (
+                cross_b2_never.float() - expected.float()
+            ).abs().max().item()
+        if cross_b2_always is not None:
+            errors["cross_boundary_norm_b2_inner_always"] = (
+                cross_b2_always.float() - expected.float()
             ).abs().max().item()
         variants: list[tuple[str, Callable[[], torch.Tensor]]] = [
             ("old_module_loop", lambda: with_autocast(lambda: current_stack_path(blocks, x))),
@@ -499,6 +586,20 @@ def benchmark_batch(
                     lambda: with_autocast(lambda: compiled_cross_b2(x)),
                 )
             )
+        if compiled_cross_b2_never is not None:
+            variants.append(
+                (
+                    "compiled_cross_boundary_norm_b2_inner_never",
+                    lambda: with_autocast(lambda: compiled_cross_b2_never(x)),
+                )
+            )
+        if compiled_cross_b2_always is not None:
+            variants.append(
+                (
+                    "compiled_cross_boundary_norm_b2_inner_always",
+                    lambda: with_autocast(lambda: compiled_cross_b2_always(x)),
+                )
+            )
         variants.extend(
             [
                 (
@@ -511,6 +612,33 @@ def benchmark_batch(
                 ),
             ]
         )
+        if include_inner_norm_modes:
+            variants.extend(
+                [
+                    (
+                        "cross_boundary_norm_b2_inner_never",
+                        lambda: with_autocast(
+                            lambda: cross_norm_stack_path(
+                                blocks,
+                                x,
+                                block_b=2,
+                                inner_norm_mode="never",
+                            )
+                        ),
+                    ),
+                    (
+                        "cross_boundary_norm_b2_inner_always",
+                        lambda: with_autocast(
+                            lambda: cross_norm_stack_path(
+                                blocks,
+                                x,
+                                block_b=2,
+                                inner_norm_mode="always",
+                            )
+                        ),
+                    ),
+                ]
+            )
         timings = [
             {
                 "name": name,
@@ -552,6 +680,7 @@ def main() -> None:
     parser.add_argument("--autocast", action="store_true")
     parser.add_argument("--include-compiled-naive", action="store_true")
     parser.add_argument("--include-compiled-wired", action="store_true")
+    parser.add_argument("--include-inner-norm-modes", action="store_true")
     parser.add_argument("--compile-dynamic", action="store_true")
     parser.add_argument(
         "--timing-mode",
@@ -598,6 +727,7 @@ def main() -> None:
             use_autocast=args.autocast,
             include_compiled_naive=args.include_compiled_naive,
             include_compiled_wired=args.include_compiled_wired,
+            include_inner_norm_modes=args.include_inner_norm_modes,
             compile_dynamic=args.compile_dynamic,
             timing_mode=args.timing_mode,
             warmup=args.warmup,
@@ -613,6 +743,7 @@ def main() -> None:
         "autocast": args.autocast,
         "include_compiled_naive": args.include_compiled_naive,
         "include_compiled_wired": args.include_compiled_wired,
+        "include_inner_norm_modes": args.include_inner_norm_modes,
         "compile_dynamic": args.compile_dynamic,
         "timing_mode": args.timing_mode,
         "depth": args.depth,

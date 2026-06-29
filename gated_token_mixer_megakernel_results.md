@@ -231,3 +231,54 @@ Depth-5 value-stack command:
 | 65536 | 23.811418 | 21.262605 | 17.345395 | 1.37x |
 
 Conclusion: this is a production-relevant win because it matches the live evaluator's compiled-forward mode. The as-committed stack fusion helped eager eval; making it compile-visible prevents `compile=default` from regressing to the naive stack and produces the largest measured stack speedups so far.
+
+## Belief Projection Probe
+
+The compact token model forms player tokens from two projections over the same `[B, P, 169]` beliefs:
+
+- `player_beliefs @ range_projection` -> hidden range features
+- `player_beliefs @ bucket_projection` -> 16 bucket masses
+
+I tested replacing those with one concatenated projection `[169, hidden_dim + 16]`.
+
+Command:
+
+`uv run python benchmarks/bench_preflop_belief_projection.py --batch-sizes 512,8192,16384,32768,65536 --iters 80 --warmup 20 --dtype float32 --weight-dtype float32 --autocast --timing-mode cuda_graph --include-compiled --compile-dynamic --json`
+
+| Batch | Current two matmuls ms | Fused one matmul ms | Dynamic compiled current ms | Dynamic compiled fused ms |
+|---:|---:|---:|---:|---:|
+| 512 | 0.097050 | 0.099443 | 0.072538 | 0.069683 |
+| 8192 | 0.581837 | 0.576000 | 0.286067 | 0.304614 |
+| 16384 | 0.997107 | 0.965069 | 0.455053 | 0.480883 |
+| 32768 | 1.883418 | 1.831014 | 0.814170 | 0.912525 |
+| 65536 | 3.624218 | 3.533632 | 1.525184 | 1.762662 |
+
+Conclusion: do not wire the fused belief projection. It is a small eager win at larger batches, but the live-style dynamic compiled current path is faster than compiled fused from batch 8192 upward.
+
+## Compile-Specific Inner FFN Norm Cutoff
+
+The within-block fusion of token-mixer residual plus FFN RMSNorm was selected before the stack path was compile-visible. Rechecking under dynamic `torch.compile` showed the compiled graph is faster when that inner FFN RMSNorm fusion is disabled through the 16k range, while eager behavior still slightly prefers the old small-batch path. I kept eager behavior unchanged and disabled only the inner FFN-norm fusion during Dynamo tracing.
+
+Pre-patch mode sweep:
+
+`uv run python benchmarks/bench_preflop_token_mixer_cross_norm.py --batch-sizes 512,8192,16384,32768,65536 --depth 4 --iters 80 --warmup 20 --dtype float32 --weight-dtype float32 --autocast --timing-mode cuda_graph --include-compiled-wired --compile-dynamic --include-inner-norm-modes --json`
+
+| Batch | Dynamic compiled current ms | Dynamic compiled inner-never ms | Faster mode |
+|---:|---:|---:|---|
+| 512 | 0.310208 | 0.233216 | inner-never |
+| 8192 | 2.314445 | 1.944909 | inner-never |
+| 16384 | 4.414797 | 3.691418 | inner-never |
+| 32768 | 7.049869 | 7.054221 | current |
+| 65536 | 13.854950 | 13.884300 | current |
+
+Post-patch focused check:
+
+`uv run python benchmarks/bench_preflop_token_mixer_cross_norm.py --batch-sizes 512,8192,16384 --depth 4 --iters 80 --warmup 20 --dtype float32 --weight-dtype float32 --autocast --timing-mode cuda_graph --include-compiled-wired --compile-dynamic --include-inner-norm-modes --json`
+
+| Batch | Old loop ms | Eager wired stack ms | Dynamic compiled wired stack ms | Compiled wired vs old |
+|---:|---:|---:|---:|---:|
+| 512 | 0.372275 | 0.336986 | 0.289677 | 1.29x |
+| 8192 | 2.675187 | 2.409792 | 1.947597 | 1.37x |
+| 16384 | 5.134451 | 4.605133 | 3.684288 | 1.39x |
+
+Conclusion: for live `compile=default`, do not trace the inner FFN-norm fused kernel. Let Inductor compile the token residual followed by FFN RMSNorm while keeping the cross-block next-token-RMSNorm fusion.
