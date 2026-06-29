@@ -15,14 +15,14 @@ wandb_tags: ["rebel", "cfr", "preflop", "backward-induction"]
 
 train:
   batch_size: 256
-  learning_rate: 0.0015
-  learning_rate_final: 0.000225
+  learning_rate: 0.006
+  learning_rate_final: 0.0009
   lr_schedule: wsd
   lr_wsd_decay_fraction: 0.6
   warmup_steps: 0
   optimizer: muon
   muon_compile_step: false
-  adamw_learning_rate: 0.00125
+  adamw_learning_rate: 0.005
   weight_decay: 0.01
   grad_clip: 1.0
   replay_buffer_batches: 1
