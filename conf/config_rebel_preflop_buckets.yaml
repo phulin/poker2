@@ -76,6 +76,7 @@ preflop_buckets:
   cfr_batch_size: 512
   actions_12_15_cfr_batch_size: 8192
   actions_8_11_cfr_batch_size: 2048
+  actions_4_7_cfr_batch_size: 2048
   actions_12_15_epochs: 10
   depth: 4
   actions_12_15_depth: 7

@@ -65,6 +65,7 @@ def _execution_config_from_config(cfg: Config) -> PreflopBucketExecutionConfig:
         cfr_batch_size=preflop.cfr_batch_size,
         actions_12_15_cfr_batch_size=preflop.actions_12_15_cfr_batch_size,
         actions_8_11_cfr_batch_size=preflop.actions_8_11_cfr_batch_size,
+        actions_4_7_cfr_batch_size=preflop.actions_4_7_cfr_batch_size,
         actions_12_15_epochs=preflop.actions_12_15_epochs,
         validation_items=preflop.validation_items,
         validation_cfr_iterations=preflop.validation_cfr_iterations,

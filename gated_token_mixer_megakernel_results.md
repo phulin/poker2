@@ -424,3 +424,24 @@ Conclusion: the compiled boundary is the new best corrected production-loop
 result on the restarted v5 actions_4_7 shape, improving the warmed
 512-root/300-iteration solve from the previous best `29.006874 ms/iter` to
 about `28.5 ms/iter`.
+
+## CFR Root Batch Size Result
+
+The next production-loop lever was root batch size for the current
+`actions_4_7` bucket. These runs used the same restarted v5 artifacts and the
+current static-compiled evaluator path with parallel partition eval and the
+compiled FFN boundary. The benchmark was the warmed 300-iteration
+`evaluate_cfr` loop; the live trainer was paused only while timing.
+
+| CFR roots | Wall s | ms/iter | Roots/s | Outcome |
+|---:|---:|---:|---:|---|
+| 512 | 8.542 | 28.474 | 59.94 | Current baseline |
+| 1024 | 18.053 | 60.176 | 56.72 | Worse |
+| 2048 | 32.672 | 108.907 | 62.68 | Best measured throughput |
+| 4096 | n/a | n/a | n/a | OOM during CUDA graph capture |
+
+Conclusion: wire a dedicated `actions_4_7_cfr_batch_size: 2048` override while
+leaving the default `cfr_batch_size: 512` for `actions_0_3`. The 4096-root
+attempt failed before timed pause/capture completion: graph capture needed
+another `442 MiB` when only about `409 MiB` was free with the live trainer
+resident.

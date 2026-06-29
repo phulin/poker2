@@ -748,7 +748,7 @@ def _bucket_cfr_batch_size(
     overrides = {
         "actions_12_15": args.actions_12_15_cfr_batch_size,
         "actions_8_11": args.actions_8_11_cfr_batch_size,
-        "actions_4_7": None,
+        "actions_4_7": args.actions_4_7_cfr_batch_size,
         "actions_0_3": None,
     }
     override = overrides[bucket_label]

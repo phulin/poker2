@@ -49,6 +49,7 @@ def _execution_config(**overrides) -> PreflopBucketExecutionConfig:
         "cfr_batch_size": 512,
         "actions_12_15_cfr_batch_size": None,
         "actions_8_11_cfr_batch_size": None,
+        "actions_4_7_cfr_batch_size": None,
         "actions_12_15_epochs": 1,
         "validation_items": 4096,
         "validation_cfr_iterations": 10_000,
@@ -174,13 +175,14 @@ def test_estimate_train_updates_counts_cfr_root_batches(tmp_path) -> None:
         cfr_batch_size=512,
         actions_12_15_cfr_batch_size=8192,
         actions_8_11_cfr_batch_size=2048,
+        actions_4_7_cfr_batch_size=2048,
         actions_12_15_epochs=2,
     )
 
     # One logical training step is one solved CFR-root batch. The deepest and
-    # 8-11 buckets fit in one override batch, while 4-7 and 0-3 use two 512-root
-    # batches: 1*2 + 1 + 2 + 2.
-    assert _estimate_train_updates(args) == 7
+    # 8-11 and 4-7 buckets fit in one override batch, while 0-3 uses two
+    # 512-root batches: 1*2 + 1 + 1 + 2.
+    assert _estimate_train_updates(args) == 6
 
     # Restricting the specialist run to one bucket estimates only that bucket.
     assert _estimate_train_updates(
