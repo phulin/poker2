@@ -85,7 +85,7 @@ preflop_buckets:
   cfr_iterations: 300
   warm_start_iterations: 0
   sparse_fused: true
-  compile: default
+  compile: static
   validation_items: 4096
   validation_cfr_iterations: 10000
   validation_interval_steps: 10

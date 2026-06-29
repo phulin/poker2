@@ -347,17 +347,31 @@ turned out to match the old production behavior: the Hydra config said
 that production path so the fused evaluator and inference/target eval models use
 the configured compile mode, and disabled TrueSkill for bucketed preflop runs.
 
-Current live actions_4_7 A/B command shape:
+The first version of this check had two benchmark problems: `--compile off`
+only changed `model.compile`, while `build_run_config()` then overwrote it from
+`preflop_buckets.compile=default`; and `--warmup-solves` warmed a discarded
+evaluator/model, so compile-on runs still paid first-use Inductor compile inside
+the timed evaluator. The benchmark now sends `--compile` through
+`preflop_buckets.compile` and warms the same evaluator/model before
+reinitializing the subgame for timing.
+
+Corrected current live actions_4_7 command shape:
 
 `uv run python scripts/bench_preflop_evaluate_cfr_loop.py --state-dataset /home/user/poker2/outputs/preflop_policy_states/eroymcd2_unique_buckets_20m_n5_cap5m_packed_20260622 --base-checkpoint /home/user/poker2/outputs/preflop_backward_induction/gated_chain_6p_epreflop_12end10ep_d7_rest_d4_lr00105_wsd0p6_300cfr_20260627_v5/actions_4_7/checkpoints/specialist_inprogress.pt --closing-checkpoint /home/user/poker2/outputs/preflop_backward_induction/gated_chain_6p_epreflop_12end10ep_d7_rest_d4_lr00105_wsd0p6_300cfr_20260627_v5/actions_8_11/checkpoints/specialist_final.pt --run-output-dir /home/user/poker2/outputs/preflop_backward_induction/gated_chain_6p_epreflop_12end10ep_d7_rest_d4_lr00105_wsd0p6_300cfr_20260627_v5 --cfr-batch-size 512 --cfr-iterations 300 --warmup-solves 1`
 
-| Variant | Wall s | ms/iter | Speedup |
+| Variant | Wall s | ms/iter | Speedup vs dynamic compile |
 |---|---:|---:|---:|
-| Compile off | 56.325047 | 187.750155 | 1.00x |
-| Compile default | 49.674228 | 165.580760 | 1.13x |
+| Compile default, dynamic | 15.101322 | 50.337741 | 1.00x |
+| Compile static | 9.391587 | 31.305291 | 1.61x |
+| Compile static repeat | 12.456134 | 41.520446 | 1.21x |
+| Compile off | 9.815967 | 32.719890 | 1.54x |
 
 These absolute times are not directly comparable to the earlier 8.47s table
 because this check used the restarted live v5 bucket artifacts and current
 actions_8_11 closing checkpoint, but the A/B is same-shape and same-artifact:
 512 roots, 125,551 total nodes, 65,536 model leaves, and 300 CFR iterations.
-Compile-on saves about 6.65s per solve, or 11.8%, for this production path.
+Dynamic compile-on is consistently worse for this production path once measured
+correctly. Static compile-on removes the dynamic-shape overhead and is the right
+compiled default for bucketed preflop; it is much faster than dynamic compile
+and roughly competitive with eager compile-off, with a noisy small edge in one
+run and a small regression in the repeat.

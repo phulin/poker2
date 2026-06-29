@@ -291,7 +291,7 @@ def _load_cfg(args: argparse.Namespace):
         "preflop_buckets.write_solved_shards=false",
         "preflop_buckets.allow_partial=false",
         "preflop_buckets.overwrite=false",
-        "preflop_buckets.compile=default",
+        f"preflop_buckets.compile={args.compile}",
         "use_wandb=false",
         f"model.preflop_model_type={args.model_type}",
         "++model.preflop_hand_dim=169",
@@ -382,8 +382,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--transformer-heads", type=int, default=8)
     parser.add_argument(
         "--compile",
-        choices=("off", "default", "max-autotune"),
-        default="default",
+        choices=("off", "default", "static", "max-autotune"),
+        default="static",
     )
     parser.add_argument("--no-closing-checkpoint", action="store_true")
     parser.add_argument("--warmup-iters", type=int, default=2)

@@ -97,6 +97,7 @@ def test_config_rebel_preflop_buckets_resolves() -> None:
     assert cfg.preflop_buckets.actions_12_15_cfr_batch_size == 8192
     assert cfg.preflop_buckets.actions_8_11_cfr_batch_size == 2048
     assert cfg.preflop_buckets.actions_12_15_epochs == 10
+    assert cfg.preflop_buckets.compile == "static"
     assert cfg.preflop_buckets.actions_12_15_depth == 7
     assert cfg.preflop_buckets.actions_4_7_depth == 4
     assert cfg.train.learning_rate == 0.006

@@ -217,17 +217,21 @@ def _compile_setting(cfg: Config) -> str:
         return "off"
     if value in {"", "true", "yes", "1"}:
         return "default"
-    if value not in {"off", "default", "max-autotune"}:
+    if value not in {"off", "default", "static", "max-autotune"}:
         raise ValueError(
-            "model.compile must be one of: off, default, max-autotune; "
+            "model.compile must be one of: off, default, static, max-autotune; "
             f"got {cfg.model.compile!r}"
         )
     return value
 
 
 def _compile_kwargs(cfg: Config) -> dict[str, object]:
-    kwargs: dict[str, object] = {"dynamic": True}
+    dynamic_env = os.environ.get("P2_MODEL_COMPILE_DYNAMIC")
     mode = _compile_setting(cfg)
+    dynamic = mode != "static"
+    if dynamic_env is not None:
+        dynamic = dynamic_env.strip().lower() not in {"0", "false", "no", "off"}
+    kwargs: dict[str, object] = {"dynamic": dynamic}
     if mode == "max-autotune":
         kwargs["mode"] = mode
     return kwargs

@@ -173,7 +173,7 @@ def _load_cfg(args: argparse.Namespace):
         "preflop_buckets.write_solved_shards=false",
         "preflop_buckets.allow_partial=false",
         "preflop_buckets.overwrite=false",
-        "preflop_buckets.compile=default",
+        f"preflop_buckets.compile={args.compile}",
         "use_wandb=false",
         f"model.preflop_model_type={args.model_type}",
         "++model.preflop_hand_dim=169",
@@ -213,7 +213,9 @@ def _load_cfg(args: argparse.Namespace):
     return execution, run_cfg
 
 
-def _make_evaluator(args: argparse.Namespace) -> tuple[Any, int]:
+def _make_evaluator(
+    args: argparse.Namespace,
+) -> tuple[Any, int, Any, torch.Tensor, torch.Tensor]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
@@ -253,7 +255,7 @@ def _make_evaluator(args: argparse.Namespace) -> tuple[Any, int]:
     roots = torch.arange(rows, device=device)
     ev = trainer.cfr_evaluator
     ev.initialize_subgame(env, roots, beliefs)
-    return ev, rows
+    return ev, rows, env, roots, beliefs
 
 
 def parse_args() -> argparse.Namespace:
@@ -281,8 +283,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--transformer-heads", type=int, default=8)
     parser.add_argument(
         "--compile",
-        choices=("off", "default", "max-autotune"),
-        default="default",
+        choices=("off", "default", "static", "max-autotune"),
+        default="static",
     )
     parser.add_argument(
         "--warmup-solves",
@@ -300,12 +302,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    for _ in range(max(0, args.warmup_solves)):
-        ev, _ = _make_evaluator(args)
+    ev, rows, env, roots, beliefs = _make_evaluator(args)
+    for i in range(max(0, args.warmup_solves)):
         with torch.no_grad():
             ev.evaluate_cfr(training_mode=True, sample_continuation=False)
         _sync(ev.device)
-    ev, rows = _make_evaluator(args)
+        if i + 1 < max(0, args.warmup_solves):
+            ev.initialize_subgame(env, roots, beliefs.clone())
+    if args.warmup_solves > 0:
+        ev.initialize_subgame(env, roots, beliefs.clone())
     with _pause_processes(not args.no_pause, args.pause_pattern):
         _sync(ev.device)
         t0 = time.perf_counter()

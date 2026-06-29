@@ -4155,7 +4155,9 @@ class BetterSplitFFN(BaseMLPModel):
 
     def compile_forward_modes(self, **kwargs):
         """Compile split child fixed-mode forwards used by the wrapper hot path."""
+        dynamic_batch = bool(kwargs.get("dynamic", False))
         policy_model = self.policy_model
+        policy_model._compiled_forward_dynamic_batch = dynamic_batch
         policy_ns = {"policy_model": policy_model}
         exec(
             "def policy_forward_features_only(features):\n"
@@ -4167,6 +4169,7 @@ class BetterSplitFFN(BaseMLPModel):
             policy_ns["policy_forward_features_only"], **kwargs
         )
         value_model = self.value_model
+        value_model._compiled_forward_dynamic_batch = dynamic_batch
         value_ns = {"value_model": value_model}
         exec(
             "def value_forward(features, latent=None, apply_zero_sum=True, "
