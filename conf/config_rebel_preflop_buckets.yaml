@@ -22,7 +22,7 @@ train:
   warmup_steps: 0
   optimizer: muon
   muon_compile_step: false
-  adamw_learning_rate: 0.005
+  adamw_learning_rate: 0.004
   weight_decay: 0.01
   grad_clip: 1.0
   replay_buffer_batches: 1
