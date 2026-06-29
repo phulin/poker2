@@ -13,6 +13,9 @@ use_wandb: true
 wandb_project: poker-rebel-preflop-backward-induction
 wandb_tags: ["rebel", "cfr", "preflop", "backward-induction"]
 
+trueskill:
+  enabled: false
+
 train:
   batch_size: 256
   learning_rate: 0.006

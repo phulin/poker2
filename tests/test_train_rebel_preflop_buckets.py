@@ -86,20 +86,22 @@ def test_config_rebel_preflop_buckets_resolves() -> None:
     assert cfg.preflop_buckets.state_dataset == "/tmp/states"
     assert cfg.preflop_buckets.base_checkpoint == "/tmp/base.pt"
     assert cfg.resume_from == "/tmp/resume.pt"
+    assert cfg.trueskill.enabled is False
     assert cfg.preflop_buckets.snapshot_interval_steps == 50
     assert cfg.preflop_buckets.distill_buckets is None
     assert cfg.preflop_buckets.distill_checkpoints.checkpoint_12_15 is None
     assert cfg.preflop_buckets.states_per_bucket == 5_000_000
-    assert cfg.preflop_buckets.train_batch_size == 256
+    assert cfg.preflop_buckets.train_batch_size == 512
+    assert cfg.preflop_buckets.policy_train_batch_size == 2048
     assert cfg.preflop_buckets.cfr_iterations == 300
     assert cfg.preflop_buckets.actions_12_15_cfr_batch_size == 8192
     assert cfg.preflop_buckets.actions_8_11_cfr_batch_size == 2048
     assert cfg.preflop_buckets.actions_12_15_epochs == 10
     assert cfg.preflop_buckets.actions_12_15_depth == 7
     assert cfg.preflop_buckets.actions_4_7_depth == 4
-    assert cfg.train.learning_rate == 0.00105
-    assert cfg.train.learning_rate_final == 0.0001575
-    assert cfg.train.adamw_learning_rate == 0.000875
+    assert cfg.train.learning_rate == 0.006
+    assert cfg.train.learning_rate_final == 0.0009
+    assert cfg.train.adamw_learning_rate == 0.004
     assert str(cfg.train.lr_schedule) == "LrSchedule.wsd"
     assert cfg.train.lr_wsd_decay_fraction == 0.6
     assert cfg.train.optimizer == "muon"

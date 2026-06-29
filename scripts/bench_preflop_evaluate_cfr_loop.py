@@ -293,7 +293,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-closing-checkpoint", action="store_true")
     parser.add_argument("--skip-load-weights", action="store_true")
     parser.add_argument("--no-pause", action="store_true")
-    parser.add_argument("--pause-pattern", default="preflop_backward_induction")
+    parser.add_argument("--pause-pattern", default="train_rebel_preflop_buckets")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     return parser.parse_args()
 

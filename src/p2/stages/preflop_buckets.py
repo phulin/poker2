@@ -161,6 +161,7 @@ def build_run_config(
     cfg.wandb_name = execution.wandb_name
     cfg.wandb_tags = list(execution.wandb_tags)
     cfg.resume_from = None
+    cfg.trueskill.enabled = False
     cfg.data.mode = "live"
     cfg.data.live_root_source = "self_play"
     cfg.data.warmup_self_play_roots = False

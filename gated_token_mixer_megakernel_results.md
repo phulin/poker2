@@ -337,3 +337,27 @@ Conclusion: the accumulated session changes produce an end-to-end
 512-root/300-iteration benchmark. The eval projection/value-head cache accounts
 for about 1.45% of that in this overall loop; most model-forward microbenchmark
 wins are diluted by non-model CFR work at this solve shape.
+
+## Production Compile Wiring Check
+
+After inspecting the trainer wiring, the prior overall-loop measurements above
+turned out to match the old production behavior: the Hydra config said
+`compile=default`, but `RebelCFRTrainer` created the inference twin,
+`cfr_target_model`, and fused evaluator model with compile disabled. I changed
+that production path so the fused evaluator and inference/target eval models use
+the configured compile mode, and disabled TrueSkill for bucketed preflop runs.
+
+Current live actions_4_7 A/B command shape:
+
+`uv run python scripts/bench_preflop_evaluate_cfr_loop.py --state-dataset /home/user/poker2/outputs/preflop_policy_states/eroymcd2_unique_buckets_20m_n5_cap5m_packed_20260622 --base-checkpoint /home/user/poker2/outputs/preflop_backward_induction/gated_chain_6p_epreflop_12end10ep_d7_rest_d4_lr00105_wsd0p6_300cfr_20260627_v5/actions_4_7/checkpoints/specialist_inprogress.pt --closing-checkpoint /home/user/poker2/outputs/preflop_backward_induction/gated_chain_6p_epreflop_12end10ep_d7_rest_d4_lr00105_wsd0p6_300cfr_20260627_v5/actions_8_11/checkpoints/specialist_final.pt --run-output-dir /home/user/poker2/outputs/preflop_backward_induction/gated_chain_6p_epreflop_12end10ep_d7_rest_d4_lr00105_wsd0p6_300cfr_20260627_v5 --cfr-batch-size 512 --cfr-iterations 300 --warmup-solves 1`
+
+| Variant | Wall s | ms/iter | Speedup |
+|---|---:|---:|---:|
+| Compile off | 56.325047 | 187.750155 | 1.00x |
+| Compile default | 49.674228 | 165.580760 | 1.13x |
+
+These absolute times are not directly comparable to the earlier 8.47s table
+because this check used the restarted live v5 bucket artifacts and current
+actions_8_11 closing checkpoint, but the A/B is same-shape and same-artifact:
+512 roots, 125,551 total nodes, 65,536 model leaves, and 300 CFR iterations.
+Compile-on saves about 6.65s per solve, or 11.8%, for this production path.

@@ -390,7 +390,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--active-iters", type=int, default=10)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR / "profile.json")
     parser.add_argument("--no-pause", action="store_true")
-    parser.add_argument("--pause-pattern", default="preflop_backward_induction")
+    parser.add_argument("--pause-pattern", default="train_rebel_preflop_buckets")
     parser.add_argument("--skip-load-weights", action="store_true")
     parser.add_argument("--record-shapes", action="store_true")
     return parser.parse_args()
@@ -417,59 +417,60 @@ def main() -> None:
         )
     )
 
+    trainer = RebelCFRTrainer(
+        cfg=run_cfg,
+        device=device,
+        pregeneration_only=True,
+    )
+    if not args.skip_load_weights:
+        _load_model_weights(trainer, str(args.base_checkpoint))
+
+    env = _make_env_from_manifest(
+        reader.manifest,
+        num_envs=args.cfr_batch_size,
+        device=device,
+        seed=execution.seed + 100,
+    )
+    rows = _copy_public_states_to_env(env, states)
+    rng = torch.Generator(device=device)
+    rng.manual_seed(_seed_for_label(execution.seed, args.bucket, salt=500_000))
+    beliefs = _random_beliefs(
+        rows,
+        env.num_players,
+        device=device,
+        rng=rng,
+        mode=execution.belief_mode,
+    )
+    ev = _prepare_evaluator(trainer, env, beliefs)
+    _patch_component_tags(ev)
+
+    print(
+        json.dumps(
+            {
+                "bucket": args.bucket,
+                "rows": rows,
+                "total_nodes": int(ev.total_nodes),
+                "root_nodes": int(ev.root_nodes),
+                "tree_depth": int(ev.tree_depth),
+                "model_indices": int(ev.model_indices.numel()),
+                "showdown_indices": int(ev.showdown_indices.numel()),
+                "rank_stats_src_weights": True,
+                "rank_stats_ev": True,
+                "rank_stats_parent_ev": True,
+                "record_shapes": args.record_shapes,
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
+
+    with torch.no_grad():
+        for i in range(args.warmup_iters):
+            ev.cfr_iteration(i)
+    _sync(device)
+
     with _pause_processes(not args.no_pause, args.pause_pattern):
-        trainer = RebelCFRTrainer(
-            cfg=run_cfg,
-            device=device,
-            pregeneration_only=True,
-        )
-        if not args.skip_load_weights:
-            _load_model_weights(trainer, str(args.base_checkpoint))
-
-        env = _make_env_from_manifest(
-            reader.manifest,
-            num_envs=args.cfr_batch_size,
-            device=device,
-            seed=execution.seed + 100,
-        )
-        rows = _copy_public_states_to_env(env, states)
-        rng = torch.Generator(device=device)
-        rng.manual_seed(_seed_for_label(execution.seed, args.bucket, salt=500_000))
-        beliefs = _random_beliefs(
-            rows,
-            env.num_players,
-            device=device,
-            rng=rng,
-            mode=execution.belief_mode,
-        )
-        ev = _prepare_evaluator(trainer, env, beliefs)
-        _patch_component_tags(ev)
-
-        print(
-            json.dumps(
-                {
-                    "bucket": args.bucket,
-                    "rows": rows,
-                    "total_nodes": int(ev.total_nodes),
-                    "root_nodes": int(ev.root_nodes),
-                    "tree_depth": int(ev.tree_depth),
-                    "model_indices": int(ev.model_indices.numel()),
-                    "showdown_indices": int(ev.showdown_indices.numel()),
-                    "rank_stats_src_weights": True,
-                    "rank_stats_ev": True,
-                    "rank_stats_parent_ev": True,
-                    "record_shapes": args.record_shapes,
-                },
-                indent=2,
-            ),
-            flush=True,
-        )
-
-        with torch.no_grad():
-            for i in range(args.warmup_iters):
-                ev.cfr_iteration(i)
         _sync(device)
-
         t0 = time.perf_counter()
         with torch.no_grad():
             with profile(

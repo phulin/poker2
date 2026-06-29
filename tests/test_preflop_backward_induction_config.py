@@ -45,6 +45,7 @@ def _execution_config(**overrides) -> PreflopBucketExecutionConfig:
         "belief_mode": "random",
         "states_per_bucket": 100_000,
         "train_batch_size": 128,
+        "policy_train_batch_size": None,
         "cfr_batch_size": 512,
         "actions_12_15_cfr_batch_size": None,
         "actions_8_11_cfr_batch_size": None,
@@ -116,6 +117,7 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
     assert cfg.wandb_project == "preflop-project"
     assert cfg.wandb_name == "preflop-run"
     assert cfg.wandb_tags == ["preflop", "test"]
+    assert cfg.trueskill.enabled is False
     assert cfg.data.mode == "live"
     assert cfg.data.live_root_source == "self_play"
     assert cfg.data.warmup_self_play_roots is False

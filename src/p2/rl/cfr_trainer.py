@@ -468,7 +468,7 @@ class RebelCFRTrainer:
             self.ema_helper = EMAHelper(mu=cfg.train.model_ema)
             self.ema_helper.register(self.model)
 
-        self.inference_model = self._make_eval_twin(compile_model=False)
+        self.inference_model = self._make_eval_twin(compile_model=True)
         self._sync_inference_model()
         init_trace("inference model ready")
         eval_model = self.inference_model
@@ -479,7 +479,7 @@ class RebelCFRTrainer:
                     "search.street_model_checkpoints because the CFR evaluator "
                     "uses an external street model registry."
                 )
-            self.cfr_target_model = self._make_eval_twin(compile_model=False)
+            self.cfr_target_model = self._make_eval_twin(compile_model=True)
             self._sync_cfr_target_model(step=0)
             eval_model = self.cfr_target_model
             init_trace(
@@ -532,7 +532,7 @@ class RebelCFRTrainer:
             "closing_leaf_model": closing_leaf_model,
         }
         if evaluator_cls.__name__.startswith("Fused"):
-            evaluator_kwargs["compile_model"] = False
+            evaluator_kwargs["compile_model"] = True
         self.cfr_evaluator = evaluator_cls(**evaluator_kwargs)
         init_trace(f"evaluator ready ({evaluator_cls.__name__})")
         root_sampler = None
@@ -671,7 +671,7 @@ class RebelCFRTrainer:
         # candidate side and creates a second frozen model for the opponent.
         self.trueskill_tracker: TrueSkillTracker | None = None
         if cfg.trueskill.enabled:
-            opponent_model = self._make_eval_twin(compile_model=False)
+            opponent_model = self._make_eval_twin(compile_model=True)
             self.trueskill_tracker = TrueSkillTracker(
                 cfg=cfg,
                 candidate_model=self.inference_model,
@@ -980,6 +980,12 @@ class RebelCFRTrainer:
         model.eval()
         for param in model.parameters():
             param.requires_grad = False
+        if (
+            self.device.type == "cuda"
+            and _compile_setting(self.cfg) != "off"
+            and hasattr(model, "compile_forward_modes")
+        ):
+            model.compile_forward_modes(**_compile_kwargs(self.cfg))
         return model
 
     def _load_street_model_registry(
