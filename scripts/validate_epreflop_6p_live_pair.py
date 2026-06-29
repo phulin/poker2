@@ -52,7 +52,12 @@ def _parse_args() -> argparse.Namespace:
     build.add_argument("--batch-size", type=int, default=1024)
     build.add_argument("--device", default="cuda")
     build.add_argument("--seed", type=int, default=2026062701)
-    build.add_argument("--belief-mode", choices=("random", "uniform"), default="random")
+    build.add_argument(
+        "--belief-mode",
+        choices=("random", "uniform", "histogram", "mixed", "coverage", "topk"),
+        default="mixed",
+    )
+    build.add_argument("--belief-profile", default="actions_12_end")
 
     evaluate = subparsers.add_parser("evaluate")
     evaluate.add_argument(
@@ -122,6 +127,7 @@ def build_validation(args: argparse.Namespace) -> Path:
             device=device,
             rng=belief_rng,
             mode=str(args.belief_mode),
+            profile=str(args.belief_profile),
         )
         targets = uniform_live_pair_value_targets(
             env,
@@ -146,6 +152,7 @@ def build_validation(args: argparse.Namespace) -> Path:
         "examples": rows_seen,
         "seed": int(args.seed),
         "belief_mode": str(args.belief_mode),
+        "belief_profile": str(args.belief_profile),
         "source_manifest": reader.manifest,
         "states": _cat_states(state_chunks),
         "beliefs": torch.cat(belief_chunks, dim=0)[:rows_seen],

@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import math
 import sys
 import time
 from contextlib import nullcontext
@@ -37,7 +36,6 @@ from p2.stages.preflop_backward_induction import (  # noqa: E402
     _bucket_spec,
     _checkpoint_model_config,
     _copy_public_states_to_env,
-    _estimate_bucket_train_updates,
     _evaluate_validation_set,
     _filter_batch_by_action_bucket,
     _load_model_weights,
@@ -233,6 +231,8 @@ def pregenerate(args: argparse.Namespace) -> Path:
                 device=device,
                 rng=rng,
                 mode=execution.belief_mode,
+                profile=getattr(execution, "belief_profile", "actions_8_11"),
+                hand_dim=getattr(execution, "belief_hand_dim", 169),
             )
             value_batch, policy_batch, tree_stats = _solve_public_state_batch(
                 solver,
@@ -295,6 +295,8 @@ def pregenerate(args: argparse.Namespace) -> Path:
                 else None,
                 "state_dataset": str(Path(args.state_dataset).resolve()),
                 "belief_mode": execution.belief_mode,
+                "belief_profile": getattr(execution, "belief_profile", "actions_8_11"),
+                "belief_hand_dim": getattr(execution, "belief_hand_dim", 169),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
         )

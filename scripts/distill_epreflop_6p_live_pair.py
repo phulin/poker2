@@ -75,7 +75,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=20260627)
-    parser.add_argument("--belief-mode", choices=("random", "uniform"), default="random")
+    parser.add_argument(
+        "--belief-mode",
+        choices=("random", "uniform", "histogram", "mixed", "coverage", "topk"),
+        default="mixed",
+    )
+    parser.add_argument("--belief-profile", default="actions_12_end")
     parser.add_argument("--checkpoint-interval", type=int, default=500)
     parser.add_argument("--log-interval", type=int, default=25)
     parser.add_argument("--validation", default=None)
@@ -542,6 +547,7 @@ def run(args: argparse.Namespace) -> Path:
         "state_dataset": str(Path(args.state_dataset).resolve()),
         "target_checkpoint": str(Path(args.target_checkpoint).resolve()),
         "belief_mode": str(args.belief_mode),
+        "belief_profile": str(args.belief_profile),
         "target_projection": "uniform unordered live pairs with stack-baseline nonparticipants",
         "preflop_model_type": str(args.preflop_model_type),
         "learning_rate": float(args.learning_rate),
@@ -585,6 +591,7 @@ def run(args: argparse.Namespace) -> Path:
                     device=device,
                     rng=belief_rng,
                     mode=str(args.belief_mode),
+                    profile=str(args.belief_profile),
                 )
                 value_encoder = value_model.create_feature_encoder(
                     env=env,

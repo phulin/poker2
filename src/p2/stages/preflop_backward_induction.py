@@ -21,13 +21,18 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from p2.config.rebel_schema import RebelExperimentConfig
 from p2.core.structured_config import Config, PreflopModelType
-from p2.env.card_utils import PREFLOP_HANDS, preflop_class_multiplicity_tensor
+from p2.env.card_utils import (
+    NUM_HANDS,
+    PREFLOP_HANDS,
+    preflop_class_multiplicity_tensor,
+)
 from p2.env.pbs_env import PBSEnv
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.checkpoint_io import CheckpointIO
 from p2.rl.cfr_trainer import RebelCFRTrainer
 from p2.rl.rebel_batch import RebelBatch
 from p2.search.cfr_evaluator import CFREvaluator
+from p2.search.preflop_belief_sampler import sample_preflop_beliefs
 from p2.search.rebel_solved_dataset import RebelSolvedDatasetWriter
 from p2.stages.preflop_buckets import (
     PreflopBucketExecutionConfig,
@@ -97,6 +102,12 @@ BOOTSTRAP_DISTILLED_CHECKPOINT = "bootstrap_distilled.pt"
 DISTILLED_FINAL_CHECKPOINT = "distilled_final.pt"
 DISTILLED_INPROGRESS_CHECKPOINT = "distilled_inprogress.pt"
 BOOTSTRAP_DISTILL_VALUE_SEMANTICS = "folded_baseline_live_zerosum_v1"
+BUCKET_BELIEF_PROFILES = {
+    "actions_0_3": "actions_0_3",
+    "actions_4_7": "actions_4_7",
+    "actions_8_11": "actions_8_11",
+    "actions_12_15": "actions_12_end",
+}
 SHARED_VALIDATION_CACHE_DIR = (
     Path("outputs") / "preflop_backward_induction" / "validation_cache"
 )
@@ -533,27 +544,47 @@ def _random_beliefs(
     device: torch.device,
     rng: torch.Generator,
     mode: str,
+    profile: str = "actions_12_end",
+    hand_dim: int = PREFLOP_HANDS,
 ) -> torch.Tensor:
-    prior = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
-    prior = prior / prior.sum().clamp_min(1.0)
+    hand_dim = int(hand_dim)
     if mode == "uniform":
+        if hand_dim == PREFLOP_HANDS:
+            prior = preflop_class_multiplicity_tensor(device=device).to(torch.float32)
+            prior = prior / prior.sum().clamp_min(1.0)
+        elif hand_dim == NUM_HANDS:
+            prior = torch.full(
+                (NUM_HANDS,),
+                1.0 / NUM_HANDS,
+                device=device,
+                dtype=torch.float32,
+            )
+        else:
+            raise ValueError(f"unsupported belief hand_dim: {hand_dim}")
         return (
-            prior.view(1, 1, PREFLOP_HANDS)
-            .expand(rows, num_players, PREFLOP_HANDS)
+            prior.view(1, 1, hand_dim)
+            .expand(rows, num_players, hand_dim)
             .clone()
         )
-    if mode == "random":
-        weights = torch.empty(
-            rows,
-            num_players,
-            PREFLOP_HANDS,
-            device=device,
-            dtype=torch.float32,
-        )
-        weights.exponential_(1.0, generator=rng)
-        weights *= prior.view(1, 1, PREFLOP_HANDS)
-        return weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0e-12)
-    raise ValueError(f"unsupported belief mode: {mode}")
+    return sample_preflop_beliefs(
+        rows,
+        num_players=num_players,
+        profile=profile,
+        mode=mode,
+        hand_dim=hand_dim,
+        device=device,
+        generator=rng,
+    )
+
+
+def _belief_profile_for_bucket(
+    args: PreflopBucketExecutionConfig,
+    bucket_label: str,
+) -> str:
+    profile = str(args.belief_profile)
+    if profile == "auto":
+        return BUCKET_BELIEF_PROFILES.get(bucket_label, "actions_12_end")
+    return profile
 
 
 def _filter_batch_by_action_bucket(
@@ -884,6 +915,8 @@ def _bootstrap_distill_expected_metadata(
         "bootstrap_distill_train_value": bool(args.bootstrap_distill_train_value),
         "include_value": bool(include_value),
         "belief_mode": str(args.belief_mode),
+        "belief_profile": _belief_profile_for_bucket(args, bucket_label),
+        "belief_hand_dim": int(args.belief_hand_dim),
         "seed": int(args.seed),
         "student_num_steps": int(cfg.num_steps),
         "student_model": _bootstrap_distill_student_metadata(cfg),
@@ -1014,6 +1047,8 @@ def _validation_cache_metadata(
         "warm_start_iterations": int(args.warm_start_iterations),
         "sparse_fused": bool(args.sparse_fused),
         "belief_mode": str(args.belief_mode),
+        "belief_profile": _belief_profile_for_bucket(args, bucket_label),
+        "belief_hand_dim": int(args.belief_hand_dim),
         "model_scope": _jsonable(cfg.search.model_scope),
         "bet_bins_by_depth": _jsonable(cfg.search.bet_bins_by_depth),
         "allin_by_depth": _jsonable(cfg.search.allin_by_depth),
@@ -1474,6 +1509,8 @@ def _build_validation_cache(
             device=device,
             rng=rng,
             mode=args.belief_mode,
+            profile=_belief_profile_for_bucket(args, bucket_label),
+            hand_dim=args.belief_hand_dim,
         )
         value_batch, policy_batch, tree_stats = _solve_public_state_batch(
             validation_solver,
@@ -1686,6 +1723,8 @@ def _run_bootstrap_distill_for_bucket(
                 device=device,
                 rng=rng,
                 mode=args.belief_mode,
+                profile=_belief_profile_for_bucket(args, bucket_label),
+                hand_dim=args.belief_hand_dim,
             )
             value_batch, policy_batch = _distill_batch_from_teacher(
                 teacher,
@@ -1837,6 +1876,8 @@ def run_presolve_values(
                 device=device,
                 rng=rng,
                 mode=args.belief_mode,
+                profile=_belief_profile_for_bucket(args, bucket_label),
+                hand_dim=args.belief_hand_dim,
             )
             value_batch, _, tree_stats = _solve_public_state_batch(
                 solver,
@@ -1914,6 +1955,8 @@ def run_presolve_values(
             "cfr_iterations": args.cfr_iterations,
             "cfr_batch_size": cfr_batch_size,
             "belief_mode": args.belief_mode,
+            "belief_profile": _belief_profile_for_bucket(args, bucket_label),
+            "belief_hand_dim": int(args.belief_hand_dim),
             "storage_dtype": args.storage_dtype,
             "solve_batches": solve_batches,
             "evaluator_total_nodes_mean": total_nodes_sum / max(1, solve_batches),
@@ -2264,6 +2307,8 @@ def run_train_specialists(
                         device=device,
                         rng=rng,
                         mode=args.belief_mode,
+                        profile=_belief_profile_for_bucket(args, bucket_label),
+                        hand_dim=args.belief_hand_dim,
                     )
                     value_batch, policy_batch, tree_stats = _solve_public_state_batch(
                         solver,
@@ -2459,6 +2504,8 @@ def run_train_specialists(
                 "cfr_iterations": args.cfr_iterations,
                 "cfr_batch_size": cfr_batch_size,
                 "belief_mode": args.belief_mode,
+                "belief_profile": _belief_profile_for_bucket(args, bucket_label),
+                "belief_hand_dim": int(args.belief_hand_dim),
             }
             if writer is not None:
                 bucket_summary["solved_dataset"] = writer.finalize(bucket_summary)
@@ -2725,6 +2772,8 @@ def run_distill(
                     device=device,
                     rng=rng,
                     mode=args.belief_mode,
+                    profile=_belief_profile_for_bucket(args, bucket_label),
+                    hand_dim=args.belief_hand_dim,
                 )
                 value_batch, policy_batch = _distill_batch_from_teacher(
                     teacher,

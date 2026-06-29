@@ -10,10 +10,12 @@ from p2.core.structured_config import Config
 from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.better_ffn import BetterSplitFFN
 from p2.stages.preflop_backward_induction import (
+    _belief_profile_for_bucket,
     _estimate_train_updates,
     _init_wandb,
     _load_model_weights,
     _pot_relative_value_error_metrics,
+    _random_beliefs,
     _student_checkpoint_for_bucket,
 )
 from p2.stages.preflop_buckets import (
@@ -43,10 +45,13 @@ def _execution_config(**overrides) -> PreflopBucketExecutionConfig:
         "sparse_fused": True,
         "compile": "off",
         "belief_mode": "random",
+        "belief_profile": "auto",
+        "belief_hand_dim": 169,
         "states_per_bucket": 100_000,
         "train_batch_size": 128,
         "policy_train_batch_size": None,
         "cfr_batch_size": 512,
+        "cfr_model_batch_size": 4096,
         "actions_12_15_cfr_batch_size": None,
         "actions_8_11_cfr_batch_size": None,
         "actions_12_15_epochs": 1,
@@ -131,11 +136,44 @@ def test_build_run_config_uses_base_config_not_checkpoint(tmp_path) -> None:
     assert cfg.search.warm_start_iterations == 0
     assert cfg.search.sparse is True
     assert cfg.search.sparse_fused is True
+    assert cfg.search.cfr_model_batch_size == 4096
     assert cfg.model.compile == "off"
 
     assert base.data.mode == "pregenerated"
     assert base.search.iterations_final == 5678
     assert base.model.compile == "default"
+
+
+def test_preflop_bucket_auto_belief_profile_maps_bucket_labels() -> None:
+    execution = _execution_config(belief_profile="auto")
+
+    assert _belief_profile_for_bucket(execution, "actions_0_3") == "actions_0_3"
+    assert _belief_profile_for_bucket(execution, "actions_4_7") == "actions_4_7"
+    assert _belief_profile_for_bucket(execution, "actions_8_11") == "actions_8_11"
+    assert _belief_profile_for_bucket(execution, "actions_12_15") == "actions_12_end"
+
+
+def test_preflop_bucket_random_beliefs_can_use_histogram_sampler() -> None:
+    generator = torch.Generator(device="cpu").manual_seed(99)
+
+    beliefs = _random_beliefs(
+        64,
+        6,
+        device=torch.device("cpu"),
+        rng=generator,
+        mode="histogram",
+        profile="actions_12_end",
+        hand_dim=169,
+    )
+
+    assert beliefs.shape == (64, 6, 169)
+    torch.testing.assert_close(
+        beliefs.sum(dim=-1),
+        torch.ones(64, 6),
+        atol=1.0e-5,
+        rtol=0.0,
+    )
+    assert (beliefs >= 0).all()
 
 
 def test_build_run_config_requires_closing_checkpoint_for_mixed_street(tmp_path) -> None:

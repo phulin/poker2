@@ -69,11 +69,14 @@ preflop_buckets:
   output_dir: outputs/preflop_backward_induction
   presolve_bucket: actions_12_15
   train_bucket: null
-  belief_mode: random
+  belief_mode: mixed
+  belief_profile: auto
+  belief_hand_dim: 169
   states_per_bucket: 5000000
   train_batch_size: 512
   policy_train_batch_size: 2048
   cfr_batch_size: 512
+  cfr_model_batch_size: 4096
   actions_12_15_cfr_batch_size: 8192
   actions_8_11_cfr_batch_size: 2048
   actions_12_15_epochs: 10

@@ -4,7 +4,7 @@ Hydra configuration files for current ReBeL CFR training, staged postflop curric
 ### Source files
 - `README.md`: Configuration catalog, usage examples, and parameter reference.
 - `config_transformer.yaml`: Legacy transformer PPO/K-best training configuration for `train_kbest.py`.
-- `config_rebel_cfr.yaml`: Main ReBeL CFR training configuration, including data mode selection, per-depth sparse search bet schedule, warm-start seed tuning, CFR/predictive-CFR variant selection, actor-backup consistency loss defaults, and preflop all-in table path.
+- `config_rebel_cfr.yaml`: Main ReBeL CFR training configuration, including data mode/root-belief sampler selection, per-depth sparse search bet schedule, warm-start seed tuning, CFR/predictive-CFR variant selection, actor-backup consistency loss defaults, and preflop all-in table path.
 - `rebel_hp_trials.yaml`: YAML trial specifications for the pregenerated ReBeL HP runner; each trial's `params` mapping can contain scalar values or arrays that expand as a local grid.
 - `config_rebel_curriculum_river.yaml`: Initial postflop curriculum config for the implemented live random-river `S_river` train stage.
 - `config_rebel_curriculum_postflop.yaml`: Full fixed-schedule postflop curriculum config that runs river, turn, flop, and compact preflop-handoff substeps in one ordered orchestrator pass with per-train-stage live root overrides, S_i policy warm-starts from S_{i+1}, tuned 0.08 linear LR / 1024 batch distillation overrides, compact `E_preflop` model overrides and validation.
@@ -13,7 +13,7 @@ Hydra configuration files for current ReBeL CFR training, staged postflop curric
 - `config_rebel_pregenerate_postflop.yaml`: Bounded postflop solved-example pregeneration config for HP sweeps/holdouts using live random postflop CFR roots, sparse-fused search by default, and optional compressed float storage.
 - `config_rebel_evaluate_value_loss.yaml`: Hydra-first value-loss evaluation config; `resume_from` supplies the checkpoint and `validation_set.dataset` supplies the solved dataset while model/runtime settings come from current config.
 - `config_rebel_postflop_hybrid_holdout.yaml`: Live random postflop training config wired to a fixed bounded pregenerated holdout dataset for fresh validation metrics.
-- `config_rebel_preflop_buckets.yaml`: Hydra-first preflop backward-induction bucket specialist/distillation config; checkpoints provide weights only while run settings live under `preflop_buckets`, with top-level `resume_from` for in-progress specialist resume.
+- `config_rebel_preflop_buckets.yaml`: Hydra-first preflop backward-induction bucket specialist/distillation config; checkpoints provide weights only while run settings live under `preflop_buckets`, including bucket-aware root-belief sampler settings, with top-level `resume_from` for in-progress specialist resume.
 - `config_rebel_debug.yaml`: Faster ReBeL debug configuration.
 
 ### Subdirectories

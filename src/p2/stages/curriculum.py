@@ -524,6 +524,8 @@ def _run_distill_substep(
                 closed_street=closed_street,
                 generator=trainer.rng,
                 compact_preflop_beliefs=closed_street == 0,
+                belief_mode=stage_cfg.data.belief_mode,
+                belief_profile=stage_cfg.data.belief_profile,
             )
             value_encoder = value_model.create_feature_encoder(
                 env=sample.pbs.env,
@@ -615,6 +617,8 @@ def _validate_preflop_value_169(
             closed_street=0,
             generator=trainer.rng,
             compact_preflop_beliefs=True,
+            belief_mode=trainer.cfg.data.belief_mode,
+            belief_profile=trainer.cfg.data.belief_profile,
         )
         value_encoder = value_model.create_feature_encoder(
             env=sample.pbs.env,

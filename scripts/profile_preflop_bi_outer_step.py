@@ -38,7 +38,6 @@ from p2.stages.preflop_backward_induction import (  # noqa: E402
     _policy_only,
     _policy_train_batch_size,
     _random_beliefs,
-    _seed_for_label,
     _train_policy_minibatches,
     _train_value_minibatches,
     _validation_to_device,
@@ -462,6 +461,8 @@ def main() -> None:
                     device=device,
                     rng=rng,
                     mode=execution.belief_mode,
+                    profile=getattr(execution, "belief_profile", "actions_12_end"),
+                    hand_dim=getattr(execution, "belief_hand_dim", 169),
                 )
             roots = torch.arange(rows, device=device)
             evaluator = solver.cfr_evaluator

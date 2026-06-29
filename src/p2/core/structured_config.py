@@ -388,6 +388,7 @@ class SearchConfig:
     cfr_avg: bool = True
     sparse: bool = True
     sparse_fused: bool = False
+    cfr_model_batch_size: int | None = None
     value_targets_from_final_policy: bool = False
     allin_call_terminal_abstraction: bool = True
     preflop_allin_table_path: str | None = None
@@ -476,6 +477,8 @@ class PregeneratedDataConfig:
 class DataConfig:
     mode: str = "live"
     live_root_source: str = "self_play"
+    belief_mode: str = "random"
+    belief_profile: str = "actions_12_end"
     warmup_self_play_roots: bool = True
     pregenerated: PregeneratedDataConfig = field(default_factory=PregeneratedDataConfig)
 
@@ -554,10 +557,13 @@ class PreflopBucketTrainingConfig:
     presolve_bucket: str = "actions_12_15"
     train_bucket: str | None = None
     belief_mode: str = "random"
+    belief_profile: str = "auto"
+    belief_hand_dim: int = 169
     states_per_bucket: int = 100_000
     train_batch_size: int = 1024
     policy_train_batch_size: int | None = None
     cfr_batch_size: int = 512
+    cfr_model_batch_size: int = 4096
     actions_12_15_cfr_batch_size: int | None = None
     actions_8_11_cfr_batch_size: int | None = None
     actions_12_15_epochs: int = 1

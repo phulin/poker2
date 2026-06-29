@@ -440,6 +440,8 @@ def main() -> None:
         device=device,
         rng=rng,
         mode=execution.belief_mode,
+        profile=getattr(execution, "belief_profile", "actions_12_end"),
+        hand_dim=getattr(execution, "belief_hand_dim", 169),
     )
     ev = _prepare_evaluator(trainer, env, beliefs)
     _patch_component_tags(ev)

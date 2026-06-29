@@ -215,6 +215,29 @@ def test_sample_postflop_start_roots_randomizes_board_legal_beliefs():
     torch.testing.assert_close(uniform_pbs.beliefs, expected_uniform)
 
 
+def test_sample_postflop_start_roots_can_use_native_combo_belief_sampler():
+    device = torch.device("cpu")
+    env = HUNLTensorEnv(
+        num_envs=2,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=device,
+        float_dtype=torch.float32,
+    )
+
+    pbs = sample_postflop_start_roots(
+        env,
+        batch_size=6,
+        street=2,
+        generator=torch.Generator(device=device).manual_seed(202),
+        belief_mode="histogram",
+        belief_profile="actions_12_end",
+    )
+
+    _assert_street_start_root(pbs, street=2, board_cards=4)
+
+
 def test_recursive_strength_beliefs_are_board_legal_normalized_and_nonuniform():
     device = torch.device("cpu")
     board = torch.tensor(
@@ -390,6 +413,37 @@ def test_sample_end_of_street_chance_roots_can_use_compact_preflop_beliefs():
         random_sample.pre_chance_beliefs,
         uniform_sample.pre_chance_beliefs,
     )
+
+
+def test_sample_end_of_street_chance_roots_can_use_sampler_preflop_profile():
+    device = torch.device("cpu")
+    env = HUNLTensorEnv(
+        num_envs=2,
+        starting_stack=1000,
+        sb=5,
+        bb=10,
+        device=device,
+        float_dtype=torch.float32,
+    )
+
+    sample = sample_end_of_street_chance_roots(
+        env,
+        batch_size=8,
+        closed_street=0,
+        generator=torch.Generator(device=device).manual_seed(324),
+        compact_preflop_beliefs=True,
+        belief_mode="histogram",
+        belief_profile="actions_12_end",
+    )
+
+    assert sample.pre_chance_beliefs.shape == (8, 2, PREFLOP_HANDS)
+    torch.testing.assert_close(
+        sample.pre_chance_beliefs.sum(dim=-1),
+        torch.ones(8, 2),
+    )
+    expected = preflop_class_multiplicity_tensor().view(1, 1, PREFLOP_HANDS)
+    expected = expected / expected.sum(dim=-1, keepdim=True)
+    assert not torch.allclose(sample.pre_chance_beliefs, expected.expand_as(sample.pre_chance_beliefs))
 
 
 def test_sample_end_of_street_chance_roots_randomizes_pre_chance_beliefs():

@@ -28,10 +28,13 @@ class PreflopBucketExecutionConfig:
     sparse_fused: bool
     compile: str | None
     belief_mode: str
+    belief_profile: str
+    belief_hand_dim: int
     states_per_bucket: int
     train_batch_size: int
     policy_train_batch_size: int | None
     cfr_batch_size: int
+    cfr_model_batch_size: int
     actions_12_15_cfr_batch_size: int | None
     actions_8_11_cfr_batch_size: int | None
     actions_12_15_epochs: int
@@ -177,6 +180,7 @@ def build_run_config(
     cfg.search.warm_start_iterations = int(execution.warm_start_iterations)
     cfg.search.sparse = True
     cfg.search.sparse_fused = execution.sparse_fused
+    cfg.search.cfr_model_batch_size = max(0, int(execution.cfr_model_batch_size))
     cfg.model.compile = execution.compile if execution.compile is not None else "off"
     _validate_bucket_run_config(cfg)
     return cfg

@@ -69,6 +69,32 @@ def test_curriculum_train_substeps_do_not_run_preflop_analyzer() -> None:
     assert curriculum_stage._should_print_preflop_analyzer("E_turn") is False
 
 
+def test_curriculum_stage_config_accepts_belief_sampler_data_overrides() -> None:
+    cfg = Config()
+    substep = CurriculumSubstepConfig(
+        kind="train",
+        net="S_river",
+        num_steps=1,
+        data_overrides={
+            "live_root_source": "random_river",
+            "belief_mode": "mixed",
+            "belief_profile": "actions_12_end",
+        },
+    )
+
+    stage_cfg = curriculum_stage._stage_config(
+        cfg,
+        "river",
+        substep,
+        resume_from=None,
+        promoted={},
+    )
+
+    assert stage_cfg.data.live_root_source == "random_river"
+    assert stage_cfg.data.belief_mode == "mixed"
+    assert stage_cfg.data.belief_profile == "actions_12_end"
+
+
 class _FakeSplitLeaf(torch.nn.Linear):
     hand_dim = NUM_HANDS
 

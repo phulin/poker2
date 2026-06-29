@@ -15,6 +15,7 @@ from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.env.pbs_env import PBSEnv
 from p2.env.rules import rank_hands
 from p2.search.cfr_evaluator import PublicBeliefState
+from p2.search.preflop_belief_sampler import sample_preflop_beliefs
 
 
 STREET_TO_BOARD_CARDS = {1: 3, 2: 4, 3: 5}
@@ -194,23 +195,26 @@ def _compact_preflop_beliefs(
     device: torch.device,
     generator: torch.Generator | None,
     randomize_beliefs: bool,
+    belief_mode: str = "random",
+    belief_profile: str = "actions_12_end",
 ) -> torch.Tensor:
     multiplicity = preflop_class_multiplicity_tensor(device=device)
     base = multiplicity.view(1, 1, PREFLOP_HANDS).expand(
         batch_size, num_players, -1
     )
-    if randomize_beliefs:
-        # Exponential noise gives a cheap Dirichlet-like positive class-mass
-        # sample while retaining multiplicity as the neutral preflop prior.
-        noise = -torch.rand(
-            batch_size,
-            num_players,
-            PREFLOP_HANDS,
-            device=device,
-            generator=generator,
-        ).clamp_min(1e-12).log()
-        base = base * noise
-    return base / base.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+    if not randomize_beliefs:
+        return base / base.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+    if belief_mode == "uniform":
+        return base / base.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+    return sample_preflop_beliefs(
+        batch_size,
+        num_players=num_players,
+        profile=belief_profile,
+        mode=belief_mode,
+        hand_dim=PREFLOP_HANDS,
+        device=device,
+        generator=generator,
+    )
 
 
 def _rank_shape_scores(board: torch.Tensor) -> torch.Tensor:
@@ -322,11 +326,30 @@ def _random_board_legal_beliefs(
     *,
     num_players: int,
     generator: torch.Generator | None,
+    belief_mode: str = "random",
+    belief_profile: str = "actions_12_end",
 ) -> torch.Tensor:
     allowed = board_allowed_hands(board)
     allowed_f = allowed[:, None, :].expand(-1, num_players, -1).to(torch.float32)
     batch_size = board.shape[0]
     device = board.device
+    if belief_mode == "uniform":
+        return _uniform_board_legal_beliefs(board, num_players=num_players)
+    if belief_mode != "random":
+        beliefs = sample_preflop_beliefs(
+            batch_size,
+            num_players=num_players,
+            profile=belief_profile,
+            mode=belief_mode,
+            hand_dim=NUM_HANDS,
+            device=device,
+            generator=generator,
+        )
+        beliefs = beliefs * allowed_f
+        row_sum = beliefs.sum(dim=-1, keepdim=True)
+        uniform = allowed_f / allowed_f.sum(dim=-1, keepdim=True).clamp(min=1.0)
+        return torch.where(row_sum > 1e-12, beliefs / row_sum.clamp(min=1e-12), uniform)
+
     strength = _normalize_allowed_scores(_strength_scores(board), allowed)
     strength = strength[:, None, :].expand(-1, num_players, -1)
 
@@ -435,6 +458,8 @@ def sample_postflop_start_roots(
     street: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    belief_mode: str = "random",
+    belief_profile: str = "actions_12_end",
     randomize_spots: bool = True,
     stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
@@ -466,7 +491,11 @@ def sample_postflop_start_roots(
     board_padded[:, :board_cards] = board
     if randomize_beliefs:
         beliefs = _random_board_legal_beliefs(
-            board_padded, num_players=2, generator=generator
+            board_padded,
+            num_players=2,
+            generator=generator,
+            belief_mode=belief_mode,
+            belief_profile=belief_profile,
         )
     else:
         beliefs = _uniform_board_legal_beliefs(board_padded, num_players=2)
@@ -521,6 +550,8 @@ def sample_postflop_legal_prefix_roots(
     street: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    belief_mode: str = "random",
+    belief_profile: str = "actions_12_end",
     randomize_spots: bool = True,
     stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
@@ -536,6 +567,8 @@ def sample_postflop_legal_prefix_roots(
         street=street,
         generator=generator,
         randomize_beliefs=randomize_beliefs,
+        belief_mode=belief_mode,
+        belief_profile=belief_profile,
         randomize_spots=randomize_spots,
         stratify_board_textures=stratify_board_textures,
     )
@@ -568,6 +601,8 @@ def sample_flop_start_roots(
     batch_size: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    belief_mode: str = "random",
+    belief_profile: str = "actions_12_end",
     randomize_spots: bool = True,
     stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
@@ -577,6 +612,8 @@ def sample_flop_start_roots(
         street=1,
         generator=generator,
         randomize_beliefs=randomize_beliefs,
+        belief_mode=belief_mode,
+        belief_profile=belief_profile,
         randomize_spots=randomize_spots,
         stratify_board_textures=stratify_board_textures,
     )
@@ -589,6 +626,8 @@ def sample_flop_legal_prefix_roots(
     batch_size: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    belief_mode: str = "random",
+    belief_profile: str = "actions_12_end",
     randomize_spots: bool = True,
     stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
@@ -598,6 +637,8 @@ def sample_flop_legal_prefix_roots(
         street=1,
         generator=generator,
         randomize_beliefs=randomize_beliefs,
+        belief_mode=belief_mode,
+        belief_profile=belief_profile,
         randomize_spots=randomize_spots,
         stratify_board_textures=stratify_board_textures,
     )
@@ -610,6 +651,8 @@ def sample_turn_start_roots(
     batch_size: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    belief_mode: str = "random",
+    belief_profile: str = "actions_12_end",
     randomize_spots: bool = True,
     stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
@@ -619,6 +662,8 @@ def sample_turn_start_roots(
         street=2,
         generator=generator,
         randomize_beliefs=randomize_beliefs,
+        belief_mode=belief_mode,
+        belief_profile=belief_profile,
         randomize_spots=randomize_spots,
         stratify_board_textures=stratify_board_textures,
     )
@@ -631,6 +676,8 @@ def sample_turn_legal_prefix_roots(
     batch_size: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    belief_mode: str = "random",
+    belief_profile: str = "actions_12_end",
     randomize_spots: bool = True,
     stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
@@ -640,6 +687,8 @@ def sample_turn_legal_prefix_roots(
         street=2,
         generator=generator,
         randomize_beliefs=randomize_beliefs,
+        belief_mode=belief_mode,
+        belief_profile=belief_profile,
         randomize_spots=randomize_spots,
         stratify_board_textures=stratify_board_textures,
     )
@@ -652,6 +701,8 @@ def sample_river_start_roots(
     batch_size: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    belief_mode: str = "random",
+    belief_profile: str = "actions_12_end",
     randomize_spots: bool = True,
     stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
@@ -661,6 +712,8 @@ def sample_river_start_roots(
         street=3,
         generator=generator,
         randomize_beliefs=randomize_beliefs,
+        belief_mode=belief_mode,
+        belief_profile=belief_profile,
         randomize_spots=randomize_spots,
         stratify_board_textures=stratify_board_textures,
     )
@@ -673,6 +726,8 @@ def sample_river_legal_prefix_roots(
     batch_size: int,
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
+    belief_mode: str = "random",
+    belief_profile: str = "actions_12_end",
     randomize_spots: bool = True,
     stratify_board_textures: bool = True,
 ) -> PublicBeliefState:
@@ -682,6 +737,8 @@ def sample_river_legal_prefix_roots(
         street=3,
         generator=generator,
         randomize_beliefs=randomize_beliefs,
+        belief_mode=belief_mode,
+        belief_profile=belief_profile,
         randomize_spots=randomize_spots,
         stratify_board_textures=stratify_board_textures,
     )
@@ -696,6 +753,8 @@ def sample_end_of_street_chance_roots(
     generator: torch.Generator | None = None,
     randomize_beliefs: bool = True,
     compact_preflop_beliefs: bool = False,
+    belief_mode: str = "random",
+    belief_profile: str = "actions_12_end",
 ) -> ChanceRootSample:
     """Sample roots for end-of-street chance-value targets.
 
@@ -716,6 +775,8 @@ def sample_end_of_street_chance_roots(
         street=next_street,
         generator=generator,
         randomize_beliefs=randomize_beliefs,
+        belief_mode=belief_mode,
+        belief_profile=belief_profile,
     )
     if compact_preflop_beliefs and closed_street == 0:
         pre_chance_beliefs = _compact_preflop_beliefs(
@@ -724,12 +785,16 @@ def sample_end_of_street_chance_roots(
             device=env_proto.device,
             generator=generator,
             randomize_beliefs=randomize_beliefs,
+            belief_mode=belief_mode,
+            belief_profile=belief_profile,
         )
     elif randomize_beliefs:
         pre_chance_beliefs = _random_board_legal_beliefs(
             pbs.env.last_board_indices,
             num_players=2,
             generator=generator,
+            belief_mode=belief_mode,
+            belief_profile=belief_profile,
         )
     else:
         pre_chance_beliefs = _uniform_board_legal_beliefs(

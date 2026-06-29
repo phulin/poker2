@@ -68,6 +68,8 @@ data:
   # hybrid = live training plus pregenerated holdout metrics.
   mode: live
   live_root_source: self_play
+  belief_mode: mixed
+  belief_profile: actions_12_end
   warmup_self_play_roots: true
   pregenerated:
     value_batch_size: null

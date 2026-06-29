@@ -559,6 +559,8 @@ class RebelCFRTrainer:
                     batch_size=batch_size,
                     street=street,
                     generator=self.rng,
+                    belief_mode=cfg.data.belief_mode,
+                    belief_profile=cfg.data.belief_profile,
                 )
 
         elif cfg.data.live_root_source in random_prefix_sources:
@@ -570,6 +572,8 @@ class RebelCFRTrainer:
                     batch_size=batch_size,
                     street=street,
                     generator=self.rng,
+                    belief_mode=cfg.data.belief_mode,
+                    belief_profile=cfg.data.belief_profile,
                 )
 
         def make_pregenerated_source(
