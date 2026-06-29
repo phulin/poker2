@@ -1483,6 +1483,7 @@ def test_fused_preflop_prepared_partitions_gather_direct_beliefs() -> None:
     evaluator._preflop_partition_position_slices = {}
     evaluator._preflop_partition_last_values_valid = False
     evaluator._preflop_partition_last_values_marker = None
+    evaluator._preflop_partition_eval_stream = None
     evaluator._subgame_generation = 1
 
     writes: list[tuple[torch.Tensor, torch.Tensor, str]] = []

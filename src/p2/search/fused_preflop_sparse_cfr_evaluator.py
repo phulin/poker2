@@ -68,6 +68,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_ev_marginal_policy_buf: torch.Tensor | None = None
         self._preflop_ev_marginal_action_policy_buf: torch.Tensor | None = None
         self._preflop_ev_numer_unblocked_buf: torch.Tensor | None = None
+        self._preflop_partition_eval_stream: torch.cuda.Stream | None = None
         self._preflop_ev_denom_unblocked_buf: torch.Tensor | None = None
         self._preflop_ev_actor_stats_buf: torch.Tensor | None = None
         self._preflop_ev_marginal_stats_buf: torch.Tensor | None = None
@@ -2268,6 +2269,19 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             if closing_features is None:
                 return False
 
+        parallel_result = self._try_set_model_values_prepared_partitions_parallel(
+            beliefs=beliefs,
+            beliefs_at_model=beliefs_at_model,
+            cutoff_positions=cutoff_positions,
+            cutoff_features=cutoff_features,
+            closing_positions=closing_positions,
+            closing_features=closing_features,
+            do_mix=do_mix,
+            store_last=store_last,
+        )
+        if parallel_result is not None:
+            return parallel_result
+
         if cutoff_features is not None:
             cutoff_values, _ = self._eval_model_for_fused_writeback(
                 self.value_model,
@@ -2314,6 +2328,80 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         else:
             self.last_model_values = None
         return wrote_any
+
+    def _try_set_model_values_prepared_partitions_parallel(
+        self,
+        *,
+        beliefs: torch.Tensor,
+        beliefs_at_model: torch.Tensor,
+        cutoff_positions: torch.Tensor,
+        cutoff_features: MLPFeatures | None,
+        closing_positions: torch.Tensor,
+        closing_features: MLPFeatures | None,
+        do_mix: bool,
+        store_last: bool,
+    ) -> bool | None:
+        if os.environ.get("P2_DISABLE_PREFLOP_PARALLEL_PARTITION_EVAL"):
+            return None
+        if self.device.type != "cuda":
+            return None
+        if cutoff_features is None or closing_features is None:
+            return None
+        if cutoff_positions.numel() == 0 or closing_positions.numel() == 0:
+            return None
+
+        side_stream = self._preflop_partition_eval_stream
+        if side_stream is None:
+            side_stream = torch.cuda.Stream(device=self.device)
+            self._preflop_partition_eval_stream = side_stream
+
+        main_stream = torch.cuda.current_stream(device=self.device)
+        side_stream.wait_stream(main_stream)
+        with torch.cuda.stream(side_stream):
+            closing_values, _ = self._eval_model_for_fused_writeback(
+                self.closing_leaf_value_model,
+                closing_features,
+                use_pre_head=False,
+            )
+
+        cutoff_values, _ = self._eval_model_for_fused_writeback(
+            self.value_model,
+            cutoff_features,
+            use_pre_head=False,
+        )
+        main_stream.wait_stream(side_stream)
+
+        self._writeback_model_values_partition(
+            hand_values=cutoff_values,
+            beliefs_at_model=beliefs,
+            positions=cutoff_positions,
+            position_beliefs=cutoff_features.beliefs,
+            last_attr="_preflop_cutoff_last_values_buf",
+            do_mix=do_mix,
+            store_last=store_last,
+        )
+        self._writeback_model_values_partition(
+            hand_values=closing_values,
+            beliefs_at_model=beliefs,
+            positions=closing_positions,
+            position_beliefs=closing_features.beliefs,
+            last_attr="_preflop_new_street_last_values_buf",
+            do_mix=do_mix,
+            store_last=store_last,
+        )
+
+        self._preflop_partition_last_values_valid = bool(store_last)
+        if store_last:
+            marker = self._preflop_partition_last_values_marker
+            if marker is None:
+                marker = self.latest_values.new_empty(
+                    (0, self.num_players, self.hand_dim)
+                )
+                self._preflop_partition_last_values_marker = marker
+            self.last_model_values = marker
+        else:
+            self.last_model_values = None
+        return True
 
     def _set_model_values_impl(
         self,

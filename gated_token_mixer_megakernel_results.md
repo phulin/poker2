@@ -375,3 +375,23 @@ correctly. Static compile-on removes the dynamic-shape overhead and is the right
 compiled default for bucketed preflop; it is much faster than dynamic compile
 and roughly competitive with eager compile-off, with a noisy small edge in one
 run and a small regression in the repeat.
+
+The static profile still showed two partitioned value-model evals dominating
+`set_leaf_values`: 44,300 same-street cutoff leaves and 21,236 closing-model
+leaves. I added a side-stream path that evaluates the smaller closing partition
+while the main stream evaluates the cutoff partition, then synchronizes before
+the existing writeback kernels. It is CUDA-graph compatible in the production
+`evaluate_cfr` loop and can be disabled with
+`P2_DISABLE_PREFLOP_PARALLEL_PARTITION_EVAL=1`.
+
+| Variant | Wall s | ms/iter |
+|---|---:|---:|
+| Static compile baseline | 9.391587 | 31.305291 |
+| Static compile baseline repeat | 12.456134 | 41.520446 |
+| Static + parallel partition eval | 8.722004 | 29.073348 |
+| Static + parallel partition eval repeat | 8.706321 | 29.021070 |
+| Static + parallel partition eval default-on check | 8.702062 | 29.006874 |
+
+Conclusion: parallel partition eval is the strongest corrected production-loop
+number so far on this restarted v5 actions_4_7 shape, bringing the warmed
+512-root/300-iteration solve to about 29.0 ms/iter.
