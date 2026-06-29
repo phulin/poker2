@@ -698,6 +698,7 @@ dependencies = [
     { name = "torch", version = "2.9.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.9.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin' and sys_platform != 'linux'" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux'" },
+    { name = "triton" },
     { name = "wandb" },
     { name = "zstandard" },
 ]
@@ -719,6 +720,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=5.4.0" },
     { name = "torch", marker = "sys_platform != 'linux'", specifier = ">=2.8.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform == 'linux'", specifier = ">=2.8.0", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "triton", specifier = ">=3.6.0" },
     { name = "wandb", specifier = ">=0.15.0" },
     { name = "zstandard", specifier = ">=0.25.0" },
 ]
