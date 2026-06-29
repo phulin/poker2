@@ -867,9 +867,15 @@ def test_preflop_gated_token_mixer_stack_fast_path_matches_autocast() -> None:
         for block in blocks:
             expected = naive_block(block, expected)
         actual = _run_preflop_gated_token_mixer_blocks(blocks, x)
+        compiled_runner = torch.compile(
+            lambda value: _run_preflop_gated_token_mixer_blocks(blocks, value),
+            dynamic=True,
+        )
+        compiled_actual = compiled_runner(x)
     torch.cuda.synchronize()
 
     torch.testing.assert_close(actual, expected, atol=6e-2, rtol=6e-2)
+    torch.testing.assert_close(compiled_actual, expected, atol=6e-2, rtol=6e-2)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

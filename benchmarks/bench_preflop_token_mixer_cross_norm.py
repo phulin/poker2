@@ -337,6 +337,9 @@ def wired_stack_path(blocks: nn.ModuleList, x: torch.Tensor) -> torch.Tensor:
     return _run_preflop_gated_token_mixer_blocks(blocks, x)
 
 
+_dynamo_disabled_wired_stack_path = torch.compiler.disable(wired_stack_path)
+
+
 def cross_norm_stack_path(
     blocks: Sequence[_PreflopGatedTokenMixerBlock],
     x: torch.Tensor,
@@ -373,6 +376,8 @@ def benchmark_batch(
     weight_dtype: torch.dtype,
     use_autocast: bool,
     include_compiled_naive: bool,
+    include_compiled_wired: bool,
+    compile_dynamic: bool,
     timing_mode: str,
     warmup: int,
     iters: int,
@@ -395,7 +400,23 @@ def benchmark_batch(
     if include_compiled_naive:
         compiled_naive = torch.compile(
             lambda inp: naive_stack_path(blocks, inp),
-            dynamic=False,
+            dynamic=compile_dynamic,
+        )
+    compiled_wired = None
+    compiled_disabled_wired = None
+    compiled_cross_b2 = None
+    if include_compiled_wired:
+        compiled_wired = torch.compile(
+            lambda inp: wired_stack_path(blocks, inp),
+            dynamic=compile_dynamic,
+        )
+        compiled_disabled_wired = torch.compile(
+            lambda inp: _dynamo_disabled_wired_stack_path(blocks, inp),
+            dynamic=compile_dynamic,
+        )
+        compiled_cross_b2 = torch.compile(
+            lambda inp: cross_norm_stack_path(blocks, inp, block_b=2),
+            dynamic=compile_dynamic,
         )
 
     with torch.no_grad():
@@ -405,6 +426,21 @@ def benchmark_batch(
             None
             if compiled_naive is None
             else with_autocast(lambda: compiled_naive(x))
+        )
+        compiled_wired_out = (
+            None
+            if compiled_wired is None
+            else with_autocast(lambda: compiled_wired(x))
+        )
+        compiled_disabled_wired_out = (
+            None
+            if compiled_disabled_wired is None
+            else with_autocast(lambda: compiled_disabled_wired(x))
+        )
+        compiled_cross_b2_out = (
+            None
+            if compiled_cross_b2 is None
+            else with_autocast(lambda: compiled_cross_b2(x))
         )
         cross_b1 = with_autocast(lambda: cross_norm_stack_path(blocks, x, block_b=1))
         cross_b2 = with_autocast(lambda: cross_norm_stack_path(blocks, x, block_b=2))
@@ -419,6 +455,18 @@ def benchmark_batch(
             errors["compiled_naive_stack"] = (
                 compiled_naive_out.float() - expected.float()
             ).abs().max().item()
+        if compiled_wired_out is not None:
+            errors["compiled_wired_stack"] = (
+                compiled_wired_out.float() - expected.float()
+            ).abs().max().item()
+        if compiled_disabled_wired_out is not None:
+            errors["compiled_disabled_wired_stack"] = (
+                compiled_disabled_wired_out.float() - expected.float()
+            ).abs().max().item()
+        if compiled_cross_b2_out is not None:
+            errors["compiled_cross_boundary_norm_b2"] = (
+                compiled_cross_b2_out.float() - expected.float()
+            ).abs().max().item()
         variants: list[tuple[str, Callable[[], torch.Tensor]]] = [
             ("old_module_loop", lambda: with_autocast(lambda: current_stack_path(blocks, x))),
             ("wired_stack_runner", lambda: with_autocast(lambda: wired_stack_path(blocks, x))),
@@ -428,6 +476,27 @@ def benchmark_batch(
                 (
                     "compiled_naive_stack",
                     lambda: with_autocast(lambda: compiled_naive(x)),
+                )
+            )
+        if compiled_wired is not None:
+            variants.append(
+                (
+                    "compiled_wired_stack",
+                    lambda: with_autocast(lambda: compiled_wired(x)),
+                )
+            )
+        if compiled_disabled_wired is not None:
+            variants.append(
+                (
+                    "compiled_disabled_wired_stack",
+                    lambda: with_autocast(lambda: compiled_disabled_wired(x)),
+                )
+            )
+        if compiled_cross_b2 is not None:
+            variants.append(
+                (
+                    "compiled_cross_boundary_norm_b2",
+                    lambda: with_autocast(lambda: compiled_cross_b2(x)),
                 )
             )
         variants.extend(
@@ -482,6 +551,8 @@ def main() -> None:
     parser.add_argument("--weight-dtype", choices=("float32", "bfloat16"), default=None)
     parser.add_argument("--autocast", action="store_true")
     parser.add_argument("--include-compiled-naive", action="store_true")
+    parser.add_argument("--include-compiled-wired", action="store_true")
+    parser.add_argument("--compile-dynamic", action="store_true")
     parser.add_argument(
         "--timing-mode",
         choices=("launches", "cuda_graph"),
@@ -526,6 +597,8 @@ def main() -> None:
             weight_dtype=weight_dtype,
             use_autocast=args.autocast,
             include_compiled_naive=args.include_compiled_naive,
+            include_compiled_wired=args.include_compiled_wired,
+            compile_dynamic=args.compile_dynamic,
             timing_mode=args.timing_mode,
             warmup=args.warmup,
             iters=args.iters,
@@ -539,6 +612,8 @@ def main() -> None:
         "weight_dtype": str(weight_dtype).replace("torch.", ""),
         "autocast": args.autocast,
         "include_compiled_naive": args.include_compiled_naive,
+        "include_compiled_wired": args.include_compiled_wired,
+        "compile_dynamic": args.compile_dynamic,
         "timing_mode": args.timing_mode,
         "depth": args.depth,
         "dim": dim,

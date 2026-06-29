@@ -2456,7 +2456,6 @@ class _PreflopGatedTokenMixerBlock(nn.Module):
             x.is_cuda
             and not self.training
             and not torch.is_grad_enabled()
-            and not torch.compiler.is_compiling()
             and isinstance(activation, nn.LeakyReLU)
             and activation.negative_slope == 0.01
             and x.shape[1] == 7
@@ -2597,7 +2596,6 @@ def _run_preflop_gated_token_mixer_blocks(
         len(blocks) <= 1
         or not x.is_cuda
         or torch.is_grad_enabled()
-        or torch.compiler.is_compiling()
         or not all(isinstance(block, _PreflopGatedTokenMixerBlock) for block in blocks)
     ):
         for block in blocks:

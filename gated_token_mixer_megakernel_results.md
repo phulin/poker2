@@ -187,3 +187,47 @@ Compiled-naive stack comparison:
 The compiled-naive stack also shows a larger numerical delta at small batch in this setup (`0.082` max abs at batch 512 versus the old custom path), while the wired stack runner stays around `0.009` to `0.011`.
 
 Conclusion: this is the strongest measured production change so far. The live-regime graph replay win is roughly 10-12% across policy-depth and value-depth stacks, and the compiled-naive alternative is substantially slower.
+
+## FFN Output Epilogue Probe
+
+The next candidate boundary was the FFN output projection. In the stack runner, each intermediate block still computes `ffn_out = linear_out(h)` with cuBLAS/PyTorch, then a Triton epilogue reads `ffn_out` and `token_out` to compute the residual plus next token RMSNorm. I tested a full-width Triton GEMM epilogue that computes `linear_out + residual + next_token_norm` in one kernel.
+
+Command:
+
+`uv run python benchmarks/bench_preflop_ffn_epilogue.py --batch-sizes 512,8192,16384,32768,65536 --iters 80 --warmup 20 --dtype float32 --weight-dtype float32 --autocast --timing-mode cuda_graph --include-compiled --json`
+
+| Batch | cuBLAS linear + Triton epilogue ms | Compiled torch boundary ms | Triton full-N BM16 ms |
+|---:|---:|---:|---:|
+| 512 | 0.022502 | 0.021837 | 0.020224 |
+| 8192 | 0.170842 | 0.164531 | 0.172198 |
+| 16384 | 0.300211 | 0.289536 | 0.333530 |
+| 32768 | 0.577434 | 0.552845 | 0.653018 |
+| 65536 | 1.136768 | 1.085043 | 1.296973 |
+
+Conclusion: the custom full-width Triton GEMM epilogue is not worth wiring. It wins only at batch 512 and loses at larger row counts because giving up cuBLAS costs more than removing the materialized `ffn_out` and separate epilogue launch. The compiled torch boundary is a small isolated win, but the safer larger win is making the existing Triton stack path visible to the already-compiled model forward.
+
+## Compile-Visible Stack Result
+
+The live bucket evaluator uses `preflop_buckets.compile=default`, which maps to `model.compile=default`; `FusedSparseCFREvaluator` then calls `compile_forward_modes(dynamic=True)`. The previous stack runner was guarded out during Dynamo tracing, so a compiled model forward traced the slow naive stack instead of the custom Triton stack. I removed those compile guards so Dynamo can trace the Triton stack path directly.
+
+Post-patch depth-4 command:
+
+`uv run python benchmarks/bench_preflop_token_mixer_cross_norm.py --batch-sizes 512,8192,65536 --depth 4 --iters 80 --warmup 20 --dtype float32 --weight-dtype float32 --autocast --timing-mode cuda_graph --include-compiled-wired --compile-dynamic --json`
+
+| Batch | Old per-block loop ms | Eager wired stack ms | Dynamic compiled wired stack ms | Compiled wired vs old |
+|---:|---:|---:|---:|---:|
+| 512 | 0.372301 | 0.337779 | 0.311782 | 1.19x |
+| 8192 | 2.689869 | 2.408870 | 2.314394 | 1.16x |
+| 65536 | 19.053503 | 17.118567 | 13.884224 | 1.37x |
+
+Depth-5 value-stack command:
+
+`uv run python benchmarks/bench_preflop_token_mixer_cross_norm.py --batch-sizes 512,8192,65536 --depth 5 --iters 80 --warmup 20 --dtype float32 --weight-dtype float32 --autocast --timing-mode cuda_graph --include-compiled-wired --compile-dynamic --json`
+
+| Batch | Old per-block loop ms | Eager wired stack ms | Dynamic compiled wired stack ms | Compiled wired vs old |
+|---:|---:|---:|---:|---:|
+| 512 | 0.464627 | 0.419840 | 0.316723 | 1.47x |
+| 8192 | 3.490854 | 2.991616 | 2.893056 | 1.21x |
+| 65536 | 23.811418 | 21.262605 | 17.345395 | 1.37x |
+
+Conclusion: this is a production-relevant win because it matches the live evaluator's compiled-forward mode. The as-committed stack fusion helped eager eval; making it compile-visible prevents `compile=default` from regressing to the naive stack and produces the largest measured stack speedups so far.
