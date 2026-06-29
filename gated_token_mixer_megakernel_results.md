@@ -282,3 +282,58 @@ Post-patch focused check:
 | 16384 | 5.134451 | 4.605133 | 3.684288 | 1.39x |
 
 Conclusion: for live `compile=default`, do not trace the inner FFN-norm fused kernel. Let Inductor compile the token residual followed by FFN RMSNorm while keeping the cross-block next-token-RMSNorm fusion.
+
+## Eval Projection Cache And Overall CFR Loop
+
+The compiled static value path still had small constant work inside every eval
+call: compact hand embedding, range projection, bucket projection dtype cast,
+and value-head hand projection/fused weight construction. I added an eval/no-grad
+cache for those tensors, refreshed inside the active autocast context before
+compiled eval tracing. Training and grad-enabled paths bypass the cache.
+
+Projection-only command:
+
+`uv run python benchmarks/bench_preflop_belief_projection.py --batch-sizes 512,8192,16384,32768,65536 --iters 80 --warmup 20 --dtype float32 --weight-dtype float32 --autocast --timing-mode cuda_graph --include-compiled --compile-dynamic --json`
+
+| Batch | Dynamic compiled current ms | Dynamic compiled cached current ms | Speedup |
+|---:|---:|---:|---:|
+| 512 | 0.072435 | 0.037542 | 1.93x |
+| 8192 | 0.247219 | 0.215168 | 1.15x |
+| 16384 | 0.455514 | 0.425754 | 1.07x |
+| 32768 | 0.814950 | 0.784666 | 1.04x |
+| 65536 | 1.527142 | 1.496435 | 1.02x |
+
+The cached fused one-matmul variant still regresses at larger batches, so the
+wired path keeps separate range and bucket matmuls.
+
+Production-shaped compiled value-forward command:
+
+`uv run python benchmarks/bench_preflop_eval_projection_cache.py --batch-sizes 512,8192,16384,32768,65536 --iters 50 --warmup 12 --dtype float32 --weight-dtype float32 --autocast --timing-mode cuda_graph --compile-dynamic --json`
+
+| Batch | Cold live constants ms | Warm eval cache ms | Speedup |
+|---:|---:|---:|---:|
+| 512 | 0.483881 | 0.415334 | 1.17x |
+| 8192 | 2.766725 | 2.448445 | 1.13x |
+| 16384 | 4.765389 | 4.714865 | 1.01x |
+| 32768 | 9.020621 | 8.968540 | 1.01x |
+| 65536 | 17.589698 | 17.631150 | 1.00x |
+
+Overall `evaluate_cfr` loop command shape:
+
+`uv run python scripts/bench_preflop_evaluate_cfr_loop.py --cfr-batch-size 512 --cfr-iterations 300 --warmup-solves 1 --out /tmp/preflop_eval_cache_on_cfr_loop.json`
+
+The pre-session baseline was measured from a temporary worktree at
+`07ee2ab7` with the same benchmark script override fixes and current artifact
+paths.
+
+| Variant | Wall s | ms/iter | Speedup vs pre-session baseline |
+|---|---:|---:|---:|
+| Pre-session baseline `07ee2ab7` | 8.850995 | 29.503315 | 1.00x |
+| Current stack changes, eval cache disabled | 8.596712 | 28.655707 | 1.03x |
+| Current stack changes, eval cache enabled | 8.473718 | 28.245726 | 1.04x |
+
+Conclusion: the accumulated session changes produce an end-to-end
+`evaluate_cfr` improvement of about 4.45% on the current actions_4_7
+512-root/300-iteration benchmark. The eval projection/value-head cache accounts
+for about 1.45% of that in this overall loop; most model-forward microbenchmark
+wins are diluted by non-model CFR work at this solve shape.

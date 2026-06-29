@@ -154,7 +154,7 @@ def _sync(device: torch.device) -> None:
 def _load_cfg(args: argparse.Namespace):
     overrides = [
         "device=cuda",
-        "+env.num_players=6",
+        "env.num_players=6",
         "preflop_buckets.command=train_specialists",
         f"preflop_buckets.state_dataset={args.state_dataset}",
         f"preflop_buckets.base_checkpoint={args.base_checkpoint}",
@@ -188,12 +188,12 @@ def _load_cfg(args: argparse.Namespace):
         "model.enforce_zero_sum=false",
         "model.street_value_heads=both",
         f"model.compile={args.compile}",
-        "+search.model_scope=mixed_street",
+        "search.model_scope=mixed_street",
     ]
     if args.no_closing_checkpoint:
-        overrides.append("+search.closing_leaf_checkpoint=null")
+        overrides.append("search.closing_leaf_checkpoint=null")
     else:
-        overrides.append(f"+search.closing_leaf_checkpoint={args.closing_checkpoint}")
+        overrides.append(f"search.closing_leaf_checkpoint={args.closing_checkpoint}")
     with hydra.initialize_config_dir(
         config_dir=str(REPO_ROOT / "conf"), version_base=None
     ):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections import OrderedDict
 
 import torch
@@ -37,6 +38,14 @@ from p2.utils.profiling import profile
 HAND_STATIC_FEATURE_DIM = 8
 HAND_DYNAMIC_FEATURE_DIM = 15
 _PREFLOP_NEXT_NORM_MAX_BATCH = 16_384
+
+
+def _preflop_eval_cache_enabled() -> bool:
+    return os.environ.get("P2_PREFLOP_EVAL_CACHE", "1").lower() not in {
+        "0",
+        "false",
+        "off",
+    }
 
 
 if triton is not None:
@@ -3053,6 +3062,22 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             _preflop_bucket_projection(),
             persistent=False,
         )
+        self.register_buffer(
+            "_preflop_eval_hand_embedding",
+            torch.empty(PREFLOP_HANDS, hand_embed_dim),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_preflop_eval_range_projection",
+            torch.empty(PREFLOP_HANDS, hidden_dim),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_preflop_eval_bucket_projection",
+            torch.empty(PREFLOP_HANDS, 16),
+            persistent=False,
+        )
+        self._preflop_eval_projection_cache_key = None
 
         self.street_embedding = nn.Embedding(5, hidden_dim)
         self.hand_encoder = nn.Sequential(
@@ -3139,9 +3164,112 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
 
     def train(self, mode: bool = True):
         self._preflop_hand_embedding_cache = None
+        self._preflop_eval_projection_cache_key = None
+        if hasattr(self, "_preflop_eval_value_cache_key"):
+            self._preflop_eval_value_cache_key = None
         return super().train(mode)
 
+    def _preflop_projection_parameter_versions(self) -> tuple[int, ...]:
+        return tuple(
+            int(param._version)
+            for module in (self.hand_encoder, self.range_proj)
+            for param in module.parameters()
+        )
+
+    def _preflop_eval_cache_dtype(self) -> torch.dtype:
+        device_type = self.class_hi_rank.device.type
+        if device_type == "cuda" and torch.is_autocast_enabled("cuda"):
+            return torch.get_autocast_dtype("cuda")
+        return self.hand_encoder[0].weight.dtype
+
+    def _store_preflop_eval_cache_tensor(
+        self,
+        name: str,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
+        value = value.detach().contiguous()
+        existing = getattr(self, name)
+        if (
+            existing.shape == value.shape
+            and existing.device == value.device
+            and existing.dtype == value.dtype
+        ):
+            existing.copy_(value)
+            return existing
+        setattr(self, name, value)
+        return value
+
+    @torch.no_grad()
+    def prepare_preflop_eval_cache(self) -> None:
+        if self.training or not _preflop_eval_cache_enabled():
+            self._preflop_eval_projection_cache_key = None
+            return
+        target_device = self.class_hi_rank.device
+        target_dtype = self._preflop_eval_cache_dtype()
+        cache_key = (
+            target_device,
+            target_dtype,
+            self._preflop_projection_parameter_versions(),
+        )
+        cached_key = getattr(self, "_preflop_eval_projection_cache_key", None)
+        if (
+            cached_key == cache_key
+            and self._preflop_eval_hand_embedding.device == target_device
+            and self._preflop_eval_hand_embedding.dtype == target_dtype
+        ):
+            return
+        hand_static = self._class_static_features().to(
+            device=target_device,
+            dtype=self.hand_encoder[0].weight.dtype,
+        )
+        hand_emb = self.hand_encoder(hand_static)
+        dtype = hand_emb.dtype
+        cache_key = (hand_emb.device, dtype, cache_key[2])
+        bucket_projection = self.preflop_bucket_projection.to(
+            device=hand_emb.device,
+            dtype=dtype,
+        )
+        combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
+        range_projection = combined_projection.matmul(self.range_proj.weight.t())
+        stored_hand_emb = self._store_preflop_eval_cache_tensor(
+            "_preflop_eval_hand_embedding",
+            hand_emb,
+        )
+        self._store_preflop_eval_cache_tensor(
+            "_preflop_eval_range_projection",
+            range_projection,
+        )
+        self._store_preflop_eval_cache_tensor(
+            "_preflop_eval_bucket_projection",
+            bucket_projection,
+        )
+        self._preflop_eval_projection_cache_key = cache_key
+        self._preflop_hand_embedding_cache = (cache_key, stored_hand_emb)
+
+    def _preflop_eval_projection_cache(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        if (
+            self.training
+            or torch.is_grad_enabled()
+            or not _preflop_eval_cache_enabled()
+        ):
+            return None
+        if not torch.compiler.is_compiling():
+            self.prepare_preflop_eval_cache()
+        if getattr(self, "_preflop_eval_projection_cache_key", None) is None:
+            return None
+        return (
+            self._preflop_eval_hand_embedding,
+            self._preflop_eval_range_projection,
+            self._preflop_eval_bucket_projection,
+        )
+
     def _hand_embedding(self) -> torch.Tensor:
+        cached_projection = self._preflop_eval_projection_cache()
+        if cached_projection is not None:
+            hand_emb, _, _ = cached_projection
+            return hand_emb
         hand_static = self._class_static_features().to(
             device=self.class_hi_rank.device,
             dtype=self.hand_encoder[0].weight.dtype,
@@ -3211,15 +3339,19 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             device=self.class_hi_rank.device,
             dtype=self.hand_encoder[0].weight.dtype,
         )
-        hand_emb = self._hand_embedding()
+        eval_projection_cache = self._preflop_eval_projection_cache()
+        if eval_projection_cache is None:
+            hand_emb = self._hand_embedding()
+            combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
+            range_projection = combined_projection.matmul(self.range_proj.weight.t())
+            bucket_projection = self.preflop_bucket_projection.to(
+                device=player_beliefs.device,
+                dtype=hand_emb.dtype,
+            )
+        else:
+            hand_emb, range_projection, bucket_projection = eval_projection_cache
         dtype = hand_emb.dtype
         player_beliefs = player_beliefs.to(dtype)
-        bucket_projection = self.preflop_bucket_projection.to(
-            device=player_beliefs.device,
-            dtype=dtype,
-        )
-        combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
-        range_projection = combined_projection.matmul(self.range_proj.weight.t())
         bucket_mass = player_beliefs @ bucket_projection
         _, player_context = self._split_context(features.context)
         static_player_tokens = self.player_context_proj(player_context.to(dtype))
@@ -3256,7 +3388,17 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             device=self.class_hi_rank.device,
             dtype=self.hand_encoder[0].weight.dtype,
         )
-        hand_emb = self._hand_embedding()
+        eval_projection_cache = self._preflop_eval_projection_cache()
+        if eval_projection_cache is None:
+            hand_emb = self._hand_embedding()
+            combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
+            range_projection = combined_projection.matmul(self.range_proj.weight.t())
+            bucket_projection = self.preflop_bucket_projection.to(
+                device=player_beliefs.device,
+                dtype=hand_emb.dtype,
+            )
+        else:
+            hand_emb, range_projection, bucket_projection = eval_projection_cache
         dtype = hand_emb.dtype
         static_game_token = static_game_token.to(dtype)
         if static_game_token.ndim == 3:
@@ -3279,12 +3421,6 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             )
         player_context = None
         player_beliefs = player_beliefs.to(dtype)
-        bucket_projection = self.preflop_bucket_projection.to(
-            device=player_beliefs.device,
-            dtype=dtype,
-        )
-        combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
-        range_projection = combined_projection.matmul(self.range_proj.weight.t())
         bucket_mass = player_beliefs @ bucket_projection
         player_tokens = (
             player_beliefs @ range_projection
@@ -3404,6 +3540,63 @@ class BetterPreflopTransformerValueFFN(_BetterPreflopTransformerBase):
         )
         self.value_scale = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
         self.value_bias = nn.Linear(self.hidden_dim, 1)
+        self.register_buffer(
+            "_preflop_eval_value_fused_weight",
+            torch.empty(self.hidden_dim, PREFLOP_HANDS + 1),
+            persistent=False,
+        )
+        self._preflop_eval_value_cache_key = None
+
+    def _preflop_value_parameter_versions(self) -> tuple[int, ...]:
+        return tuple(
+            int(param._version)
+            for module in (self.value_hand_proj, self.value_scale, self.value_bias)
+            for param in module.parameters()
+        )
+
+    @torch.no_grad()
+    def prepare_preflop_eval_cache(self) -> None:
+        super().prepare_preflop_eval_cache()
+        if self.training or not _preflop_eval_cache_enabled():
+            self._preflop_eval_value_cache_key = None
+            return
+        projection_key = getattr(self, "_preflop_eval_projection_cache_key", None)
+        if projection_key is None:
+            self._preflop_eval_value_cache_key = None
+            return
+        cache_key = (projection_key, self._preflop_value_parameter_versions())
+        cached_key = getattr(self, "_preflop_eval_value_cache_key", None)
+        if (
+            cached_key == cache_key
+            and self._preflop_eval_value_fused_weight.device
+            == self._preflop_eval_hand_embedding.device
+            and self._preflop_eval_value_fused_weight.dtype
+            == self._preflop_eval_hand_embedding.dtype
+        ):
+            return
+        hand_value = self.value_hand_proj(self._preflop_eval_hand_embedding)
+        combined_weight = self.value_scale.weight.t().matmul(hand_value.t())
+        combined_weight = combined_weight / math.sqrt(float(self.hidden_dim))
+        value_bias_weight = self.value_bias.weight.t().to(dtype=combined_weight.dtype)
+        fused_weight = torch.cat((combined_weight, value_bias_weight), dim=1)
+        self._store_preflop_eval_cache_tensor(
+            "_preflop_eval_value_fused_weight",
+            fused_weight,
+        )
+        self._preflop_eval_value_cache_key = cache_key
+
+    def _preflop_eval_value_fused_weight_cache(self) -> torch.Tensor | None:
+        if (
+            self.training
+            or torch.is_grad_enabled()
+            or not _preflop_eval_cache_enabled()
+        ):
+            return None
+        if not torch.compiler.is_compiling():
+            self.prepare_preflop_eval_cache()
+        if getattr(self, "_preflop_eval_value_cache_key", None) is None:
+            return None
+        return self._preflop_eval_value_fused_weight
 
     def _hand_values_from_tokens(
         self,
@@ -3412,11 +3605,15 @@ class BetterPreflopTransformerValueFFN(_BetterPreflopTransformerBase):
         hand_emb: torch.Tensor,
         apply_zero_sum: bool = True,
     ) -> torch.Tensor:
-        hand_value = self.value_hand_proj(hand_emb)
-        combined_weight = self.value_scale.weight.t().matmul(hand_value.t())
-        combined_weight = combined_weight / math.sqrt(float(self.hidden_dim))
-        value_bias_weight = self.value_bias.weight.t().to(dtype=combined_weight.dtype)
-        fused_weight = torch.cat((combined_weight, value_bias_weight), dim=1)
+        fused_weight = self._preflop_eval_value_fused_weight_cache()
+        if fused_weight is None:
+            hand_value = self.value_hand_proj(hand_emb)
+            combined_weight = self.value_scale.weight.t().matmul(hand_value.t())
+            combined_weight = combined_weight / math.sqrt(float(self.hidden_dim))
+            value_bias_weight = self.value_bias.weight.t().to(
+                dtype=combined_weight.dtype
+            )
+            fused_weight = torch.cat((combined_weight, value_bias_weight), dim=1)
         raw_and_bias = player_state.flatten(0, 1).matmul(fused_weight)
         hand_values_raw = raw_and_bias[:, :PREFLOP_HANDS].view(
             -1, self.num_players, PREFLOP_HANDS
@@ -4104,6 +4301,12 @@ class BetterSplitFFN(BaseMLPModel):
         self, prefix: torch.Tensor, board: torch.Tensor
     ) -> torch.Tensor:
         return self.value_model.static_feature_base_from_prefix(prefix, board)
+
+    def prepare_preflop_eval_cache(self) -> None:
+        for child in (self.policy_model, self.value_model):
+            prepare = getattr(child, "prepare_preflop_eval_cache", None)
+            if prepare is not None:
+                prepare()
 
     @profile
     def forward(

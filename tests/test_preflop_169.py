@@ -676,12 +676,16 @@ def test_compact_preflop_token_static_base_caches_player_tokens() -> None:
         hand_emb_a = value_model._hand_embedding()
         hand_emb_b = value_model._hand_embedding()
     assert hand_emb_a.data_ptr() == hand_emb_b.data_ptr()
+    hand_emb_a_snapshot = hand_emb_a.clone()
 
     value_model.train()
+    with torch.no_grad():
+        value_model.hand_encoder[0].bias.add_(0.01)
     value_model.eval()
     with torch.no_grad():
         hand_emb_c = value_model._hand_embedding()
-    assert hand_emb_c.data_ptr() != hand_emb_a.data_ptr()
+    assert hand_emb_c.data_ptr() == hand_emb_a.data_ptr()
+    assert not torch.allclose(hand_emb_c, hand_emb_a_snapshot)
 
 
 def test_compact_preflop_static_hand_features_are_cached_correctly() -> None:

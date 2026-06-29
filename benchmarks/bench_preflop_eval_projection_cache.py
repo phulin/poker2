@@ -11,7 +11,10 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from p2.core.structured_config import NonlinearityType
+from p2.env.card_utils import PREFLOP_HANDS
+from p2.models.mlp.better_features import context_length
 from p2.models.mlp.better_ffn import BetterPreflopGatedTokenMixerValueFFN
+from p2.models.mlp.mlp_features import MLPFeatures
 
 
 DEFAULT_CONFIG = "conf/config_rebel_preflop_buckets.yaml"
@@ -116,7 +119,7 @@ def make_model(
     dim: int,
     range_dim: int,
     ffn_dim: int,
-    token_count: int,
+    num_players: int,
     device: torch.device,
     weight_dtype: torch.dtype,
 ) -> BetterPreflopGatedTokenMixerValueFFN:
@@ -128,7 +131,7 @@ def make_model(
         num_hidden_layers=0,
         num_value_layers=5,
         num_policy_layers=4,
-        num_players=token_count - 1,
+        num_players=num_players,
         nonlinearity=NonlinearityType.leaky_relu,
         enforce_zero_sum=False,
     )
@@ -137,70 +140,41 @@ def make_model(
     return model.to(device=device, dtype=weight_dtype)
 
 
+def make_features(
+    *,
+    batch_size: int,
+    num_players: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> MLPFeatures:
+    beliefs = torch.rand(
+        batch_size,
+        num_players,
+        PREFLOP_HANDS,
+        device=device,
+        dtype=dtype,
+    )
+    beliefs = beliefs / beliefs.sum(dim=-1, keepdim=True)
+    context = torch.randn(
+        batch_size,
+        context_length(num_players),
+        device=device,
+        dtype=dtype,
+    )
+    return MLPFeatures(
+        context=context,
+        street=torch.zeros(batch_size, device=device, dtype=torch.long),
+        to_act=torch.zeros(batch_size, device=device, dtype=torch.long),
+        board=torch.full((batch_size, 5), -1, device=device, dtype=torch.long),
+        beliefs=beliefs.flatten(1),
+        hand_dim=PREFLOP_HANDS,
+    )
+
+
 def autocast_context(device: torch.device, enabled: bool):
     if enabled and device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     return nullcontext()
-
-
-def current_projection(
-    model: BetterPreflopGatedTokenMixerValueFFN,
-    player_beliefs: torch.Tensor,
-) -> torch.Tensor:
-    hand_emb = model._hand_embedding()
-    dtype = hand_emb.dtype
-    player_beliefs = player_beliefs.to(dtype)
-    bucket_projection = model.preflop_bucket_projection.to(
-        device=player_beliefs.device,
-        dtype=dtype,
-    )
-    combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
-    range_projection = combined_projection.matmul(model.range_proj.weight.t())
-    bucket_mass = player_beliefs @ bucket_projection
-    return player_beliefs @ range_projection + model.bucket_mass_proj(bucket_mass)
-
-
-def fused_projection(
-    model: BetterPreflopGatedTokenMixerValueFFN,
-    player_beliefs: torch.Tensor,
-) -> torch.Tensor:
-    hand_emb = model._hand_embedding()
-    dtype = hand_emb.dtype
-    player_beliefs = player_beliefs.to(dtype)
-    bucket_projection = model.preflop_bucket_projection.to(
-        device=player_beliefs.device,
-        dtype=dtype,
-    )
-    combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
-    range_projection = combined_projection.matmul(model.range_proj.weight.t())
-    belief_projection = torch.cat((range_projection, bucket_projection), dim=1)
-    belief_features = player_beliefs @ belief_projection
-    range_features = belief_features[..., : model.hidden_dim]
-    bucket_mass = belief_features[..., model.hidden_dim :]
-    return range_features + model.bucket_mass_proj(bucket_mass)
-
-
-def cached_current_projection(
-    model: BetterPreflopGatedTokenMixerValueFFN,
-    player_beliefs: torch.Tensor,
-    range_projection: torch.Tensor,
-    bucket_projection: torch.Tensor,
-) -> torch.Tensor:
-    player_beliefs = player_beliefs.to(range_projection.dtype)
-    bucket_mass = player_beliefs @ bucket_projection
-    return player_beliefs @ range_projection + model.bucket_mass_proj(bucket_mass)
-
-
-def cached_fused_projection(
-    model: BetterPreflopGatedTokenMixerValueFFN,
-    player_beliefs: torch.Tensor,
-    belief_projection: torch.Tensor,
-) -> torch.Tensor:
-    player_beliefs = player_beliefs.to(belief_projection.dtype)
-    belief_features = player_beliefs @ belief_projection
-    range_features = belief_features[..., : model.hidden_dim]
-    bucket_mass = belief_features[..., model.hidden_dim :]
-    return range_features + model.bucket_mass_proj(bucket_mass)
 
 
 def benchmark_batch(
@@ -209,176 +183,88 @@ def benchmark_batch(
     dim: int,
     range_dim: int,
     ffn_dim: int,
-    token_count: int,
+    num_players: int,
     device: torch.device,
     input_dtype: torch.dtype,
     weight_dtype: torch.dtype,
     use_autocast: bool,
-    include_compiled: bool,
     compile_dynamic: bool,
     timing_mode: str,
     warmup: int,
     iters: int,
 ) -> dict[str, object]:
-    model = make_model(
+    cold_model = make_model(
         dim=dim,
         range_dim=range_dim,
         ffn_dim=ffn_dim,
-        token_count=token_count,
+        num_players=num_players,
         device=device,
         weight_dtype=weight_dtype,
     )
-    beliefs = torch.rand(
-        batch_size,
-        token_count - 1,
-        169,
+    warm_model = make_model(
+        dim=dim,
+        range_dim=range_dim,
+        ffn_dim=ffn_dim,
+        num_players=num_players,
+        device=device,
+        weight_dtype=weight_dtype,
+    )
+    warm_model.load_state_dict(cold_model.state_dict())
+    cold_model.eval()
+    warm_model.eval()
+
+    features = make_features(
+        batch_size=batch_size,
+        num_players=num_players,
         device=device,
         dtype=input_dtype,
     )
-    beliefs = beliefs / beliefs.sum(dim=-1, keepdim=True)
 
     with torch.no_grad(), autocast_context(device, use_autocast):
-        hand_emb = model._hand_embedding()
-        cache_dtype = hand_emb.dtype
-        bucket_projection = model.preflop_bucket_projection.to(
-            device=device,
-            dtype=cache_dtype,
-        )
-        combined_projection = torch.cat((hand_emb, hand_emb.square()), dim=-1)
-        range_projection = combined_projection.matmul(model.range_proj.weight.t())
-        belief_projection = torch.cat((range_projection, bucket_projection), dim=1)
+        cold_static_base = cold_model.static_feature_base(features).clone()
+        warm_static_base = warm_model.static_feature_base(features).clone()
+        warm_model.prepare_preflop_eval_cache()
 
-    compiled_current = None
-    compiled_fused = None
-    compiled_cached_current = None
-    compiled_cached_fused = None
-    if include_compiled:
-        compiled_current = torch.compile(
-            lambda x: current_projection(model, x),
-            dynamic=compile_dynamic,
-        )
-        compiled_fused = torch.compile(
-            lambda x: fused_projection(model, x),
-            dynamic=compile_dynamic,
-        )
-        compiled_cached_current = torch.compile(
-            lambda x: cached_current_projection(
-                model,
-                x,
-                range_projection,
-                bucket_projection,
-            ),
-            dynamic=compile_dynamic,
-        )
-        compiled_cached_fused = torch.compile(
-            lambda x: cached_fused_projection(model, x, belief_projection),
-            dynamic=compile_dynamic,
-        )
+    cold_fn = torch.compile(
+        lambda f, s: cold_model.forward_hand_values_static_base(
+            f,
+            s,
+            apply_zero_sum=False,
+        ),
+        dynamic=compile_dynamic,
+    )
+    warm_fn = torch.compile(
+        lambda f, s: warm_model.forward_hand_values_static_base(
+            f,
+            s,
+            apply_zero_sum=False,
+        ),
+        dynamic=compile_dynamic,
+    )
 
     def with_autocast(fn: Callable[[], torch.Tensor]) -> torch.Tensor:
         with autocast_context(device, use_autocast):
             return fn()
 
     with torch.no_grad():
-        expected = with_autocast(lambda: current_projection(model, beliefs))
-        fused = with_autocast(lambda: fused_projection(model, beliefs))
-        cached_current = with_autocast(
-            lambda: cached_current_projection(
-                model,
-                beliefs,
-                range_projection,
-                bucket_projection,
-            )
-        )
-        cached_fused = with_autocast(
-            lambda: cached_fused_projection(model, beliefs, belief_projection)
-        )
+        cold_out = with_autocast(lambda: cold_fn(features, cold_static_base))
+        warm_out = with_autocast(lambda: warm_fn(features, warm_static_base))
         errors = {
-            "fused_projection": (fused.float() - expected.float()).abs().max().item(),
-            "cached_current_projection": (
-                cached_current.float() - expected.float()
-            ).abs().max().item(),
-            "cached_fused_projection": (
-                cached_fused.float() - expected.float()
-            ).abs().max().item(),
+            "compiled_warm_eval_projection_cache": (
+                warm_out.float() - cold_out.float()
+            ).abs().max().item()
         }
         variants: list[tuple[str, Callable[[], torch.Tensor]]] = [
             (
-                "current_two_matmuls",
-                lambda: with_autocast(lambda: current_projection(model, beliefs)),
+                "compiled_cold_live_projection",
+                lambda: with_autocast(lambda: cold_fn(features, cold_static_base)),
             ),
             (
-                "fused_one_matmul",
-                lambda: with_autocast(lambda: fused_projection(model, beliefs)),
-            ),
-            (
-                "cached_current_two_matmuls",
-                lambda: with_autocast(
-                    lambda: cached_current_projection(
-                        model,
-                        beliefs,
-                        range_projection,
-                        bucket_projection,
-                    )
-                ),
-            ),
-            (
-                "cached_fused_one_matmul",
-                lambda: with_autocast(
-                    lambda: cached_fused_projection(model, beliefs, belief_projection)
-                ),
+                "compiled_warm_eval_projection_cache",
+                lambda: with_autocast(lambda: warm_fn(features, warm_static_base)),
             ),
         ]
-        if (
-            compiled_current is not None
-            and compiled_fused is not None
-            and compiled_cached_current is not None
-            and compiled_cached_fused is not None
-        ):
-            compiled_current_out = with_autocast(lambda: compiled_current(beliefs))
-            compiled_fused_out = with_autocast(lambda: compiled_fused(beliefs))
-            compiled_cached_current_out = with_autocast(
-                lambda: compiled_cached_current(beliefs)
-            )
-            compiled_cached_fused_out = with_autocast(
-                lambda: compiled_cached_fused(beliefs)
-            )
-            errors["compiled_current_two_matmuls"] = (
-                compiled_current_out.float() - expected.float()
-            ).abs().max().item()
-            errors["compiled_fused_one_matmul"] = (
-                compiled_fused_out.float() - expected.float()
-            ).abs().max().item()
-            errors["compiled_cached_current_two_matmuls"] = (
-                compiled_cached_current_out.float() - expected.float()
-            ).abs().max().item()
-            errors["compiled_cached_fused_one_matmul"] = (
-                compiled_cached_fused_out.float() - expected.float()
-            ).abs().max().item()
-            variants.extend(
-                [
-                    (
-                        "compiled_current_two_matmuls",
-                        lambda: with_autocast(lambda: compiled_current(beliefs)),
-                    ),
-                    (
-                        "compiled_fused_one_matmul",
-                        lambda: with_autocast(lambda: compiled_fused(beliefs)),
-                    ),
-                    (
-                        "compiled_cached_current_two_matmuls",
-                        lambda: with_autocast(
-                            lambda: compiled_cached_current(beliefs)
-                        ),
-                    ),
-                    (
-                        "compiled_cached_fused_one_matmul",
-                        lambda: with_autocast(lambda: compiled_cached_fused(beliefs)),
-                    ),
-                ]
-            )
         sync(device)
-
         timings = [
             {
                 "name": name,
@@ -394,13 +280,13 @@ def benchmark_batch(
         ]
 
     timing_by_name = {row["name"]: float(row["ms"]) for row in timings}
-    current_ms = timing_by_name["current_two_matmuls"]
+    current_ms = timing_by_name["compiled_cold_live_projection"]
     return {
         "batch_size": batch_size,
-        "rows": batch_size * (token_count - 1),
+        "rows": batch_size * num_players,
         "max_abs_error": errors,
         "timings": timings,
-        "speedups_vs_current": {
+        "speedups_vs_cold": {
             name: current_ms / ms for name, ms in timing_by_name.items() if ms > 0.0
         },
     }
@@ -413,13 +299,12 @@ def main() -> None:
     parser.add_argument("--dim", type=int, default=None)
     parser.add_argument("--range-dim", type=int, default=None)
     parser.add_argument("--ffn-dim", type=int, default=None)
-    parser.add_argument("--token-count", type=int, default=None)
-    parser.add_argument("--iters", type=int, default=200)
-    parser.add_argument("--warmup", type=int, default=50)
+    parser.add_argument("--num-players", type=int, default=None)
+    parser.add_argument("--iters", type=int, default=100)
+    parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--dtype", choices=("float32", "bfloat16"), default="float32")
     parser.add_argument("--weight-dtype", choices=("float32", "bfloat16"), default=None)
     parser.add_argument("--autocast", action="store_true")
-    parser.add_argument("--include-compiled", action="store_true")
     parser.add_argument("--compile-dynamic", action="store_true")
     parser.add_argument(
         "--timing-mode",
@@ -439,10 +324,10 @@ def main() -> None:
     ffn_dim = (
         args.ffn_dim if args.ffn_dim is not None else config_int(cfg, "model.ffn_dim", 256)
     )
-    token_count = (
-        args.token_count
-        if args.token_count is not None
-        else config_int(cfg, "env.num_players", 6) + 1
+    num_players = (
+        args.num_players
+        if args.num_players is not None
+        else config_int(cfg, "env.num_players", 6)
     )
     batch_sizes = args.batch_sizes if args.batch_sizes is not None else auto_batch_sizes(cfg)
 
@@ -460,12 +345,11 @@ def main() -> None:
             dim=dim,
             range_dim=range_dim,
             ffn_dim=ffn_dim,
-            token_count=token_count,
+            num_players=num_players,
             device=device,
             input_dtype=input_dtype,
             weight_dtype=weight_dtype,
             use_autocast=args.autocast,
-            include_compiled=args.include_compiled,
             compile_dynamic=args.compile_dynamic,
             timing_mode=args.timing_mode,
             warmup=args.warmup,
@@ -479,13 +363,12 @@ def main() -> None:
         "input_dtype": str(input_dtype).replace("torch.", ""),
         "weight_dtype": str(weight_dtype).replace("torch.", ""),
         "autocast": args.autocast,
-        "include_compiled": args.include_compiled,
         "compile_dynamic": args.compile_dynamic,
         "timing_mode": args.timing_mode,
         "dim": dim,
         "range_dim": range_dim,
         "ffn_dim": ffn_dim,
-        "token_count": token_count,
+        "num_players": num_players,
         "warmup": args.warmup,
         "iters": args.iters,
         "results": results,
@@ -495,13 +378,13 @@ def main() -> None:
         return
 
     print()
-    print("batch,rows,variant,ms,speedup_vs_current,max_abs_error")
+    print("batch,rows,variant,ms,speedup_vs_cold,max_abs_error")
     for row in results:
-        speedups = row["speedups_vs_current"]
+        speedups = row["speedups_vs_cold"]
         errors = row["max_abs_error"]
         for timing in row["timings"]:
             name = str(timing["name"])
-            err = 0.0 if name == "current_two_matmuls" else float(errors[name])
+            err = 0.0 if name == "compiled_cold_live_projection" else float(errors[name])
             print(
                 f"{row['batch_size']},"
                 f"{row['rows']},"

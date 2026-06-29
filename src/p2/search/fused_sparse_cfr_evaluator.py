@@ -2531,6 +2531,9 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             model = value_model
             base_model = getattr(model, "_orig_mod", model)
+            prepare_eval_cache = getattr(base_model, "prepare_preflop_eval_cache", None)
+            if prepare_eval_cache is not None:
+                prepare_eval_cache()
             if type(base_model) is BetterTRM:
                 model_output = model(
                     features,
