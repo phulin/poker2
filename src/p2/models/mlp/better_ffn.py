@@ -48,6 +48,24 @@ def _preflop_eval_cache_enabled() -> bool:
     }
 
 
+def _preflop_compiled_ffn_boundary_enabled() -> bool:
+    explicit = os.environ.get("P2_PREFLOP_COMPILED_FFN_BOUNDARY")
+    if explicit is not None:
+        return explicit.lower() in {
+            "1",
+            "true",
+            "on",
+        }
+    return os.environ.get(
+        "P2_DISABLE_PREFLOP_COMPILED_FFN_BOUNDARY",
+        "0",
+    ).lower() not in {
+        "1",
+        "true",
+        "on",
+    }
+
+
 if triton is not None:
 
     @triton.jit
@@ -2583,6 +2601,12 @@ class _PreflopGatedTokenMixerBlock(nn.Module):
         h = ffn_linear_in(ffn_in)
         h = ffn_activation(h)
         ffn_out = ffn_linear_out(h)
+        if (
+            torch.compiler.is_compiling()
+            and _preflop_compiled_ffn_boundary_enabled()
+        ):
+            out = token_out + ffn_out / math.sqrt(2.0)
+            return out, next_token_norm(out)
         return _preflop_ffn_residual_next_token_norm_triton(
             token_out,
             ffn_out,

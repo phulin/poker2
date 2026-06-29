@@ -395,3 +395,32 @@ the existing writeback kernels. It is CUDA-graph compatible in the production
 Conclusion: parallel partition eval is the strongest corrected production-loop
 number so far on this restarted v5 actions_4_7 shape, bringing the warmed
 512-root/300-iteration solve to about 29.0 ms/iter.
+
+## Compile Boundary Result: FFN Residual Plus Next Token RMSNorm
+
+The static/parallel profile still showed the cross-block
+`_preflop_ffn_residual_next_token_norm` Triton boundary kernels in the value
+stack. The isolated FFN epilogue probe had already shown that, under
+`torch.compile`, a normal Torch expression for
+`token_out + ffn_out / sqrt(2)` followed by `next_token_norm(out)` can be a
+little faster than the custom Triton epilogue. I wired that boundary only while
+Dynamo is tracing; eager/no-compile eval still uses the existing Triton path.
+The default can be disabled with
+`P2_DISABLE_PREFLOP_COMPILED_FFN_BOUNDARY=1`, and the older explicit
+`P2_PREFLOP_COMPILED_FFN_BOUNDARY=0/1` override is also honored.
+
+Same corrected production-loop command shape as above, with static compile,
+parallel partition eval default-on, 512 roots, 125,551 total nodes, 65,536 model
+leaves, and 300 CFR iterations:
+
+| Variant | Wall s | ms/iter |
+|---|---:|---:|
+| Static + parallel partition eval fresh baseline | 9.786 | 32.619 |
+| Compiled FFN boundary env-gated | 8.549 | 28.498 |
+| Compiled FFN boundary env-gated repeat | 8.546 | 28.485 |
+| Compiled FFN boundary default-on check | 8.553 | 28.509 |
+
+Conclusion: the compiled boundary is the new best corrected production-loop
+result on the restarted v5 actions_4_7 shape, improving the warmed
+512-root/300-iteration solve from the previous best `29.006874 ms/iter` to
+about `28.5 ms/iter`.
