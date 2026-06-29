@@ -147,3 +147,43 @@ Cutoff check:
 | 32768 | 2.434978 | 2.476979 | 0.98x |
 
 Conclusion: compiled naive is not a replacement for the custom Triton residual path. The fused next-norm path is a small but real live-regime win through batch 16384 and regresses at 32768+. Production wiring is therefore conditional: eval/no-grad CUDA gated-token-mixer blocks use fused next-norm only for batches `<= 16384`; larger batches fall back to the old Triton residual path.
+
+## Stack-Level Result: Cross-Block Next Token RMSNorm
+
+The next larger boundary is between adjacent gated-token-mixer blocks. After a block computes its FFN output, the old path stores `out = token_out + ffn_out / sqrt(2)` and the next block immediately reads `out` to run `token_norm(out)`. I added a stack runner that fuses that residual add with the next block's token RMSNorm, threads the precomputed normalized tokens into the next block, and otherwise keeps the existing per-block math. Training and TorchDynamo paths still use the normal per-block loop; the stack runner is eval/no-grad CUDA only.
+
+Command:
+
+`uv run python benchmarks/bench_preflop_token_mixer_cross_norm.py --batch-sizes 512,8192,16384,32768,65536 --depth 4 --iters 120 --warmup 20 --dtype float32 --weight-dtype float32 --autocast --timing-mode cuda_graph --json`
+
+| Batch | Old per-block loop ms | Wired stack runner ms | Speedup |
+|---:|---:|---:|---:|
+| 512 | 0.372386 | 0.338304 | 1.10x |
+| 8192 | 2.684177 | 2.410155 | 1.11x |
+| 16384 | 5.137322 | 4.605687 | 1.12x |
+| 32768 | 9.733854 | 8.732527 | 1.11x |
+| 65536 | 19.158929 | 17.206366 | 1.11x |
+
+Depth-5 check for the value stack:
+
+`uv run python benchmarks/bench_preflop_token_mixer_cross_norm.py --batch-sizes 512,8192,65536 --depth 5 --iters 100 --warmup 20 --dtype float32 --weight-dtype float32 --autocast --timing-mode cuda_graph --json`
+
+| Batch | Old per-block loop ms | Wired stack runner ms | Speedup |
+|---:|---:|---:|---:|
+| 512 | 0.464978 | 0.420557 | 1.11x |
+| 8192 | 3.352719 | 2.989926 | 1.12x |
+| 65536 | 23.851858 | 21.284587 | 1.12x |
+
+Compiled-naive stack comparison:
+
+`uv run python benchmarks/bench_preflop_token_mixer_cross_norm.py --batch-sizes 512,8192,65536 --depth 4 --iters 80 --warmup 20 --dtype float32 --weight-dtype float32 --autocast --timing-mode cuda_graph --include-compiled-naive --json`
+
+| Batch | Wired stack runner ms | Compiled naive stack ms | Wired vs compiled |
+|---:|---:|---:|---:|
+| 512 | 0.336896 | 0.465190 | 1.38x |
+| 8192 | 2.412634 | 3.944423 | 1.63x |
+| 65536 | 17.110963 | 29.129535 | 1.70x |
+
+The compiled-naive stack also shows a larger numerical delta at small batch in this setup (`0.082` max abs at batch 512 versus the old custom path), while the wired stack runner stays around `0.009` to `0.011`.
+
+Conclusion: this is the strongest measured production change so far. The live-regime graph replay win is roughly 10-12% across policy-depth and value-depth stacks, and the compiled-naive alternative is substantially slower.

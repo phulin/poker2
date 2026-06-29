@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 import pytest
 
 from p2.core.structured_config import NonlinearityType
@@ -27,6 +28,7 @@ from p2.models.mlp.better_ffn import (
     BetterPreflopValueFFN,
     _PreflopGatedTokenMixerBlock,
     _preflop_gate_residual_combine_triton,
+    _run_preflop_gated_token_mixer_blocks,
     _preflop_token_mixer_gate_residual_next_norm_triton,
     _preflop_token_mixer_gate_residual_persistent_triton,
     _preflop_token_mixer_gate_residual_triton,
@@ -830,6 +832,44 @@ def test_preflop_gated_token_mixer_fast_forward_matches_autocast(
     torch.cuda.synchronize()
 
     torch.testing.assert_close(actual, expected, atol=5e-2, rtol=5e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_preflop_gated_token_mixer_stack_fast_path_matches_autocast() -> None:
+    torch.manual_seed(12)
+    blocks = nn.ModuleList(
+        [
+            _PreflopGatedTokenMixerBlock(
+                192,
+                token_count=7,
+                ffn_dim=256,
+                nonlinearity=NonlinearityType.leaky_relu,
+            )
+            for _ in range(4)
+        ]
+    ).cuda()
+    blocks.eval()
+    x = torch.randn(19, 7, 192, device="cuda", dtype=torch.float32)
+
+    def naive_block(block: _PreflopGatedTokenMixerBlock, value: torch.Tensor) -> torch.Tensor:
+        y = block.token_norm(value)
+        gate = block.token_gate(y)
+        mixed = block.token_mixer(y.transpose(1, 2)).transpose(1, 2)
+        token_out = value + mixed * torch.sigmoid(gate) / torch.sqrt(
+            torch.tensor(2.0, device=value.device)
+        )
+        return token_out + block.ffn(token_out) / torch.sqrt(
+            torch.tensor(2.0, device=value.device)
+        )
+
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        expected = x
+        for block in blocks:
+            expected = naive_block(block, expected)
+        actual = _run_preflop_gated_token_mixer_blocks(blocks, x)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual, expected, atol=6e-2, rtol=6e-2)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

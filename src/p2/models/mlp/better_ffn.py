@@ -416,6 +416,42 @@ if triton is not None:
         tl.store(normed_out_ptr + (offs_b[:, None] * 7 + 6) * dim + offs_d[None, :], norm6, mask=mask)
 
     @triton.jit
+    def _preflop_ffn_residual_next_token_norm_kernel(
+        residual_ptr,
+        ffn_out_ptr,
+        norm_weight_ptr,
+        out_ptr,
+        normed_out_ptr,
+        batch_size: tl.constexpr,
+        token_count: tl.constexpr,
+        dim: tl.constexpr,
+        eps: tl.constexpr,
+        scale: tl.constexpr,
+        BLOCK_B: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        pid_b = tl.program_id(0)
+        pid_t = tl.program_id(1)
+        offs_b = pid_b * BLOCK_B + tl.arange(0, BLOCK_B)
+        offs_d = tl.arange(0, BLOCK_D)
+        mask = (offs_b[:, None] < batch_size) & (offs_d[None, :] < dim)
+        base = (offs_b[:, None] * token_count + pid_t) * dim + offs_d[None, :]
+
+        residual = tl.load(residual_ptr + base, mask=mask, other=0.0).to(tl.float32)
+        ffn_out = tl.load(ffn_out_ptr + base, mask=mask, other=0.0).to(tl.float32)
+        out = residual + ffn_out * scale
+        ss = tl.sum(tl.where(mask, out * out, 0.0), axis=1)
+        norm_weight = tl.load(
+            norm_weight_ptr + offs_d,
+            mask=offs_d < dim,
+            other=0.0,
+        ).to(tl.float32)
+        normed = out * tl.rsqrt(ss[:, None] / dim + eps) * norm_weight[None, :]
+
+        tl.store(out_ptr + base, out, mask=mask)
+        tl.store(normed_out_ptr + base, normed, mask=mask)
+
+    @triton.jit
     def _preflop_token_mixer_norm_gate_residual_kernel(
         x_ptr,
         norm_weight_ptr,
@@ -811,6 +847,54 @@ def _preflop_token_mixer_gate_residual_next_norm_triton(
         out,
         normed_out,
         batch_size,
+        dim,
+        eps,
+        1.0 / math.sqrt(2.0),
+        BLOCK_B=block_b,
+        BLOCK_D=block_d,
+        num_warps=num_warps,
+    )
+    return out, normed_out
+
+
+def _preflop_ffn_residual_next_token_norm_triton(
+    residual: torch.Tensor,
+    ffn_out: torch.Tensor,
+    norm_weight: torch.Tensor,
+    *,
+    eps: float = 1e-5,
+    block_b: int = 2,
+    block_d: int = 256,
+    num_warps: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if triton is None:
+        raise RuntimeError("Triton is not available")
+    if not residual.is_contiguous():
+        residual = residual.contiguous()
+    if not ffn_out.is_contiguous():
+        ffn_out = ffn_out.contiguous()
+    if residual.shape != ffn_out.shape:
+        raise ValueError("residual and ffn_out must have matching shapes")
+    out = torch.empty_like(residual)
+    normed_out = torch.empty_like(residual)
+    batch_size, token_count, dim = residual.shape
+    if norm_weight.shape != (dim,):
+        raise ValueError("norm_weight must match the hidden dimension")
+    if dim > block_d:
+        raise ValueError("block_d must cover the full hidden dimension")
+    if block_b <= 0 or block_d <= 0:
+        raise ValueError("block_b and block_d must be positive")
+    if num_warps <= 0:
+        raise ValueError("num_warps must be positive")
+    grid = (triton.cdiv(batch_size, block_b), token_count)
+    _preflop_ffn_residual_next_token_norm_kernel[grid](
+        residual,
+        ffn_out,
+        norm_weight,
+        out,
+        normed_out,
+        batch_size,
+        token_count,
         dim,
         eps,
         1.0 / math.sqrt(2.0),
@@ -2364,13 +2448,11 @@ class _PreflopGatedTokenMixerBlock(nn.Module):
         self.token_gate = nn.Linear(dim, dim, bias=True)
         self.ffn = ffn_block(dim, ffn_dim, dim, nonlinearity)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = self.token_norm(x)
+    def _can_use_token_triton_path(self, x: torch.Tensor) -> bool:
         linear_in = self.token_mixer.linear_in
         activation = self.token_mixer.activation
         linear_out = self.token_mixer.linear_out
-        gate = self.token_gate(y)
-        if (
+        return (
             x.is_cuda
             and not self.training
             and not torch.is_grad_enabled()
@@ -2380,21 +2462,43 @@ class _PreflopGatedTokenMixerBlock(nn.Module):
             and x.shape[1] == 7
             and linear_in.weight.shape == (28, 7)
             and linear_out.weight.shape == (7, 28)
+        )
+
+    def _ffn_parts(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[nn.RMSNorm, nn.Linear, nn.Module, nn.Linear] | None:
+        ffn_norm = getattr(self.ffn, "norm", None)
+        ffn_linear_in = getattr(self.ffn, "linear_in", None)
+        ffn_activation = getattr(self.ffn, "activation", None)
+        ffn_linear_out = getattr(self.ffn, "linear_out", None)
+        if (
+            isinstance(ffn_norm, nn.RMSNorm)
+            and isinstance(ffn_linear_in, nn.Linear)
+            and ffn_activation is not None
+            and isinstance(ffn_linear_out, nn.Linear)
+            and ffn_norm.weight is not None
+            and ffn_norm.normalized_shape == (x.shape[-1],)
         ):
-            ffn_norm = getattr(self.ffn, "norm", None)
-            ffn_linear_in = getattr(self.ffn, "linear_in", None)
-            ffn_activation = getattr(self.ffn, "activation", None)
-            ffn_linear_out = getattr(self.ffn, "linear_out", None)
+            return ffn_norm, ffn_linear_in, ffn_activation, ffn_linear_out
+        return None
+
+    def _token_mixer_residual_from_norm(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        gate: torch.Tensor,
+        ffn_norm: nn.RMSNorm | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        linear_in = self.token_mixer.linear_in
+        linear_out = self.token_mixer.linear_out
+        if self._can_use_token_triton_path(x):
             if (
-                isinstance(ffn_norm, nn.RMSNorm)
-                and isinstance(ffn_linear_in, nn.Linear)
-                and ffn_activation is not None
-                and isinstance(ffn_linear_out, nn.Linear)
+                ffn_norm is not None
                 and ffn_norm.weight is not None
-                and ffn_norm.normalized_shape == (x.shape[-1],)
                 and x.shape[0] <= _PREFLOP_NEXT_NORM_MAX_BATCH
             ):
-                x, ffn_in = _preflop_token_mixer_gate_residual_next_norm_triton(
+                return _preflop_token_mixer_gate_residual_next_norm_triton(
                     x,
                     y,
                     gate,
@@ -2405,21 +2509,128 @@ class _PreflopGatedTokenMixerBlock(nn.Module):
                     block_b=2,
                     num_warps=8,
                 )
-                h = ffn_linear_in(ffn_in)
-                h = ffn_activation(h)
-                h = ffn_linear_out(h)
-                return x + h / math.sqrt(2.0)
-            x = _preflop_token_mixer_gate_residual_triton(
+            token_out = _preflop_token_mixer_gate_residual_triton(
                 x,
                 y,
                 gate,
                 linear_in.weight,
                 linear_out.weight,
             )
+            return token_out, None
+
+        mixed = self.token_mixer(y.transpose(1, 2)).transpose(1, 2)
+        return x + mixed * torch.sigmoid(gate) / math.sqrt(2.0), None
+
+    def _forward_from_token_norm(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+    ) -> torch.Tensor:
+        gate = self.token_gate(y)
+        ffn_parts = self._ffn_parts(x)
+        ffn_norm = None if ffn_parts is None else ffn_parts[0]
+        token_out, ffn_in = self._token_mixer_residual_from_norm(
+            x,
+            y,
+            gate,
+            ffn_norm,
+        )
+        if ffn_parts is None:
+            return token_out + self.ffn(token_out) / math.sqrt(2.0)
+        ffn_norm, ffn_linear_in, ffn_activation, ffn_linear_out = ffn_parts
+        if ffn_in is None:
+            ffn_in = ffn_norm(token_out)
+        h = ffn_linear_in(ffn_in)
+        h = ffn_activation(h)
+        h = ffn_linear_out(h)
+        return token_out + h / math.sqrt(2.0)
+
+    def _forward_from_token_norm_with_next_token_norm(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        next_token_norm: nn.RMSNorm,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        ffn_parts = self._ffn_parts(x)
+        if (
+            not self._can_use_token_triton_path(x)
+            or ffn_parts is None
+            or next_token_norm.weight is None
+            or next_token_norm.normalized_shape != (x.shape[-1],)
+        ):
+            out = self._forward_from_token_norm(x, y)
+            return out, next_token_norm(out)
+
+        gate = self.token_gate(y)
+        ffn_norm, ffn_linear_in, ffn_activation, ffn_linear_out = ffn_parts
+        token_out, ffn_in = self._token_mixer_residual_from_norm(
+            x,
+            y,
+            gate,
+            ffn_norm,
+        )
+        if ffn_in is None:
+            ffn_in = ffn_norm(token_out)
+        h = ffn_linear_in(ffn_in)
+        h = ffn_activation(h)
+        ffn_out = ffn_linear_out(h)
+        return _preflop_ffn_residual_next_token_norm_triton(
+            token_out,
+            ffn_out,
+            next_token_norm.weight,
+            eps=next_token_norm.eps,
+            block_b=2,
+            num_warps=8,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._forward_from_token_norm(x, self.token_norm(x))
+
+
+def _run_preflop_gated_token_mixer_blocks(
+    blocks: nn.ModuleList,
+    x: torch.Tensor,
+) -> torch.Tensor:
+    if len(blocks) == 0:
+        return x
+    if (
+        len(blocks) <= 1
+        or not x.is_cuda
+        or torch.is_grad_enabled()
+        or torch.compiler.is_compiling()
+        or not all(isinstance(block, _PreflopGatedTokenMixerBlock) for block in blocks)
+    ):
+        for block in blocks:
+            x = block(x)
+        return x
+
+    gated_blocks = list(blocks)
+    if not all(
+        not block.training
+        and block._can_use_token_triton_path(x)
+        and block._ffn_parts(x) is not None
+        and isinstance(block.token_norm, nn.RMSNorm)
+        and block.token_norm.weight is not None
+        and block.token_norm.normalized_shape == (x.shape[-1],)
+        for block in gated_blocks
+    ):
+        for block in blocks:
+            x = block(x)
+        return x
+
+    precomputed_y: torch.Tensor | None = None
+    for index, block in enumerate(gated_blocks):
+        y = block.token_norm(x) if precomputed_y is None else precomputed_y
+        if index + 1 < len(gated_blocks):
+            x, precomputed_y = block._forward_from_token_norm_with_next_token_norm(
+                x,
+                y,
+                gated_blocks[index + 1].token_norm,
+            )
         else:
-            mixed = self.token_mixer(y.transpose(1, 2)).transpose(1, 2)
-            x = x + mixed * torch.sigmoid(gate) / math.sqrt(2.0)
-        return x + self.ffn(x) / math.sqrt(2.0)
+            x = block._forward_from_token_norm(x, y)
+            precomputed_y = None
+    return x
 
 
 class _PreflopRangeSlotMomentPool(nn.Module):
@@ -3028,8 +3239,7 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
             dtype
         )
         encoded = torch.cat((game_token[:, None, :], player_tokens), dim=1)
-        for block in self.encoder:
-            encoded = block(encoded)
+        encoded = _run_preflop_gated_token_mixer_blocks(self.encoder, encoded)
         return player_beliefs, encoded, hand_emb
 
     def _encode_base_tokens_static(
@@ -3090,8 +3300,7 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
                 player_context.to(dtype),
             )
         encoded = torch.cat((game_token[:, None, :], player_tokens), dim=1)
-        for block in self.encoder:
-            encoded = block(encoded)
+        encoded = _run_preflop_gated_token_mixer_blocks(self.encoder, encoded)
         return player_beliefs, encoded, hand_emb
 
     def _states_from_tokens(
@@ -3142,8 +3351,7 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
                 features, static_game_token
             )
         if extra_encoder is not None:
-            for block in extra_encoder:
-                encoded = block(encoded)
+            encoded = _run_preflop_gated_token_mixer_blocks(extra_encoder, encoded)
         game_state, player_state = self._states_from_tokens(encoded)
         return player_beliefs, game_state, player_state, hand_emb
 
@@ -3387,8 +3595,7 @@ class BetterPreflopTransformerPolicyFFN(_BetterPreflopTransformerBase):
         _, encoded, hand_emb = self._encode_base_tokens(features)
         if not self.shared_trunk:
             encoded = encoded.detach()
-        for block in self.policy_encoder:
-            encoded = block(encoded)
+        encoded = _run_preflop_gated_token_mixer_blocks(self.policy_encoder, encoded)
         game_state, player_state = self._states_from_tokens(encoded)
         actor = features.to_act.long().clamp(min=0, max=self.num_players - 1)
         actor_state = player_state.gather(
