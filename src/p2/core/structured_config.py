@@ -560,7 +560,6 @@ class PreflopBucketTrainingConfig:
     cfr_batch_size: int = 512
     actions_12_15_cfr_batch_size: int | None = None
     actions_8_11_cfr_batch_size: int | None = None
-    actions_4_7_cfr_batch_size: int | None = None
     actions_12_15_epochs: int = 1
     depth: int = 4
     actions_12_15_depth: int | None = None

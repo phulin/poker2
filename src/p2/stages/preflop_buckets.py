@@ -34,7 +34,6 @@ class PreflopBucketExecutionConfig:
     cfr_batch_size: int
     actions_12_15_cfr_batch_size: int | None
     actions_8_11_cfr_batch_size: int | None
-    actions_4_7_cfr_batch_size: int | None
     actions_12_15_epochs: int
     validation_items: int
     validation_cfr_iterations: int

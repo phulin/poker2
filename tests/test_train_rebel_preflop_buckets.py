@@ -96,7 +96,6 @@ def test_config_rebel_preflop_buckets_resolves() -> None:
     assert cfg.preflop_buckets.cfr_iterations == 300
     assert cfg.preflop_buckets.actions_12_15_cfr_batch_size == 8192
     assert cfg.preflop_buckets.actions_8_11_cfr_batch_size == 2048
-    assert cfg.preflop_buckets.actions_4_7_cfr_batch_size == 2048
     assert cfg.preflop_buckets.actions_12_15_epochs == 10
     assert cfg.preflop_buckets.compile == "static"
     assert cfg.preflop_buckets.actions_12_15_depth == 7
@@ -133,7 +132,6 @@ def test_preflop_hydra_cli_dispatches_train_specialists(monkeypatch, tmp_path) -
     cfg.preflop_buckets.train_bucket = "actions_12_15"
     cfg.preflop_buckets.cfr_batch_size = 17
     cfg.preflop_buckets.actions_12_15_cfr_batch_size = 9
-    cfg.preflop_buckets.actions_4_7_cfr_batch_size = 11
 
     preflop_cli.train_rebel_preflop_buckets(cfg)
 
@@ -148,7 +146,6 @@ def test_preflop_hydra_cli_dispatches_train_specialists(monkeypatch, tmp_path) -
     assert args.train_bucket == "actions_12_15"
     assert args.cfr_batch_size == 17
     assert args.actions_12_15_cfr_batch_size == 9
-    assert args.actions_4_7_cfr_batch_size == 11
     assert args.snapshot_interval_steps == 50
     assert args.use_wandb is False
     assert args.wandb_project == "preflop-project"
