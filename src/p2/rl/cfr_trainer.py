@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import time
 from contextlib import nullcontext
 from dataclasses import asdict, fields
 from typing import Any
@@ -259,11 +260,11 @@ class RebelCFRTrainer:
     def __init__(
         self, cfg: Config, device: torch.device, pregeneration_only: bool = False
     ) -> None:
-        debug_init = bool(os.environ.get("P2_DEBUG_TRAINER_INIT"))
+        init_t0 = time.perf_counter()
 
         def init_trace(message: str) -> None:
-            if debug_init:
-                print(f"[RebelCFRTrainer:init] {message}", flush=True)
+            elapsed = time.perf_counter() - init_t0
+            print(f"[RebelCFRTrainer:init +{elapsed:.1f}s] {message}", flush=True)
 
         init_trace("start")
         self.cfg = cfg
@@ -631,7 +632,9 @@ class RebelCFRTrainer:
                 warmup=cfg.data.warmup_self_play_roots,
                 root_sampler=root_sampler,
                 store_replay=not pregeneration_only,
-                sample_continuations=not pregeneration_only,
+                sample_continuations=(
+                    root_sampler is None and not pregeneration_only
+                ),
                 record_batch_diag=not pregeneration_only,
             )
             init_trace("data generator ready")
@@ -639,6 +642,7 @@ class RebelCFRTrainer:
                 self.data_source = None
                 self.aggression_analyzer = AggressionAnalyzer(device=self.device)
                 self.trueskill_tracker = None
+                init_trace("ready")
                 return
             if self.value_buffer is None or self.policy_buffer is None:
                 raise RuntimeError("Live training requires replay buffers")
@@ -702,6 +706,7 @@ class RebelCFRTrainer:
                 generator=self.rng,
                 trainer_evaluator=self.cfr_evaluator,
             )
+        init_trace("ready")
 
     def _model_autocast(self):
         if self.device.type == "cuda":
@@ -2780,11 +2785,16 @@ class RebelCFRTrainer:
     def _update_model(
         self, step: int
     ) -> dict[str, int | float | torch.Tensor | dict[str, int | float]]:
-        debug = bool(os.environ.get("P2_DEBUG_TRAINER_INIT"))
+        first_step_progress = step == 0
+        progress_t0 = time.perf_counter()
 
         def trace(message: str) -> None:
-            if debug:
-                print(f"[RebelCFRTrainer:update] {message}", flush=True)
+            if first_step_progress:
+                elapsed = time.perf_counter() - progress_t0
+                print(
+                    f"[RebelCFRTrainer:first-step +{elapsed:.1f}s] {message}",
+                    flush=True,
+                )
 
         trace(f"step {step} prepare_step start")
         fresh_value_batch, fresh_policy_batch = self.data_source.prepare_step(step)
@@ -2866,9 +2876,16 @@ class RebelCFRTrainer:
         }
         stratify = self._get_stratify_streets(step)
 
+        trace(
+            "train updates start "
+            f"episodes={episodes} supervisions={supervisions} "
+            f"policy_extra={self.policy_extra_updates_per_step}"
+        )
         self.model.train()
         for episode in range(episodes):
-            trace(f"episode {episode} sample batches start")
+            log_episode = episode == 0 or episode == episodes - 1
+            if log_episode:
+                trace(f"episode {episode} sample batches start")
             value_latent, policy_latent, permuted_latent = None, None, None
             # TODO: think about how to interleave these/ratio in a smarter way.
             # Might need to use different sizes for the two batches.
@@ -2881,7 +2898,8 @@ class RebelCFRTrainer:
             policy_batch = self.data_source.sample_policy(
                 self.batch_size, stratify_streets=policy_stratify
             ).to(self.device)
-            trace(f"episode {episode} sample batches done")
+            if log_episode:
+                trace(f"episode {episode} sample batches done")
 
             # Sample suit permutations and apply to features/targets together.
             suit_permutations_idxs = torch.randint(
@@ -2900,8 +2918,14 @@ class RebelCFRTrainer:
                 num_players=self.num_players,
             )
 
-            for _ in range(supervisions):
-                trace(f"episode {episode} supervise start")
+            for supervision_idx in range(supervisions):
+                log_supervision = log_episode and (
+                    supervision_idx == 0 or supervision_idx == supervisions - 1
+                )
+                if log_supervision:
+                    trace(
+                        f"episode {episode} supervise {supervision_idx} start"
+                    )
                 (
                     episode_stats,
                     permuted_value_output,
@@ -2920,7 +2944,8 @@ class RebelCFRTrainer:
                     policy_latent,
                     permuted_latent,
                 )
-                trace(f"episode {episode} supervise done")
+                if log_supervision:
+                    trace(f"episode {episode} supervise {supervision_idx} done")
                 value_latent = (
                     value_output_orig.latent.detach()
                     if value_output_orig.latent is not None
@@ -2968,7 +2993,12 @@ class RebelCFRTrainer:
         policy_stratify = (
             None if self.cfg.train.policy_depth_stratify_sample else stratify
         )
-        for _ in range(self.policy_extra_updates_per_step):
+        for extra_idx in range(self.policy_extra_updates_per_step):
+            log_extra = (
+                extra_idx == 0 or extra_idx == self.policy_extra_updates_per_step - 1
+            )
+            if log_extra:
+                trace(f"extra policy update {extra_idx} start")
             extra_policy_batch = self.data_source.sample_policy(
                 self.policy_extra_batch_size,
                 stratify_streets=policy_stratify,
@@ -2977,6 +3007,8 @@ class RebelCFRTrainer:
             for k, acc in extra_tensor_stats.items():
                 v = extra_stats[k]
                 extra_tensor_stats[k] = v if acc is None else acc + v
+            if log_extra:
+                trace(f"extra policy update {extra_idx} done")
 
         # Single host sync to fold the device-side accumulators into the
         # float-keyed step_stats dict that _compute_metrics expects.
@@ -3003,7 +3035,9 @@ class RebelCFRTrainer:
         for k in extra_tensor_stats:
             step_stats.setdefault(f"extra_{k}", 0.0)
 
+        trace("sync inference model start")
         self._sync_inference_model()
+        trace("sync inference model done")
 
         if (
             metric_value_batch is None
@@ -3016,6 +3050,7 @@ class RebelCFRTrainer:
             or metric_policy_kl_all is None
         ):
             raise RuntimeError("No training batch was available for metric reporting.")
+        trace("metrics start")
         metrics = self._compute_metrics(
             episodes,
             updates,
@@ -3034,6 +3069,7 @@ class RebelCFRTrainer:
                 streamed_metric_state
             ),
         )
+        trace("step complete")
 
         return metrics
 

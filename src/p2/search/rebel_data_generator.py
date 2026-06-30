@@ -1,5 +1,5 @@
 from collections.abc import Callable
-import os
+import time
 
 import torch
 
@@ -70,6 +70,7 @@ class RebelDataGenerator:
         initial_pbs = self._sample_roots(self.target_batch_size)
         self.current_pbs = initial_pbs
         self.last_extra = 0
+        self._first_generate_progress_pending = True
         if warmup and self.root_sampler is None:
             self._warmup_current_pbs()
 
@@ -276,11 +277,18 @@ class RebelDataGenerator:
         return_policy_batch: bool = True,
         max_return_policy_samples: int | None = None,
     ) -> tuple[RebelBatch | None, RebelBatch | None]:
-        debug = bool(os.environ.get("P2_DEBUG_TRAINER_INIT"))
+        log_progress = self._first_generate_progress_pending
+        self._first_generate_progress_pending = False
+        progress_t0 = time.perf_counter()
 
         def trace(message: str) -> None:
-            if debug:
-                print(f"[RebelDataGenerator] {message}", flush=True)
+            if log_progress:
+                elapsed = time.perf_counter() - progress_t0
+                print(
+                    f"[RebelDataGenerator:first-generate +{elapsed:.1f}s] "
+                    f"{message}",
+                    flush=True,
+                )
 
         target_batch_size = self.target_batch_size
         collected = self.last_extra
