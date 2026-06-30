@@ -1,20 +1,20 @@
 ## Directory summary
-Hydra configuration files for current ReBeL CFR training, staged postflop curriculum, preflop bucket stages, postflop pregeneration/evaluation, and standalone all-in equity training. ReBeL entry points default to explicit `config_rebel_*` files; `config_transformer.yaml` remains only for the legacy PPO/K-best trainer.
+Hydra configuration files for ReBeL training, staged curricula, preflop buckets, postflop pregeneration/evaluation, and legacy transformer PPO/K-best training.
 
 ### Source files
 - `README.md`: Configuration catalog, usage examples, and parameter reference.
 - `config_transformer.yaml`: Legacy transformer PPO/K-best training configuration for `train_kbest.py`.
-- `config_rebel_cfr.yaml`: Main ReBeL CFR training configuration, including data mode/root-belief sampler selection, per-depth sparse search bet schedule, warm-start seed tuning, CFR/predictive-CFR variant selection, actor-backup consistency loss defaults, and preflop all-in table path.
-- `rebel_hp_trials.yaml`: YAML trial specifications for the pregenerated ReBeL HP runner; each trial's `params` mapping can contain scalar values or arrays that expand as a local grid.
-- `config_rebel_curriculum_river.yaml`: Initial postflop curriculum config for the implemented live random-river `S_river` train stage.
-- `config_rebel_curriculum_postflop.yaml`: Full fixed-schedule postflop curriculum config that runs river, turn, flop, and compact preflop-handoff substeps in one ordered orchestrator pass with per-train-stage live root overrides, S_i policy warm-starts from S_{i+1}, tuned 0.08 linear LR / 1024 batch distillation overrides, compact `E_preflop` model overrides and validation.
-- `config_rebel_curriculum_turn.yaml`: Postflop curriculum config for value-only `distill_E_turn` from promoted `S_river`, then live random-turn `S_turn` training with policy initialized from `S_river`, `E_turn` closing leaves, and tuned 0.08 linear LR / 1024 batch distillation overrides.
-- `config_rebel_curriculum_flop.yaml`: Postflop curriculum config for value-only `distill_E_flop` from promoted `S_turn`, live random-flop `S_flop` training with policy initialized from `S_turn` and `E_flop` closing leaves, then compact value-only `distill_E_preflop` with 169-hand model overrides and validation, and tuned 0.08 linear LR / 1024 batch distillation overrides.
-- `config_rebel_pregenerate_postflop.yaml`: Bounded postflop solved-example pregeneration config for HP sweeps/holdouts using live random postflop CFR roots, sparse-fused search by default, and optional compressed float storage.
-- `config_rebel_evaluate_value_loss.yaml`: Hydra-first value-loss evaluation config; `resume_from` supplies the checkpoint and `validation_set.dataset` supplies the solved dataset while model/runtime settings come from current config.
-- `config_rebel_postflop_hybrid_holdout.yaml`: Live random postflop training config wired to a fixed bounded pregenerated holdout dataset for fresh validation metrics.
-- `config_rebel_preflop_buckets.yaml`: Hydra-first preflop backward-induction bucket specialist/distillation config; checkpoints provide weights only while run settings live under `preflop_buckets`, including bucket-aware root-belief sampler settings, with top-level `resume_from` for in-progress specialist resume.
+- `config_rebel_cfr.yaml`: Main ReBeL CFR training configuration.
+- `config_rebel_curriculum_flop.yaml`: Flop-stage postflop curriculum configuration.
+- `config_rebel_curriculum_postflop.yaml`: Full postflop curriculum orchestration configuration.
+- `config_rebel_curriculum_river.yaml`: River-stage postflop curriculum configuration.
+- `config_rebel_curriculum_turn.yaml`: Turn-stage postflop curriculum configuration.
 - `config_rebel_debug.yaml`: Faster ReBeL debug configuration.
+- `config_rebel_evaluate_value_loss.yaml`: Hydra-first value-loss evaluation configuration.
+- `config_rebel_postflop_hybrid_holdout.yaml`: Postflop hybrid live/holdout training configuration.
+- `config_rebel_preflop_buckets.yaml`: Preflop backward-induction bucket training configuration.
+- `config_rebel_pregenerate_postflop.yaml`: Bounded postflop solved-example pregeneration configuration.
+- `rebel_hp_trials.yaml`: Trial specifications for pregenerated ReBeL hyperparameter runs.
 
 ### Subdirectories
 - `allin/`: Hydra defaults for standalone preflop all-in equity model training.

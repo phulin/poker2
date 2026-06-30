@@ -2,29 +2,83 @@
 Python unit and integration tests for environments, rules, models, training utilities, CFR/search, ReBeL data generation, and RL support.
 
 ### Source files
-- `test_*env*.py`, `test_rules*.py`, `test_card_utils.py`, `test_legal_actions.py`, `test_winner_reward_sign.py`: Environment, rule, reward, and card-combo coverage.
-- `test_multiway_env.py`: Scalar multiway NLHE, vectorized PBS, and public-state parity coverage.
-- `test_triton_pbs_env.py`: CUDA/Triton PBS parity against the PyTorch PBSEnv implementation.
-- `test_showdown_package.py`: Package export and explicit triangle-weight checks for reusable showdown evaluators.
-- `test_showdown_per_hand_equity.py`: Per-hand exact, A+xB, tiered approximation, and blocked-hand showdown equity vector coverage.
-- `test_allin_equity_model.py`: Preflop all-in random batch generation, browser-friendly LeakyReLU/RMSNorm model shape checks, pregenerated dataset helpers, and random/exhaustive all-in target sampler smoke coverage.
-- `test_allin_precompute.py`: Compact 169-class all-in precompute helpers, covering combo-table 2-player collapse and board-streamed 2/3-player class share tensors against brute-force class tuple checks.
-- `test_preflop_169.py`: Compact 169-hand preflop mapping, expand/collapse, live-aware/multiplicity-weighted compact loss, and compact Better preflop model shape coverage.
-- `test_*cfr*.py`, `test_allin_payoff.py`, `test_chance_node_helper.py`, `test_rebel_data_generator.py`, `test_rebel_pipeline.py`, `test_sparse_cfr_evaluator.py`, `test_preflop_fused_hotloop_kernels.py`, `test_high_exploitability_save.py`: Sparse CFR/search, compact non-fused and fused preflop evaluator helpers, all-in payoff kernels, and ReBeL pipeline coverage.
-- `test_end_of_street_distillation.py`: End-of-street `E_X` distillation target-batch coverage for pre-chance features, compact `E_preflop` batches, and chance-mode validation.
-- `test_postflop_spot_sampler.py`: Random postflop public-root sampler invariants for flop/turn/river street-start and legal-prefix roots, closed-street chance-target roots with configured 1326-combo and compact preflop belief samplers, board texture stratification, randomized board-legal beliefs, and conservative pot/SPR templates.
-- `test_preflop_belief_sampler.py`: Preflop belief sampler coverage for 2p/6p and native 169-class/1326-combo output shapes, normalization, observed cascade max/AA/entropy quantile parity, entropy CDF/uniform-tail checks, CUDA combo-smoke coverage, and broad-to-hard-tail coverage.
-- `test_rebel_data_source.py`: ReBeL data-source abstraction coverage for live generator-backed, pregenerated solved-dataset-backed, and hybrid live-plus-holdout training data, including pregenerated step windows, shuffled sampling, direct dataset sampling, and checkpoint manifest-state validation.
-- `test_rebel_solved_dataset.py`: Tensor-only solved ReBeL dataset serialization, manifest validation and street/depth/target-source/root-source plus leaf-source coverage counts, wrapped reads, random sampling, compressed float storage, and async prefetch coverage.
-- `test_pregenerate_postflop_rebel.py`: Bounded postflop pregeneration coverage for live-mode validation, trimmed solved-batch writer calls, per-row root-source tags, root-street metadata, typed feature-encoder metadata, quality metadata, value-only checkpoint loading, and closing-leaf/distillation-source checkpoint provenance.
-- `test_train_rebel_curriculum.py`: Curriculum stage orchestration coverage for train/distill substep routing, per-substep checkpoint dirs, promotion state, metadata, configured belief-sampler data overrides, S_i policy warm-starts, value-only E_i ownership, and validated substep-aware resume.
-- `test_evaluate_rebel_value_loss.py`: Hydra-first ReBeL value-loss evaluator coverage, including current-config ownership and ignoring checkpoint-embedded legacy config.
-- `test_model_*.py`, `test_transformer_model.py`, `test_mlp_features.py`, `test_structured_embedding_data.py`, `test_kv_caching.py`, `test_encoders.py`, `test_activation_utils.py`, `test_state_encoder_perspective.py`: Model, encoder, and feature coverage.
-- `test_street_model_registry.py`: Runtime street-to-net dispatch coverage for promoted postflop model registries.
-- `test_losses.py`, `test_rl.py`, `test_rebel_replay.py`, `test_rebel_batch.py`, `test_vectorized_replay.py`, `test_kbest*.py`, `test_dred_pool.py`, `test_kmedoids.py`, `test_elo_calculator.py`: RL, replay, loss, opponent pool, and rating coverage.
-- `test_rebel_loop.py`: Shared ReBeL loop runner control-flow coverage for checkpoints, stats, optional preflop analyzer printing, final save, and TrueSkill snapshots without invoking real CFR.
-- `test_trueskill_tracker.py`: TrueSkill snapshot evaluator opponent sampling, game-budget sizing, and public-belief river payoff batching coverage.
-- `test_ema*.py`, `test_model_context.py`, `test_model_utils.py`, `test_training_utils.py`, `test_trainer_config_build.py`, `test_schedules.py`, `test_mps_autocast.py`, `test_alignment.py`, `test_bins_configurable.py`: Utility, config, schedule, and platform coverage.
+- `test_action_schedule.py`: CFR action schedule tests.
+- `test_activation_utils.py`: Activation utility tests.
+- `test_aggression_analyzer.py`: Aggression analyzer tests.
+- `test_alignment.py`: Alignment helper tests.
+- `test_allin_equity_model.py`: All-in equity model tests.
+- `test_allin_payoff.py`: All-in payoff tests.
+- `test_allin_precompute.py`: All-in precompute tests.
+- `test_analyze_tensor_env.py`: Tensor-environment analyzer tests.
+- `test_bins_configurable.py`: Configurable bet-bin tests.
+- `test_card_utils.py`: Card and combo utility tests.
+- `test_cfr_manager.py`: CFR manager tests.
+- `test_chance_node_helper.py`: Chance-node helper tests.
+- `test_dcfr.py`: DCFR utility tests.
+- `test_dred_pool.py`: DReD opponent-pool tests.
+- `test_elo_calculator.py`: Elo calculator tests.
+- `test_ema.py`: EMA utility tests.
+- `test_ema_helper.py`: EMA helper tests.
+- `test_encoders.py`: Encoder tests.
+- `test_end_of_street_distillation.py`: End-of-street distillation tests.
+- `test_env_helpers.py`: Environment helper tests.
+- `test_env_rewards.py`: Environment reward tests.
+- `test_env_round_closure.py`: Environment round-closure tests.
+- `test_evaluate_rebel_value_loss.py`: Value-loss evaluator tests.
+- `test_fused_cfr_triton.py`: Fused CFR Triton tests.
+- `test_high_exploitability_save.py`: High-exploitability artifact tests.
+- `test_kbest.py`: K-best trainer tests.
+- `test_kbest_pool.py`: K-best opponent-pool tests.
+- `test_kmedoids.py`: K-medoids tests.
+- `test_kv_caching.py`: Transformer KV-cache tests.
+- `test_legal_actions.py`: Legal-action tests.
+- `test_losses.py`: RL and ReBeL loss tests.
+- `test_mlp_features.py`: MLP feature tests.
+- `test_model_context.py`: Model context-manager tests.
+- `test_model_forward.py`: Model forward-pass tests.
+- `test_model_utils.py`: Model utility tests.
+- `test_mps_autocast.py`: MPS autocast tests.
+- `test_multiway_env.py`: Multiway environment tests.
+- `test_optimizers.py`: Optimizer tests.
+- `test_postflop_spot_sampler.py`: Postflop spot sampler tests.
+- `test_preflop_169.py`: Compact 169-hand preflop tests.
+- `test_preflop_backward_induction_config.py`: Preflop backward-induction config tests.
+- `test_preflop_belief_sampler.py`: Preflop belief sampler tests.
+- `test_preflop_fused_hotloop_kernels.py`: Preflop fused hot-loop kernel tests.
+- `test_preflop_live_pair_distillation.py`: Preflop live-pair distillation tests.
+- `test_preflop_token_mixer_mpk.py`: Preflop token mixer MPK tests.
+- `test_pregenerate_postflop_rebel.py`: Postflop pregeneration tests.
+- `test_rebel_batch.py`: ReBeL batch tests.
+- `test_rebel_config_load.py`: ReBeL config-loading tests.
+- `test_rebel_data_generator.py`: ReBeL data generator tests.
+- `test_rebel_data_source.py`: ReBeL data-source tests.
+- `test_rebel_loop.py`: ReBeL loop tests.
+- `test_rebel_pipeline.py`: ReBeL pipeline tests.
+- `test_rebel_preflop_analyzer.py`: ReBeL preflop analyzer tests.
+- `test_rebel_replay.py`: ReBeL replay-buffer tests.
+- `test_rebel_solved_dataset.py`: ReBeL solved-dataset tests.
+- `test_rl.py`: Core RL tests.
+- `test_rules.py`: PyTorch rules tests.
+- `test_rules_triton.py`: Triton rules tests.
+- `test_schedules.py`: Schedule tests.
+- `test_showdown_package.py`: Showdown package tests.
+- `test_showdown_per_hand_equity.py`: Per-hand showdown equity tests.
+- `test_sparse_cfr_evaluator.py`: Sparse CFR evaluator tests.
+- `test_state_encoder_perspective.py`: State encoder perspective tests.
+- `test_street_model_registry.py`: Street model registry tests.
+- `test_structured_config_refactor.py`: Structured config refactor tests.
+- `test_structured_embedding_data.py`: Structured embedding data tests.
+- `test_tensor_env.py`: Tensor environment tests.
+- `test_train_rebel_curriculum.py`: ReBeL curriculum training tests.
+- `test_train_rebel_preflop_buckets.py`: Preflop bucket training tests.
+- `test_trainer_config_build.py`: Trainer config build tests.
+- `test_training_run.py`: Training runtime tests.
+- `test_training_utils.py`: Training utility tests.
+- `test_transformer_model.py`: Transformer model tests.
+- `test_triton_pbs_env.py`: Triton PBSEnv tests.
+- `test_trueskill_tracker.py`: TrueSkill tracker tests.
+- `test_vectorized_replay.py`: Vectorized replay tests.
+- `test_winner_reward_sign.py`: Winner reward sign tests.
 
 ### Subdirectories
 There are no child source directories.

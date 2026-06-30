@@ -3,7 +3,7 @@ Action encoding utilities that map between abstract betting bins and concrete HU
 
 ### Source files
 - `__init__.py`: Package marker.
-- `action_mapping.py`: Converts bet bins to actions, maps actions back to bins, and builds legal-action masks.
+- `action_mapping.py`: Action-bin mapping and legal-mask helpers.
 
 ### Subdirectories
 There are no child source directories.

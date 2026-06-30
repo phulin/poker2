@@ -1,8 +1,8 @@
 ## Directory summary
-WGSL modules and layout constants for GPU-resident HUNL public-state replay, legal-action generation, terminal values, and BetterFFN feature encoding.
+WGSL modules and layout constants for GPU-resident HUNL public-state replay.
 
 ### Source files
-- `layout.ts`: Packed state offsets, lightweight WGSL layout prelude, and shared WGSL state helper functions.
-- `stateMachine.ts`: Legal-mask, step, child-state, compaction, and value-scatter kernels.
+- `layout.ts`: Packed state offsets and shared WGSL layout helpers.
+- `stateMachine.ts`: Public-state transition kernels.
 - `terminal.ts`: Terminal rank and payoff-value kernels.
 - `modelFeatures.ts`: Public-state to BetterFFN feature encoding kernel.

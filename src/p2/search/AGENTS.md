@@ -2,24 +2,24 @@
 CFR/DCFR search, public-belief state handling, ReBeL data generation, evaluator orchestration, chance-node logic, and fused Triton kernels.
 
 ### Source files
-- `cfr_evaluator.py`: PublicBeliefState, exploitability stats, hand-rank data, evaluator interface, shared split policy/value model dispatch, optional closing-leaf value model routing, hand-dimension-aware sparse helpers, folded/all-in statistics export for supervised batches, sparse warm-start prior/regret extraction helpers, sparse-only delayed DCFR-hybrid PCFR/SAPCFR predictive regret extraction, depth-filtered root value-target export, actor-backup child-feature statistics for auxiliary value consistency, and per-root leaf target-source provenance.
-- `allin_payoff.py`: Preflop/flop/turn all-in call payoff table generation, lookup, eager references, and fused Triton writeback kernels, including grouped turn-board payoff dot writeback.
-- `dcfr.py`: Standalone DCFR utilities and regret matching.
-- `end_of_street_distillation.py`: Builds value-only end-of-street distillation batches by evaluating frozen next-street value nets through chance-node target helpers, with compact 169-hand `E_preflop` target collapse/expansion at the `S_flop` boundary.
-- `preflop_live_pair_distillation.py`: Builds value-only 6-player compact `E_preflop` distillation batches at preflop street closure by enumerating uniform unordered live-player pairs, projecting each pair to the existing 2-player compact `E_preflop` target model, and averaging 2-player targets per participating player while leaving nonparticipants on stack-delta baselines.
-- `preflop_belief_sampler.py`: Preflop belief samplers for 2+ players with native 169-class or 1326-combo hand dimensions, including observed-cascade max/AA/entropy histogram matching, empirical temperature/noise augmentation, broad random priors, top-k ranges, and hard-tail coverage modes for solver-query training distributions.
+- `allin_payoff.py`: All-in call payoff lookup and writeback helpers.
+- `cfr_evaluator.py`: Shared CFR evaluator types, interfaces, and training-data export logic.
 - `cfr_manager.py`: High-level CFRManager orchestration.
-- `chance_node_helper.py`: Chance-node expansion and board/deck helper logic, including sampled raw-flop, weighted canonical-flop, and single-card post-chance value-head evaluation for street-value targets.
-- `postflop_spot_sampler.py`: Random legal postflop public-root samplers for heads-up flop/turn/river street-start and legal-prefix roots, closed-street chance-target roots with configured 1326-combo or compact 169 pre-chance belief samplers, texture-stratified boards, tensorized strength-ordered and named-shape board-legal belief mixtures, and conservative pot/SPR templates.
-- `rebel_data_generator.py`: ReBeL public-belief training data generator with replay-buffer insertion, continuation sampling, and batched diagnostic syncing.
-- `rebel_data_source.py`: Data-source boundary for ReBeL trainer batches, wrapping live CFR generation, bounded pregenerated solved datasets, or hybrid live-training-plus-holdout metrics through replay-buffer or direct dataset sampling with step-windowed dataset selection, optional shuffled row sampling, and checkpointed cursor plus manifest-state validation.
-- `rebel_solved_dataset.py`: Tensor-only bounded solved-example dataset streaming writer/reader for postflop value and policy `RebelBatch` shards with manifest validation, street/depth/target-source/root-source and leaf-source coverage metadata, normalized included-street names, wrapped sampling, optional compressed float storage, and optional pinned/async shard prefetch.
-- `sparse_cfr_evaluator.py`: Sparse CFR evaluator implementation used as the reference path, including split policy/value encoder setup, configurable warm-start prior controls, PCFR/SAPCFR enablement, and initial PBSEnv-backed multiway tree construction.
-- `preflop_sparse_cfr_evaluator.py`: Guarded compact-only non-fused sparse CFR boundary for the `S_preflop`/`S_0` arbitrary preflop public-state model, requiring PBSEnv street-0 roots, 169-hand policy/value models, exact class-level blocker projection for class-constant strategies, folded-player marginal action weighting in EV backups, generation-time mid-tree continuation-root sampling, and native 169 preflop all-in call leaf routing by live-player count with cached grouped entry-belief gathers.
-- `fused_preflop_sparse_cfr_evaluator.py`: CUDA/Triton-backed compact-only preflop sparse evaluator boundary that uses 169-hand sparse tree tensors, exact class-level blocker projection for EV/regret math, folded-player marginal action weighting in fused EV backups, native 169 preflop all-in call values, compact fused regret/DCFR updates, graph-enabled preflop CFR iteration scheduling, fused policy/reach/belief propagation, deferred average-value accumulation for the default non-CFR-AVG multiway loop, and generic fused average-policy/value/model-writeback kernels parameterized by hand dimension.
-- `fused_sparse_cfr_evaluator.py`: Sparse evaluator with fused operations, persistent-buffer subgame construction, graph-friendly paths, BetterFFN static leaf-feature caching, split value-model leaf evaluation, combined leaf-belief gather paths, fused DCFR-hybrid SAPCFR policy extraction, and fused all-in terminal payoff writeback.
-- `fused_cfr_triton.py`: Triton kernels and graph runner utilities for fused DCFR and SAPDCFR regret updates, compact preflop multiway regret and reach/belief propagation, showdown EV, and related reductions.
-- `subgame_constructor_triton.py`: Triton kernels for fused sparse same-street subgame expansion, child-row construction, constructor masks, root hand legality, and init-buffer writes.
+- `chance_node_helper.py`: Chance-node expansion and chance-target evaluation helpers.
+- `dcfr.py`: Standalone DCFR utilities and regret matching.
+- `end_of_street_distillation.py`: End-of-street value distillation batch builder.
+- `fused_cfr_triton.py`: Triton kernels and graph utilities for fused CFR.
+- `fused_preflop_sparse_cfr_evaluator.py`: CUDA/Triton compact preflop sparse CFR evaluator.
+- `fused_sparse_cfr_evaluator.py`: Fused sparse CFR evaluator implementation.
+- `postflop_spot_sampler.py`: Postflop public-root sampler utilities.
+- `preflop_belief_sampler.py`: Preflop public-belief sampler utilities.
+- `preflop_live_pair_distillation.py`: Live-pair E-preflop distillation batch builder.
+- `preflop_sparse_cfr_evaluator.py`: Compact preflop sparse CFR evaluator.
+- `rebel_data_generator.py`: ReBeL public-belief training data generator.
+- `rebel_data_source.py`: Data-source boundary for ReBeL trainer batches.
+- `rebel_solved_dataset.py`: Tensor-only solved-example dataset reader/writer.
+- `sparse_cfr_evaluator.py`: Reference sparse CFR evaluator implementation.
+- `subgame_constructor_triton.py`: Triton kernels for sparse subgame construction.
 
 ### Subdirectories
 There are no child source directories.

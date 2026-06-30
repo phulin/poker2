@@ -28,4 +28,4 @@ This repository trains and evaluates neural-network-based heads-up no-limit Texa
 - `website/`: TypeScript/WebGPU evaluator and browser demo for exported BetterFFN CFR inference.
 - `docs/`: Architecture plans and design notes for cross-cutting changes.
 - `outputs/`, `wandb/`: Hydra and Weights & Biases run artifacts; do not edit as source.
-- `.agents/`, `.codex/`: Local agent/tooling metadata.
+- `.codex/`: Local agent/tooling metadata.
