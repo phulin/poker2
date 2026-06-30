@@ -23,8 +23,6 @@ from p2.search.fused_cfr_triton import (
     fused_accumulate_weighted_values_,
     fused_avg_values_multiway_,
     fused_compact_regret_dcfr_update_multiway_with_tensors_,
-    fused_hu_closing_postprocess_writeback_multiway_,
-    fused_hu_closing_selected_beliefs_writeback_multiway_,
     fused_model_values_postprocess_writeback_multiway_,
     fused_model_values_writeback_multiway_,
     fused_parent_sum_divide_,
@@ -40,9 +38,72 @@ from p2.search.fused_cfr_triton import (
     preflop169_unblocked_rank_stats_out_,
     select_actor_beliefs_and_marginal_policy_multiway_triton_out_,
 )
-from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+from p2.search.fused_sparse_cfr_evaluator import (
+    FusedSparseCFREvaluator,
+    _direct_torch_compile_kwargs,
+)
 from p2.search.preflop_sparse_cfr_evaluator import PreflopSparseCFREvaluator
 from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
+
+
+def _preflop_model_batch_segments(
+    num_rows: int,
+    batch_size: int,
+) -> tuple[tuple[int, int, int], ...]:
+    """Return ``(start, real_rows, static_rows)`` model-eval segments.
+
+    Full segments use ``batch_size``. The remainder is decomposed into
+    ``batch_size / 2``, ``/ 4``, and ``/ 8`` segments, with only the final
+    segment padded when needed.
+    """
+    rows = max(0, int(num_rows))
+    batch = max(1, int(batch_size))
+    if rows == 0:
+        return ()
+
+    segments: list[tuple[int, int, int]] = []
+    start = 0
+    while rows - start >= batch:
+        segments.append((start, batch, batch))
+        start += batch
+
+    remaining = rows - start
+    if remaining <= 0:
+        return tuple(segments)
+
+    tail_sizes = tuple(
+        size
+        for size in (batch // 2, batch // 4, batch // 8)
+        if 0 < size < batch
+    )
+    if not tail_sizes:
+        segments.append((start, remaining, batch))
+        return tuple(segments)
+
+    def tail_plan(rows_left: int) -> tuple[tuple[int, int], ...]:
+        final_options = tuple(
+            ((rows_left, size),)
+            for size in tail_sizes
+            if size >= rows_left
+        )
+        options: list[tuple[tuple[int, int], ...]] = list(final_options)
+        for size in tail_sizes:
+            if rows_left > size:
+                options.append(((size, size),) + tail_plan(rows_left - size))
+        if not options:
+            return ((rows_left, batch),)
+        return min(
+            options,
+            key=lambda option: (
+                sum(static_rows for _real_rows, static_rows in option),
+                len(option),
+            ),
+        )
+
+    for real_rows, static_rows in tail_plan(remaining):
+        segments.append((start, real_rows, static_rows))
+        start += real_rows
+    return tuple(segments)
 
 
 class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
@@ -115,12 +176,16 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_partition_beliefs_cache: dict[
             tuple[int, int, int, int, torch.dtype], torch.Tensor
         ] = {}
+        self._preflop_segment_feature_cache: dict[
+            tuple[int, int, int, int, int, int, torch.dtype],
+            MLPFeatures,
+        ] = {}
         self._preflop_static_model_base_fn_cache: dict[int, tuple[object, bool]] = {}
         self._preflop_static_hand_values_fn_cache: dict[
             int, tuple[object, bool]
         ] = {}
         self._preflop_static_model_base_features_cache: dict[
-            tuple[int, int, int, int, int],
+            tuple[int, int, int, int, int, int],
             torch.Tensor,
         ] = {}
         self._preflop_iteration_schedule_key: tuple[object, ...] | None = None
@@ -149,6 +214,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             self._preflop_partition_node_cache = {}
         if not hasattr(self, "_preflop_partition_beliefs_cache"):
             self._preflop_partition_beliefs_cache = {}
+        if not hasattr(self, "_preflop_segment_feature_cache"):
+            self._preflop_segment_feature_cache = {}
         if not hasattr(self, "_preflop_static_model_base_fn_cache"):
             self._preflop_static_model_base_fn_cache = {}
         if not hasattr(self, "_preflop_static_hand_values_fn_cache"):
@@ -190,6 +257,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_new_street_features = None
         self._preflop_partition_node_cache.clear()
         self._preflop_partition_beliefs_cache.clear()
+        self._preflop_segment_feature_cache.clear()
         self._preflop_static_model_base_fn_cache.clear()
         self._preflop_static_hand_values_fn_cache.clear()
         self._preflop_static_model_base_features_cache.clear()
@@ -600,6 +668,44 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._prepare_preflop_model_feature_tensors()
         self._reset_average_policy_accumulators()
 
+    def _preflop_mixed_street_closing_model_enabled(self) -> bool:
+        if self._model_scope() != "mixed_street":
+            return False
+        closing_model = getattr(self, "closing_leaf_value_model", None)
+        if closing_model is None:
+            return False
+        closing_players = int(
+            getattr(
+                closing_model,
+                "num_players",
+                self.num_players,
+            )
+        )
+        closing_hand_dim = int(
+            getattr(
+                closing_model,
+                "hand_dim",
+                self.hand_dim,
+            )
+        )
+        if closing_players != self.num_players or closing_hand_dim != self.hand_dim:
+            raise ValueError(
+                "fused preflop mixed-street evaluation requires an E-preflop "
+                "closing model with the same compact shape as the evaluator; "
+                f"got num_players={closing_players}, hand_dim={closing_hand_dim}, "
+                f"expected num_players={self.num_players}, hand_dim={self.hand_dim}"
+            )
+        if self.hand_dim != PREFLOP_HANDS:
+            raise ValueError(
+                "fused preflop mixed-street evaluation requires compact "
+                f"{PREFLOP_HANDS}-hand features, got hand_dim={self.hand_dim}"
+            )
+        return True
+
+    def _init_fused_feature_encoders(self) -> None:
+        self._preflop_mixed_street_closing_model_enabled()
+        super()._init_fused_feature_encoders()
+
     def _prepare_preflop_model_feature_tensors(self) -> None:
         if self.model_indices.numel() == 0:
             return
@@ -673,9 +779,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         encoder = self.closing_leaf_value_encoder
         if encoder is None or self.closing_leaf_value_model is None:
             return
-        if self._model_scope() != "mixed_street":
-            return
-        if self._can_project_heads_up_closing_model():
+        if not self._preflop_mixed_street_closing_model_enabled():
             return
 
         self._ensure_model_index_partitions()
@@ -797,6 +901,180 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         features.beliefs = beliefs_out.reshape(flat_shape)
         return features
 
+    def _preflop_cfr_model_batch_size(self) -> int:
+        if os.environ.get("P2_DISABLE_PREFLOP_SEGMENTED_MODEL_EVAL"):
+            return 0
+        raw = os.environ.get("P2_PREFLOP_CFR_MODEL_BATCH_SIZE")
+        if raw is None:
+            raw = getattr(getattr(self.cfg, "search", None), "cfr_model_batch_size", 0)
+        if raw is None:
+            return 0
+        return max(0, int(raw))
+
+    @staticmethod
+    def _narrow_mlp_features(
+        features: MLPFeatures,
+        start: int,
+        rows: int,
+    ) -> MLPFeatures:
+        return MLPFeatures(
+            context=features.context.narrow(0, start, rows),
+            street=features.street.narrow(0, start, rows),
+            to_act=features.to_act.narrow(0, start, rows),
+            board=features.board.narrow(0, start, rows),
+            beliefs=features.beliefs.narrow(0, start, rows),
+            hand_dim=features.hand_dim,
+        )
+
+    def _segmented_mlp_features(
+        self,
+        features: MLPFeatures,
+        *,
+        start: int,
+        real_rows: int,
+        static_rows: int,
+    ) -> MLPFeatures:
+        if real_rows == static_rows:
+            return self._narrow_mlp_features(features, start, real_rows)
+        self._ensure_fused_attrs()
+        key = (
+            int(self._subgame_generation),
+            int(features.context.data_ptr()),
+            int(features.beliefs.data_ptr()),
+            int(start),
+            int(real_rows),
+            int(static_rows),
+            features.beliefs.dtype,
+        )
+        cached = self._preflop_segment_feature_cache.get(key)
+        if (
+            cached is None
+            or cached.context.shape != (static_rows, features.context.shape[1])
+            or cached.street.shape != (static_rows,)
+            or cached.to_act.shape != (static_rows,)
+            or cached.board.shape != (static_rows, features.board.shape[1])
+            or cached.beliefs.shape != (static_rows, features.beliefs.shape[1])
+            or cached.context.device != features.context.device
+            or cached.beliefs.device != features.beliefs.device
+            or cached.context.dtype != features.context.dtype
+            or cached.beliefs.dtype != features.beliefs.dtype
+        ):
+            cached = MLPFeatures(
+                context=features.context.new_empty(
+                    (static_rows, features.context.shape[1])
+                ),
+                street=features.street.new_empty((static_rows,)),
+                to_act=features.to_act.new_empty((static_rows,)),
+                board=features.board.new_empty((static_rows, features.board.shape[1])),
+                beliefs=features.beliefs.new_empty(
+                    (static_rows, features.beliefs.shape[1])
+                ),
+                hand_dim=features.hand_dim,
+            )
+            self._preflop_segment_feature_cache[key] = cached
+
+        src_context = features.context.narrow(0, start, real_rows)
+        src_street = features.street.narrow(0, start, real_rows)
+        src_to_act = features.to_act.narrow(0, start, real_rows)
+        src_board = features.board.narrow(0, start, real_rows)
+        src_beliefs = features.beliefs.narrow(0, start, real_rows)
+        cached.context.narrow(0, 0, real_rows).copy_(src_context)
+        cached.street.narrow(0, 0, real_rows).copy_(src_street)
+        cached.to_act.narrow(0, 0, real_rows).copy_(src_to_act)
+        cached.board.narrow(0, 0, real_rows).copy_(src_board)
+        cached.beliefs.narrow(0, 0, real_rows).copy_(src_beliefs)
+
+        pad_rows = static_rows - real_rows
+        if pad_rows > 0:
+            cached.context.narrow(0, real_rows, pad_rows).copy_(
+                src_context.narrow(0, real_rows - 1, 1).expand(pad_rows, -1)
+            )
+            cached.street.narrow(0, real_rows, pad_rows).copy_(
+                src_street.narrow(0, real_rows - 1, 1).expand(pad_rows)
+            )
+            cached.to_act.narrow(0, real_rows, pad_rows).copy_(
+                src_to_act.narrow(0, real_rows - 1, 1).expand(pad_rows)
+            )
+            cached.board.narrow(0, real_rows, pad_rows).copy_(
+                src_board.narrow(0, real_rows - 1, 1).expand(pad_rows, -1)
+            )
+            cached.beliefs.narrow(0, real_rows, pad_rows).copy_(
+                src_beliefs.narrow(0, real_rows - 1, 1).expand(pad_rows, -1)
+            )
+        return cached
+
+    @staticmethod
+    def _real_feature_beliefs(
+        features: MLPFeatures,
+        real_rows: int,
+    ) -> torch.Tensor:
+        if int(features.beliefs.shape[0]) == int(real_rows):
+            return features.beliefs
+        return features.beliefs.narrow(0, 0, int(real_rows))
+
+    def _prepare_preflop_model_eval_cache(self, value_model) -> None:
+        base_model = getattr(value_model, "_orig_mod", value_model)
+        prepare_eval_cache = getattr(base_model, "prepare_preflop_eval_cache", None)
+        if prepare_eval_cache is not None:
+            prepare_eval_cache()
+
+    def _eval_model_value_chunks(
+        self,
+        value_model,
+        features: MLPFeatures,
+        positions: torch.Tensor,
+        *,
+        batch_size: int,
+        use_pre_head: bool,
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], ...]:
+        segments = _preflop_model_batch_segments(len(features), batch_size)
+        chunks: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        self._prepare_preflop_model_eval_cache(value_model)
+        for start, real_rows, static_rows in segments:
+            segment_features = self._segmented_mlp_features(
+                features,
+                start=start,
+                real_rows=real_rows,
+                static_rows=static_rows,
+            )
+            hand_values, _ = self._eval_model_for_fused_writeback(
+                value_model,
+                segment_features,
+                use_pre_head=use_pre_head,
+                prepare_cache=False,
+            )
+            chunks.append(
+                (
+                    hand_values.narrow(0, 0, real_rows),
+                    positions.narrow(0, start, real_rows),
+                    self._real_feature_beliefs(segment_features, real_rows),
+                )
+            )
+        return tuple(chunks)
+
+    def _writeback_model_value_chunks(
+        self,
+        chunks: tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], ...],
+        *,
+        beliefs_at_model: torch.Tensor,
+        last_attr: str,
+        do_mix: bool,
+        store_last: bool,
+    ) -> bool:
+        wrote_any = False
+        for hand_values, positions, position_beliefs in chunks:
+            self._writeback_model_values_partition(
+                hand_values=hand_values,
+                beliefs_at_model=beliefs_at_model,
+                positions=positions,
+                position_beliefs=position_beliefs,
+                last_attr=last_attr,
+                do_mix=do_mix,
+                store_last=store_last,
+            )
+            wrote_any = True
+        return wrote_any
+
     def _position_slice_if_contiguous(
         self,
         positions: torch.Tensor,
@@ -819,8 +1097,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         self._preflop_partition_position_slices.clear()
         for positions in (
             self.cutoff_model_positions,
-            self.new_street_baseline_model_positions,
-            self.new_street_hu_model_positions,
+            self.new_street_model_positions,
         ):
             bounds = self._position_slice_if_contiguous(positions)
             if bounds is not None:
@@ -828,35 +1105,10 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                     (int(positions.data_ptr()), int(positions.numel()))
                 ] = bounds
 
-    def _update_model_index_partitions(self) -> None:
-        if (
-            self.model_indices.numel() > 0
-            and self._model_scope() == "mixed_street"
-            and getattr(self, "closing_leaf_value_model", None) is not None
-            and self._can_project_heads_up_closing_model()
-        ):
-            new_street_at_model = self.new_street_mask[self.model_indices]
-            live_counts = self._live_counts_for_nodes(self.model_indices)
-            hu_at_model = live_counts >= 2
-            positions = torch.arange(
-                self.model_indices.numel(),
-                dtype=torch.long,
-                device=self.model_indices.device,
-            )
-            ordered_positions = torch.cat(
-                (
-                    positions[~new_street_at_model],
-                    positions[new_street_at_model & ~hu_at_model],
-                    positions[new_street_at_model & hu_at_model],
-                )
-            )
-            order_is_complete = ordered_positions.numel() == self.model_indices.numel()
-            order_changed = not torch.equal(ordered_positions, positions)
-            if order_is_complete and order_changed:
-                self.model_indices = self.model_indices[ordered_positions].contiguous()
-                self._model_leaf_beliefs_valid = False
-                self._model_leaf_slot_key = None
+    def _can_project_heads_up_closing_model(self) -> bool:
+        return False
 
+    def _update_model_index_partitions(self) -> None:
         super()._update_model_index_partitions()
         self._register_partition_position_slices()
 
@@ -1752,6 +2004,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         features: MLPFeatures,
         *,
         use_pre_head: bool,
+        prepare_cache: bool = True,
     ) -> tuple[torch.Tensor, bool]:
         from p2.models.mlp.better_trm import BetterTRM
 
@@ -1759,9 +2012,8 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             model = value_model
             base_model = getattr(model, "_orig_mod", model)
-            prepare_eval_cache = getattr(base_model, "prepare_preflop_eval_cache", None)
-            if prepare_eval_cache is not None:
-                prepare_eval_cache()
+            if prepare_cache:
+                self._prepare_preflop_model_eval_cache(model)
             if type(base_model) is BetterTRM:
                 model_output = model(
                     features,
@@ -1785,7 +2037,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                     ):
                         static_model_base_fn = torch.compile(
                             base_model.static_feature_base,
-                            **self._compile_kwargs,
+                            **_direct_torch_compile_kwargs(self._compile_kwargs),
                         )
                     else:
                         static_model_base_fn = base_model.static_feature_base
@@ -1801,6 +2053,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                 key = (
                     model_key,
                     int(self._subgame_generation),
+                    int(features.context.shape[0]),
                     int(features.context.data_ptr()),
                     int(features.street.data_ptr()),
                     int(features.board.data_ptr()),
@@ -1833,7 +2086,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
                         ):
                             static_hand_values_fn = torch.compile(
                                 static_hand_values_fn,
-                                **self._compile_kwargs,
+                                **_direct_torch_compile_kwargs(self._compile_kwargs),
                             )
                         accepts_hand_value_head = (
                             "value_head"
@@ -2006,218 +2259,6 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             store_last=store_last,
         )
 
-    def _writeback_heads_up_closing_values_partition(
-        self,
-        *,
-        hand_values: torch.Tensor,
-        live_players: torch.Tensor,
-        beliefs_at_model: torch.Tensor,
-        positions: torch.Tensor,
-        selected_beliefs: torch.Tensor | None = None,
-        last_attr: str,
-        do_mix: bool,
-        store_last: bool,
-    ) -> None:
-        if positions.numel() == 0:
-            return
-        node_indices = self._partition_node_indices_for_positions(positions)
-        hand_values = hand_values.contiguous()
-        if store_last:
-            last_shape = (hand_values.shape[0], self.num_players, self.hand_dim)
-            last_out = self._partition_last_values_buffer(
-                last_attr,
-                last_shape,
-                hand_values.dtype,
-            )
-            last_model_values = last_out if do_mix else last_out
-        else:
-            last_shape = (hand_values.shape[0], self.num_players, self.hand_dim)
-            last_out = self.latest_values.new_empty(last_shape)
-            last_model_values = last_out
-        if selected_beliefs is not None:
-            fused_hu_closing_selected_beliefs_writeback_multiway_(
-                hand_values=hand_values,
-                last_model_values=last_model_values,
-                selected_beliefs=selected_beliefs.view(
-                    hand_values.shape[0], 2, self.hand_dim
-                ).contiguous(),
-                node_indices=node_indices,
-                live_players=live_players.contiguous(),
-                latest_values=self.latest_values,
-                last_out=last_out,
-                has_folded=self.env.has_folded.contiguous(),
-                stacks=self.env.stacks.contiguous(),
-                starting_stacks=self.env.starting_stacks.contiguous(),
-                scale=self.env.scale.contiguous(),
-                old_plus_new_over_new=self._t_scalars.mix_onon,
-                old_over_new=self._t_scalars.mix_oon,
-                do_mix=do_mix,
-                store_last=store_last,
-            )
-        else:
-            position_beliefs = self._partition_beliefs_for_positions(
-                beliefs_at_model,
-                positions,
-            )
-            fused_hu_closing_postprocess_writeback_multiway_(
-                hand_values=hand_values,
-                last_model_values=last_model_values,
-                beliefs=position_beliefs,
-                node_indices=node_indices,
-                live_players=live_players.contiguous(),
-                latest_values=self.latest_values,
-                last_out=last_out,
-                has_folded=self.env.has_folded.contiguous(),
-                stacks=self.env.stacks.contiguous(),
-                starting_stacks=self.env.starting_stacks.contiguous(),
-                scale=self.env.scale.contiguous(),
-                old_plus_new_over_new=self._t_scalars.mix_onon,
-                old_over_new=self._t_scalars.mix_oon,
-                do_mix=do_mix,
-                store_last=store_last,
-            )
-
-    def _try_set_model_values_partitioned(
-        self,
-        t: int,
-        beliefs: torch.Tensor,
-        features: MLPFeatures,
-    ) -> bool:
-        if os.environ.get("P2_DISABLE_PREFLOP_PARTITIONED_WRITEBACK"):
-            return False
-        if self._model_scope() != "mixed_street":
-            return False
-        if self.closing_leaf_value_model is None:
-            return False
-
-        self._ensure_model_index_partitions()
-        can_project_heads_up = self._can_project_heads_up_closing_model()
-        if not can_project_heads_up and (
-            self._closing_model_num_players() != self.num_players
-            or self._closing_model_hand_dim() != self.hand_dim
-        ):
-            return False
-        store_last = bool(self.cfr_avg)
-        do_mix = (
-            store_last
-            and t > 1
-            and self._preflop_partition_last_values_valid
-            and not self._average_accumulation_delayed(t)
-        )
-        wrote_any = False
-
-        cutoff_positions = self.cutoff_model_positions
-        if cutoff_positions.numel() > 0:
-            cutoff_features = self._features_for_model_positions(
-                features, cutoff_positions
-            )
-            cutoff_values, _ = self._eval_model_for_fused_writeback(
-                self.value_model,
-                cutoff_features,
-                use_pre_head=False,
-            )
-            self._writeback_model_values_partition(
-                hand_values=cutoff_values,
-                beliefs_at_model=beliefs,
-                positions=cutoff_positions,
-                position_beliefs=cutoff_features.beliefs,
-                last_attr="_preflop_cutoff_last_values_buf",
-                do_mix=do_mix,
-                store_last=store_last,
-            )
-            wrote_any = True
-
-        if not can_project_heads_up:
-            closing_positions = self.new_street_model_positions
-            if closing_positions.numel() > 0:
-                closing_features = self._features_for_model_positions(
-                    features,
-                    closing_positions,
-                    self.closing_leaf_value_encoder,
-                )
-                closing_values, _ = self._eval_model_for_fused_writeback(
-                    self.closing_leaf_value_model,
-                    closing_features,
-                    use_pre_head=False,
-                )
-                self._writeback_model_values_partition(
-                    hand_values=closing_values,
-                    beliefs_at_model=beliefs,
-                    positions=closing_positions,
-                    position_beliefs=closing_features.beliefs,
-                    last_attr="_preflop_new_street_last_values_buf",
-                    do_mix=do_mix,
-                    store_last=store_last,
-                )
-                wrote_any = True
-
-            self._preflop_partition_last_values_valid = bool(store_last and wrote_any)
-            if store_last and wrote_any:
-                marker = getattr(self, "_preflop_partition_last_values_marker", None)
-                if marker is None:
-                    marker = self.latest_values.new_empty(
-                        (0, self.num_players, self.hand_dim)
-                    )
-                    self._preflop_partition_last_values_marker = marker
-                self.last_model_values = marker
-            else:
-                self.last_model_values = None
-            return wrote_any
-
-        baseline_positions = self.new_street_baseline_model_positions
-        if baseline_positions.numel() > 0:
-            baseline_values = self._cached_stack_value_baseline_for_model_positions(
-                baseline_positions,
-                self.hand_dim,
-            )
-            self._writeback_model_values_partition(
-                hand_values=baseline_values,
-                beliefs_at_model=beliefs,
-                positions=baseline_positions,
-                last_attr="_preflop_new_street_baseline_last_values_buf",
-                do_mix=do_mix,
-                store_last=store_last,
-            )
-            wrote_any = True
-
-        hu_positions = self.new_street_hu_model_positions
-        if hu_positions.numel() > 0:
-            closing_features, live_players = self._heads_up_projected_closing_features(
-                features,
-                hu_positions,
-                self.closing_leaf_value_encoder,
-                validate_live=False,
-            )
-            closing_values, _ = self._eval_model_for_fused_writeback(
-                self.closing_leaf_value_model,
-                closing_features,
-                use_pre_head=False,
-            )
-            self._writeback_heads_up_closing_values_partition(
-                hand_values=closing_values,
-                live_players=live_players,
-                beliefs_at_model=beliefs,
-                positions=hu_positions,
-                selected_beliefs=closing_features.beliefs,
-                last_attr="_preflop_new_street_last_values_buf",
-                do_mix=do_mix,
-                store_last=store_last,
-            )
-            wrote_any = True
-
-        self._preflop_partition_last_values_valid = bool(store_last and wrote_any)
-        if store_last and wrote_any:
-            marker = getattr(self, "_preflop_partition_last_values_marker", None)
-            if marker is None:
-                marker = self.latest_values.new_empty(
-                    (0, self.num_players, self.hand_dim)
-                )
-                self._preflop_partition_last_values_marker = marker
-            self.last_model_values = marker
-        else:
-            self.last_model_values = None
-        return wrote_any
-
     def _try_set_model_values_prepared_partitions(
         self,
         t: int,
@@ -2225,16 +2266,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
     ) -> bool:
         if os.environ.get("P2_DISABLE_PREFLOP_PARTITIONED_WRITEBACK"):
             return False
-        if self._model_scope() != "mixed_street":
-            return False
-        if self.closing_leaf_value_model is None:
-            return False
-        if self._can_project_heads_up_closing_model():
-            return False
-        if (
-            self._closing_model_num_players() != self.num_players
-            or self._closing_model_hand_dim() != self.hand_dim
-        ):
+        if not self._preflop_mixed_street_closing_model_enabled():
             return False
 
         store_last = bool(self.cfr_avg)
@@ -2281,6 +2313,52 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         )
         if parallel_result is not None:
             return parallel_result
+
+        segmented_batch_size = (
+            0 if store_last else self._preflop_cfr_model_batch_size()
+        )
+        if segmented_batch_size > 0:
+            if cutoff_features is not None:
+                cutoff_chunks = self._eval_model_value_chunks(
+                    self.value_model,
+                    cutoff_features,
+                    cutoff_positions,
+                    batch_size=segmented_batch_size,
+                    use_pre_head=False,
+                )
+                wrote_any = (
+                    self._writeback_model_value_chunks(
+                        cutoff_chunks,
+                        beliefs_at_model=beliefs_at_model,
+                        last_attr="_preflop_cutoff_last_values_buf",
+                        do_mix=do_mix,
+                        store_last=store_last,
+                    )
+                    or wrote_any
+                )
+
+            if closing_features is not None:
+                closing_chunks = self._eval_model_value_chunks(
+                    self.closing_leaf_value_model,
+                    closing_features,
+                    closing_positions,
+                    batch_size=segmented_batch_size,
+                    use_pre_head=False,
+                )
+                wrote_any = (
+                    self._writeback_model_value_chunks(
+                        closing_chunks,
+                        beliefs_at_model=beliefs_at_model,
+                        last_attr="_preflop_new_street_last_values_buf",
+                        do_mix=do_mix,
+                        store_last=store_last,
+                    )
+                    or wrote_any
+                )
+
+            self._preflop_partition_last_values_valid = False
+            self.last_model_values = None
+            return wrote_any
 
         if cutoff_features is not None:
             cutoff_values, _ = self._eval_model_for_fused_writeback(
@@ -2350,6 +2428,9 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         if cutoff_positions.numel() == 0 or closing_positions.numel() == 0:
             return None
 
+        segmented_batch_size = (
+            0 if store_last else self._preflop_cfr_model_batch_size()
+        )
         side_stream = self._preflop_partition_eval_stream
         if side_stream is None:
             side_stream = torch.cuda.Stream(device=self.device)
@@ -2357,38 +2438,75 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
 
         main_stream = torch.cuda.current_stream(device=self.device)
         side_stream.wait_stream(main_stream)
-        with torch.cuda.stream(side_stream):
-            closing_values, _ = self._eval_model_for_fused_writeback(
-                self.closing_leaf_value_model,
-                closing_features,
+        if segmented_batch_size > 0:
+            with torch.cuda.stream(side_stream):
+                closing_chunks = self._eval_model_value_chunks(
+                    self.closing_leaf_value_model,
+                    closing_features,
+                    closing_positions,
+                    batch_size=segmented_batch_size,
+                    use_pre_head=False,
+                )
+
+            cutoff_chunks = self._eval_model_value_chunks(
+                self.value_model,
+                cutoff_features,
+                cutoff_positions,
+                batch_size=segmented_batch_size,
                 use_pre_head=False,
             )
+            main_stream.wait_stream(side_stream)
 
-        cutoff_values, _ = self._eval_model_for_fused_writeback(
-            self.value_model,
-            cutoff_features,
-            use_pre_head=False,
-        )
-        main_stream.wait_stream(side_stream)
+            wrote_cutoff = self._writeback_model_value_chunks(
+                cutoff_chunks,
+                beliefs_at_model=beliefs_at_model,
+                last_attr="_preflop_cutoff_last_values_buf",
+                do_mix=do_mix,
+                store_last=store_last,
+            )
+            wrote_closing = self._writeback_model_value_chunks(
+                closing_chunks,
+                beliefs_at_model=beliefs_at_model,
+                last_attr="_preflop_new_street_last_values_buf",
+                do_mix=do_mix,
+                store_last=store_last,
+            )
+            self._preflop_partition_last_values_valid = False
+            self.last_model_values = None
+            return bool(wrote_cutoff or wrote_closing)
+        else:
+            with torch.cuda.stream(side_stream):
+                closing_values, _ = self._eval_model_for_fused_writeback(
+                    self.closing_leaf_value_model,
+                    closing_features,
+                    use_pre_head=False,
+                )
 
-        self._writeback_model_values_partition(
-            hand_values=cutoff_values,
-            beliefs_at_model=beliefs,
-            positions=cutoff_positions,
-            position_beliefs=cutoff_features.beliefs,
-            last_attr="_preflop_cutoff_last_values_buf",
-            do_mix=do_mix,
-            store_last=store_last,
-        )
-        self._writeback_model_values_partition(
-            hand_values=closing_values,
-            beliefs_at_model=beliefs,
-            positions=closing_positions,
-            position_beliefs=closing_features.beliefs,
-            last_attr="_preflop_new_street_last_values_buf",
-            do_mix=do_mix,
-            store_last=store_last,
-        )
+            cutoff_values, _ = self._eval_model_for_fused_writeback(
+                self.value_model,
+                cutoff_features,
+                use_pre_head=False,
+            )
+            main_stream.wait_stream(side_stream)
+
+            self._writeback_model_values_partition(
+                hand_values=cutoff_values,
+                beliefs_at_model=beliefs,
+                positions=cutoff_positions,
+                position_beliefs=cutoff_features.beliefs,
+                last_attr="_preflop_cutoff_last_values_buf",
+                do_mix=do_mix,
+                store_last=store_last,
+            )
+            self._writeback_model_values_partition(
+                hand_values=closing_values,
+                beliefs_at_model=beliefs,
+                positions=closing_positions,
+                position_beliefs=closing_features.beliefs,
+                last_attr="_preflop_new_street_last_values_buf",
+                do_mix=do_mix,
+                store_last=store_last,
+            )
 
         self._preflop_partition_last_values_valid = bool(store_last)
         if store_last:
@@ -2410,14 +2528,6 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
         features: MLPFeatures,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         self._ensure_fused_attrs()
-        if self._try_set_model_values_partitioned(t, beliefs, features):
-            last = self.last_model_values
-            if last is None:
-                last = self.latest_values.new_empty(
-                    (0, self.num_players, self.hand_dim)
-                )
-            return self.latest_values, last
-
         hand_values, model_applied_zero_sum = (
             self._model_leaf_values_for_fused_writeback(features)
         )
@@ -2477,6 +2587,7 @@ class FusedPreflopSparseCFREvaluator(FusedSparseCFREvaluator):
             beliefs = self.beliefs_avg if self.cfr_avg else self.beliefs
 
         if self.model_indices.numel() > 0:
+            self._preflop_mixed_street_closing_model_enabled()
             if not self._try_set_model_values_prepared_partitions(t, beliefs):
                 beliefs_at_model = self._model_beliefs_for_values(beliefs)
                 features_at_model = self._model_features_for_beliefs(beliefs_at_model)

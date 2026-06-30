@@ -1427,6 +1427,92 @@ def test_fused_preflop_prepared_partitions_match_legacy_mixed_street() -> None:
         )
 
 
+def test_preflop_model_batch_segments_use_static_tail_buckets() -> None:
+    from p2.search.fused_preflop_sparse_cfr_evaluator import (
+        _preflop_model_batch_segments,
+    )
+
+    assert _preflop_model_batch_segments(0, 4096) == ()
+    assert _preflop_model_batch_segments(4096, 4096) == ((0, 4096, 4096),)
+    assert _preflop_model_batch_segments(4097, 4096) == (
+        (0, 4096, 4096),
+        (4096, 1, 512),
+    )
+    assert _preflop_model_batch_segments(65024, 4096)[-3:] == (
+        (61440, 2048, 2048),
+        (63488, 1024, 1024),
+        (64512, 512, 512),
+    )
+    assert len(_preflop_model_batch_segments(65536, 4096)) == 16
+    assert _preflop_model_batch_segments(44300, 4096)[-3:] == (
+        (40960, 2048, 2048),
+        (43008, 1024, 1024),
+        (44032, 268, 512),
+    )
+    assert _preflop_model_batch_segments(21236, 4096)[-1:] == (
+        (20480, 756, 1024),
+    )
+    assert _preflop_model_batch_segments(7936, 4096)[-2:] == (
+        (4096, 2048, 2048),
+        (6144, 1792, 2048),
+    )
+
+
+def test_static_compile_leaves_policy_uncompiled_by_default(monkeypatch) -> None:
+    from p2.rl.cfr_trainer import _compile_kwargs as trainer_compile_kwargs
+    from p2.search.fused_sparse_cfr_evaluator import _compile_kwargs_from_env
+
+    cfg = Config()
+    cfg.model.compile = "static"
+    monkeypatch.delenv("P2_POLICY_COMPILE", raising=False)
+    monkeypatch.delenv("P2_POLICY_COMPILE_DYNAMIC", raising=False)
+
+    kwargs = _compile_kwargs_from_env(cfg)
+
+    assert kwargs["dynamic"] is False
+    assert kwargs["policy_dynamic"] is True
+    assert kwargs["policy_compile"] is False
+    assert trainer_compile_kwargs(cfg) == kwargs
+
+    monkeypatch.setenv("P2_POLICY_COMPILE", "1")
+
+    kwargs = _compile_kwargs_from_env(cfg)
+
+    assert kwargs["policy_compile"] is True
+    assert trainer_compile_kwargs(cfg)["policy_compile"] is True
+
+
+def test_fused_preflop_rejects_heads_up_closing_projection_mode() -> None:
+    from p2.search.fused_preflop_sparse_cfr_evaluator import (
+        FusedPreflopSparseCFREvaluator,
+    )
+
+    evaluator = object.__new__(FusedPreflopSparseCFREvaluator)
+    evaluator.cfg = _scope_cfg()
+    evaluator.num_players = 6
+    evaluator.hand_dim = PREFLOP_HANDS
+
+    evaluator.closing_leaf_value_model = CompactRecordingValueModel(
+        1.0,
+        num_players=6,
+        device=torch.device("cpu"),
+    )
+    assert evaluator._preflop_mixed_street_closing_model_enabled()
+    assert not evaluator._can_project_heads_up_closing_model()
+
+    evaluator.closing_leaf_value_model = CompactRecordingValueModel(
+        1.0,
+        num_players=2,
+        device=torch.device("cpu"),
+    )
+    with pytest.raises(ValueError, match="same compact shape"):
+        evaluator._preflop_mixed_street_closing_model_enabled()
+
+    evaluator.closing_leaf_value_model = ConstantValueModel(1.0, num_players=6)
+    with pytest.raises(ValueError, match="same compact shape"):
+        evaluator._preflop_mixed_street_closing_model_enabled()
+
+
 def test_fused_preflop_prepared_partitions_gather_direct_beliefs() -> None:
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA to exercise the fused preflop evaluator")

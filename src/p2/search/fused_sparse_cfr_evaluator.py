@@ -437,6 +437,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._showdown_fallback_extras = fallback_extras
         return showdown_ev_v15(beliefs, fallback_extras)
 
+    def _record_stats_percentile_ts(self) -> set[int]:
+        # Mid-CFR percentile stats force eager iterations and interfere with
+        # graph replay on the training hot path.
+        return set()
+
     def _record_stats(self, t: int, old_policy_probs: torch.Tensor) -> None:
         """Record policy-update stats with a fused CFR-delta reduction."""
         percentile_ts = (

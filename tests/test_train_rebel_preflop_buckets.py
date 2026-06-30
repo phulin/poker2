@@ -93,6 +93,7 @@ def test_config_rebel_preflop_buckets_resolves() -> None:
     assert cfg.preflop_buckets.states_per_bucket == 5_000_000
     assert cfg.preflop_buckets.train_batch_size == 512
     assert cfg.preflop_buckets.policy_train_batch_size == 2048
+    assert cfg.preflop_buckets.cfr_model_batch_size == 4096
     assert cfg.preflop_buckets.cfr_iterations == 300
     assert cfg.preflop_buckets.actions_12_15_cfr_batch_size == 8192
     assert cfg.preflop_buckets.actions_8_11_cfr_batch_size == 2048
@@ -131,6 +132,7 @@ def test_preflop_hydra_cli_dispatches_train_specialists(monkeypatch, tmp_path) -
     cfg.preflop_buckets.command = "train_specialists"
     cfg.preflop_buckets.train_bucket = "actions_12_15"
     cfg.preflop_buckets.cfr_batch_size = 17
+    cfg.preflop_buckets.cfr_model_batch_size = 19
     cfg.preflop_buckets.actions_12_15_cfr_batch_size = 9
 
     preflop_cli.train_rebel_preflop_buckets(cfg)
@@ -145,6 +147,7 @@ def test_preflop_hydra_cli_dispatches_train_specialists(monkeypatch, tmp_path) -
     assert args.resume_from is None
     assert args.train_bucket == "actions_12_15"
     assert args.cfr_batch_size == 17
+    assert args.cfr_model_batch_size == 19
     assert args.actions_12_15_cfr_batch_size == 9
     assert args.snapshot_interval_steps == 50
     assert args.use_wandb is False
