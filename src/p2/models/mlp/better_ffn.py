@@ -1202,6 +1202,7 @@ class BetterFFN(BaseMLPModel):
             belief_in_dim, belief_hidden_dim, hidden_dim, nonlinearity
         )
         context_in_dim = context_length(num_players)
+        self.context_in_dim = int(context_in_dim)
         self.context_encoder = ffn_block(
             context_in_dim, hidden_dim, hidden_dim, nonlinearity
         )
@@ -1700,6 +1701,13 @@ class BetterFFN(BaseMLPModel):
         self, context: torch.Tensor, street: torch.Tensor
     ) -> torch.Tensor:
         """Feature contribution from context and street before board expansion."""
+        if context.shape[-1] > self.context_in_dim:
+            context = context[..., : self.context_in_dim]
+        elif context.shape[-1] < self.context_in_dim:
+            pad = context.new_zeros(
+                *context.shape[:-1], self.context_in_dim - context.shape[-1]
+            )
+            context = torch.cat((context, pad), dim=-1)
         return self.street_embedding(street) + self.context_encoder(context)
 
     def static_feature_base_from_prefix(
