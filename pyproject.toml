@@ -81,6 +81,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.pytest.ini_options]
+addopts = ["-m", "not slow"]
 markers = [
     "slow: expensive exact showdown or training tests",
 ]
