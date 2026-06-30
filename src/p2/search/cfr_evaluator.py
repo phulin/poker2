@@ -3130,10 +3130,13 @@ class CFREvaluator(ABC):
         root_indices = torch.arange(N, dtype=torch.long, device=self.device)
         value_root_mask = torch.ones(N, dtype=torch.bool, device=self.device)
         if exclude_start:
+            start_of_hand_roots = (self.env.street[:N] == 0) & (
+                self.env.actions_this_round[:N] == 0
+            )
             value_root_mask &= (
                 self.valid_mask[:N]
                 & ~self.env.done[:N]
-                & (self.env.actions_this_round[:N] >= int(self.max_depth))
+                & ~start_of_hand_roots
             )
             allin_call_mask = getattr(self, "allin_call_mask", None)
             if allin_call_mask is not None and allin_call_mask.shape[0] >= N:
