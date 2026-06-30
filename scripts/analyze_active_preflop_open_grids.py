@@ -258,6 +258,30 @@ def _set_closing_leaf_model(
     evaluator.closing_leaf_value_encoder = None
 
 
+def _install_uniform_policy_initializer(evaluator) -> None:
+    original_initialize = evaluator.initialize_policy_and_beliefs
+
+    def initialize_uniform_policy_and_beliefs() -> None:
+        original_initialize()
+        root_nodes = int(evaluator.root_nodes)
+        root_beliefs = evaluator.beliefs[:root_nodes].detach().clone()
+        evaluator.policy_probs.copy_(evaluator.uniform_policy)
+        evaluator._mask_invalid(evaluator.policy_probs)
+        evaluator.self_reach.zero_()
+        evaluator.self_reach[:root_nodes] = 1.0
+        evaluator._calculate_reach_weights(evaluator.self_reach, evaluator.policy_probs)
+        evaluator.beliefs.zero_()
+        evaluator.beliefs[:root_nodes] = root_beliefs
+        evaluator._propagate_all_beliefs(evaluator.beliefs, evaluator.self_reach)
+        evaluator.policy_probs_avg.copy_(evaluator.policy_probs)
+        evaluator.self_reach_avg.copy_(evaluator.self_reach)
+        evaluator.beliefs_avg.copy_(evaluator.beliefs)
+        evaluator.beliefs_sample.copy_(evaluator.beliefs)
+        evaluator._reset_average_policy_accumulators()
+
+    evaluator.initialize_policy_and_beliefs = initialize_uniform_policy_and_beliefs
+
+
 def _make_open_env(cfg: Config, device: torch.device, rng: torch.Generator) -> PBSEnv:
     env = PBSEnv(
         num_envs=1,
@@ -383,6 +407,7 @@ def _save_tree_snapshot(
     values: torch.Tensor,
     legal: torch.Tensor,
     fold_beliefs: bool,
+    policy_init: str,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     action_means = _weighted_action_means(probs)
@@ -406,6 +431,7 @@ def _save_tree_snapshot(
                 cfg.search.predictive_cfr_dcfr_hybrid
             ),
             "fold_beliefs": bool(fold_beliefs),
+            "policy_init": policy_init,
             "num_players": int(evaluator.num_players),
             "num_actions": int(evaluator.num_actions),
             "hand_dim": int(getattr(evaluator, "hand_dim", PREFLOP_HANDS)),
@@ -581,26 +607,31 @@ def _step_fold_with_belief_update(
 def run_analysis(args: argparse.Namespace) -> Path | None:
     checkpoint_path = _resolve_checkpoint(args)
     device = torch.device(args.device)
-    original_cutoff_checkpoint = (
+    new_street_closing_checkpoint = (
         args.sb_cutoff_checkpoint.expanduser().resolve()
         if args.sb_cutoff_checkpoint is not None
         else _checkpoint_config_closing_leaf_checkpoint(checkpoint_path)
     )
+    # The active specialist is the same-street cutoff/value model. Round-closed
+    # preflop leaves have no betting left and must use the embedded
+    # end-of-street closing model instead.
     cfg = _analysis_config(
         checkpoint_path,
         device=device,
         iterations=args.iterations,
         seed=args.seed,
-        closing_leaf_checkpoint=checkpoint_path,
+        closing_leaf_checkpoint=new_street_closing_checkpoint,
     )
     rng = torch.Generator(device=device)
     rng.manual_seed(int(args.seed))
     trainer = _make_trainer(cfg, checkpoint_path, device)
     evaluator = trainer.cfr_evaluator
+    policy_init = "uniform" if args.uniform_policy_init else "model"
+    if args.uniform_policy_init:
+        _install_uniform_policy_initializer(evaluator)
     env = _make_open_env(cfg, device, rng)
     beliefs = _uniform_preflop_beliefs(cfg, device)
-    active_cutoff_checkpoint: Path | None = checkpoint_path
-    installed_cutoff_checkpoint: Path | None = checkpoint_path
+    installed_closing_checkpoint: Path | None = new_street_closing_checkpoint
     checkpoint_step = CheckpointIO.metadata(
         str(checkpoint_path),
         map_location=torch.device("cpu"),
@@ -630,8 +661,9 @@ def run_analysis(args: argparse.Namespace) -> Path | None:
         print(f"predictive_cfr_dcfr_hybrid: {cfg.search.predictive_cfr_dcfr_hybrid}", file=out)
         print(f"allin_by_depth: {cfg.search.allin_by_depth}", file=out)
         print(f"preflop_allin_169_model_checkpoint: {cfg.search.preflop_allin_169_model_checkpoint}", file=out)
-        print(f"active_closing_leaf_checkpoint: {active_cutoff_checkpoint}", file=out)
-        print(f"after_4_actions_closing_leaf_checkpoint: {original_cutoff_checkpoint}", file=out)
+        print(f"policy_init: {policy_init}", file=out)
+        print(f"same_street_cutoff_checkpoint: {checkpoint_path}", file=out)
+        print(f"new_street_closing_leaf_checkpoint: {new_street_closing_checkpoint}", file=out)
         if tree_output_dir is not None:
             print(f"tree_output_dir: {tree_output_dir}", file=out)
         print(f"stacks: {env.starting_stacks[0].detach().cpu().tolist()}", file=out)
@@ -645,22 +677,22 @@ def run_analysis(args: argparse.Namespace) -> Path | None:
                     file=out,
                 )
                 break
-            action_count = int(env.actions_this_round[0].item())
-            cutoff_checkpoint = active_cutoff_checkpoint
-            if action_count >= int(args.sb_cutoff_after_actions):
-                cutoff_checkpoint = original_cutoff_checkpoint
-            if cutoff_checkpoint != installed_cutoff_checkpoint and cutoff_checkpoint is not None:
+            cutoff_checkpoint = new_street_closing_checkpoint
+            if (
+                cutoff_checkpoint != installed_closing_checkpoint
+                and cutoff_checkpoint is not None
+            ):
                 print(
-                    f"\nswitching closing leaf checkpoint at {position} "
-                    f"(actions_this_round={action_count}): {cutoff_checkpoint}",
+                    f"\nswitching new-street closing leaf checkpoint at {position}: "
+                    f"{cutoff_checkpoint}",
                     file=out,
                 )
                 _set_closing_leaf_model(trainer, cutoff_checkpoint)
-                installed_cutoff_checkpoint = cutoff_checkpoint
-            elif cutoff_checkpoint is None and installed_cutoff_checkpoint is not None:
+                installed_closing_checkpoint = cutoff_checkpoint
+            elif cutoff_checkpoint is None and installed_closing_checkpoint is not None:
                 evaluator.closing_leaf_value_model = None
                 evaluator.closing_leaf_value_encoder = None
-                installed_cutoff_checkpoint = None
+                installed_closing_checkpoint = None
             actor, probs, _values, legal = _root_policy(evaluator, env, beliefs)
             if tree_output_dir is not None:
                 snapshot_path = _save_tree_snapshot(
@@ -679,6 +711,7 @@ def run_analysis(args: argparse.Namespace) -> Path | None:
                     values=_values,
                     legal=legal,
                     fold_beliefs=args.fold_beliefs,
+                    policy_init=policy_init,
                 )
                 print(f"saved_tree: {snapshot_path}", file=out)
             _print_position(out, position=position, seat=actor, legal=legal, probs=probs)
@@ -733,12 +766,16 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Closing-leaf checkpoint to use once actions_this_round reaches "
-            "--sb-cutoff-after-actions. Defaults to the checkpoint config's "
-            "original closing_leaf_checkpoint."
+            "Override the new-street closing-leaf checkpoint. Defaults to the "
+            "checkpoint config's original closing_leaf_checkpoint."
         ),
     )
-    parser.add_argument("--sb-cutoff-after-actions", type=int, default=4)
+    parser.add_argument(
+        "--sb-cutoff-after-actions",
+        type=int,
+        default=4,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--no-save-trees",
         dest="save_trees",
@@ -746,6 +783,11 @@ def parse_args() -> argparse.Namespace:
         help="Do not write per-position evaluator tree snapshots.",
     )
     parser.add_argument("--diagnostics", action="store_true")
+    parser.add_argument(
+        "--uniform-policy-init",
+        action="store_true",
+        help="Initialize each CFR subgame from legal uniform policy instead of the policy model.",
+    )
     parser.add_argument(
         "--no-fold-beliefs",
         dest="fold_beliefs",

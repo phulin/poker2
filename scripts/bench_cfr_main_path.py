@@ -41,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = REPO_ROOT / "outputs" / "cfr_main_path_benchmark.json"
 STEP_TAG = "train_step"
 GENERATE_TAG = "generate_step"
+SOLVE_TAG = "cfr_solve"
 
 INIT_SUBTAGS = [
     "cfr_init_construct_subgame",
@@ -76,6 +77,7 @@ INIT_SUBTAGS = [
 COMPONENT_TAGS = [
     STEP_TAG,
     GENERATE_TAG,
+    SOLVE_TAG,
     "trainer_update_model",
     "data_generate",
     "cfr_evaluate",
@@ -113,6 +115,7 @@ COMPONENT_TAGS = [
 CUDA_EVENT_TAGS = {
     STEP_TAG,
     GENERATE_TAG,
+    SOLVE_TAG,
     "trainer_update_model",
     "data_generate",
     "cfr_evaluate",
@@ -835,6 +838,120 @@ def run_generate_benchmark(
             fused_sparse_cfr_evaluator._INIT_PROFILE_HOOK = fused_init_hook_prev
 
 
+def run_solve_benchmark(
+    trainer: RebelCFRTrainer, args: argparse.Namespace
+) -> dict[str, Any]:
+    device = trainer.device
+    event_timer = (
+        CudaEventTimer(device, sync_attribution=args.sync_attribution)
+        if args.cuda_events
+        else None
+    )
+    fused_init_hook_prev = None
+    if event_timer is not None:
+        import p2.search.fused_sparse_cfr_evaluator as fused_sparse_cfr_evaluator
+
+        fused_init_hook_prev = fused_sparse_cfr_evaluator._INIT_PROFILE_HOOK
+        fused_sparse_cfr_evaluator._INIT_PROFILE_HOOK = event_timer.region
+    _patch_profiler_tags(trainer, event_timer)
+
+    generator = trainer.data_generator
+    if generator is None:
+        raise RuntimeError("solve benchmark requires live data_generator")
+
+    solve_sizes: list[dict[str, int]] = []
+
+    def solve_once() -> None:
+        pbs = generator._sample_roots(generator.target_batch_size)
+        root_count = int(pbs.env.N)
+        root_indices = torch.arange(root_count, device=device)
+        trainer.cfr_evaluator.initialize_subgame(
+            pbs.env,
+            root_indices,
+            pbs.beliefs[:root_count],
+        )
+        trainer.cfr_evaluator.evaluate_cfr(
+            training_mode=True,
+            sample_continuation=False,
+        )
+        solve_sizes.append(
+            {
+                "roots": int(trainer.cfr_evaluator.root_nodes),
+                "nodes": int(trainer.cfr_evaluator.total_nodes),
+            }
+        )
+
+    try:
+        warmup_wall: list[float] = []
+        for step in range(args.warmup_steps):
+            t0 = time.perf_counter()
+            solve_once()
+            _sync(device)
+            warmup_wall.append(time.perf_counter() - t0)
+            print(f"[solve warmup {step}] {warmup_wall[-1]:.3f}s", flush=True)
+
+        if event_timer is not None:
+            event_timer.clear()
+
+        activities = [ProfilerActivity.CPU]
+        if device.type == "cuda":
+            activities.append(ProfilerActivity.CUDA)
+
+        active_wall: list[float] = []
+
+        def active_step() -> None:
+            def run():
+                with record_function(SOLVE_TAG):
+                    solve_once()
+                    _sync(device)
+
+            if event_timer is not None:
+                event_timer.measure(SOLVE_TAG, run)
+            else:
+                run()
+
+        summary: dict[str, Any]
+        if args.no_torch_profiler:
+            for i in range(args.active_steps):
+                t0 = time.perf_counter()
+                active_step()
+                active_wall.append(time.perf_counter() - t0)
+                print(f"[solve active {i}] {active_wall[-1]:.3f}s", flush=True)
+            summary = {"components": []}
+        else:
+            with profile(activities=activities, record_shapes=False) as prof:
+                for i in range(args.active_steps):
+                    t0 = time.perf_counter()
+                    active_step()
+                    active_wall.append(time.perf_counter() - t0)
+                    print(
+                        f"[solve active {i}] {active_wall[-1]:.3f}s",
+                        flush=True,
+                    )
+            summary = _profiler_summary(prof, args.active_steps, active_wall)
+
+        if event_timer is not None:
+            event_summary = event_timer.summary(args.active_steps, active_wall)
+            summary["cuda_events"] = event_summary
+            step_rows = [
+                row
+                for row in event_summary["components"]
+                if row["component"] == SOLVE_TAG
+            ]
+            if step_rows:
+                summary["step_cuda_event_ms"] = step_rows[0][
+                    "cuda_event_ms_per_step"
+                ]
+        summary["warmup_wall_s"] = warmup_wall
+        summary["active_wall_s"] = active_wall
+        summary["active_wall_mean_s"] = sum(active_wall) / max(1, len(active_wall))
+        summary["solve_sizes"] = solve_sizes
+        return summary
+    finally:
+        if event_timer is not None:
+            fused_sparse_cfr_evaluator._INIT_PROFILE_HOOK = fused_init_hook_prev
+
+
 def _cuda_event_time(
     device: torch.device,
     fn: Callable[[], Any],
@@ -1204,10 +1321,48 @@ def _print_generate_summary(generate: dict[str, Any]) -> None:
                 )
 
 
+def _print_solve_summary(solve: dict[str, Any]) -> None:
+    print("\nFull-solve profile:")
+    print(f"  wall mean: {solve['active_wall_mean_s'] * 1e3:.2f} ms/solve")
+    if "step_cuda_event_ms" in solve:
+        print(f"  CUDA events solve: {solve['step_cuda_event_ms']:.2f} ms/solve")
+    sizes = solve.get("solve_sizes", [])
+    if sizes:
+        active_sizes = sizes[-len(solve.get("active_wall_s", [])) :]
+        node_counts = [row["nodes"] for row in active_sizes]
+        if node_counts:
+            print(
+                "  active nodes: "
+                f"min={min(node_counts)} mean={sum(node_counts) / len(node_counts):.1f} "
+                f"max={max(node_counts)}"
+            )
+    if "cuda_events" in solve:
+        print("  top CUDA event components:")
+        for row in solve["cuda_events"]["components"][:14]:
+            print(
+                f"    {row['component']:<26}"
+                f" {row['cuda_event_ms_per_step']:>9.2f} ms cuda-event"
+                f" {row['cuda_event_pct_of_wall']:>6.1f}% wall"
+                f" calls/solve={row['calls_per_step']:.1f}"
+            )
+        sync_rows = solve["cuda_events"].get("sync_attribution", [])
+        if sync_rows:
+            print("  sync attribution init regions:")
+            for row in sync_rows[:16]:
+                print(
+                    f"    {row['component']:<34}"
+                    f" pre_sync={row['pre_sync_ms_per_step']:>9.2f} ms"
+                    f" own_wall={row['region_wall_ms_per_step']:>9.2f} ms"
+                    f" calls/solve={row['calls_per_step']:.1f}"
+                )
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--mode", choices=["source", "generate", "micro", "both"], default="both"
+        "--mode",
+        choices=["source", "generate", "solve", "micro", "both"],
+        default="both",
     )
     parser.add_argument("--warmup-steps", type=int, default=1)
     parser.add_argument("--active-steps", type=int, default=1)
@@ -1249,7 +1404,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str]) -> None:
     args = parse_args(argv)
     cfg = _load_config(args)
-    trainer = _make_trainer(cfg, pregeneration_only=args.mode == "generate")
+    trainer = _make_trainer(
+        cfg, pregeneration_only=args.mode in {"generate", "solve"}
+    )
     if args.disable_cfr_graph and hasattr(trainer.cfr_evaluator, "_graph_capture_regime"):
         trainer.cfr_evaluator._graph_capture_regime = lambda _t: None  # type: ignore[method-assign]
 
@@ -1284,6 +1441,11 @@ def main(argv: list[str]) -> None:
         with pause_train_rebel(not args.no_pause, args.pause_pattern):
             output["generate"] = run_generate_benchmark(trainer, args)
         _print_generate_summary(output["generate"])
+
+    if args.mode == "solve":
+        with pause_train_rebel(not args.no_pause, args.pause_pattern):
+            output["solve"] = run_solve_benchmark(trainer, args)
+        _print_solve_summary(output["solve"])
 
     if args.mode in {"micro", "both"}:
         with pause_train_rebel(not args.no_pause, args.pause_pattern):
