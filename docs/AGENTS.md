@@ -8,6 +8,11 @@ Design notes and implementation plans for larger architecture changes that span 
 - `rebel_pregenerated_postflop_curriculum_plan.md`: Plan for converting heads-up postflop ReBeL production training to live random legal postflop spot generation, with optional bounded offline solved-example datasets for sweeps/holdouts, bootstrapping river to turn to flop and connecting later to multiway preflop handoff roots.
 - `showdown_per_hand_equity_vector_plan.md`: Plan for converting exact, approximate, and Monte Carlo showdown evaluators to return per-hand equity vectors in `R^H`.
 - `flop_turn_allin_training_examples_plan.md`: Plan for extending `p2.allin` pregeneration, targets, datasets, and training from preflop all-in states to board-aware flop and turn all-in examples.
+- `notes_eos_leaf_investigation.md`: Completed notes from the BTN end-of-street leaf value investigation, including EOS model wiring, target construction, dataset coverage, in-domain belief probes, and ReBeL policy/value target consistency.
+- `task_plan_eos_leaf_investigation.md`: Completed task plan for the EOS leaf value investigation.
+- `notes_preflop_4_7_restart.md`: Operational notes from monitoring and restarting the preflop actions_4_7 backward-induction run with updated learning-rate settings.
+- `task_plan_preflop_4_7_restart.md`: Completed task plan for the preflop actions_4_7 restart monitor.
+- `task_plan_preflop_continuation_beliefs.md`: Completed task plan for generating and saving preflop continuation belief cascades.
 
 ### Subdirectories
 There are no child source directories.
