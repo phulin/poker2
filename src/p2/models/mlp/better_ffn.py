@@ -1104,6 +1104,348 @@ def output_projection(in_dim: int, out_dim: int) -> nn.Module:
     )
 
 
+class CardTokenValueHead(nn.Module):
+    """Blocker-aware value head that aggregates opponent range card tokens."""
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        token_dim: int,
+        num_players: int,
+        nonlinearity: NonlinearityType,
+    ) -> None:
+        super().__init__()
+        if token_dim <= 0:
+            raise ValueError("token_dim must be positive")
+        self.token_dim = int(token_dim)
+        self.num_players = int(num_players)
+        self.hand_value_proj = output_projection(hidden_dim, self.token_dim)
+        self.trunk_proj = output_projection(hidden_dim, self.token_dim)
+        self.card_ffn = ResidualBlock(
+            ffn_block(
+                self.token_dim,
+                self.token_dim * 2,
+                self.token_dim,
+                nonlinearity,
+            ),
+            1.0 / math.sqrt(2.0),
+        )
+        self.per_hand_value_head = output_projection(self.token_dim * 2, 1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        player_beliefs: torch.Tensor,
+        hand_emb: torch.Tensor,
+        hand_card_a: torch.Tensor,
+        hand_card_b: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size = x.shape[0]
+        num_players = player_beliefs.shape[1]
+        if num_players != self.num_players:
+            raise ValueError(
+                f"expected {self.num_players} players, got {num_players}"
+            )
+
+        total_belief = player_beliefs.sum(dim=1, keepdim=True)
+        opp_belief = total_belief - player_beliefs
+        hand_token = self.hand_value_proj(hand_emb)
+        if hand_token.dim() == 2:
+            hand_token = hand_token[None, None]
+        elif hand_token.dim() == 3:
+            hand_token = hand_token[:, None]
+        else:
+            raise ValueError("hand_emb must have shape [N, H] or [B, N, H]")
+        weighted = opp_belief[..., None].to(dtype=hand_token.dtype) * hand_token
+
+        card_feat = x.new_zeros(
+            batch_size,
+            num_players,
+            52,
+            self.token_dim,
+            dtype=weighted.dtype,
+        )
+        index_a = hand_card_a.view(1, 1, -1, 1).expand_as(weighted)
+        index_b = hand_card_b.view(1, 1, -1, 1).expand_as(weighted)
+        card_feat.scatter_add_(2, index_a, weighted)
+        card_feat.scatter_add_(2, index_b, weighted)
+        card_feat = self.card_ffn(card_feat)
+
+        total = card_feat.sum(dim=2)
+        per_hand = (
+            total[:, :, None]
+            - card_feat[:, :, hand_card_a]
+            - card_feat[:, :, hand_card_b]
+        )
+        trunk_token = self.trunk_proj(x)[:, None, None].expand_as(per_hand)
+        value_input = torch.cat((trunk_token, per_hand), dim=-1)
+        return self.per_hand_value_head(value_input).squeeze(-1)
+
+    def scale_output(self, scale: float) -> None:
+        self.per_hand_value_head.get_submodule("linear_out").weight.data.mul_(
+            scale
+        )
+
+
+class StrengthBucketEncoder(nn.Module):
+    """Board and bet-context conditioned soft response buckets over hands."""
+
+    def __init__(
+        self,
+        hand_dim: int,
+        board_dim: int,
+        bet_dim: int,
+        bucket_count: int,
+        hidden_dim: int,
+    ) -> None:
+        super().__init__()
+        if bucket_count <= 0:
+            raise ValueError("bucket_count must be positive")
+        self.bucket_count = int(bucket_count)
+        self.hand_proj = nn.Linear(hand_dim, hidden_dim, bias=False)
+        self.board_proj = nn.Linear(board_dim, hidden_dim, bias=False)
+        self.bet_proj = nn.Linear(bet_dim, hidden_dim, bias=True)
+        self.activation = nn.SiLU()
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.out = nn.Linear(hidden_dim, bucket_count)
+        self.tau = nn.Parameter(torch.ones(()))
+
+    def _bucket_weights(
+        self,
+        hand_emb: torch.Tensor,
+        board_ctx: torch.Tensor,
+        bet_ctx: torch.Tensor,
+    ) -> torch.Tensor:
+        hand_hidden = self.hand_proj(hand_emb)
+        if hand_hidden.dim() == 2:
+            hand_hidden = hand_hidden[None]
+        elif hand_hidden.dim() != 3:
+            raise ValueError("hand_emb must have shape [N, H] or [B, N, H]")
+        hidden = (
+            hand_hidden
+            + self.board_proj(board_ctx).to(dtype=hand_hidden.dtype)[:, None, :]
+            + self.bet_proj(bet_ctx).to(dtype=hand_hidden.dtype)[:, None, :]
+        )
+        logits = self.out(self.norm(self.activation(hidden)))
+        tau = self.tau.abs().clamp_min(0.1).to(dtype=logits.dtype)
+        return torch.softmax(logits / tau, dim=-1)
+
+    def forward(
+        self,
+        hand_emb: torch.Tensor,
+        board_ctx: torch.Tensor,
+        bet_ctx: torch.Tensor,
+        player_beliefs: torch.Tensor,
+        hand_card_a: torch.Tensor,
+        hand_card_b: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        bucket_weights = self._bucket_weights(hand_emb, board_ctx, bet_ctx)
+        batch_size, num_players, num_hands = player_beliefs.shape
+        if bucket_weights.shape[0] == 1 and batch_size != 1:
+            bucket_weights = bucket_weights.expand(batch_size, -1, -1)
+        if bucket_weights.shape[:2] != (batch_size, num_hands):
+            raise ValueError("bucket weights must have shape [B, N, K]")
+
+        opp_beliefs = player_beliefs.sum(dim=1, keepdim=True) - player_beliefs
+        weighted = opp_beliefs[..., None].to(dtype=bucket_weights.dtype) * (
+            bucket_weights[:, None, :, :]
+        )
+
+        card_bucket = weighted.new_zeros(
+            batch_size,
+            num_players,
+            52,
+            self.bucket_count,
+        )
+        index_a = hand_card_a.view(1, 1, -1, 1).expand_as(weighted)
+        index_b = hand_card_b.view(1, 1, -1, 1).expand_as(weighted)
+        card_bucket.scatter_add_(2, index_a, weighted)
+        card_bucket.scatter_add_(2, index_b, weighted)
+
+        total = weighted.sum(dim=2)
+        compat_bucket = (
+            total[:, :, None, :]
+            - card_bucket[:, :, hand_card_a, :]
+            - card_bucket[:, :, hand_card_b, :]
+            + weighted
+        )
+        return compat_bucket, bucket_weights
+
+
+class ValueStratificationHead(nn.Module):
+    """Small per-player residual head for hand-level bucket features."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        num_players: int,
+        nonlinearity: NonlinearityType,
+        state_dim: int = 0,
+    ) -> None:
+        super().__init__()
+        self.num_players = int(num_players)
+        self.state_dim = int(state_dim)
+        self.hidden = nn.Linear(input_dim, hidden_dim)
+        self.activation = get_activation(nonlinearity)
+        if self.state_dim > 0:
+            self.film = nn.Linear(self.state_dim, 2 * hidden_dim)
+        self.out = nn.Linear(hidden_dim, num_players)
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        player_state: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden = self.activation(self.hidden(features))
+        if self.state_dim > 0:
+            if player_state is None:
+                raise ValueError("player_state is required for stratification FiLM")
+            film = self.film(player_state.to(dtype=hidden.dtype)).view(
+                features.shape[0],
+                self.num_players,
+                1,
+                2,
+                hidden.shape[-1],
+            )
+            scale = film[:, :, :, 0, :]
+            shift = film[:, :, :, 1, :]
+            hidden = hidden * (1.0 + scale.tanh()) + shift
+        all_players = self.out(hidden)
+        index = torch.arange(self.num_players, device=features.device).view(
+            1,
+            self.num_players,
+            1,
+            1,
+        )
+        index = index.expand(
+            features.shape[0],
+            self.num_players,
+            features.shape[2],
+            1,
+        )
+        return all_players.gather(-1, index).squeeze(-1)
+
+    def scale_output(self, scale: float) -> None:
+        self.out.weight.data.mul_(scale)
+
+
+class LowRankValueHead(nn.Module):
+    """Value tower with a factorized final per-hand output projection."""
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        ffn_dim: int,
+        num_value_layers: int,
+        num_hidden_layers: int,
+        num_players: int,
+        rank: int,
+        nonlinearity: NonlinearityType,
+    ) -> None:
+        super().__init__()
+        if rank <= 0:
+            raise ValueError("rank must be positive")
+        alpha = 1 / math.sqrt(num_hidden_layers + num_value_layers)
+        self.tower = nn.Sequential(
+            *[
+                ResidualBlock(
+                    ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity),
+                    alpha,
+                )
+                for _ in range(num_value_layers)
+            ]
+        )
+        self.left = output_projection(hidden_dim, rank)
+        self.right = nn.Linear(rank, num_players * NUM_HANDS)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.right(self.left(self.tower(x)))
+
+    def scale_output(self, scale: float) -> None:
+        self.right.weight.data.mul_(scale)
+
+
+class HandBasisValueHead(nn.Module):
+    """Hand-aware low-rank value head using a shared learned hand basis."""
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        ffn_dim: int,
+        num_value_layers: int,
+        num_hidden_layers: int,
+        num_players: int,
+        rank: int,
+        nonlinearity: NonlinearityType,
+    ) -> None:
+        super().__init__()
+        if rank <= 0:
+            raise ValueError("rank must be positive")
+        self.num_players = int(num_players)
+        self.rank = int(rank)
+        alpha = 1 / math.sqrt(num_hidden_layers + num_value_layers)
+        self.tower = nn.Sequential(
+            *[
+                ResidualBlock(
+                    ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity),
+                    alpha,
+                )
+                for _ in range(num_value_layers)
+            ]
+        )
+        self.state_proj = output_projection(hidden_dim, self.num_players * self.rank)
+        self.hand_basis_proj = output_projection(hidden_dim, self.rank)
+        self.state_bias = output_projection(hidden_dim, self.num_players)
+        self.hand_bias = output_projection(hidden_dim, self.num_players)
+
+    def forward(self, x: torch.Tensor, hand_emb: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 3:
+            player_state = (
+                x[:, 1:] if x.shape[1] == self.num_players + 1 else x
+            )
+            if player_state.shape[1] != self.num_players:
+                raise ValueError("token value input must have one token per player")
+            batch_size = player_state.shape[0]
+            state = self.tower(player_state.reshape(-1, player_state.shape[-1]))
+            coeff = self.state_proj(state).view(
+                batch_size,
+                self.num_players,
+                self.num_players,
+                self.rank,
+            )
+            player_idx = torch.arange(self.num_players, device=x.device)
+            coeff = coeff[:, player_idx, player_idx, :]
+            state_bias = self.state_bias(state).view(
+                batch_size,
+                self.num_players,
+                self.num_players,
+            )[:, player_idx, player_idx]
+        else:
+            state = self.tower(x)
+            coeff = self.state_proj(state).view(
+                x.shape[0],
+                self.num_players,
+                self.rank,
+            )
+            state_bias = self.state_bias(state)
+
+        basis = self.hand_basis_proj(hand_emb)
+        hand_bias = self.hand_bias(hand_emb)
+        if basis.dim() == 2:
+            values = torch.einsum("bpr,nr->bpn", coeff, basis)
+            values = values + hand_bias.transpose(0, 1)[None]
+        else:
+            values = torch.einsum("bpr,bnr->bpn", coeff, basis)
+            values = values + hand_bias.permute(0, 2, 1)
+        return values + state_bias[:, :, None]
+
+    def scale_output(self, scale: float) -> None:
+        self.state_proj.get_submodule("linear_out").weight.data.mul_(scale)
+        self.state_bias.get_submodule("linear_out").weight.data.mul_(scale)
+        self.hand_bias.get_submodule("linear_out").weight.data.mul_(scale)
+
+
 class BetterFFN(BaseMLPModel):
     """Better PBS feed-forward poker model."""
 
@@ -1122,8 +1464,29 @@ class BetterFFN(BaseMLPModel):
         shared_trunk: bool = True,
         enforce_zero_sum: bool = True,
         board_interaction_dim: int = 0,
+        board_interaction_skip_out: bool = False,
+        board_interaction_gated: bool = False,
         policy_rank: int = 64,
         policy_hand_bias_rank: int = 32,
+        value_per_hand_residual: bool = False,
+        board_conditioned_hand_embedding_dim: int = 0,
+        cross_range_rank: int = 0,
+        card_token_value_head_dim: int = 0,
+        context_range_stats: bool = False,
+        postflop_multi_token_trunk: bool = False,
+        belief_second_moment: bool = False,
+        value_strength_bucket_count: int = 0,
+        value_strength_bucket_film: bool = False,
+        value_strength_bucket_relative: bool = False,
+        value_head_rank: int = 0,
+        value_hand_basis_rank: int = 0,
+        belief_low_rank_dim: int = 0,
+        belief_low_rank_board_conditioned: bool = False,
+        belief_skip_matching_encoder: bool = False,
+        belief_linear_encoder: bool = False,
+        belief_board_film: bool = False,
+        belief_board_bilinear_rank: int = 0,
+        belief_board_mass_features: bool = False,
         nonlinearity: NonlinearityType = NonlinearityType.gelu,
     ) -> None:
         super().__init__()
@@ -1137,14 +1500,79 @@ class BetterFFN(BaseMLPModel):
         self.shared_trunk = shared_trunk
         self.enforce_zero_sum = enforce_zero_sum
         self.board_interaction_dim = board_interaction_dim
+        self.board_interaction_skip_out = bool(board_interaction_skip_out)
+        self.board_interaction_gated = bool(board_interaction_gated)
         self.policy_rank = policy_rank
         self.policy_hand_bias_rank = policy_hand_bias_rank
+        self.value_per_hand_residual = bool(value_per_hand_residual)
+        self.board_conditioned_hand_embedding_dim = int(
+            board_conditioned_hand_embedding_dim
+        )
+        self.cross_range_rank = int(cross_range_rank)
+        self.card_token_value_head_dim = int(card_token_value_head_dim)
+        self.context_range_stats = bool(context_range_stats)
+        self.postflop_multi_token_trunk = bool(postflop_multi_token_trunk)
+        self.belief_second_moment = bool(belief_second_moment)
+        self.value_strength_bucket_count = int(value_strength_bucket_count)
+        self.value_strength_bucket_film = bool(value_strength_bucket_film)
+        self.value_strength_bucket_relative = bool(value_strength_bucket_relative)
+        self.value_head_rank = int(value_head_rank)
+        self.value_hand_basis_rank = int(value_hand_basis_rank)
+        self.belief_low_rank_dim = int(belief_low_rank_dim)
+        self.belief_low_rank_board_conditioned = bool(
+            belief_low_rank_board_conditioned
+        )
+        self.belief_skip_matching_encoder = bool(belief_skip_matching_encoder)
+        self.belief_linear_encoder = bool(belief_linear_encoder)
+        self.belief_board_film = bool(belief_board_film)
+        self.belief_board_bilinear_rank = int(belief_board_bilinear_rank)
+        self.belief_board_mass_features = bool(belief_board_mass_features)
         self.nonlinearity = nonlinearity
 
         if range_hidden_dim < 0:
             raise ValueError("range_hidden_dim must be non-negative")
         if board_interaction_dim < 0:
             raise ValueError("board_interaction_dim must be non-negative")
+        if (
+            self.board_interaction_skip_out
+            and num_players * board_interaction_dim != hidden_dim
+        ):
+            raise ValueError(
+                "board_interaction_skip_out requires "
+                "num_players * board_interaction_dim == hidden_dim"
+            )
+        if self.board_conditioned_hand_embedding_dim < 0:
+            raise ValueError("board_conditioned_hand_embedding_dim must be non-negative")
+        if self.cross_range_rank < 0:
+            raise ValueError("cross_range_rank must be non-negative")
+        if self.card_token_value_head_dim < 0:
+            raise ValueError("card_token_value_head_dim must be non-negative")
+        if self.value_strength_bucket_count < 0:
+            raise ValueError("value_strength_bucket_count must be non-negative")
+        if self.value_head_rank < 0:
+            raise ValueError("value_head_rank must be non-negative")
+        if self.value_hand_basis_rank < 0:
+            raise ValueError("value_hand_basis_rank must be non-negative")
+        if self.belief_low_rank_dim < 0:
+            raise ValueError("belief_low_rank_dim must be non-negative")
+        if self.belief_board_bilinear_rank < 0:
+            raise ValueError("belief_board_bilinear_rank must be non-negative")
+        if self.belief_low_rank_board_conditioned and self.belief_low_rank_dim <= 0:
+            raise ValueError(
+                "belief_low_rank_board_conditioned requires belief_low_rank_dim > 0"
+            )
+        if self.value_head_rank > 0 and self.value_hand_basis_rank > 0:
+            raise ValueError("value_head_rank and value_hand_basis_rank are exclusive")
+        if self.belief_low_rank_dim > 0 and self.postflop_multi_token_trunk:
+            raise ValueError(
+                "belief_low_rank_dim is not compatible with postflop_multi_token_trunk"
+            )
+        if self.cross_range_rank > 0 and num_players != 2:
+            raise ValueError("cross_range_rank is currently heads-up only")
+        if self.context_range_stats and num_players != 2:
+            raise ValueError("context_range_stats is currently heads-up only")
+        if self.postflop_multi_token_trunk and num_players < 2:
+            raise ValueError("postflop_multi_token_trunk requires at least two players")
         if policy_rank <= 0:
             raise ValueError("policy_rank must be positive")
         if policy_hand_bias_rank <= 0:
@@ -1162,6 +1590,20 @@ class BetterFFN(BaseMLPModel):
         self.register_buffer("hand_combos", combos, persistent=False)
         self.register_buffer("hand_card_a", combos[:, 0].long(), persistent=False)
         self.register_buffer("hand_card_b", combos[:, 1].long(), persistent=False)
+        card_ids = torch.arange(52, dtype=torch.long)
+        self.register_buffer("card_ids", card_ids, persistent=False)
+        self.register_buffer("card_ranks", card_ids % 13, persistent=False)
+        self.register_buffer("card_suits", card_ids // 13, persistent=False)
+        self.register_buffer(
+            "card_rank_one_hot",
+            torch.nn.functional.one_hot(card_ids % 13, 13).to(torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "card_suit_one_hot",
+            torch.nn.functional.one_hot(card_ids // 13, 4).to(torch.float32),
+            persistent=False,
+        )
         self.register_buffer("hand_ranks", combos % 13, persistent=False)
         self.register_buffer("hand_suits", combos // 13, persistent=False)
         hand_static_features = self._build_hand_static_features(
@@ -1193,41 +1635,177 @@ class BetterFFN(BaseMLPModel):
         effective_range_hidden_dim = (
             ffn_dim // num_players if range_hidden_dim == 0 else range_hidden_dim
         )
-        belief_in_dim = num_players * hidden_dim
+        self.belief_feature_dim = (
+            self.belief_low_rank_dim if self.belief_low_rank_dim > 0 else hidden_dim
+        )
+        belief_moment_count = 2 if self.belief_second_moment else 1
+        belief_in_dim = num_players * self.belief_feature_dim * belief_moment_count
         belief_hidden_dim = num_players * effective_range_hidden_dim
         self.hand_feature_proj = nn.Linear(
             HAND_STATIC_FEATURE_DIM, hidden_dim, bias=False
         )
-        self.belief_proj = ffn_block(
-            belief_in_dim, belief_hidden_dim, hidden_dim, nonlinearity
+        if self.belief_low_rank_dim > 0:
+            self.belief_hand_low_proj = nn.Linear(
+                hidden_dim,
+                self.belief_low_rank_dim,
+                bias=False,
+            )
+            if self.belief_low_rank_board_conditioned:
+                self.belief_low_board_proj = nn.Linear(
+                    hidden_dim,
+                    self.belief_low_rank_dim,
+                    bias=False,
+                )
+                self.belief_low_card_id_embedding = nn.Embedding(
+                    52, self.belief_low_rank_dim
+                )
+                self.belief_low_card_rank_embedding = nn.Embedding(
+                    13, self.belief_low_rank_dim
+                )
+                self.belief_low_card_suit_embedding = nn.Embedding(
+                    4, self.belief_low_rank_dim
+                )
+                self.belief_low_card_offset = nn.Sequential(
+                    nn.Linear(4 * self.belief_low_rank_dim, self.belief_low_rank_dim),
+                    get_activation(nonlinearity),
+                    nn.Linear(self.belief_low_rank_dim, self.belief_low_rank_dim),
+                )
+        if self.board_conditioned_hand_embedding_dim > 0:
+            self.card_board_proj = nn.Linear(
+                hidden_dim,
+                52 * self.board_conditioned_hand_embedding_dim,
+                bias=False,
+            )
+            self.card_offset_up = nn.Linear(
+                self.board_conditioned_hand_embedding_dim,
+                hidden_dim,
+                bias=False,
+            )
+        if self.belief_skip_matching_encoder:
+            if self.belief_linear_encoder:
+                raise ValueError(
+                    "belief_linear_encoder is not compatible with "
+                    "belief_skip_matching_encoder"
+                )
+            if belief_in_dim != hidden_dim or belief_hidden_dim != hidden_dim:
+                raise ValueError(
+                    "belief_skip_matching_encoder requires belief input, hidden, "
+                    "and output dimensions to match"
+                )
+            self.belief_proj = nn.RMSNorm(hidden_dim, eps=1e-5)
+        elif self.belief_linear_encoder:
+            self.belief_proj = nn.Linear(belief_in_dim, hidden_dim)
+        else:
+            self.belief_proj = ffn_block(
+                belief_in_dim, belief_hidden_dim, hidden_dim, nonlinearity
+            )
+        if self.belief_board_film:
+            self.belief_board_film_proj = nn.Linear(
+                hidden_dim,
+                2 * num_players * self.belief_feature_dim,
+            )
+        if self.belief_board_bilinear_rank > 0:
+            self.belief_board_bilinear_left = nn.Linear(
+                num_players * self.belief_feature_dim,
+                self.belief_board_bilinear_rank,
+                bias=False,
+            )
+            self.belief_board_bilinear_right = nn.Linear(
+                hidden_dim,
+                self.belief_board_bilinear_rank,
+                bias=False,
+            )
+            self.belief_board_bilinear_out = nn.Linear(
+                self.belief_board_bilinear_rank,
+                hidden_dim,
+                bias=False,
+            )
+        if self.belief_board_mass_features:
+            self.belief_board_mass_proj = nn.Linear(
+                num_players * (5 + 13 + 4),
+                hidden_dim,
+                bias=False,
+            )
+        if self.cross_range_rank > 0:
+            self.cross_left = nn.Linear(
+                self.belief_feature_dim,
+                self.cross_range_rank,
+                bias=False,
+            )
+            self.cross_right = nn.Linear(
+                self.belief_feature_dim,
+                self.cross_range_rank,
+                bias=False,
+            )
+            self.cross_proj = nn.Linear(self.cross_range_rank, hidden_dim, bias=False)
+        context_in_dim = context_length(num_players) + (
+            5 if self.context_range_stats else 0
         )
-        context_in_dim = context_length(num_players)
         self.context_in_dim = int(context_in_dim)
         self.context_encoder = ffn_block(
             context_in_dim, hidden_dim, hidden_dim, nonlinearity
         )
+        if self.value_strength_bucket_count > 0:
+            strength_bet_dim = 32
+            strength_hidden_dim = 64
+            strat_input_dim = 2 * self.value_strength_bucket_count
+            if self.value_strength_bucket_relative:
+                strat_input_dim += 2 * self.value_strength_bucket_count
+            self.strength_bet_ctx_proj = nn.Linear(5, strength_bet_dim)
+            self.strength_bucket_enc = StrengthBucketEncoder(
+                hidden_dim,
+                hidden_dim,
+                strength_bet_dim,
+                self.value_strength_bucket_count,
+                strength_hidden_dim,
+            )
+            self.value_strat_head = ValueStratificationHead(
+                strat_input_dim,
+                16,
+                num_players,
+                nonlinearity,
+                state_dim=hidden_dim if self.value_strength_bucket_film else 0,
+            )
         if board_interaction_dim > 0:
             self.rank_pair_low_embedding = nn.Embedding(91, board_interaction_dim)
             self.board_rank_low = nn.Linear(13, board_interaction_dim, bias=False)
-            self.rank_board_interaction_out = nn.Linear(
-                num_players * board_interaction_dim, hidden_dim, bias=False
-            )
             self.suit_pair_low_embedding = nn.Embedding(10, board_interaction_dim)
             self.board_suit_low = nn.Linear(4, board_interaction_dim, bias=False)
-            self.suit_board_interaction_out = nn.Linear(
-                num_players * board_interaction_dim, hidden_dim, bias=False
-            )
+            if self.board_interaction_gated:
+                self.board_interaction_gate = nn.Parameter(torch.zeros(()))
+            if self.board_interaction_skip_out:
+                self.board_interaction_norm = nn.RMSNorm(hidden_dim, eps=1e-5)
+            else:
+                self.rank_board_interaction_out = nn.Linear(
+                    num_players * board_interaction_dim, hidden_dim, bias=False
+                )
+                self.suit_board_interaction_out = nn.Linear(
+                    num_players * board_interaction_dim, hidden_dim, bias=False
+                )
 
         # Build trunk
         # Default alpha is always based on hidden + value layers
         alpha = 1 / math.sqrt(num_hidden_layers + num_value_layers)
-        layers = [
-            ResidualBlock(
-                ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), alpha
+        if self.postflop_multi_token_trunk:
+            self.trunk = nn.ModuleList(
+                [
+                    _PreflopGatedTokenMixerBlock(
+                        hidden_dim,
+                        token_count=num_players + 1,
+                        ffn_dim=ffn_dim,
+                        nonlinearity=nonlinearity,
+                    )
+                    for _ in range(num_hidden_layers)
+                ]
             )
-            for _ in range(num_hidden_layers)
-        ]
-        self.trunk = nn.Sequential(*layers)
+        else:
+            layers = [
+                ResidualBlock(
+                    ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), alpha
+                )
+                for _ in range(num_hidden_layers)
+            ]
+            self.trunk = nn.Sequential(*layers)
 
         # Heads
         # If shared_trunk is False, use separate alpha for policy_head based on num_policy_layers
@@ -1257,14 +1835,56 @@ class BetterFFN(BaseMLPModel):
         )
         self.policy_hand_norm = nn.RMSNorm(hidden_dim, eps=1e-5)
 
+        self.hand_value_head = self._make_value_head()
+        if self.value_per_hand_residual:
+            self.value_residual = nn.Sequential(
+                nn.Linear(3, 8),
+                get_activation(nonlinearity),
+                nn.Linear(8, 1),
+            )
+
+    def _make_value_head(self) -> nn.Module:
+        if self.card_token_value_head_dim > 0:
+            return CardTokenValueHead(
+                self.hidden_dim,
+                self.card_token_value_head_dim,
+                self.num_players,
+                self.nonlinearity,
+            )
+        if self.value_head_rank > 0:
+            return LowRankValueHead(
+                self.hidden_dim,
+                self.ffn_dim,
+                self.num_value_layers,
+                self.num_hidden_layers,
+                self.num_players,
+                self.value_head_rank,
+                self.nonlinearity,
+            )
+        if self.value_hand_basis_rank > 0:
+            return HandBasisValueHead(
+                self.hidden_dim,
+                self.ffn_dim,
+                self.num_value_layers,
+                self.num_hidden_layers,
+                self.num_players,
+                self.value_hand_basis_rank,
+                self.nonlinearity,
+            )
+        alpha = 1 / math.sqrt(self.num_hidden_layers + self.num_value_layers)
         layers = [
             ResidualBlock(
-                ffn_block(hidden_dim, ffn_dim, nonlinearity=nonlinearity), alpha
+                ffn_block(
+                    self.hidden_dim,
+                    self.ffn_dim,
+                    nonlinearity=self.nonlinearity,
+                ),
+                alpha,
             )
-            for _ in range(num_value_layers)
+            for _ in range(self.num_value_layers)
         ]
-        layers.append(output_projection(hidden_dim, num_players * NUM_HANDS))
-        self.hand_value_head = nn.Sequential(*layers)
+        layers.append(output_projection(self.hidden_dim, self.num_players * NUM_HANDS))
+        return nn.Sequential(*layers)
 
     @staticmethod
     def _unordered_pair_index(
@@ -1315,11 +1935,171 @@ class BetterFFN(BaseMLPModel):
             dim=-1,
         )
 
-    def _hand_embedding(self) -> torch.Tensor:
+    def _board_context(self, board: torch.Tensor) -> torch.Tensor:
+        ranks = torch.where(board >= 0, board % 13, torch.full_like(board, 13))
+        suits = torch.where(board >= 0, board // 13, torch.full_like(board, 4))
+        return (self.rank_embedding(ranks) + self.suit_embedding(suits)).sum(dim=1)
+
+    def _hand_embedding(self, board_context: torch.Tensor | None = None) -> torch.Tensor:
         """Per-hand exact-card embedding — shape [NUM_HANDS, hidden_dim]."""
         card_emb = self.card_embedding(self.hand_combos)
         static = self.hand_static_features.to(dtype=card_emb.dtype)
-        return card_emb.sum(dim=1) + self.hand_feature_proj(static)
+        hand_emb = card_emb.sum(dim=1) + self.hand_feature_proj(static)
+        if self.board_conditioned_hand_embedding_dim <= 0 or board_context is None:
+            return hand_emb
+        card_offsets = self.card_board_proj(board_context).view(
+            board_context.shape[0],
+            52,
+            self.board_conditioned_hand_embedding_dim,
+        )
+        hand_offset = card_offsets[:, self.hand_card_a] + card_offsets[
+            :, self.hand_card_b
+        ]
+        return hand_emb[None] + self.card_offset_up(hand_offset)
+
+    def _belief_moments(
+        self,
+        player_beliefs: torch.Tensor,
+        hand_emb: torch.Tensor,
+        board_context: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        belief_hand_emb = (
+            self.belief_hand_low_proj(hand_emb)
+            if self.belief_low_rank_dim > 0
+            else hand_emb
+        )
+        if (
+            self.belief_low_rank_dim > 0
+            and self.belief_low_rank_board_conditioned
+            and board_context is not None
+        ):
+            board_token = self.belief_low_board_proj(board_context)
+            dtype = board_token.dtype
+            card_input = torch.cat(
+                (
+                    board_token[:, None, :].expand(-1, 52, -1),
+                    self.belief_low_card_id_embedding(self.card_ids)
+                    .to(dtype=dtype)[None]
+                    .expand(board_context.shape[0], -1, -1),
+                    self.belief_low_card_rank_embedding(self.card_ranks)
+                    .to(dtype=dtype)[None]
+                    .expand(board_context.shape[0], -1, -1),
+                    self.belief_low_card_suit_embedding(self.card_suits)
+                    .to(dtype=dtype)[None]
+                    .expand(board_context.shape[0], -1, -1),
+                ),
+                dim=-1,
+            )
+            card_offsets = self.belief_low_card_offset(card_input)
+            hand_offsets = card_offsets[:, self.hand_card_a] + card_offsets[
+                :, self.hand_card_b
+            ]
+            belief_hand_emb = (
+                belief_hand_emb[None] + hand_offsets
+                if belief_hand_emb.dim() == 2
+                else belief_hand_emb + hand_offsets
+            )
+        if belief_hand_emb.dim() == 2:
+            mu = player_beliefs @ belief_hand_emb
+            if not self.belief_second_moment:
+                return mu, None
+            mu2 = player_beliefs @ belief_hand_emb.square()
+        else:
+            mu = torch.einsum("bpn,bnh->bph", player_beliefs, belief_hand_emb)
+            if not self.belief_second_moment:
+                return mu, None
+            mu2 = torch.einsum(
+                "bpn,bnh->bph",
+                player_beliefs,
+                belief_hand_emb.square(),
+            )
+        return mu, mu2 - mu.square()
+
+    def _apply_belief_board_film(
+        self,
+        per_player_belief: torch.Tensor,
+        board_context: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if not self.belief_board_film or board_context is None:
+            return per_player_belief
+        film = self.belief_board_film_proj(board_context).view(
+            -1,
+            self.num_players,
+            2,
+            self.belief_feature_dim,
+        )
+        gate = 0.1 * film[:, :, 0].tanh()
+        shift = 0.1 * film[:, :, 1]
+        return per_player_belief * (1.0 + gate) + shift
+
+    def _belief_board_bilinear(
+        self,
+        per_player_belief: torch.Tensor,
+        board_context: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if self.belief_board_bilinear_rank <= 0 or board_context is None:
+            return None
+        belief_term = self.belief_board_bilinear_left(per_player_belief.flatten(1))
+        board_term = self.belief_board_bilinear_right(board_context)
+        return self.belief_board_bilinear_out(belief_term * board_term)
+
+    def _belief_board_mass_features(
+        self,
+        player_beliefs: torch.Tensor,
+        board: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if not self.belief_board_mass_features:
+            return None
+        card_mass = self._card_mass(player_beliefs)
+        valid = board >= 0
+        board_safe = torch.where(valid, board, torch.zeros_like(board))
+        gather_idx = board_safe[:, None, :].expand(
+            -1,
+            self.num_players,
+            -1,
+        )
+        board_card_mass = card_mass.gather(2, gather_idx) * valid[:, None, :].to(
+            dtype=card_mass.dtype
+        )
+        rank_mass = card_mass @ self.card_rank_one_hot.to(dtype=card_mass.dtype)
+        suit_mass = card_mass @ self.card_suit_one_hot.to(dtype=card_mass.dtype)
+        mass_features = torch.cat(
+            (board_card_mass, rank_mass, suit_mass),
+            dim=-1,
+        ).flatten(1)
+        return self.belief_board_mass_proj(mass_features)
+
+    def _belief_projection_input(
+        self,
+        per_player_belief: torch.Tensor,
+        per_player_variance: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if not self.belief_second_moment:
+            return per_player_belief.flatten(1)
+        if per_player_variance is None:
+            raise RuntimeError("belief_second_moment requires variance features")
+        return torch.cat((per_player_belief, per_player_variance), dim=-1).flatten(1)
+
+    def _postflop_trunk_output(
+        self,
+        game_token: torch.Tensor,
+        player_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.postflop_multi_token_trunk:
+            tokens = torch.cat((game_token[:, None, :], player_tokens), dim=1)
+            return _run_preflop_gated_token_mixer_blocks(self.trunk, tokens)
+        return self.trunk(game_token)
+
+    def _policy_input_from_base(
+        self,
+        flat_features: torch.Tensor,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.shared_trunk:
+            return flat_features.detach()
+        if x.dim() == 3:
+            return x[:, 0]
+        return x
 
     def _card_mass_and_unblocked_mass(
         self, belief: torch.Tensor
@@ -1618,7 +2398,32 @@ class BetterFFN(BaseMLPModel):
         self,
         value_input: torch.Tensor,
     ) -> torch.Tensor:
-        return self.hand_value_head(value_input).view(-1, self.num_players, NUM_HANDS)
+        return self._hand_value_logits_from_head(value_input, self.hand_value_head)
+
+    def _hand_value_logits_from_head(
+        self, value_input: torch.Tensor, head: nn.Module
+    ) -> torch.Tensor:
+        if value_input.dim() == 3:
+            player_state = (
+                value_input[:, 1:]
+                if value_input.shape[1] == self.num_players + 1
+                else value_input
+            )
+            if player_state.shape[1] != self.num_players:
+                raise ValueError(
+                    "token value input must have one token per player, optionally "
+                    "preceded by one game token"
+                )
+            batch_size = player_state.shape[0]
+            token_values = head(player_state.reshape(-1, player_state.shape[-1])).view(
+                batch_size,
+                self.num_players,
+                self.num_players,
+                NUM_HANDS,
+            )
+            player_idx = torch.arange(self.num_players, device=value_input.device)
+            return token_values[:, player_idx, player_idx, :]
+        return head(value_input).view(-1, self.num_players, NUM_HANDS)
 
     def _policy_logits(
         self,
@@ -1636,13 +2441,21 @@ class BetterFFN(BaseMLPModel):
         hand_gate = 1.0 + self.policy_hand_gate(policy_state).tanh()
         action_emb = action_emb * hand_gate[:, None, :]
         hand_vec = self.policy_hand_proj(hand_emb)
-        logits = torch.einsum("hr,bar->bha", hand_vec, action_emb)
+        if hand_vec.dim() == 2:
+            logits = torch.einsum("hr,bar->bha", hand_vec, action_emb)
+        else:
+            logits = torch.einsum("bhr,bar->bha", hand_vec, action_emb)
         logits = logits / math.sqrt(self.policy_rank)
         hand_bias = self.policy_hand_bias(hand_emb)
         hand_bias_action = self.policy_hand_bias_action(policy_state).view(
             -1, self.num_actions, self.policy_hand_bias_rank
         )
-        logits = logits + torch.einsum("hk,bak->bha", hand_bias, hand_bias_action)
+        if hand_bias.dim() == 2:
+            logits = logits + torch.einsum("hk,bak->bha", hand_bias, hand_bias_action)
+        else:
+            logits = logits + torch.einsum(
+                "bhk,bak->bha", hand_bias, hand_bias_action
+            )
 
         dynamic_coeff = self.policy_dynamic_coeff(policy_state).view(
             -1, self.num_actions, HAND_DYNAMIC_FEATURE_DIM
@@ -1675,20 +2488,144 @@ class BetterFFN(BaseMLPModel):
         )
         rank_pair_low = rank_pair_mass @ self.rank_pair_low_embedding.weight
         board_rank_low = self.board_rank_low(board_rank_counts)
-        rank_features = self.rank_board_interaction_out(
-            (rank_pair_low * board_rank_low[:, None, :]).flatten(1)
-        )
+        rank_features = (rank_pair_low * board_rank_low[:, None, :]).flatten(1)
 
         suit_pair_mass = player_beliefs @ self.hand_suit_pair_one_hot.to(
             dtype=player_beliefs.dtype
         )
         suit_pair_low = suit_pair_mass @ self.suit_pair_low_embedding.weight
         board_suit_low = self.board_suit_low(board_suit_counts)
-        suit_features = self.suit_board_interaction_out(
-            (suit_pair_low * board_suit_low[:, None, :]).flatten(1)
+        suit_features = (suit_pair_low * board_suit_low[:, None, :]).flatten(1)
+
+        if self.board_interaction_skip_out:
+            out = 0.1 * self.board_interaction_norm(rank_features + suit_features)
+            if self.board_interaction_gated:
+                out = out * self.board_interaction_gate.tanh()
+            return out
+
+        out = self.rank_board_interaction_out(
+            rank_features
+        ) + self.suit_board_interaction_out(suit_features)
+        if self.board_interaction_gated:
+            out = out * self.board_interaction_gate.tanh()
+        return out
+
+    def _cross_range_interaction(
+        self, per_player_belief: torch.Tensor
+    ) -> torch.Tensor | None:
+        if self.cross_range_rank <= 0:
+            return None
+        p0 = per_player_belief[:, 0]
+        p1 = per_player_belief[:, 1]
+        cross = self.cross_left(p0) * self.cross_right(p1)
+        return self.cross_proj(cross)
+
+    def _range_stats(self, player_beliefs: torch.Tensor) -> torch.Tensor:
+        b0 = player_beliefs[:, 0]
+        b1 = player_beliefs[:, 1]
+        b0_norm = b0 / b0.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        b1_norm = b1 / b1.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        return torch.stack(
+            [
+                -(b0_norm * b0_norm.clamp_min(1e-8).log()).sum(dim=-1),
+                -(b1_norm * b1_norm.clamp_min(1e-8).log()).sum(dim=-1),
+                (b0_norm * b1_norm).sum(dim=-1),
+                b0_norm.square().sum(dim=-1).rsqrt(),
+                b1_norm.square().sum(dim=-1).rsqrt(),
+            ],
+            dim=-1,
         )
 
-        return rank_features + suit_features
+    def _context_with_range_stats(
+        self, context: torch.Tensor, player_beliefs: torch.Tensor
+    ) -> torch.Tensor:
+        base_context_dim = self.context_in_dim - 5
+        if context.shape[-1] > base_context_dim:
+            context = context[..., :base_context_dim]
+        elif context.shape[-1] < base_context_dim:
+            pad = context.new_zeros(
+                *context.shape[:-1], base_context_dim - context.shape[-1]
+            )
+            context = torch.cat((context, pad), dim=-1)
+        stats = self._range_stats(player_beliefs).to(dtype=context.dtype)
+        return torch.cat((context, stats), dim=-1)
+
+    def _range_context_delta(
+        self, context: torch.Tensor, player_beliefs: torch.Tensor
+    ) -> torch.Tensor | None:
+        if not self.context_range_stats:
+            return None
+        full_context = self._context_with_range_stats(context, player_beliefs)
+        zero_stats_context = torch.cat(
+            (
+                full_context[..., :-5],
+                full_context.new_zeros(*full_context.shape[:-1], 5),
+            ),
+            dim=-1,
+        )
+        return self.context_encoder(full_context) - self.context_encoder(
+            zero_stats_context
+        )
+
+    def _strength_bet_context(self, context: torch.Tensor) -> torch.Tensor:
+        bet_scalars = torch.stack(
+            [
+                context[:, ValueScalarContext.POT.value],
+                context[:, ValueScalarContext.MIN_RAISE.value],
+                context[:, ValueScalarContext.LOG_POT_BB.value],
+                context[:, ValueScalarContext.LOG_STACK_DEPTH_BB.value],
+                context[:, ValueScalarContext.MAX_COMMITTED.value],
+            ],
+            dim=-1,
+        )
+        return self.strength_bet_ctx_proj(bet_scalars)
+
+    def _value_stratification_residual(
+        self,
+        player_beliefs: torch.Tensor,
+        x: torch.Tensor,
+        hand_emb: torch.Tensor,
+        features: MLPFeatures,
+    ) -> torch.Tensor | None:
+        if self.value_strength_bucket_count <= 0:
+            return None
+        board_ctx = self._board_context(features.board).to(dtype=hand_emb.dtype)
+        bet_ctx = self._strength_bet_context(features.context).to(dtype=hand_emb.dtype)
+        compat_bucket, hero_bucket = self.strength_bucket_enc(
+            hand_emb,
+            board_ctx,
+            bet_ctx,
+            player_beliefs,
+            self.hand_card_a,
+            self.hand_card_b,
+        )
+        hero_bucket = hero_bucket[:, None, :, :].expand(
+            -1,
+            self.num_players,
+            -1,
+            -1,
+        )
+        strat_input = torch.cat((compat_bucket, hero_bucket), dim=-1)
+        if self.value_strength_bucket_relative:
+            compat_share = compat_bucket / compat_bucket.sum(
+                dim=-1,
+                keepdim=True,
+            ).clamp_min(1e-8)
+            strat_input = torch.cat(
+                (
+                    strat_input,
+                    compat_share,
+                    compat_share - hero_bucket,
+                ),
+                dim=-1,
+            )
+        player_state = None
+        if self.value_strength_bucket_film:
+            if x.dim() == 3:
+                player_state = x[:, 1:] if x.shape[1] == self.num_players + 1 else x
+            else:
+                player_state = x[:, None, :].expand(-1, self.num_players, -1)
+        return self.value_strat_head(strat_input, player_state)
 
     def static_feature_base(self, features: MLPFeatures) -> torch.Tensor:
         """Feature contribution that is fixed for a CFR leaf row."""
@@ -1714,10 +2651,7 @@ class BetterFFN(BaseMLPModel):
         self, prefix: torch.Tensor, board: torch.Tensor
     ) -> torch.Tensor:
         """Add board features to a precomputed context/street prefix."""
-        ranks = torch.where(board >= 0, board % 13, torch.full_like(board, 13))
-        suits = torch.where(board >= 0, board // 13, torch.full_like(board, 4))
-        board_features = self.rank_embedding(ranks) + self.suit_embedding(suits)
-        return board_features.sum(dim=1) + prefix
+        return self._board_context(board) + prefix
 
     def _forward_base_from_static(
         self,
@@ -1731,11 +2665,48 @@ class BetterFFN(BaseMLPModel):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     ]:
         player_beliefs = features.beliefs.view(-1, self.num_players, NUM_HANDS)
-        hand_emb = self._hand_embedding()  # [NUM_HANDS, hidden_dim]
-        per_player_belief = player_beliefs @ hand_emb  # [B, P, H]
-        belief_features = self.belief_proj(per_player_belief.flatten(1))
+        board_context = (
+            self._board_context(features.board)
+            if (
+                self.board_conditioned_hand_embedding_dim > 0
+                or self.belief_low_rank_board_conditioned
+                or self.belief_board_film
+                or self.belief_board_bilinear_rank > 0
+            )
+            else None
+        )
+        hand_emb = self._hand_embedding(board_context)
+        per_player_belief, per_player_variance = self._belief_moments(
+            player_beliefs,
+            hand_emb,
+            board_context,
+        )
+        per_player_belief = self._apply_belief_board_film(
+            per_player_belief,
+            board_context,
+        )
+        belief_features = self.belief_proj(
+            self._belief_projection_input(per_player_belief, per_player_variance)
+        )
 
         flat_features = static_base_features + belief_features
+        range_context_delta = self._range_context_delta(
+            features.context, player_beliefs
+        )
+        if range_context_delta is not None:
+            flat_features = flat_features + range_context_delta
+        cross_features = self._cross_range_interaction(per_player_belief)
+        if cross_features is not None:
+            flat_features = flat_features + cross_features
+        board_bilinear = self._belief_board_bilinear(per_player_belief, board_context)
+        if board_bilinear is not None:
+            flat_features = flat_features + board_bilinear
+        board_mass_features = self._belief_board_mass_features(
+            player_beliefs,
+            features.board,
+        )
+        if board_mass_features is not None:
+            flat_features = flat_features + board_mass_features
         board_stats = self._board_stats(features.board, player_beliefs.dtype)
         interaction_features = self._belief_board_interaction(
             player_beliefs, board_stats
@@ -1744,7 +2715,11 @@ class BetterFFN(BaseMLPModel):
             flat_features = flat_features + interaction_features
         # assert flat_features.isfinite().all()
 
-        x = self.trunk(flat_features)
+        x = (
+            self._postflop_trunk_output(static_base_features, per_player_belief)
+            if self.postflop_multi_token_trunk
+            else self._postflop_trunk_output(flat_features, per_player_belief)
+        )
         # assert x.isfinite().all()
         return (
             player_beliefs,
@@ -1776,7 +2751,7 @@ class BetterFFN(BaseMLPModel):
         player_beliefs, flat_features, x, hand_emb, board_stats = self._forward_base(
             features
         )
-        policy_input = x if self.shared_trunk else flat_features.detach()
+        policy_input = self._policy_input_from_base(flat_features, x)
         policy_logits = self._policy_logits(
             policy_input,
             player_beliefs,
@@ -1802,8 +2777,14 @@ class BetterFFN(BaseMLPModel):
         projection after any value mixing.
         """
         player_beliefs, _, x, hand_emb, board_stats = self._forward_base(features)
-        del hand_emb, board_stats
-        return self._value_from_base(player_beliefs, x, apply_zero_sum=apply_zero_sum)
+        del board_stats
+        return self._value_from_base(
+            player_beliefs,
+            x,
+            hand_emb,
+            features,
+            apply_zero_sum=apply_zero_sum,
+        )
 
     def forward_value_static_base(
         self,
@@ -1816,16 +2797,26 @@ class BetterFFN(BaseMLPModel):
         player_beliefs, _, x, hand_emb, board_stats = self._forward_base_from_static(
             features, static_base_features=static_base_features
         )
-        del hand_emb, board_stats
-        return self._value_from_base(player_beliefs, x, apply_zero_sum=apply_zero_sum)
+        del board_stats
+        return self._value_from_base(
+            player_beliefs,
+            x,
+            hand_emb,
+            features,
+            apply_zero_sum=apply_zero_sum,
+        )
 
     def _value_from_base(
         self,
         player_beliefs: torch.Tensor,
         x: torch.Tensor,
+        hand_emb: torch.Tensor,
+        features: MLPFeatures,
         apply_zero_sum: bool = True,
     ) -> ModelOutput:
-        hand_values_raw = self._hand_value_logits(x)
+        hand_values_raw = self._value_logits_from_head(
+            player_beliefs, x, hand_emb, self.hand_value_head, features
+        )
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
                 (hand_values_raw * player_beliefs)
@@ -1838,6 +2829,59 @@ class BetterFFN(BaseMLPModel):
         value = hand_values.mean(dim=-1)
         return ModelOutput(value=value, hand_values=hand_values)
 
+    def _value_logits_from_head(
+        self,
+        player_beliefs: torch.Tensor,
+        x: torch.Tensor,
+        hand_emb: torch.Tensor,
+        head: nn.Module,
+        features: MLPFeatures | None = None,
+    ) -> torch.Tensor:
+        if isinstance(head, CardTokenValueHead):
+            value_state = x[:, 0] if x.dim() == 3 else x
+            hand_values = head(
+                value_state,
+                player_beliefs,
+                hand_emb,
+                self.hand_card_a,
+                self.hand_card_b,
+            )
+        elif isinstance(head, HandBasisValueHead):
+            hand_values = head(x, hand_emb)
+        else:
+            hand_values = self._hand_value_logits_from_head(x, head)
+        if self.value_per_hand_residual:
+            correction = self._value_residual_correction(player_beliefs)
+            hand_values = hand_values + correction.to(dtype=hand_values.dtype)
+        if features is not None:
+            stratification = self._value_stratification_residual(
+                player_beliefs,
+                x,
+                hand_emb,
+                features,
+            )
+            if stratification is not None:
+                hand_values = hand_values + stratification.to(dtype=hand_values.dtype)
+        return hand_values
+
+    def _value_residual_correction(self, player_beliefs: torch.Tensor) -> torch.Tensor:
+        card_mass = self._card_mass(player_beliefs)
+        opp_belief = player_beliefs.sum(dim=1, keepdim=True) - player_beliefs
+        opp_card_mass = card_mass.sum(dim=1, keepdim=True) - card_mass
+        opp_unblocked = self._unblocked_mass_from_card_mass(
+            opp_belief,
+            opp_card_mass,
+        )
+        residual_input = torch.stack(
+            [
+                player_beliefs,
+                player_beliefs.clamp_min(1e-8).log(),
+                opp_unblocked.to(dtype=player_beliefs.dtype),
+            ],
+            dim=-1,
+        )
+        return self.value_residual(residual_input).squeeze(-1)
+
     def forward_both(
         self,
         features: MLPFeatures,
@@ -1847,7 +2891,7 @@ class BetterFFN(BaseMLPModel):
         player_beliefs, flat_features, x, hand_emb, board_stats = self._forward_base(
             features
         )
-        policy_input = x if self.shared_trunk else flat_features.detach()
+        policy_input = self._policy_input_from_base(flat_features, x)
         policy_logits = self._policy_logits(
             policy_input,
             player_beliefs,
@@ -1856,7 +2900,9 @@ class BetterFFN(BaseMLPModel):
             hand_emb,
             board_stats,
         )
-        hand_values_raw = self._hand_value_logits(x)
+        hand_values_raw = self._value_logits_from_head(
+            player_beliefs, x, hand_emb, self.hand_value_head, features
+        )
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
                 (hand_values_raw * player_beliefs)
@@ -1911,7 +2957,7 @@ class BetterFFN(BaseMLPModel):
                 nn.init.orthogonal_(module.weight, generator=rng)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.RMSNorm):
+            elif isinstance(module, (nn.RMSNorm, nn.LayerNorm)):
                 nn.init.ones_(module.weight)
 
         expansion_gain = math.sqrt(self.ffn_dim / self.hidden_dim)
@@ -1946,13 +2992,28 @@ class BetterFFN(BaseMLPModel):
         # Guess hand values are around stddev 0.1.
         for head_name in ("hand_value_head", "pre_value_head", "post_value_head"):
             head = getattr(self, head_name, None)
-            if head is not None:
+            if hasattr(head, "scale_output"):
+                head.scale_output(0.1)
+            elif head is not None:
                 head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
         if self.board_interaction_dim > 0:
-            self.rank_board_interaction_out.weight.data.mul_(0.1)
-            self.suit_board_interaction_out.weight.data.mul_(0.1)
+            if hasattr(self, "rank_board_interaction_out"):
+                self.rank_board_interaction_out.weight.data.mul_(0.1)
+            if hasattr(self, "suit_board_interaction_out"):
+                self.suit_board_interaction_out.weight.data.mul_(0.1)
         if hasattr(self, "belief_phase_shift"):
             nn.init.zeros_(self.belief_phase_shift.weight)
+        if hasattr(self, "cross_proj"):
+            self.cross_proj.weight.data.mul_(0.1)
+        if hasattr(self, "card_offset_up"):
+            self.card_offset_up.weight.data.mul_(0.1)
+        if hasattr(self, "value_residual"):
+            self.value_residual[-1].weight.data.mul_(0.1)
+        if hasattr(self, "value_strat_head"):
+            if hasattr(self.value_strat_head, "film"):
+                nn.init.zeros_(self.value_strat_head.film.weight)
+                nn.init.zeros_(self.value_strat_head.film.bias)
+            self.value_strat_head.scale_output(0.1)
 
         # Start CFR warm-start policies close to uniform. The dominant low-rank
         # policy logit branch uses gain 0.1; auxiliary additive correction
@@ -2010,7 +3071,7 @@ class BetterPolicyFFN(BetterFFN):
         player_beliefs, flat_features, x, hand_emb, board_stats = self._forward_base(
             features
         )
-        policy_input = x if self.shared_trunk else flat_features.detach()
+        policy_input = self._policy_input_from_base(flat_features, x)
         return self._policy_logits(
             policy_input,
             player_beliefs,
@@ -2094,24 +3155,11 @@ class BetterStreetValueFFN(BetterFFN):
 
         # Directly conditions per-player belief summaries before belief_proj.
         self.belief_phase_shift = nn.Embedding(
-            5 * 2, self.num_players * self.hidden_dim
+            5 * 2, self.num_players * self.belief_feature_dim
         )
 
-    def _make_value_head(self) -> nn.Sequential:
-        alpha = 1 / math.sqrt(self.num_hidden_layers + self.num_value_layers)
-        layers = [
-            ResidualBlock(
-                ffn_block(
-                    self.hidden_dim,
-                    self.ffn_dim,
-                    nonlinearity=self.nonlinearity,
-                ),
-                alpha,
-            )
-            for _ in range(self.num_value_layers)
-        ]
-        layers.append(output_projection(self.hidden_dim, self.num_players * NUM_HANDS))
-        return nn.Sequential(*layers)
+    def _make_value_head(self) -> nn.Module:
+        return super()._make_value_head()
 
     def _phase_key(self, features: MLPFeatures) -> torch.Tensor:
         phase = features.context[:, ValueScalarContext.CHANCE_PHASE.value]
@@ -2139,15 +3187,52 @@ class BetterStreetValueFFN(BetterFFN):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     ]:
         player_beliefs = features.beliefs.view(-1, self.num_players, NUM_HANDS)
-        hand_emb = self._hand_embedding()
-        per_player_belief = player_beliefs @ hand_emb
+        board_context = (
+            self._board_context(features.board)
+            if (
+                self.board_conditioned_hand_embedding_dim > 0
+                or self.belief_low_rank_board_conditioned
+                or self.belief_board_film
+                or self.belief_board_bilinear_rank > 0
+            )
+            else None
+        )
+        hand_emb = self._hand_embedding(board_context)
+        per_player_belief, per_player_variance = self._belief_moments(
+            player_beliefs,
+            hand_emb,
+            board_context,
+        )
+        per_player_belief = self._apply_belief_board_film(
+            per_player_belief,
+            board_context,
+        )
         phase_shift = self.belief_phase_shift(self._phase_key(features)).view(
-            -1, self.num_players, self.hidden_dim
+            -1, self.num_players, self.belief_feature_dim
         )
         per_player_belief = per_player_belief + phase_shift
-        belief_features = self.belief_proj(per_player_belief.flatten(1))
+        belief_features = self.belief_proj(
+            self._belief_projection_input(per_player_belief, per_player_variance)
+        )
 
         flat_features = static_base_features + belief_features
+        range_context_delta = self._range_context_delta(
+            features.context, player_beliefs
+        )
+        if range_context_delta is not None:
+            flat_features = flat_features + range_context_delta
+        cross_features = self._cross_range_interaction(per_player_belief)
+        if cross_features is not None:
+            flat_features = flat_features + cross_features
+        board_bilinear = self._belief_board_bilinear(per_player_belief, board_context)
+        if board_bilinear is not None:
+            flat_features = flat_features + board_bilinear
+        board_mass_features = self._belief_board_mass_features(
+            player_beliefs,
+            features.board,
+        )
+        if board_mass_features is not None:
+            flat_features = flat_features + board_mass_features
         board_stats = self._board_stats(features.board, player_beliefs.dtype)
         interaction_features = self._belief_board_interaction(
             player_beliefs, board_stats
@@ -2155,22 +3240,30 @@ class BetterStreetValueFFN(BetterFFN):
         if interaction_features is not None:
             flat_features = flat_features + interaction_features
 
-        x = self.trunk(flat_features)
+        x = (
+            self._postflop_trunk_output(static_base_features, per_player_belief)
+            if self.postflop_multi_token_trunk
+            else self._postflop_trunk_output(flat_features, per_player_belief)
+        )
         return player_beliefs, flat_features, x, hand_emb, board_stats
 
     def _hand_value_logits_from_head(
         self, value_input: torch.Tensor, head: nn.Module
     ) -> torch.Tensor:
-        return head(value_input).view(-1, self.num_players, NUM_HANDS)
+        return super()._hand_value_logits_from_head(value_input, head)
 
     def _value_tensor_from_base(
         self,
         player_beliefs: torch.Tensor,
         x: torch.Tensor,
+        hand_emb: torch.Tensor,
         head: nn.Module,
+        features: MLPFeatures,
         apply_zero_sum: bool = True,
     ) -> torch.Tensor:
-        hand_values_raw = self._hand_value_logits_from_head(x, head)
+        hand_values_raw = self._value_logits_from_head(
+            player_beliefs, x, hand_emb, head, features
+        )
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
                 (hand_values_raw * player_beliefs)
@@ -2188,13 +3281,18 @@ class BetterStreetValueFFN(BetterFFN):
         apply_zero_sum: bool = True,
     ) -> torch.Tensor:
         if static_base_features is None:
-            player_beliefs, _, x, _, _ = self._forward_base(features)
+            player_beliefs, _, x, hand_emb, _ = self._forward_base(features)
         else:
-            player_beliefs, _, x, _, _ = self._forward_base_from_static(
+            player_beliefs, _, x, hand_emb, _ = self._forward_base_from_static(
                 features, static_base_features=static_base_features
             )
         return self._value_tensor_from_base(
-            player_beliefs, x, head, apply_zero_sum=apply_zero_sum
+            player_beliefs,
+            x,
+            hand_emb,
+            head,
+            features,
+            apply_zero_sum=apply_zero_sum,
         )
 
     def forward_pre(
@@ -2290,9 +3388,9 @@ class BetterStreetValueFFN(BetterFFN):
             return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
 
         if static_base_features is None:
-            player_beliefs, _, x, _, _ = self._forward_base(features)
+            player_beliefs, _, x, hand_emb, _ = self._forward_base(features)
         else:
-            player_beliefs, _, x, _, _ = self._forward_base_from_static(
+            player_beliefs, _, x, hand_emb, _ = self._forward_base_from_static(
                 features, static_base_features=static_base_features
             )
         hand_values = features.beliefs.new_empty(
@@ -2304,14 +3402,18 @@ class BetterStreetValueFFN(BetterFFN):
             hand_values[pre_rows] = self._value_tensor_from_base(
                 player_beliefs[pre_rows],
                 x[pre_rows],
+                hand_emb[pre_rows] if hand_emb.dim() == 3 else hand_emb,
                 self.pre_value_head,
+                features[pre_rows],
                 apply_zero_sum=apply_zero_sum,
             ).to(dtype=hand_values.dtype)
         if post_rows.numel() > 0:
             hand_values[post_rows] = self._value_tensor_from_base(
                 player_beliefs[post_rows],
                 x[post_rows],
+                hand_emb[post_rows] if hand_emb.dim() == 3 else hand_emb,
                 self.post_value_head,
+                features[post_rows],
                 apply_zero_sum=apply_zero_sum,
             ).to(dtype=hand_values.dtype)
         return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)

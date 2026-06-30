@@ -59,6 +59,9 @@ from p2.rl.optimizers import build_optimizer
 from p2.rl.rebel_batch import RebelBatch
 from p2.rl.trueskill_tracker import TrueSkillTracker
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
+from p2.rl.value_metrics import (
+    pot_relative_value_error_metrics as _pot_relative_value_error_metrics,
+)
 from p2.search.cfr_evaluator import CFREvaluator, PublicBeliefState
 from p2.search.postflop_spot_sampler import (
     sample_postflop_legal_prefix_roots,
@@ -66,6 +69,7 @@ from p2.search.postflop_spot_sampler import (
 )
 from p2.search.rebel_data_generator import RebelDataGenerator
 from p2.search.rebel_data_source import (
+    BootstrapPregeneratedRebelDataSource,
     HybridRebelDataSource,
     LiveRebelDataSource,
     PregeneratedRebelDataSource,
@@ -161,66 +165,16 @@ def _scheduled_learning_rate(
     return lr_start
 
 
-def _pot_relative_value_error_metrics(
-    output: Any,
-    batch: RebelBatch,
-    loss_dict: dict[str, Any],
-) -> dict[str, torch.Tensor]:
-    if output.hand_values is None or batch.value_targets is None:
-        return {}
-    pot = batch.statistics.get("pot")
-    scale = batch.statistics.get("scale")
-    if pot is None or scale is None:
-        return {}
-
-    corrected = loss_dict.get("value_predictions")
-    predictions = (
-        corrected.float()
-        if isinstance(corrected, torch.Tensor)
-        else output.hand_values.float()
-    )
-    targets = batch.value_targets.to(
-        device=predictions.device,
-        dtype=predictions.dtype,
-    )
-    scale_tensor = scale.to(
-        device=predictions.device,
-        dtype=predictions.dtype,
-    ).clamp_min(1.0)
-    pot_scale = pot.to(
-        device=predictions.device,
-        dtype=predictions.dtype,
-    ).clamp_min(1.0)
-    while scale_tensor.ndim < predictions.ndim:
-        scale_tensor = scale_tensor.unsqueeze(-1)
-    while pot_scale.ndim < predictions.ndim:
-        pot_scale = pot_scale.unsqueeze(-1)
-
-    relative_abs_error = (predictions - targets).abs() * scale_tensor / pot_scale
-    relative_sq_error = relative_abs_error.square()
-    weights = loss_dict.get("value_weights")
-    if isinstance(weights, torch.Tensor):
-        value_weights = weights.to(device=predictions.device, dtype=predictions.dtype)
-    else:
-        value_weights = torch.ones_like(relative_abs_error)
-    denom = value_weights.sum().clamp_min(1.0e-8)
-    relative_mse = (relative_sq_error * value_weights).sum() / denom
-    return {
-        "pot_relative_mae": (relative_abs_error * value_weights).sum() / denom,
-        "pot_relative_mse": relative_mse,
-        "pot_relative_rmse": relative_mse.sqrt(),
-    }
-
-
 def _compile_setting(cfg: Config) -> str:
     value = str(cfg.model.compile).strip().lower()
     if value in {"0", "false", "no", "none"}:
         return "off"
     if value in {"", "true", "yes", "1"}:
         return "default"
-    if value not in {"off", "default", "static", "max-autotune"}:
+    if value not in {"off", "default", "static", "reduce-overhead", "max-autotune"}:
         raise ValueError(
-            "model.compile must be one of: off, default, static, max-autotune; "
+            "model.compile must be one of: off, default, static, "
+            "reduce-overhead, max-autotune; "
             f"got {cfg.model.compile!r}"
         )
     return value
@@ -247,7 +201,7 @@ def _compile_kwargs(cfg: Config) -> dict[str, object]:
         )
     elif mode == "static":
         kwargs["policy_compile"] = False
-    if mode == "max-autotune":
+    if mode in {"reduce-overhead", "max-autotune"}:
         kwargs["mode"] = mode
     return kwargs
 
@@ -596,15 +550,26 @@ class RebelCFRTrainer:
             policy_buffer: RebelPolicyBuffer,
             *,
             generator: torch.Generator,
+            default_policy_sample_count: int | None = None,
         ) -> PregeneratedRebelDataSource:
             return PregeneratedRebelDataSource(
                 cfg.data.pregenerated.datasets,
                 value_buffer,
                 policy_buffer,
-                value_sample_count=cfg.data.pregenerated.value_batch_size
-                or self.K_value,
-                policy_sample_count=cfg.data.pregenerated.policy_batch_size
-                or self.batch_size,
+                value_sample_count=(
+                    cfg.data.pregenerated.value_batch_size
+                    if cfg.data.pregenerated.value_batch_size is not None
+                    else self.K_value
+                ),
+                policy_sample_count=(
+                    cfg.data.pregenerated.policy_batch_size
+                    if cfg.data.pregenerated.policy_batch_size is not None
+                    else (
+                        self.batch_size
+                        if default_policy_sample_count is None
+                        else int(default_policy_sample_count)
+                    )
+                ),
                 num_players=self.num_players,
                 num_actions=self.num_actions,
                 context_length=num_context_features,
@@ -623,7 +588,7 @@ class RebelCFRTrainer:
             )
 
         self.data_generator: RebelDataGenerator | None = None
-        if cfg.data.mode in {"live", "hybrid"}:
+        if cfg.data.mode in {"live", "hybrid", "bootstrap_pregenerated"}:
             self.data_generator = RebelDataGenerator(
                 env_proto=self.env,
                 evaluator=self.cfr_evaluator,
@@ -653,7 +618,21 @@ class RebelCFRTrainer:
                 value_sample_count=self.K_value,
                 max_return_policy_samples=self.batch_size,
             )
-            if cfg.data.mode == "hybrid":
+            if cfg.data.mode == "bootstrap_pregenerated":
+                bootstrap_rng = torch.Generator(device="cpu")
+                if cfg.seed is not None:
+                    bootstrap_rng.manual_seed(int(cfg.seed))
+                bootstrap_source = make_pregenerated_source(
+                    self.value_buffer,
+                    self.policy_buffer,
+                    generator=bootstrap_rng,
+                    default_policy_sample_count=0,
+                )
+                self.data_source = BootstrapPregeneratedRebelDataSource(
+                    bootstrap_source,
+                    self.data_source,
+                )
+            elif cfg.data.mode == "hybrid":
                 holdout_rng = torch.Generator(device="cpu")
                 if cfg.seed is not None:
                     holdout_rng.manual_seed(int(cfg.seed) + 1)
@@ -790,8 +769,33 @@ class RebelCFRTrainer:
             shared_trunk=cfg.model.shared_trunk,
             enforce_zero_sum=cfg.model.enforce_zero_sum,
             board_interaction_dim=cfg.model.board_interaction_dim,
+            board_interaction_skip_out=cfg.model.board_interaction_skip_out,
+            board_interaction_gated=cfg.model.board_interaction_gated,
             policy_rank=cfg.model.policy_rank,
             policy_hand_bias_rank=cfg.model.policy_hand_bias_rank,
+            value_per_hand_residual=cfg.model.value_per_hand_residual,
+            board_conditioned_hand_embedding_dim=(
+                cfg.model.board_conditioned_hand_embedding_dim
+            ),
+            cross_range_rank=cfg.model.cross_range_rank,
+            card_token_value_head_dim=cfg.model.card_token_value_head_dim,
+            context_range_stats=cfg.model.context_range_stats,
+            postflop_multi_token_trunk=cfg.model.postflop_multi_token_trunk,
+            belief_second_moment=cfg.model.belief_second_moment,
+            value_strength_bucket_count=cfg.model.value_strength_bucket_count,
+            value_strength_bucket_film=cfg.model.value_strength_bucket_film,
+            value_strength_bucket_relative=cfg.model.value_strength_bucket_relative,
+            value_head_rank=cfg.model.value_head_rank,
+            value_hand_basis_rank=cfg.model.value_hand_basis_rank,
+            belief_low_rank_dim=cfg.model.belief_low_rank_dim,
+            belief_low_rank_board_conditioned=(
+                cfg.model.belief_low_rank_board_conditioned
+            ),
+            belief_skip_matching_encoder=cfg.model.belief_skip_matching_encoder,
+            belief_linear_encoder=cfg.model.belief_linear_encoder,
+            belief_board_film=cfg.model.belief_board_film,
+            belief_board_bilinear_rank=cfg.model.belief_board_bilinear_rank,
+            belief_board_mass_features=cfg.model.belief_board_mass_features,
             nonlinearity=cfg.model.nonlinearity,
         )
         if int(cfg.model.preflop_hand_dim) == 169:
@@ -2248,6 +2252,24 @@ class RebelCFRTrainer:
                 value_batch.value_targets.abs().mean().item()
             )
             metrics["batch_value_target_std"] = value_batch.value_targets.std().item()
+            pot_relative_metrics = _pot_relative_value_error_metrics(
+                value_output,
+                value_batch,
+                {
+                    "value_predictions": (
+                        value_output.hand_values.detach()
+                        if value_output.hand_values is not None
+                        else None
+                    ),
+                    "value_weights": value_weights,
+                },
+            )
+            metrics.update(
+                {
+                    key: float(value.detach().item())
+                    for key, value in pot_relative_metrics.items()
+                }
+            )
 
         # Calculate loss on fresh data
         if fresh_value_batch:
@@ -2267,6 +2289,17 @@ class RebelCFRTrainer:
                 # loss_fn returns device tensors; .item() lands once per
                 # metric here (3 syncs/step in the EMA case, 1 otherwise).
                 metrics["fresh_value_loss"] = fresh_loss_dict["value_loss"].item()
+                fresh_pot_relative_metrics = _pot_relative_value_error_metrics(
+                    fresh_model_output,
+                    fresh_value_batch,
+                    fresh_loss_dict,
+                )
+                metrics.update(
+                    {
+                        f"fresh_{key}": float(value.detach().item())
+                        for key, value in fresh_pot_relative_metrics.items()
+                    }
+                )
 
                 if self.ema_helper is not None:
                     metrics["fresh_value_loss_avg"] = metrics["fresh_value_loss"]
@@ -2781,6 +2814,69 @@ class RebelCFRTrainer:
         )
         return stats
 
+    def _update_bootstrap_pregenerated_value_only(self, step: int) -> dict[str, Any]:
+        if not isinstance(self.data_source, BootstrapPregeneratedRebelDataSource):
+            raise RuntimeError("bootstrap value-only update requires bootstrap source")
+        fresh_value_batch = self.data_source.prepare_value_bootstrap_step(step)
+        self.data_source.ensure_min_value_samples(self.batch_size)
+        available_value = self.data_source.bootstrap_value_available()
+        if available_value <= 0:
+            raise RuntimeError("bootstrap pregenerated value prefix is empty")
+
+        value_fullness = min(
+            1.0,
+            available_value
+            / max(1, self.data_source.bootstrap_value_capacity()),
+        )
+        episodes = max(1, math.ceil(self.cfg.train.episodes_per_step * value_fullness))
+        stratify = self._get_stratify_streets(step)
+        accum: dict[str, float] = {}
+        last_stats: dict[str, Any] | None = None
+        for _ in range(episodes):
+            value_batch = self.data_source.sample_value(
+                self.batch_size,
+                stratify_streets=stratify,
+            )
+            stats = self.train_value_batch(
+                value_batch,
+                step,
+                sync_inference_model=False,
+            )
+            last_stats = stats
+            for key in (
+                "loss",
+                "total_loss",
+                "value_loss",
+                "permutation_loss",
+                "pot_relative_mae",
+                "pot_relative_mse",
+                "pot_relative_rmse",
+            ):
+                value = stats.get(key)
+                if isinstance(value, (int, float)):
+                    accum[key] = accum.get(key, 0.0) + float(value)
+
+        self._sync_inference_model()
+        if last_stats is None:
+            raise RuntimeError("bootstrap value-only update produced no stats")
+        averaged = dict(last_stats)
+        for key, value in accum.items():
+            averaged[key] = value / episodes
+        averaged["step"] = step + 1
+        averaged["updates"] = episodes
+        averaged["num_samples"] = self.batch_size * episodes
+        averaged["bootstrap_pregenerated_value_only"] = 1.0
+        averaged["bootstrap_pregenerated_value_remaining"] = float(
+            self.data_source.bootstrap_value_remaining()
+        )
+        averaged["value_buffer_size"] = available_value
+        averaged["policy_buffer_size"] = (
+            len(self.policy_buffer) if self.policy_buffer is not None else 0
+        )
+        if fresh_value_batch is not None:
+            averaged["fresh_value_examples"] = len(fresh_value_batch)
+        return averaged
+
     @profile
     def _update_model(
         self, step: int
@@ -3080,7 +3176,13 @@ class RebelCFRTrainer:
         self._apply_schedules(step)
         cfr_target_promoted = self._maybe_promote_cfr_target_model(step)
 
-        update_info = self._update_model(step)
+        if (
+            isinstance(self.data_source, BootstrapPregeneratedRebelDataSource)
+            and self.data_source.value_bootstrap_active()
+        ):
+            update_info = self._update_bootstrap_pregenerated_value_only(step)
+        else:
+            update_info = self._update_model(step)
         update_info["step"] = step_public
         update_info["learning_rate"] = self.optimizer.param_groups[0]["lr"]
         adamw_lrs = [

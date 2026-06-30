@@ -124,9 +124,10 @@ def _compile_setting_from_env(cfg=None) -> str:
         return "off"
     if value in {"", "true", "yes", "1"}:
         return "default"
-    if value not in {"off", "default", "static", "max-autotune"}:
+    if value not in {"off", "default", "static", "reduce-overhead", "max-autotune"}:
         raise ValueError(
-            "compile mode must be one of: off, default, static, max-autotune; "
+            "compile mode must be one of: off, default, static, "
+            "reduce-overhead, max-autotune; "
             f"got {mode!r}"
         )
     return value
@@ -155,7 +156,7 @@ def _compile_kwargs_from_env(cfg=None) -> dict[str, object]:
         )
     elif mode == "static":
         kwargs["policy_compile"] = False
-    if mode == "max-autotune":
+    if mode in {"reduce-overhead", "max-autotune"}:
         kwargs["mode"] = mode
     return kwargs
 

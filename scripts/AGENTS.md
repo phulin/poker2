@@ -19,6 +19,7 @@ Reusable profiling, benchmark, data-prep, and diagnostic scripts. ReBeL Hydra sc
 - `bench_warm_start_spots.py`: Benchmarks fused sparse CFR warm-starts.
 - `bench_write_children_kernel.py`: Benchmarks same-street child-writer kernels.
 - `check_dynamic_compile_recompiles.py`: Checks dynamic compile recompilation behavior.
+- `combine_rebel_solved_datasets.py`: Combines compatible ReBeL solved postflop datasets into one manifest/shard set using symlinks, hardlinks, or copies.
 - `convert_allin_dataset_to_169.py`: Converts pregenerated all-in datasets to native 169-class tensors.
 - `diagnose_river_convergence.py`: Diagnoses river CFR convergence details.
 - `distill_epreflop_6p_live_pair.py`: Runs 6-player compact E-preflop live-pair distillation.
@@ -41,10 +42,13 @@ Reusable profiling, benchmark, data-prep, and diagnostic scripts. ReBeL Hydra sc
 - `profile_train_rebel.py`: Profiles the ReBeL training loop.
 - `river_cfr_exploitability_trajectory.py`: Logs river CFR exploitability trajectories.
 - `run_rebel_hp_bandit.py`: Runs ReBeL hyperparameter bandit trials.
+- `run_value_arch_proposal.py`: Runs value-only S_river BetterFFN architecture proposal tests on pregenerated postflop data.
 - `sample_preflop_continuation_beliefs.py`: Samples preflop continuation belief cascades.
 - `shuffle_preflop_street_closed_states.py`: Shuffles preflop street-closed state datasets.
 - `sweep_preflop_value_lr_bs.py`: Runs preflop value LR/batch-size sweeps.
 - `test_survey_runner.py`: Runs pytest files or node ids with per-invocation timeouts and records structured audit results.
+- `time_fixed_value_checkpoints.py`: Times fixed value-architecture checkpoints with GPU-resident pregenerated batches and no-grad 4096-example value forwards.
+- `time_value_forward_ablations.py`: Times value-forward ablations by monkey-patching checkpointed value-network components before reduce-overhead compilation.
 - `validate_epreflop_6p_live_pair.py`: Validates 6-player compact E-preflop live-pair checkpoints.
 
 ### Subdirectories

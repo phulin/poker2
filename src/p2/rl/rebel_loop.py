@@ -171,6 +171,7 @@ def run_training_loop(
     checkpoint_metadata: dict[str, object] | None = None,
     value_only: bool = False,
     print_preflop_analyzer: bool = True,
+    log_interval: int = 1,
 ) -> int:
     stage_suffix = f" for {stage_tag}" if stage_tag else ""
     print(
@@ -227,9 +228,14 @@ def run_training_loop(
                 f"time={validation_elapsed:.2f}s"
             )
 
-        print_rebel_training_stats(
-            metrics, step, stop_step, step_elapsed, total_elapsed
+        should_log_step = (
+            log_interval > 0
+            and (step == start_step or (step + 1) % log_interval == 0)
         )
+        if should_log_step:
+            print_rebel_training_stats(
+                metrics, step, stop_step, step_elapsed, total_elapsed
+            )
 
         if cfg.use_wandb:
             metrics["step_time_s"] = step_elapsed

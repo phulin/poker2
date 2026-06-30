@@ -811,6 +811,88 @@ def test_better_ffn_unblocked_mass_uses_registered_buffers():
     torch.testing.assert_close(actual, expected)
 
 
+def test_better_street_value_ffn_arch_proposal_forward_shapes():
+    batch_size = 2
+    num_players = 2
+    proposal_kwargs = [
+        {"value_per_hand_residual": True},
+        {"board_conditioned_hand_embedding_dim": 4},
+        {"cross_range_rank": 4},
+        {"card_token_value_head_dim": 8},
+        {"context_range_stats": True},
+        {"postflop_multi_token_trunk": True},
+        {"belief_second_moment": True},
+        {"value_strength_bucket_count": 4},
+        {"value_strength_bucket_count": 4, "value_strength_bucket_film": True},
+        {"value_strength_bucket_count": 4, "value_strength_bucket_relative": True},
+        {
+            "value_strength_bucket_count": 4,
+            "value_strength_bucket_film": True,
+            "value_strength_bucket_relative": True,
+        },
+        {"value_head_rank": 4},
+        {
+            "value_head_rank": 4,
+            "value_strength_bucket_count": 4,
+            "value_strength_bucket_film": True,
+        },
+        {"value_hand_basis_rank": 4},
+        {"belief_low_rank_dim": 4},
+        {"belief_linear_encoder": True},
+        {"belief_low_rank_dim": 4, "belief_linear_encoder": True},
+        {"belief_low_rank_dim": 4, "belief_board_film": True},
+        {"belief_low_rank_dim": 4, "belief_board_bilinear_rank": 4},
+        {"belief_low_rank_dim": 4, "belief_board_mass_features": True},
+        {"board_interaction_dim": 8, "board_interaction_gated": True},
+        {"board_interaction_dim": 8, "board_interaction_skip_out": True},
+        {
+            "board_interaction_dim": 8,
+            "board_interaction_skip_out": True,
+            "board_interaction_gated": True,
+        },
+        {"belief_low_rank_dim": 4, "belief_low_rank_board_conditioned": True},
+        {
+            "belief_low_rank_dim": 4,
+            "belief_second_moment": True,
+            "belief_skip_matching_encoder": True,
+        },
+    ]
+    beliefs = torch.full(
+        (batch_size, num_players, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32
+    )
+    features = MLPFeatures(
+        context=torch.zeros(batch_size, value_context_length(num_players)),
+        street=torch.full((batch_size,), 3, dtype=torch.long),
+        to_act=torch.zeros(batch_size, dtype=torch.long),
+        board=torch.tensor(
+            [
+                [12, 25, 38, 3, 17],
+                [0, 14, 28, 42, 51],
+            ],
+            dtype=torch.long,
+        ),
+        beliefs=beliefs.view(batch_size, -1),
+    )
+
+    for kwargs in proposal_kwargs:
+        model = BetterStreetValueFFN(
+            hidden_dim=16,
+            range_hidden_dim=8,
+            ffn_dim=32,
+            num_hidden_layers=1,
+            num_policy_layers=1,
+            num_value_layers=1,
+            num_players=num_players,
+            **kwargs,
+        )
+        model.init_weights(torch.Generator(device="cpu").manual_seed(0))
+
+        output = model(features)
+
+        assert output.value.shape == (batch_size, num_players)
+        assert output.hand_values.shape == (batch_size, num_players, NUM_HANDS)
+
+
 def test_better_ffn_rank_and_suit_board_bilinear_interactions():
     batch_size = 2
     num_actions = 4

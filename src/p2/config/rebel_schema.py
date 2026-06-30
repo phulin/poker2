@@ -36,6 +36,7 @@ class RebelRunConfig:
     seed: int
     use_tensor_env: bool
     config: str | None
+    log_interval: int
 
 
 @dataclass(frozen=True)
@@ -234,8 +235,29 @@ class RebelModelConfig:
     shared_trunk: bool
     enforce_zero_sum: bool
     board_interaction_dim: int
+    board_interaction_skip_out: bool
+    board_interaction_gated: bool
     policy_rank: int
     policy_hand_bias_rank: int
+    value_per_hand_residual: bool
+    board_conditioned_hand_embedding_dim: int
+    cross_range_rank: int
+    card_token_value_head_dim: int
+    context_range_stats: bool
+    postflop_multi_token_trunk: bool
+    belief_second_moment: bool
+    value_strength_bucket_count: int
+    value_strength_bucket_film: bool
+    value_strength_bucket_relative: bool
+    value_head_rank: int
+    value_hand_basis_rank: int
+    belief_low_rank_dim: int
+    belief_low_rank_board_conditioned: bool
+    belief_skip_matching_encoder: bool
+    belief_linear_encoder: bool
+    belief_board_film: bool
+    belief_board_bilinear_rank: int
+    belief_board_mass_features: bool
     street_value_heads: StreetValueHeads
     preflop_hand_dim: int
     preflop_model_type: PreflopModelType
@@ -264,8 +286,33 @@ class RebelModelConfig:
             shared_trunk=cfg.shared_trunk,
             enforce_zero_sum=cfg.enforce_zero_sum,
             board_interaction_dim=cfg.board_interaction_dim,
+            board_interaction_skip_out=cfg.board_interaction_skip_out,
+            board_interaction_gated=cfg.board_interaction_gated,
             policy_rank=cfg.policy_rank,
             policy_hand_bias_rank=cfg.policy_hand_bias_rank,
+            value_per_hand_residual=cfg.value_per_hand_residual,
+            board_conditioned_hand_embedding_dim=(
+                cfg.board_conditioned_hand_embedding_dim
+            ),
+            cross_range_rank=cfg.cross_range_rank,
+            card_token_value_head_dim=cfg.card_token_value_head_dim,
+            context_range_stats=cfg.context_range_stats,
+            postflop_multi_token_trunk=cfg.postflop_multi_token_trunk,
+            belief_second_moment=cfg.belief_second_moment,
+            value_strength_bucket_count=cfg.value_strength_bucket_count,
+            value_strength_bucket_film=cfg.value_strength_bucket_film,
+            value_strength_bucket_relative=cfg.value_strength_bucket_relative,
+            value_head_rank=cfg.value_head_rank,
+            value_hand_basis_rank=cfg.value_hand_basis_rank,
+            belief_low_rank_dim=cfg.belief_low_rank_dim,
+            belief_low_rank_board_conditioned=(
+                cfg.belief_low_rank_board_conditioned
+            ),
+            belief_skip_matching_encoder=cfg.belief_skip_matching_encoder,
+            belief_linear_encoder=cfg.belief_linear_encoder,
+            belief_board_film=cfg.belief_board_film,
+            belief_board_bilinear_rank=cfg.belief_board_bilinear_rank,
+            belief_board_mass_features=cfg.belief_board_mass_features,
             street_value_heads=cfg.street_value_heads,
             preflop_hand_dim=cfg.preflop_hand_dim,
             preflop_model_type=cfg.preflop_model_type,
@@ -294,8 +341,33 @@ class RebelModelConfig:
         cfg.shared_trunk = self.shared_trunk
         cfg.enforce_zero_sum = self.enforce_zero_sum
         cfg.board_interaction_dim = self.board_interaction_dim
+        cfg.board_interaction_skip_out = self.board_interaction_skip_out
+        cfg.board_interaction_gated = self.board_interaction_gated
         cfg.policy_rank = self.policy_rank
         cfg.policy_hand_bias_rank = self.policy_hand_bias_rank
+        cfg.value_per_hand_residual = self.value_per_hand_residual
+        cfg.board_conditioned_hand_embedding_dim = (
+            self.board_conditioned_hand_embedding_dim
+        )
+        cfg.cross_range_rank = self.cross_range_rank
+        cfg.card_token_value_head_dim = self.card_token_value_head_dim
+        cfg.context_range_stats = self.context_range_stats
+        cfg.postflop_multi_token_trunk = self.postflop_multi_token_trunk
+        cfg.belief_second_moment = self.belief_second_moment
+        cfg.value_strength_bucket_count = self.value_strength_bucket_count
+        cfg.value_strength_bucket_film = self.value_strength_bucket_film
+        cfg.value_strength_bucket_relative = self.value_strength_bucket_relative
+        cfg.value_head_rank = self.value_head_rank
+        cfg.value_hand_basis_rank = self.value_hand_basis_rank
+        cfg.belief_low_rank_dim = self.belief_low_rank_dim
+        cfg.belief_low_rank_board_conditioned = (
+            self.belief_low_rank_board_conditioned
+        )
+        cfg.belief_skip_matching_encoder = self.belief_skip_matching_encoder
+        cfg.belief_linear_encoder = self.belief_linear_encoder
+        cfg.belief_board_film = self.belief_board_film
+        cfg.belief_board_bilinear_rank = self.belief_board_bilinear_rank
+        cfg.belief_board_mass_features = self.belief_board_mass_features
         cfg.street_value_heads = self.street_value_heads
         cfg.preflop_hand_dim = self.preflop_hand_dim
         cfg.preflop_model_type = self.preflop_model_type
@@ -334,6 +406,7 @@ class RebelExperimentConfig:
                 seed=cfg.seed,
                 use_tensor_env=cfg.use_tensor_env,
                 config=cfg.config,
+                log_interval=cfg.log_interval,
             ),
             checkpoint=RebelCheckpointConfig(
                 checkpoint_dir=cfg.checkpoint_dir,
@@ -378,6 +451,7 @@ class RebelExperimentConfig:
             resume_from=self.checkpoint.resume_from,
             seed=self.run.seed,
             config=self.run.config,
+            log_interval=self.run.log_interval,
             economize_checkpoints=self.checkpoint.economize_checkpoints,
             strict_model_loading=self.checkpoint.strict_model_loading,
             train=self.train.to_training_config(),

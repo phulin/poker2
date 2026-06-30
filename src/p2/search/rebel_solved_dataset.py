@@ -756,6 +756,40 @@ class RebelSolvedDataset:
             hand_dim=int(self.manifest.get("hands", NUM_HANDS)),
         )
 
+    def get_indexed_batch(
+        self,
+        stream: StreamName,
+        rows: torch.Tensor,
+        *,
+        device: torch.device | None = None,
+        float_dtype: torch.dtype | None = torch.float32,
+    ) -> RebelBatch:
+        rows = rows.detach().cpu().to(torch.long).reshape(-1)
+        if rows.numel() <= 0:
+            raise ValueError("rows must be non-empty")
+        total = self.examples[stream]
+        if total == 0:
+            raise ValueError(f"{stream} stream is empty")
+        if bool(((rows < 0) | (rows >= total)).any().item()):
+            raise IndexError(f"{stream} row index outside solved dataset")
+
+        chunks = []
+        for shard_idx, shard in enumerate(self.shards[stream]):
+            shard_start = int(shard["start"])
+            shard_end = int(shard["end"])
+            mask = (rows >= shard_start) & (rows < shard_end)
+            if not mask.any():
+                continue
+            local_rows = rows[mask] - shard_start
+            chunks.append(_index_tensors(self._load_shard(stream, shard_idx), local_rows))
+        tensors = chunks[0] if len(chunks) == 1 else _concat_tensors(chunks)
+        return rebel_batch_from_tensors(
+            tensors,
+            device=device,
+            float_dtype=float_dtype,
+            hand_dim=int(self.manifest.get("hands", NUM_HANDS)),
+        )
+
     def sample_batch(
         self,
         stream: StreamName,

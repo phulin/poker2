@@ -375,10 +375,10 @@ def _run_train_substep(
     resume_from: str | None,
     promoted: dict[str, str] | None = None,
 ) -> str:
-    if cfg.data.mode not in {"live", "hybrid"}:
+    if cfg.data.mode not in {"live", "hybrid", "bootstrap_pregenerated"}:
         raise NotImplementedError(
-            "Curriculum train substeps currently support data.mode=live or "
-            "data.mode=hybrid only; "
+            "Curriculum train substeps currently support data.mode=live, "
+            "data.mode=hybrid, or data.mode=bootstrap_pregenerated; "
             "use train_rebel.py with data.mode=pregenerated for bounded HP sweeps."
         )
 
@@ -447,6 +447,7 @@ def _run_train_substep(
             stage_tag=substep_name,
             checkpoint_metadata=metadata,
             print_preflop_analyzer=_should_print_preflop_analyzer(substep.net),
+            log_interval=stage_cfg.log_interval,
         )
 
     final_path = os.path.join(stage_cfg.checkpoint_dir, "rebel_final.pt")

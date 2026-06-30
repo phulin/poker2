@@ -24,7 +24,9 @@ _FORBIDDEN_REBEL_TOP_LEVEL_KEYS = frozenset(
         "exploiter",
     }
 )
-_REBEL_DATA_MODES = frozenset({"live", "pregenerated", "hybrid"})
+_REBEL_DATA_MODES = frozenset(
+    {"live", "pregenerated", "hybrid", "bootstrap_pregenerated"}
+)
 _LIVE_ROOT_SOURCES = frozenset(
     {
         "self_play",
@@ -74,7 +76,8 @@ def _apply_rebel_loader_defaults(container: dict[str, Any]) -> dict[str, Any]:
 def validate_rebel_config(cfg: Config) -> None:
     if cfg.data.mode not in _REBEL_DATA_MODES:
         raise ValueError(
-            "data.mode must be one of live, pregenerated, or hybrid; "
+            "data.mode must be one of live, pregenerated, hybrid, "
+            "or bootstrap_pregenerated; "
             f"got {cfg.data.mode!r}"
         )
     if cfg.data.live_root_source not in _LIVE_ROOT_SOURCES:
@@ -83,9 +86,14 @@ def validate_rebel_config(cfg: Config) -> None:
             "random_river, random_flop_prefix, random_turn_prefix, or "
             f"random_river_prefix; got {cfg.data.live_root_source!r}"
         )
-    if cfg.curriculum.stages and cfg.data.mode not in {"live", "hybrid"}:
+    if cfg.curriculum.stages and cfg.data.mode not in {
+        "live",
+        "hybrid",
+        "bootstrap_pregenerated",
+    }:
         raise ValueError(
-            "curriculum stages require data.mode=live or data.mode=hybrid; "
+            "curriculum stages require data.mode=live, data.mode=hybrid, "
+            "or data.mode=bootstrap_pregenerated; "
             f"got {cfg.data.mode!r}"
         )
     if cfg.model.preflop_model_type not in _PREFLOP_MODEL_TYPES:

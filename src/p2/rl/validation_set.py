@@ -8,6 +8,7 @@ import torch
 
 from p2.core.structured_config import Config
 from p2.rl.cfr_trainer import RebelCFRTrainer
+from p2.rl.value_metrics import pot_relative_value_error_sums
 from p2.search.rebel_solved_dataset import RebelSolvedDataset
 
 
@@ -61,6 +62,9 @@ class RebelValueValidationSetEvaluator:
         weighted_loss_elements = 0
         weight_normalized_denom = 0.0
         batch_loss_sum = 0.0
+        pot_relative_abs_sum = 0.0
+        pot_relative_sq_sum = 0.0
+        pot_relative_weight_sum = 0.0
         num_batches = 0
 
         for start in range(0, total_examples, self.batch_size):
@@ -82,15 +86,39 @@ class RebelValueValidationSetEvaluator:
             loss_dict = self.trainer.loss_fn.forward_value(output, batch)
             value_loss_all = loss_dict["value_loss_all"]
             value_weights = loss_dict["value_weights"]
+            pot_relative_sums = pot_relative_value_error_sums(
+                output,
+                batch,
+                loss_dict,
+            )
 
             weighted_loss_sum += float(value_loss_all.sum().detach().cpu().item())
             weighted_loss_elements += int(value_loss_all.numel())
             weight_normalized_denom += float(value_weights.sum().detach().cpu().item())
             batch_loss_sum += float(loss_dict["value_loss"].detach().cpu().item())
+            if pot_relative_sums:
+                pot_relative_abs_sum += float(
+                    pot_relative_sums["pot_relative_abs_error_sum"]
+                    .detach()
+                    .cpu()
+                    .item()
+                )
+                pot_relative_sq_sum += float(
+                    pot_relative_sums["pot_relative_sq_error_sum"]
+                    .detach()
+                    .cpu()
+                    .item()
+                )
+                pot_relative_weight_sum += float(
+                    pot_relative_sums["pot_relative_weight_sum"]
+                    .detach()
+                    .cpu()
+                    .item()
+                )
             num_batches += 1
 
         value_loss = weighted_loss_sum / max(weight_normalized_denom, 1e-12)
-        return {
+        metrics = {
             "validation_value_loss": value_loss,
             "validation_element_mean_weighted_square_error": (
                 weighted_loss_sum / max(weighted_loss_elements, 1)
@@ -100,6 +128,18 @@ class RebelValueValidationSetEvaluator:
             "validation_num_batches": num_batches,
             "validation_dataset": self.dataset_path,
         }
+        if pot_relative_weight_sum > 0.0:
+            pot_relative_mse = pot_relative_sq_sum / pot_relative_weight_sum
+            metrics.update(
+                {
+                    "validation_pot_relative_mae": (
+                        pot_relative_abs_sum / pot_relative_weight_sum
+                    ),
+                    "validation_pot_relative_mse": pot_relative_mse,
+                    "validation_pot_relative_rmse": pot_relative_mse**0.5,
+                }
+            )
+        return metrics
 
 
 __all__ = [
