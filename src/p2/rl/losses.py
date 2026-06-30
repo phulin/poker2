@@ -779,6 +779,9 @@ class RebelSupervisedLoss(nn.Module):
 
     def compile_forward_modes(self, **kwargs):
         """Compile fixed-mode loss forwards without compiling optional dispatch."""
+        kwargs = dict(kwargs)
+        kwargs.pop("policy_compile", None)
+        kwargs.pop("policy_dynamic", None)
         device = self._combo_card_a.device
         preflop_class_compatibility_counts_tensor(device=device)
         preflop_class_multiplicity_tensor(device=device)

@@ -2298,14 +2298,14 @@ class BetterStreetValueFFN(BetterFFN):
                 x[pre_rows],
                 self.pre_value_head,
                 apply_zero_sum=apply_zero_sum,
-            )
+            ).to(dtype=hand_values.dtype)
         if post_rows.numel() > 0:
             hand_values[post_rows] = self._value_tensor_from_base(
                 player_beliefs[post_rows],
                 x[post_rows],
                 self.post_value_head,
                 apply_zero_sum=apply_zero_sum,
-            )
+            ).to(dtype=hand_values.dtype)
         return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
 
     def forward_value_static_base(
@@ -4179,21 +4179,40 @@ class BetterSplitFFN(BaseMLPModel):
 
     def compile_forward_modes(self, **kwargs):
         """Compile split child fixed-mode forwards used by the wrapper hot path."""
+        kwargs = dict(kwargs)
+        compile_policy = bool(kwargs.pop("policy_compile", True))
+        policy_dynamic = bool(
+            kwargs.pop("policy_dynamic", kwargs.get("dynamic", False))
+        )
         dynamic_batch = bool(kwargs.get("dynamic", False))
+        policy_kwargs = dict(kwargs)
+        policy_kwargs["dynamic"] = policy_dynamic
         policy_model = self.policy_model
-        policy_model._compiled_forward_dynamic_batch = dynamic_batch
-        policy_ns = {"policy_model": policy_model}
-        exec(
-            "def policy_forward_features_only(features):\n"
-            "    return policy_model.forward_policy(features)\n",
-            policy_ns,
+        policy_model._compiled_forward_dynamic_batch = (
+            policy_dynamic if compile_policy else False
         )
+        policy_model._compiled_forward_policy_dynamic_batch = (
+            policy_dynamic if compile_policy else False
+        )
+        if compile_policy:
+            policy_ns = {"policy_model": policy_model}
+            exec(
+                "def policy_forward_features_only(features):\n"
+                "    return policy_model.forward_policy(features)\n",
+                policy_ns,
+            )
 
-        self.policy_model._compiled_forward_policy = torch.compile(
-            policy_ns["policy_forward_features_only"], **kwargs
-        )
+            self.policy_model._compiled_forward_policy = torch.compile(
+                policy_ns["policy_forward_features_only"],
+                **policy_kwargs,
+            )
+        else:
+            self.policy_model._compiled_forward_policy = None
         value_model = self.value_model
         value_model._compiled_forward_dynamic_batch = dynamic_batch
+        value_model._compiled_forward_value_dynamic_batch = dynamic_batch
+        value_model._compiled_forward_value_static_base_dynamic_batch = dynamic_batch
+        value_model._compiled_forward_both_dynamic_batch = dynamic_batch
         value_ns = {"value_model": value_model}
         exec(
             "def value_forward(features, latent=None, apply_zero_sum=True, "
@@ -4237,7 +4256,11 @@ class BetterSplitFFN(BaseMLPModel):
         self.value_model._compiled_forward_value_static_base = torch.compile(
             value_ns["value_forward_static_base"], **kwargs
         )
-        return super().compile_forward_modes(**kwargs)
+        return super().compile_forward_modes(
+            **kwargs,
+            policy_dynamic=policy_dynamic,
+            policy_compile=compile_policy,
+        )
 
     def forward_policy(self, features: MLPFeatures, latent=None) -> ModelOutput:
         return ModelOutput(

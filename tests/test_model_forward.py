@@ -9,6 +9,7 @@ from p2.encoding.action_mapping import bin_to_action, get_legal_mask
 from p2.env.card_utils import NUM_HANDS, calculate_unblocked_mass
 from p2.env.hunl_env import HUNLEnv
 from p2.env.types import GameState, PlayerState
+from p2.models.base_mlp_model import BaseMLPModel
 from p2.models.cnn import ActionsHUEncoderV1, CardsPlanesV1, SiameseConvNetV1
 from p2.models.cnn.cnn_embedding_data import CNNEmbeddingData
 from p2.core.structured_config import StreetValueHeads
@@ -486,6 +487,70 @@ def test_better_split_ffn_fixed_value_head_uses_compiled_value_forward():
     torch.testing.assert_close(output.hand_values[0], torch.ones_like(output.hand_values[0]))
     torch.testing.assert_close(output.hand_values[1], torch.ones_like(output.hand_values[1]))
     torch.testing.assert_close(output.hand_values[2], torch.ones_like(output.hand_values[2]))
+
+
+def test_compile_forward_modes_can_leave_policy_eager_with_static_values(monkeypatch):
+    compiled_calls = []
+
+    def fake_compile(fn, **kwargs):
+        compiled_calls.append((fn.__name__, dict(kwargs)))
+        return fn
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    policy_model = BetterPolicyFFN(
+        num_actions=4,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=2,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+    )
+    value_model = BetterStreetValueFFN(
+        num_actions=1,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=32,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        num_players=2,
+        policy_rank=8,
+        policy_hand_bias_rank=4,
+    )
+    model = BetterSplitFFN(policy_model=policy_model, value_model=value_model)
+
+    model.compile_forward_modes(
+        dynamic=False,
+        policy_dynamic=True,
+        policy_compile=False,
+    )
+
+    assert model.policy_model._compiled_forward_policy is None
+    assert model.policy_model._compiled_forward_policy_dynamic_batch is False
+    assert model.value_model._compiled_forward_value_dynamic_batch is False
+    assert model.value_model._compiled_forward_value_static_base_dynamic_batch is False
+    assert not any(name == "policy_forward_features_only" for name, _ in compiled_calls)
+    assert any(
+        name == "value_forward" and kwargs["dynamic"] is False
+        for name, kwargs in compiled_calls
+    )
+
+
+def test_dynamic_batch_marking_uses_strict_mark_dynamic(monkeypatch):
+    calls = []
+
+    def fake_mark_dynamic(tensor, dim):
+        calls.append((tensor.shape, dim))
+
+    monkeypatch.setattr(torch._dynamo, "mark_dynamic", fake_mark_dynamic)
+
+    BaseMLPModel._mark_dynamic_batch(torch.zeros(3, 2))
+
+    assert calls == [(torch.Size([3, 2]), 0)]
 
 
 def test_better_street_value_auto_matches_phase_heads():

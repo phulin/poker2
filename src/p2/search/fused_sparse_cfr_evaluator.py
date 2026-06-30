@@ -136,14 +136,36 @@ def _compile_kwargs_from_env(cfg=None) -> dict[str, object]:
     dynamic_env = os.environ.get("P2_FUSED_COMPILE_DYNAMIC")
     if dynamic_env is None:
         dynamic_env = os.environ.get("P2_MODEL_COMPILE_DYNAMIC")
+    policy_compile_env = os.environ.get("P2_POLICY_COMPILE")
+    policy_dynamic_env = os.environ.get("P2_POLICY_COMPILE_DYNAMIC")
     mode = _compile_setting_from_env(cfg)
     dynamic = mode != "static"
     if dynamic_env is not None:
         dynamic = dynamic_env.strip().lower() not in {"0", "false", "no", "off"}
     kwargs: dict[str, object] = {"dynamic": dynamic}
+    if policy_dynamic_env is not None:
+        kwargs["policy_dynamic"] = (
+            policy_dynamic_env.strip().lower() not in {"0", "false", "no", "off"}
+        )
+    elif mode == "static":
+        kwargs["policy_dynamic"] = True
+    if policy_compile_env is not None:
+        kwargs["policy_compile"] = (
+            policy_compile_env.strip().lower() not in {"0", "false", "no", "off"}
+        )
+    elif mode == "static":
+        kwargs["policy_compile"] = False
     if mode == "max-autotune":
         kwargs["mode"] = mode
     return kwargs
+
+
+def _direct_torch_compile_kwargs(kwargs: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in kwargs.items()
+        if key not in {"policy_compile", "policy_dynamic"}
+    }
 
 
 class FusedSparseCFREvaluator(SparseCFREvaluator):
@@ -186,7 +208,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     if getattr(self.model, "_compiled_forward_value", None) is None:
                         self.model.compile_forward_modes(**self._compile_kwargs)
                 else:
-                    self.model = torch.compile(self.model, **self._compile_kwargs)
+                    self.model = torch.compile(
+                        self.model,
+                        **_direct_torch_compile_kwargs(self._compile_kwargs),
+                    )
             except Exception:
                 pass
 
@@ -2565,7 +2590,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                     ):
                         self._static_model_base_fn = torch.compile(
                             base_model.static_feature_base,
-                            **self._compile_kwargs,
+                            **_direct_torch_compile_kwargs(self._compile_kwargs),
                         )
                     else:
                         self._static_model_base_fn = base_model.static_feature_base

@@ -20,8 +20,28 @@ class BaseMLPModel(nn.Module, ABC):
 
     def compile_forward_modes(self, **kwargs):
         """Compile fixed-mode forwards without compiling boolean dispatch."""
-        self._compiled_forward_dynamic_batch = bool(kwargs.get("dynamic", False))
-        self._compiled_forward_policy = torch.compile(self.forward_policy, **kwargs)
+        kwargs = dict(kwargs)
+        compile_policy = bool(kwargs.pop("policy_compile", True))
+        policy_dynamic = bool(
+            kwargs.pop("policy_dynamic", kwargs.get("dynamic", False))
+        )
+        dynamic_batch = bool(kwargs.get("dynamic", False))
+        policy_kwargs = dict(kwargs)
+        policy_kwargs["dynamic"] = policy_dynamic
+        self._compiled_forward_dynamic_batch = dynamic_batch
+        self._compiled_forward_policy_dynamic_batch = (
+            policy_dynamic if compile_policy else False
+        )
+        self._compiled_forward_value_dynamic_batch = dynamic_batch
+        self._compiled_forward_value_static_base_dynamic_batch = dynamic_batch
+        self._compiled_forward_both_dynamic_batch = dynamic_batch
+        if compile_policy:
+            self._compiled_forward_policy = torch.compile(
+                self.forward_policy,
+                **policy_kwargs,
+            )
+        else:
+            self._compiled_forward_policy = None
         self._compiled_forward_value = torch.compile(self.forward_value, **kwargs)
         self._compiled_forward_both = torch.compile(self.forward_both, **kwargs)
         static_value_fn = getattr(self, "forward_value_static_base", None)
@@ -35,12 +55,7 @@ class BaseMLPModel(nn.Module, ABC):
     def _mark_dynamic_batch(tensor: torch.Tensor | None) -> None:
         if tensor is None or tensor.dim() == 0:
             return
-        try:
-            torch._dynamo.maybe_mark_dynamic(tensor, 0)
-        except Exception:
-            # Dynamic marking is only a compiler hint. If a tensor backend or
-            # fake tensor mode rejects it, the forward call should still proceed.
-            pass
+        torch._dynamo.mark_dynamic(tensor, 0)
 
     @classmethod
     def _mark_feature_batch_dynamic(cls, features) -> None:
@@ -76,7 +91,11 @@ class BaseMLPModel(nn.Module, ABC):
         fn = getattr(self, "_compiled_forward_policy", None)
         if fn is None:
             fn = self.forward_policy
-        elif getattr(self, "_compiled_forward_dynamic_batch", True):
+        elif getattr(
+            self,
+            "_compiled_forward_policy_dynamic_batch",
+            getattr(self, "_compiled_forward_dynamic_batch", True),
+        ):
             self._mark_compiled_forward_dynamic(args, kwargs)
         return fn(*args, **kwargs)
 
@@ -84,7 +103,11 @@ class BaseMLPModel(nn.Module, ABC):
         fn = getattr(self, "_compiled_forward_value", None)
         if fn is None:
             fn = self.forward_value
-        elif getattr(self, "_compiled_forward_dynamic_batch", True):
+        elif getattr(
+            self,
+            "_compiled_forward_value_dynamic_batch",
+            getattr(self, "_compiled_forward_dynamic_batch", True),
+        ):
             self._mark_compiled_forward_dynamic(args, kwargs)
         return fn(*args, **kwargs)
 
@@ -92,7 +115,11 @@ class BaseMLPModel(nn.Module, ABC):
         fn = getattr(self, "_compiled_forward_value_static_base", None)
         if fn is None:
             fn = getattr(self, "forward_value_static_base")
-        elif getattr(self, "_compiled_forward_dynamic_batch", True):
+        elif getattr(
+            self,
+            "_compiled_forward_value_static_base_dynamic_batch",
+            getattr(self, "_compiled_forward_dynamic_batch", True),
+        ):
             self._mark_compiled_forward_dynamic(args, kwargs)
         return fn(*args, **kwargs)
 
@@ -100,7 +127,11 @@ class BaseMLPModel(nn.Module, ABC):
         fn = getattr(self, "_compiled_forward_both", None)
         if fn is None:
             fn = self.forward_both
-        elif getattr(self, "_compiled_forward_dynamic_batch", True):
+        elif getattr(
+            self,
+            "_compiled_forward_both_dynamic_batch",
+            getattr(self, "_compiled_forward_dynamic_batch", True),
+        ):
             self._mark_compiled_forward_dynamic(args, kwargs)
         return fn(*args, **kwargs)
 

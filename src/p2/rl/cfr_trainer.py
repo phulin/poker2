@@ -227,11 +227,25 @@ def _compile_setting(cfg: Config) -> str:
 
 def _compile_kwargs(cfg: Config) -> dict[str, object]:
     dynamic_env = os.environ.get("P2_MODEL_COMPILE_DYNAMIC")
+    policy_compile_env = os.environ.get("P2_POLICY_COMPILE")
+    policy_dynamic_env = os.environ.get("P2_POLICY_COMPILE_DYNAMIC")
     mode = _compile_setting(cfg)
     dynamic = mode != "static"
     if dynamic_env is not None:
         dynamic = dynamic_env.strip().lower() not in {"0", "false", "no", "off"}
     kwargs: dict[str, object] = {"dynamic": dynamic}
+    if policy_dynamic_env is not None:
+        kwargs["policy_dynamic"] = (
+            policy_dynamic_env.strip().lower() not in {"0", "false", "no", "off"}
+        )
+    elif mode == "static":
+        kwargs["policy_dynamic"] = True
+    if policy_compile_env is not None:
+        kwargs["policy_compile"] = (
+            policy_compile_env.strip().lower() not in {"0", "false", "no", "off"}
+        )
+    elif mode == "static":
+        kwargs["policy_compile"] = False
     if mode == "max-autotune":
         kwargs["mode"] = mode
     return kwargs
