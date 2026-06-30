@@ -184,16 +184,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 "Triton is not installed; FusedSparseCFREvaluator is unavailable."
             )
 
-        # Swap in the Triton hand ranker for subgame setup. _init_hand_rank_data
-        # uses the module-level binding; rebinding it module-wide is the least
-        # invasive way to retarget the call. Only valid-hand relative order is
-        # used downstream; blocked combos are zeroed by allowed_hands before any
-        # rank-dependent cumsum.
+        # Use the Triton hand ranker for this evaluator only. Only valid-hand
+        # relative order is used downstream; blocked combos are zeroed by
+        # allowed_hands before any rank-dependent cumsum.
         if _rules_triton_ok():
-            import p2.search.cfr_evaluator as _ce
-
-            if _ce.rank_hands is not rank_hands_triton:
-                _ce.rank_hands = rank_hands_triton
+            self._rank_hands = rank_hands_triton
 
         # Inductor-fused GEMM epilogues for the MLP forward pass. dynamic=True
         # keeps a single compiled graph as model_indices count varies. TF32 is
@@ -325,9 +320,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         m = indices.numel()
         k = torch.arange(NUM_HANDS, device=device).expand(m, -1)
 
-        import p2.search.cfr_evaluator as _ce
-
-        hand_ranks, sorted_indices = _ce.rank_hands(board)
+        hand_ranks, sorted_indices = self._rank_hands(board)
         ranks_sorted = torch.gather(hand_ranks, 1, sorted_indices)
         is_start = torch.ones_like(ranks_sorted, dtype=torch.bool)
         is_start[:, 1:] = ranks_sorted[:, 1:] != ranks_sorted[:, :-1]

@@ -302,7 +302,9 @@ def test_fused_initialize_subgame_invalidates_static_feature_cache() -> None:
 
     from p2.core.structured_config import Config
     from p2.env.hunl_tensor_env import HUNLTensorEnv
+    from p2.env.rules import rank_hands as torch_rank_hands
     from p2.models.mlp.rebel_ffn import RebelFFN
+    from p2.search import cfr_evaluator as cfr_evaluator_module
     from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
 
     conf_dir = str(
@@ -357,6 +359,7 @@ def test_fused_initialize_subgame_invalidates_static_feature_cache() -> None:
         cfg=cfg,
         compile_model=False,
     )
+    assert cfr_evaluator_module.rank_hands is torch_rank_hands
     root_indices = torch.arange(cfg.num_envs, dtype=torch.long, device=device)
 
     evaluator.initialize_subgame(make_env(2), root_indices)

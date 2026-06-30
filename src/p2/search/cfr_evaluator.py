@@ -134,6 +134,7 @@ class CFREvaluator(ABC):
     # CFR hot path triggers many per training step. Off by default; flip on
     # for debugging numerical issues.
     CHECK_INVARIANTS: bool = False
+    _rank_hands = staticmethod(rank_hands)
 
     model: BaseMLPModel
     device: torch.device
@@ -1473,7 +1474,7 @@ class CFREvaluator(ABC):
         # --- Ranks & sorted order per env (river deterministic strength) ---
         # hand_ranks: (M,1326) any integer/monotone rank key s.t. equal => tie
         # sorted_indices: argsort by (rank, tiebreak) ascending (weaker -> stronger)
-        hand_ranks, sorted_indices = rank_hands(board)  # both (M,1326)
+        hand_ranks, sorted_indices = self._rank_hands(board)  # both (M,1326)
 
         # Ranks in sorted order
         ranks_sorted = torch.gather(hand_ranks, 1, sorted_indices)  # (M,1326)

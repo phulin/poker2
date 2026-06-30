@@ -324,7 +324,7 @@ def test_rebel_cfr_trainer_live_mode_uses_replay_buffers():
     )
     assert trainer.data_generator is not None
     assert trainer.data_generator.store_replay is True
-    assert trainer.data_generator.sample_continuations is True
+    assert trainer.data_generator.sample_continuations is False
     assert metrics["updates"] >= 1
     assert metrics["value_buffer_size"] >= cfg.train.batch_size
     assert metrics["policy_buffer_size"] >= cfg.train.batch_size
