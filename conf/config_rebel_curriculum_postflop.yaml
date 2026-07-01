@@ -6,12 +6,74 @@ defaults:
   - _self_
 
 checkpoint_dir: checkpoints-rebel-curriculum
+checkpoint_interval: 200
 wandb_project: poker-rebel-postflop-curriculum
 wandb_tags: ["rebel", "cfr", "postflop-curriculum", "fixed-schedule"]
+log_interval: 25
 
 data:
   mode: live
   live_root_source: random_river
+  belief_mode: mixed
+  belief_profile: actions_12_end
+  warmup_self_play_roots: true
+
+train:
+  learning_rate: 4e-2
+  learning_rate_final: 4e-3
+  lr_schedule: cosine
+  adamw_learning_rate: 0.04
+  batch_size: 2048
+  episodes_per_step: 5
+  replay_buffer_batches: 32
+  save_replay_buffers: true
+  replay_buffer_device: cuda
+  value_reuse_goal: 2
+  policy_capacity_factor: 4
+  policy_loss_type: mse
+  value_coef: 1.0
+  grad_clip: 1.0
+  policy_grad_clip: 10
+
+model:
+  name: BetterFFN
+  hidden_dim: 384
+  range_hidden_dim: 192
+  ffn_dim: 768
+  board_interaction_dim: 96
+  policy_rank: 96
+  policy_hand_bias_rank: 24
+  shared_trunk: true
+  num_hidden_layers: 0
+  num_value_layers: 6
+  num_policy_layers: 6
+  compile: default
+  enforce_zero_sum: true
+  belief_low_rank_dim: 128
+
+search:
+  depth: 5
+  bet_bins_by_depth:
+    - [0.25, 0.5, 0.75, 1.0, 1.5]
+    - [0.5, 1.0]
+    - [1.0]
+    - [1.0]
+    - []
+  allin_by_depth: [true, true, true, true, false]
+  cfr_type: sapcfr
+  predictive_cfr_delay: 40
+  iterations: 300
+  iterations_final: 300
+  warm_start_iterations: 15
+  warm_start_type: model_br
+  warm_start_multiplier: 2
+
+validation_set:
+  enabled: true
+  dataset: outputs/rebel_postflop/river_val_8192_10k_sapdcfr_nowarm_ctx41_20260630
+  interval: 50
+  batch_size: 1024
+  max_examples: null
 
 curriculum:
   stages: [river, distill_E_turn, turn, distill_E_flop, flop, distill_E_preflop]
@@ -24,9 +86,22 @@ curriculum:
     river:
       kind: train
       net: S_river
-      num_steps: 200000
+      num_steps: 2000
       data_overrides:
+        mode: bootstrap_pregenerated
         live_root_source: random_river
+        pregenerated:
+          value_batch_size: 1024
+          policy_batch_size: 0
+          shuffle: true
+          direct_sample: false
+          pin_memory: true
+          async_shard_prefetch: true
+          validate_manifest: true
+          datasets:
+            - path: outputs/rebel_postflop/river_value_500steps_512000_300it_20260630
+              value_weight: 1.0
+              policy_weight: 0.0
     distill_E_turn:
       kind: distill
       net: E_turn
