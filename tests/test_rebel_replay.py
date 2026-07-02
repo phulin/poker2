@@ -119,6 +119,50 @@ def test_rebel_replay_buffer_state_dict_roundtrip():
     )
 
 
+def test_rebel_replay_buffer_allows_mixed_statistics_keys():
+    buffer = RebelReplayBuffer(
+        capacity=8,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=torch.device("cpu"),
+        policy_targets=False,
+    )
+    features = MLPFeatures(
+        context=torch.arange(16, dtype=torch.float32).view(4, 4),
+        street=torch.zeros(4, dtype=torch.long),
+        to_act=torch.zeros(4, dtype=torch.long),
+        board=torch.zeros(4, 5, dtype=torch.long),
+        beliefs=torch.randn(4, 2 * NUM_HANDS),
+    )
+    first = RebelBatch(
+        features=features[:2],
+        policy_targets=None,
+        value_targets=torch.randn(2, 2, NUM_HANDS),
+        legal_masks=torch.ones(2, 5, dtype=torch.bool),
+        statistics={"node_depth": torch.tensor([1, 2])},
+    )
+    second = RebelBatch(
+        features=features[2:],
+        policy_targets=None,
+        value_targets=torch.randn(2, 2, NUM_HANDS),
+        legal_masks=torch.ones(2, 5, dtype=torch.bool),
+        statistics={"target_source": torch.tensor([3, 4])},
+    )
+
+    buffer.add_batch(first)
+    buffer.add_batch(second)
+
+    valid = buffer._valid_physical_indices()
+    assert set(buffer.statistics) == {"node_depth", "target_source"}
+    torch.testing.assert_close(
+        buffer.statistics["node_depth"][valid], torch.tensor([1, 2, 0, 0])
+    )
+    torch.testing.assert_close(
+        buffer.statistics["target_source"][valid], torch.tensor([0, 0, 3, 4])
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_rebel_replay_buffer_cuda_roundtrip():
     device = torch.device("cuda")

@@ -435,16 +435,18 @@ class RebelReplayBuffer:
         self.legal_masks[dest_indices] = batch.legal_masks
         # Reset sample count when overwriting entries
         self.sample_count[dest_indices] = 0
-        for key in batch.statistics:
+        for key, value in batch.statistics.items():
             if key not in self.statistics:
                 self.statistics[key] = torch.zeros(
                     self.capacity,
-                    *batch.statistics[key].shape[1:],
-                    dtype=batch.statistics[key].dtype,
+                    *value.shape[1:],
+                    dtype=value.dtype,
                     device=self.device,
                 )
-            self.statistics[key][dest_indices] = batch.statistics[key]
-        assert set(self.statistics.keys()) == set(batch.statistics.keys())
+            self.statistics[key][dest_indices] = value
+        for key, value in self.statistics.items():
+            if key not in batch.statistics:
+                value[dest_indices] = 0
 
         next_position = (insert_start + batch_size) % self.capacity
         if self.size + batch_size >= self.capacity:
