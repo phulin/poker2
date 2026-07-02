@@ -63,6 +63,643 @@ PROPOSALS: dict[str, dict[str, Any]] = {
         "value_strength_bucket_film": True,
         "value_strength_bucket_relative": True,
     },
+    "river_showdown_baseline": {
+        "value_exact_river_features": True,
+        "value_showdown_baseline": True,
+    },
+    "river_exact_features": {"value_exact_river_features": True},
+    "river_range_equity_baseline_c050": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.50,
+    },
+    "river_range_equity_baseline_c065": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.65,
+    },
+    "river_range_equity_baseline_c075": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.75,
+    },
+    "river_range_equity_baseline_c100": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 1.00,
+    },
+    "river_range_equity_action_c065": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.65,
+        "value_action_summary_head": True,
+        "train": {"value_action_summary_coef": 0.05},
+    },
+    "river_range_equity_blockers_c050": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.50,
+        "value_river_range_equity_blockers": True,
+    },
+    "river_range_equity_blockers_c065": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.65,
+        "value_river_range_equity_blockers": True,
+    },
+    "river_range_equity_blockers_c065_r96": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.65,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+    },
+    "river_range_equity_blockers_posneg_r96": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+    },
+    "river_range_equity_blockers_posneg_r96_lr1p5": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "train": {
+            "learning_rate": 0.06,
+            "learning_rate_final": 0.006,
+            "adamw_learning_rate": 0.06,
+        },
+    },
+    "river_range_equity_blockers_posneg_r96_lr0p7": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "train": {
+            "learning_rate": 0.028,
+            "learning_rate_final": 0.0028,
+            "adamw_learning_rate": 0.028,
+        },
+    },
+    "river_range_equity_blockers_posneg_r96_lr0p04_out0p00": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_output_init_scale": 0.0,
+        "train": {
+            "learning_rate": 0.04,
+            "learning_rate_final": 0.004,
+            "adamw_learning_rate": 0.04,
+        },
+    },
+    "river_range_equity_blockers_posneg_r96_lr0p04_out0p03": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_output_init_scale": 0.03,
+        "train": {
+            "learning_rate": 0.04,
+            "learning_rate_final": 0.004,
+            "adamw_learning_rate": 0.04,
+        },
+    },
+    "river_range_equity_blockers_posneg_r96_lr0p06_out0p00": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_output_init_scale": 0.0,
+        "train": {
+            "learning_rate": 0.06,
+            "learning_rate_final": 0.006,
+            "adamw_learning_rate": 0.06,
+        },
+    },
+    "river_range_equity_blockers_posneg_r96_lr0p06_out0p03": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_output_init_scale": 0.03,
+        "train": {
+            "learning_rate": 0.06,
+            "learning_rate_final": 0.006,
+            "adamw_learning_rate": 0.06,
+        },
+    },
+    "river_range_equity_blockers_posneg_r96_lr0p08": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "train": {
+            "learning_rate": 0.08,
+            "learning_rate_final": 0.008,
+            "adamw_learning_rate": 0.08,
+        },
+    },
+    "river_range_equity_blockers_posneg_r96_lr0p08_out0p00": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_output_init_scale": 0.0,
+        "train": {
+            "learning_rate": 0.08,
+            "learning_rate_final": 0.008,
+            "adamw_learning_rate": 0.08,
+        },
+    },
+    "river_range_equity_blockers_posneg_r96_lr0p08_out0p03": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_output_init_scale": 0.03,
+        "train": {
+            "learning_rate": 0.08,
+            "learning_rate_final": 0.008,
+            "adamw_learning_rate": 0.08,
+        },
+    },
+    "river_range_equity_blockers_posneg_r96_lr0p08_out0p10": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_output_init_scale": 0.1,
+        "train": {
+            "learning_rate": 0.08,
+            "learning_rate_final": 0.008,
+            "adamw_learning_rate": 0.08,
+        },
+    },
+    "river_range_equity_blockers_posneg_r96_lr0p08_out0p30": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_output_init_scale": 0.3,
+        "train": {
+            "learning_rate": 0.08,
+            "learning_rate_final": 0.008,
+            "adamw_learning_rate": 0.08,
+        },
+    },
+    "river_range_equity_inputs_posneg_r96_lr0p08": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "train": {
+            "learning_rate": 0.08,
+            "learning_rate_final": 0.008,
+            "adamw_learning_rate": 0.08,
+        },
+    },
+    "river_range_equity_inputs_posneg_r96_lr0p06": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "train": {
+            "learning_rate": 0.06,
+            "learning_rate_final": 0.006,
+            "adamw_learning_rate": 0.06,
+        },
+    },
+    "river_range_equity_inputs_posneg_r96_lr0p06_out0p00": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "value_output_init_scale": 0.0,
+        "train": {
+            "learning_rate": 0.06,
+            "learning_rate_final": 0.006,
+            "adamw_learning_rate": 0.06,
+        },
+    },
+    "river_range_equity_film_r8_posneg_r96_lr0p06_out0p00": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "value_river_range_equity_film_rank": 8,
+        "value_river_range_equity_film_hidden_dim": 16,
+        "value_output_init_scale": 0.0,
+        "train": {
+            "learning_rate": 0.06,
+            "learning_rate_final": 0.006,
+            "adamw_learning_rate": 0.06,
+        },
+    },
+    "river_range_equity_inputs_posneg_r96_lr0p06_out0p03": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "value_output_init_scale": 0.03,
+        "train": {
+            "learning_rate": 0.06,
+            "learning_rate_final": 0.006,
+            "adamw_learning_rate": 0.06,
+        },
+    },
+    "river_range_equity_inputs_posneg_r96_lr0p06_out0p10": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "value_output_init_scale": 0.1,
+        "train": {
+            "learning_rate": 0.06,
+            "learning_rate_final": 0.006,
+            "adamw_learning_rate": 0.06,
+        },
+    },
+    "river_range_equity_inputs_posneg_r96_lr0p06_out0p30": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "value_output_init_scale": 0.3,
+        "train": {
+            "learning_rate": 0.06,
+            "learning_rate_final": 0.006,
+            "adamw_learning_rate": 0.06,
+        },
+    },
+    "river_range_equity_inputs_posneg_r96_lr0p04": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "train": {
+            "learning_rate": 0.04,
+            "learning_rate_final": 0.004,
+            "adamw_learning_rate": 0.04,
+        },
+    },
+    "river_range_equity_inputs_posneg_r96_lr0p04_out0p00": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "value_output_init_scale": 0.0,
+        "train": {
+            "learning_rate": 0.04,
+            "learning_rate_final": 0.004,
+            "adamw_learning_rate": 0.04,
+        },
+    },
+    "river_range_equity_inputs_posneg_r96_lr0p04_out0p03": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "value_output_init_scale": 0.03,
+        "train": {
+            "learning_rate": 0.04,
+            "learning_rate_final": 0.004,
+            "adamw_learning_rate": 0.04,
+        },
+    },
+    "river_range_equity_inputs_posneg_r96_lr0p02": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "train": {
+            "learning_rate": 0.02,
+            "learning_rate_final": 0.002,
+            "adamw_learning_rate": 0.02,
+        },
+    },
+    "river_range_equity_inputs_posneg_r96_lr0p10": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_range_equity_feature_head": True,
+        "value_river_range_equity_trunk_context": True,
+        "train": {
+            "learning_rate": 0.10,
+            "learning_rate_final": 0.010,
+            "adamw_learning_rate": 0.10,
+        },
+    },
+    "river_range_equity_blockers_posneg_r96_lr0p10": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "train": {
+            "learning_rate": 0.10,
+            "learning_rate_final": 0.010,
+            "adamw_learning_rate": 0.10,
+        },
+    },
+    "river_range_equity_blockers_c065_r96_potp05": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.65,
+        "value_river_range_equity_pot_power": 0.5,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+    },
+    "river_range_equity_blockers_c080_r96_potp05": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.80,
+        "value_river_range_equity_pot_power": 0.5,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+    },
+    "river_range_equity_blockers_c100_r96_potp05": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 1.00,
+        "value_river_range_equity_pot_power": 0.5,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+    },
+    "river_range_equity_blockers_c065_r96_potp075": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.65,
+        "value_river_range_equity_pot_power": 0.75,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+    },
+    "river_range_equity_blockers_c080_r96_potp075": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.80,
+        "value_river_range_equity_pot_power": 0.75,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+    },
+    "river_range_equity_blockers_c100_r96_potp075": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 1.00,
+        "value_river_range_equity_pot_power": 0.75,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+    },
+    "river_range_equity_blockers_exact_c065": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.65,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 1326,
+    },
+    "river_range_equity_blockers_exact_c100": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 1.00,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 1326,
+    },
+    "river_range_equity_blockers_c065_r64": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.65,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 64,
+    },
+    "river_range_equity_blockers_c075": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.75,
+        "value_river_range_equity_blockers": True,
+    },
+    "river_range_equity_blockers_action_c065": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.65,
+        "value_river_range_equity_blockers": True,
+        "value_action_summary_head": True,
+        "train": {"value_action_summary_coef": 0.05},
+    },
+    "river_range_equity_blockers_action_c065_r96": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.65,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_action_summary_head": True,
+        "train": {"value_action_summary_coef": 0.05},
+    },
+    "river_range_equity_blockers_action_c065_r64": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_baseline_scale": 0.65,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 64,
+        "value_action_summary_head": True,
+        "train": {"value_action_summary_coef": 0.05},
+    },
+    "river_multiresolution": {
+        "train": {"value_multiresolution_coef": 0.25},
+    },
+    "river_strength_bucket_aux": {
+        "value_strength_bucket_count": 8,
+        "value_strength_bucket_relative": True,
+        "value_strength_bucket_board_only": True,
+        "train": {"value_bucket_aux_coef": 0.25},
+    },
+    "river_ordering": {
+        "value_exact_river_features": True,
+        "train": {"value_ordering_coef": 0.05},
+    },
+    "river_bucket_calibration": {
+        "value_strength_bucket_count": 8,
+        "value_strength_bucket_relative": True,
+        "value_strength_bucket_board_only": True,
+        "train": {
+            "value_bucket_usage_coef": 0.01,
+            "value_bucket_entropy_coef": 0.001,
+        },
+    },
+    "river_bucket_calibration_fast": {
+        "value_strength_bucket_count": 8,
+        "value_strength_bucket_relative": True,
+        "value_strength_bucket_board_only": True,
+        "value_strength_bucket_blockers": False,
+        "train": {
+            "value_bucket_usage_coef": 0.01,
+            "value_bucket_entropy_coef": 0.001,
+        },
+    },
+    "river_bucket_calibration_projected": {
+        "value_strength_bucket_count": 8,
+        "value_strength_bucket_relative": True,
+        "value_strength_bucket_board_only": True,
+        "value_strength_bucket_blockers": False,
+        "value_strength_bucket_coarse_residual": True,
+        "train": {
+            "value_bucket_usage_coef": 0.01,
+            "value_bucket_entropy_coef": 0.001,
+        },
+    },
+    "river_bucket_coarse_head": {
+        "value_strength_bucket_count": 8,
+        "value_strength_bucket_relative": True,
+        "value_strength_bucket_board_only": True,
+        "value_bucket_coarse_dim": 64,
+    },
+    "river_bucket_coarse_head_fast": {
+        "value_strength_bucket_count": 8,
+        "value_strength_bucket_relative": True,
+        "value_strength_bucket_board_only": True,
+        "value_strength_bucket_blockers": False,
+        "value_bucket_coarse_dim": 64,
+    },
+    "river_bucket_coarse_head_projected": {
+        "value_strength_bucket_count": 8,
+        "value_strength_bucket_relative": True,
+        "value_strength_bucket_board_only": True,
+        "value_strength_bucket_blockers": False,
+        "value_strength_bucket_coarse_residual": True,
+        "value_bucket_coarse_dim": 64,
+    },
+    "river_latent_bucket_k8": {
+        "value_latent_bucket_count": 8,
+        "value_latent_bucket_dim": 32,
+    },
+    "river_latent_bucket_k16": {
+        "value_latent_bucket_count": 16,
+        "value_latent_bucket_dim": 32,
+    },
+    "river_latent_bucket_aux_k8": {
+        "value_latent_bucket_count": 8,
+        "value_latent_bucket_dim": 32,
+        "train": {"value_bucket_aux_coef": 0.25},
+    },
+    "river_latent_bucket_calibration_k8": {
+        "value_latent_bucket_count": 8,
+        "value_latent_bucket_dim": 32,
+        "train": {
+            "value_bucket_usage_coef": 0.01,
+            "value_bucket_entropy_coef": 0.001,
+        },
+    },
+    "river_latent_bucket_action_k8": {
+        "value_latent_bucket_count": 8,
+        "value_latent_bucket_dim": 32,
+        "value_action_summary_head": True,
+        "train": {"value_action_summary_coef": 0.05},
+    },
+    "river_action_summary": {
+        "value_action_summary_head": True,
+        "train": {"value_action_summary_coef": 0.05},
+    },
+    "river_action_summary_c001": {
+        "value_action_summary_head": True,
+        "train": {"value_action_summary_coef": 0.01},
+    },
+    "river_action_summary_c0025": {
+        "value_action_summary_head": True,
+        "train": {"value_action_summary_coef": 0.025},
+    },
+    "river_action_summary_c010": {
+        "value_action_summary_head": True,
+        "train": {"value_action_summary_coef": 0.10},
+    },
+    "river_action_summary_c020": {
+        "value_action_summary_head": True,
+        "train": {"value_action_summary_coef": 0.20},
+    },
+    "river_aux_combo": {
+        "value_exact_river_features": True,
+        "value_strength_bucket_count": 8,
+        "value_strength_bucket_relative": True,
+        "value_strength_bucket_board_only": True,
+        "value_bucket_coarse_dim": 64,
+        "value_action_summary_head": True,
+        "train": {
+            "value_multiresolution_coef": 0.25,
+            "value_bucket_aux_coef": 0.25,
+            "value_ordering_coef": 0.05,
+            "value_bucket_usage_coef": 0.01,
+            "value_bucket_entropy_coef": 0.001,
+            "value_action_summary_coef": 0.05,
+        },
+    },
+    "river_aux_combo_projected": {
+        "value_exact_river_features": True,
+        "value_strength_bucket_count": 8,
+        "value_strength_bucket_relative": True,
+        "value_strength_bucket_board_only": True,
+        "value_strength_bucket_blockers": False,
+        "value_strength_bucket_coarse_residual": True,
+        "value_bucket_coarse_dim": 64,
+        "value_action_summary_head": True,
+        "train": {
+            "value_multiresolution_coef": 0.25,
+            "value_bucket_aux_coef": 0.25,
+            "value_ordering_coef": 0.05,
+            "value_bucket_usage_coef": 0.01,
+            "value_bucket_entropy_coef": 0.001,
+            "value_action_summary_coef": 0.05,
+        },
+    },
     "flops_value_lr512": {"value_head_rank": 512},
     "flops_value_lr192": {"value_head_rank": 192},
     "flops_value_lr256": {"value_head_rank": 256},
@@ -666,6 +1303,17 @@ def _benchmark_no_grad_value_inference(
     timed_batches: int = 20,
     value_head: str = "post",
 ) -> dict[str, Any]:
+    if timed_batches <= 0:
+        return {
+            "kind": "no_grad_value_forward",
+            "skipped": True,
+            "reason": "timed_batches <= 0",
+            "batch_size": int(batch_size),
+            "warmup_batches": int(warmup_batches),
+            "timed_batches": int(timed_batches),
+            "value_head": str(value_head),
+            "count": 0,
+        }
     required = batch_size * (warmup_batches + timed_batches)
     if required > gpu_epoch.examples:
         raise ValueError(
@@ -836,7 +1484,11 @@ def _build_config(
     cfg.curriculum.substeps = {}
 
     for key, value in PROPOSALS[proposal].items():
-        setattr(cfg.model, key, value)
+        if key == "train":
+            for train_key, train_value in value.items():
+                setattr(cfg.train, train_key, train_value)
+        else:
+            setattr(cfg.model, key, value)
 
     run_dir = args.output_root / proposal
     cfg.checkpoint_dir = str(run_dir / "checkpoints")
@@ -876,6 +1528,9 @@ def _run_one_proposal(
         manifest=manifest,
         value_batch_size=value_batch_size,
     )
+    torch.manual_seed(int(cfg.seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(cfg.seed))
     run_dir.mkdir(parents=True, exist_ok=True)
 
     metadata = {
@@ -908,6 +1563,70 @@ def _run_one_proposal(
             "belief_board_film": bool(cfg.model.belief_board_film),
             "belief_board_bilinear_rank": int(cfg.model.belief_board_bilinear_rank),
             "belief_board_mass_features": bool(cfg.model.belief_board_mass_features),
+            "value_strength_bucket_count": int(cfg.model.value_strength_bucket_count),
+            "value_strength_bucket_relative": bool(
+                cfg.model.value_strength_bucket_relative
+            ),
+            "value_strength_bucket_board_only": bool(
+                cfg.model.value_strength_bucket_board_only
+            ),
+            "value_strength_bucket_blockers": bool(
+                cfg.model.value_strength_bucket_blockers
+            ),
+            "value_strength_bucket_coarse_residual": bool(
+                cfg.model.value_strength_bucket_coarse_residual
+            ),
+            "value_bucket_coarse_dim": int(cfg.model.value_bucket_coarse_dim),
+            "value_latent_bucket_count": int(cfg.model.value_latent_bucket_count),
+            "value_latent_bucket_dim": int(cfg.model.value_latent_bucket_dim),
+            "value_exact_river_features": bool(cfg.model.value_exact_river_features),
+            "value_showdown_baseline": bool(cfg.model.value_showdown_baseline),
+            "value_river_range_equity_baseline": bool(
+                cfg.model.value_river_range_equity_baseline
+            ),
+            "value_river_range_equity_baseline_scale": float(
+                cfg.model.value_river_range_equity_baseline_scale
+            ),
+            "value_river_range_equity_pot_power": float(
+                cfg.model.value_river_range_equity_pot_power
+            ),
+            "value_river_range_equity_pos_scale": float(
+                cfg.model.value_river_range_equity_pos_scale
+            ),
+            "value_river_range_equity_neg_scale": float(
+                cfg.model.value_river_range_equity_neg_scale
+            ),
+            "value_river_range_equity_intercept": float(
+                cfg.model.value_river_range_equity_intercept
+            ),
+            "value_river_range_equity_blockers": bool(
+                cfg.model.value_river_range_equity_blockers
+            ),
+            "value_river_range_equity_rank_bins": int(
+                cfg.model.value_river_range_equity_rank_bins
+            ),
+            "value_river_range_equity_feature_head": bool(
+                cfg.model.value_river_range_equity_feature_head
+            ),
+            "value_river_range_equity_trunk_context": bool(
+                cfg.model.value_river_range_equity_trunk_context
+            ),
+            "value_river_range_equity_film_rank": int(
+                cfg.model.value_river_range_equity_film_rank
+            ),
+            "value_river_range_equity_film_hidden_dim": int(
+                cfg.model.value_river_range_equity_film_hidden_dim
+            ),
+            "value_output_init_scale": float(cfg.model.value_output_init_scale),
+            "value_action_summary_head": bool(cfg.model.value_action_summary_head),
+            "value_multiresolution_coef": float(
+                cfg.train.value_multiresolution_coef
+            ),
+            "value_bucket_aux_coef": float(cfg.train.value_bucket_aux_coef),
+            "value_ordering_coef": float(cfg.train.value_ordering_coef),
+            "value_bucket_usage_coef": float(cfg.train.value_bucket_usage_coef),
+            "value_bucket_entropy_coef": float(cfg.train.value_bucket_entropy_coef),
+            "value_action_summary_coef": float(cfg.train.value_action_summary_coef),
             "compile": str(cfg.model.compile),
         },
         "pregenerated_dataset": str(_dataset_dir(args.dataset)),

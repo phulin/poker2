@@ -785,6 +785,58 @@ class RebelCFRTrainer:
             value_strength_bucket_count=cfg.model.value_strength_bucket_count,
             value_strength_bucket_film=cfg.model.value_strength_bucket_film,
             value_strength_bucket_relative=cfg.model.value_strength_bucket_relative,
+            value_strength_bucket_board_only=(
+                cfg.model.value_strength_bucket_board_only
+            ),
+            value_strength_bucket_blockers=(
+                cfg.model.value_strength_bucket_blockers
+            ),
+            value_strength_bucket_coarse_residual=(
+                cfg.model.value_strength_bucket_coarse_residual
+            ),
+            value_bucket_coarse_dim=cfg.model.value_bucket_coarse_dim,
+            value_latent_bucket_count=cfg.model.value_latent_bucket_count,
+            value_latent_bucket_dim=cfg.model.value_latent_bucket_dim,
+            value_exact_river_features=cfg.model.value_exact_river_features,
+            value_showdown_baseline=cfg.model.value_showdown_baseline,
+            value_river_range_equity_baseline=(
+                cfg.model.value_river_range_equity_baseline
+            ),
+            value_river_range_equity_baseline_scale=(
+                cfg.model.value_river_range_equity_baseline_scale
+            ),
+            value_river_range_equity_pot_power=(
+                cfg.model.value_river_range_equity_pot_power
+            ),
+            value_river_range_equity_pos_scale=(
+                cfg.model.value_river_range_equity_pos_scale
+            ),
+            value_river_range_equity_neg_scale=(
+                cfg.model.value_river_range_equity_neg_scale
+            ),
+            value_river_range_equity_intercept=(
+                cfg.model.value_river_range_equity_intercept
+            ),
+            value_river_range_equity_blockers=(
+                cfg.model.value_river_range_equity_blockers
+            ),
+            value_river_range_equity_rank_bins=(
+                cfg.model.value_river_range_equity_rank_bins
+            ),
+            value_river_range_equity_feature_head=(
+                cfg.model.value_river_range_equity_feature_head
+            ),
+            value_river_range_equity_trunk_context=(
+                cfg.model.value_river_range_equity_trunk_context
+            ),
+            value_river_range_equity_film_rank=(
+                cfg.model.value_river_range_equity_film_rank
+            ),
+            value_river_range_equity_film_hidden_dim=(
+                cfg.model.value_river_range_equity_film_hidden_dim
+            ),
+            value_output_init_scale=cfg.model.value_output_init_scale,
+            value_action_summary_head=cfg.model.value_action_summary_head,
             value_head_rank=cfg.model.value_head_rank,
             value_hand_basis_rank=cfg.model.value_hand_basis_rank,
             belief_low_rank_dim=cfg.model.belief_low_rank_dim,

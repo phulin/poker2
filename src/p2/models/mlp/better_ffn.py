@@ -16,6 +16,8 @@ except ImportError:  # pragma: no cover - optional CUDA optimization
 from p2.core.structured_config import NonlinearityType, StreetValueHeads
 from p2.env.card_utils import NUM_HANDS, hand_combos_tensor
 from p2.env.card_utils import PREFLOP_HANDS
+from p2.env.rules import rank_hands as rank_hands_torch
+from p2.env.rules_triton import rank_hands_triton, triton_is_available
 from p2.models.activation_utils import get_activation, SwiGLU
 from p2.models.base_mlp_model import BaseMLPModel
 from p2.models.mlp.better_feature_encoder import (
@@ -27,6 +29,7 @@ from p2.models.mlp.better_feature_encoder import (
 )
 from p2.models.mlp.better_features import (
     ChancePhase,
+    PlayerContext,
     ValueScalarContext,
     context_length,
 )
@@ -127,6 +130,37 @@ if triton is not None:
         tl.store(out_ptr + (offs_b[:, None] * 7 + 4) * dim + offs_d[None, :], out4, mask=mask)
         tl.store(out_ptr + (offs_b[:, None] * 7 + 5) * dim + offs_d[None, :], out5, mask=mask)
         tl.store(out_ptr + (offs_b[:, None] * 7 + 6) * dim + offs_d[None, :], out6, mask=mask)
+
+    @triton.jit
+    def _river_card_rank_prefix_kernel(
+        card_rank_mass_ptr,
+        card_prefix_ptr,
+        card_total_ptr,
+        batch_size,
+        RANK_BINS: tl.constexpr,
+        NUM_PLAYERS: tl.constexpr,
+        NUM_CARDS: tl.constexpr,
+        BLOCK_R: tl.constexpr,
+        CARD_BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        player = tl.program_id(1)
+        card_block = tl.program_id(2)
+        rank_off = tl.arange(0, BLOCK_R)[:, None]
+        card_off = tl.arange(0, CARD_BLOCK)[None, :]
+        cards = card_block * CARD_BLOCK + card_off
+        mask = (row < batch_size) & (rank_off < RANK_BINS) & (cards < NUM_CARDS)
+        base = (
+            (row * NUM_PLAYERS + player) * NUM_CARDS * RANK_BINS
+            + cards * RANK_BINS
+            + rank_off
+        )
+        mass = tl.load(card_rank_mass_ptr + base, mask=mask, other=0.0).to(tl.float32)
+        prefix = tl.cumsum(mass, axis=0)
+        tl.store(card_prefix_ptr + base, prefix, mask=mask)
+        total = tl.sum(mass, axis=0)
+        total_base = (row * NUM_PLAYERS + player) * NUM_CARDS + cards
+        tl.store(card_total_ptr + total_base, total, mask=(row < batch_size) & (cards < NUM_CARDS))
 
     @triton.jit
     def _preflop_gate_residual_combine_kernel(
@@ -673,6 +707,44 @@ def _preflop_token_mixer_leaky_relu_triton(
         num_warps=4,
     )
     return out
+
+
+def _river_card_rank_prefix_triton(
+    card_rank_mass: torch.Tensor,
+    *,
+    rank_bins: int,
+    num_players: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if triton is None:
+        raise RuntimeError("Triton is not available")
+    if not card_rank_mass.is_cuda:
+        raise ValueError("river card-rank prefix Triton path requires CUDA")
+    batch_size = card_rank_mass.shape[0]
+    prefix = torch.empty_like(card_rank_mass, dtype=torch.float32)
+    card_total = torch.empty(
+        batch_size,
+        num_players,
+        52,
+        device=card_rank_mass.device,
+        dtype=torch.float32,
+    )
+    block_r = 1 << (int(rank_bins) - 1).bit_length()
+    card_block = 16
+    _river_card_rank_prefix_kernel[
+        (batch_size, num_players, triton.cdiv(52, card_block))
+    ](
+        card_rank_mass,
+        prefix,
+        card_total,
+        batch_size,
+        RANK_BINS=int(rank_bins),
+        NUM_PLAYERS=int(num_players),
+        NUM_CARDS=52,
+        BLOCK_R=block_r,
+        CARD_BLOCK=card_block,
+        num_warps=8,
+    )
+    return prefix, card_total
 
 
 def _preflop_gate_residual_combine_triton(
@@ -1238,6 +1310,7 @@ class StrengthBucketEncoder(nn.Module):
         player_beliefs: torch.Tensor,
         hand_card_a: torch.Tensor,
         hand_card_b: torch.Tensor,
+        use_blockers: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         bucket_weights = self._bucket_weights(hand_emb, board_ctx, bet_ctx)
         batch_size, num_players, num_hands = player_beliefs.shape
@@ -1250,6 +1323,15 @@ class StrengthBucketEncoder(nn.Module):
         weighted = opp_beliefs[..., None].to(dtype=bucket_weights.dtype) * (
             bucket_weights[:, None, :, :]
         )
+        total = weighted.sum(dim=2)
+        if not use_blockers:
+            compat_bucket = total[:, :, None, :].expand(
+                -1,
+                -1,
+                num_hands,
+                -1,
+            )
+            return compat_bucket, bucket_weights
 
         card_bucket = weighted.new_zeros(
             batch_size,
@@ -1262,7 +1344,6 @@ class StrengthBucketEncoder(nn.Module):
         card_bucket.scatter_add_(2, index_a, weighted)
         card_bucket.scatter_add_(2, index_b, weighted)
 
-        total = weighted.sum(dim=2)
         compat_bucket = (
             total[:, :, None, :]
             - card_bucket[:, :, hand_card_a, :]
@@ -1328,6 +1409,103 @@ class ValueStratificationHead(nn.Module):
 
     def scale_output(self, scale: float) -> None:
         self.out.weight.data.mul_(scale)
+
+
+class LatentBucketValueResidual(nn.Module):
+    """Perceiver-style board-conditioned latent buckets for value residuals."""
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        bucket_count: int,
+        bucket_dim: int,
+        num_players: int,
+        nonlinearity: NonlinearityType,
+    ) -> None:
+        super().__init__()
+        if bucket_count <= 0:
+            raise ValueError("bucket_count must be positive")
+        if bucket_dim <= 0:
+            raise ValueError("bucket_dim must be positive")
+        self.bucket_count = int(bucket_count)
+        self.bucket_dim = int(bucket_dim)
+        self.num_players = int(num_players)
+        self.hand_key = nn.Linear(hidden_dim, bucket_dim, bias=False)
+        self.hand_value = nn.Linear(hidden_dim, bucket_dim, bias=False)
+        self.board_query = nn.Linear(hidden_dim, bucket_count * bucket_dim)
+        self.state_query = nn.Linear(hidden_dim, num_players * bucket_count * bucket_dim)
+        self.bucket_query = nn.Parameter(torch.empty(bucket_count, bucket_dim))
+        nn.init.zeros_(self.bucket_query)
+        self.bucket_norm = nn.LayerNorm(bucket_dim)
+        self.bucket_value = nn.Sequential(
+            nn.Linear(bucket_dim, bucket_dim),
+            get_activation(nonlinearity),
+            nn.Linear(bucket_dim, 1),
+        )
+
+    def forward(
+        self,
+        hand_emb: torch.Tensor,
+        board_ctx: torch.Tensor,
+        state: torch.Tensor,
+        player_beliefs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, num_players, num_hands = player_beliefs.shape
+        if num_players != self.num_players:
+            raise ValueError(
+                f"expected {self.num_players} players, got {num_players}"
+            )
+        if hand_emb.dim() == 2:
+            hand_emb = hand_emb[None].expand(batch_size, -1, -1)
+        elif hand_emb.dim() != 3:
+            raise ValueError("hand_emb must have shape [N, H] or [B, N, H]")
+        if hand_emb.shape[:2] != (batch_size, num_hands):
+            raise ValueError("hand_emb must have shape [B, N, D]")
+
+        hand_key = self.hand_key(hand_emb)
+        hand_value = self.hand_value(hand_emb)
+        board_query = self.board_query(board_ctx).view(
+            batch_size,
+            1,
+            self.bucket_count,
+            self.bucket_dim,
+        )
+        state_query = self.state_query(state).view(
+            batch_size,
+            num_players,
+            self.bucket_count,
+            self.bucket_dim,
+        )
+        query = (
+            self.bucket_query.to(dtype=board_query.dtype).view(
+                1,
+                1,
+                self.bucket_count,
+                self.bucket_dim,
+            )
+            + board_query
+            + state_query
+        )
+        logits = torch.einsum("bpkd,bhd->bpkh", query, hand_key) / math.sqrt(
+            float(self.bucket_dim)
+        )
+
+        opp_beliefs = player_beliefs.sum(dim=1, keepdim=True) - player_beliefs
+        attn_logits = logits + opp_beliefs[:, :, None, :].to(
+            dtype=logits.dtype
+        ).clamp_min(1e-8).log()
+        attend = torch.softmax(attn_logits, dim=-1)
+        bucket_state = torch.einsum("bpkh,bhd->bpkd", attend, hand_value)
+        bucket_state = self.bucket_norm(bucket_state + query)
+        bucket_values = self.bucket_value(bucket_state).squeeze(-1)
+
+        hand_bucket = torch.softmax(logits.transpose(2, 3), dim=-1)
+        hand_residual = torch.einsum("bphk,bpk->bph", hand_bucket, bucket_values)
+        bucket_weights = hand_bucket.mean(dim=1)
+        return hand_residual, bucket_weights
+
+    def scale_output(self, scale: float) -> None:
+        self.bucket_value[-1].weight.data.mul_(scale)
 
 
 class LowRankValueHead(nn.Module):
@@ -1478,6 +1656,28 @@ class BetterFFN(BaseMLPModel):
         value_strength_bucket_count: int = 0,
         value_strength_bucket_film: bool = False,
         value_strength_bucket_relative: bool = False,
+        value_strength_bucket_board_only: bool = False,
+        value_strength_bucket_blockers: bool = True,
+        value_strength_bucket_coarse_residual: bool = False,
+        value_bucket_coarse_dim: int = 16,
+        value_latent_bucket_count: int = 0,
+        value_latent_bucket_dim: int = 32,
+        value_exact_river_features: bool = False,
+        value_showdown_baseline: bool = False,
+        value_river_range_equity_baseline: bool = False,
+        value_river_range_equity_baseline_scale: float = 0.65,
+        value_river_range_equity_pot_power: float = 1.0,
+        value_river_range_equity_pos_scale: float = -1.0,
+        value_river_range_equity_neg_scale: float = -1.0,
+        value_river_range_equity_intercept: float = 0.0,
+        value_river_range_equity_blockers: bool = False,
+        value_river_range_equity_rank_bins: int = 144,
+        value_river_range_equity_feature_head: bool = False,
+        value_river_range_equity_trunk_context: bool = False,
+        value_river_range_equity_film_rank: int = 0,
+        value_river_range_equity_film_hidden_dim: int = 16,
+        value_output_init_scale: float = 0.1,
+        value_action_summary_head: bool = False,
         value_head_rank: int = 0,
         value_hand_basis_rank: int = 0,
         belief_low_rank_dim: int = 0,
@@ -1516,6 +1716,54 @@ class BetterFFN(BaseMLPModel):
         self.value_strength_bucket_count = int(value_strength_bucket_count)
         self.value_strength_bucket_film = bool(value_strength_bucket_film)
         self.value_strength_bucket_relative = bool(value_strength_bucket_relative)
+        self.value_strength_bucket_board_only = bool(value_strength_bucket_board_only)
+        self.value_strength_bucket_blockers = bool(value_strength_bucket_blockers)
+        self.value_strength_bucket_coarse_residual = bool(
+            value_strength_bucket_coarse_residual
+        )
+        self.value_bucket_coarse_dim = int(value_bucket_coarse_dim)
+        self.value_latent_bucket_count = int(value_latent_bucket_count)
+        self.value_latent_bucket_dim = int(value_latent_bucket_dim)
+        self.value_exact_river_features = bool(value_exact_river_features)
+        self.value_showdown_baseline = bool(value_showdown_baseline)
+        self.value_river_range_equity_baseline = bool(
+            value_river_range_equity_baseline
+        )
+        self.value_river_range_equity_baseline_scale = float(
+            value_river_range_equity_baseline_scale
+        )
+        self.value_river_range_equity_pot_power = float(
+            value_river_range_equity_pot_power
+        )
+        self.value_river_range_equity_pos_scale = float(
+            value_river_range_equity_pos_scale
+        )
+        self.value_river_range_equity_neg_scale = float(
+            value_river_range_equity_neg_scale
+        )
+        self.value_river_range_equity_intercept = float(
+            value_river_range_equity_intercept
+        )
+        self.value_river_range_equity_blockers = bool(
+            value_river_range_equity_blockers
+        )
+        self.value_river_range_equity_rank_bins = int(
+            value_river_range_equity_rank_bins
+        )
+        self.value_river_range_equity_feature_head = bool(
+            value_river_range_equity_feature_head
+        )
+        self.value_river_range_equity_trunk_context = bool(
+            value_river_range_equity_trunk_context
+        )
+        self.value_river_range_equity_film_rank = int(
+            value_river_range_equity_film_rank
+        )
+        self.value_river_range_equity_film_hidden_dim = int(
+            value_river_range_equity_film_hidden_dim
+        )
+        self.value_output_init_scale = float(value_output_init_scale)
+        self.value_action_summary_head = bool(value_action_summary_head)
         self.value_head_rank = int(value_head_rank)
         self.value_hand_basis_rank = int(value_hand_basis_rank)
         self.belief_low_rank_dim = int(belief_low_rank_dim)
@@ -1549,8 +1797,51 @@ class BetterFFN(BaseMLPModel):
             raise ValueError("card_token_value_head_dim must be non-negative")
         if self.value_strength_bucket_count < 0:
             raise ValueError("value_strength_bucket_count must be non-negative")
+        if self.value_bucket_coarse_dim <= 0:
+            raise ValueError("value_bucket_coarse_dim must be positive")
+        if self.value_latent_bucket_count < 0:
+            raise ValueError("value_latent_bucket_count must be non-negative")
+        if self.value_latent_bucket_dim <= 0:
+            raise ValueError("value_latent_bucket_dim must be positive")
+        if self.value_river_range_equity_baseline_scale < 0.0:
+            raise ValueError(
+                "value_river_range_equity_baseline_scale must be non-negative"
+            )
+        if self.value_river_range_equity_pot_power < 0.0:
+            raise ValueError("value_river_range_equity_pot_power must be non-negative")
+        if (self.value_river_range_equity_pos_scale >= 0.0) != (
+            self.value_river_range_equity_neg_scale >= 0.0
+        ):
+            raise ValueError(
+                "value_river_range_equity_pos_scale and "
+                "value_river_range_equity_neg_scale must both be negative "
+                "or both be non-negative"
+            )
+        if self.value_river_range_equity_rank_bins <= 0:
+            raise ValueError("value_river_range_equity_rank_bins must be positive")
+        if self.value_river_range_equity_rank_bins > NUM_HANDS:
+            raise ValueError(
+                "value_river_range_equity_rank_bins must be <= NUM_HANDS"
+            )
+        if (
+            self.value_river_range_equity_feature_head
+            or self.value_river_range_equity_trunk_context
+            or self.value_river_range_equity_film_rank > 0
+        ) and not self.value_river_range_equity_baseline:
+            raise ValueError(
+                "river range equity feature/context/FiLM heads require "
+                "value_river_range_equity_baseline=True"
+            )
+        if self.value_river_range_equity_film_rank < 0:
+            raise ValueError("value_river_range_equity_film_rank must be non-negative")
+        if self.value_river_range_equity_film_hidden_dim <= 0:
+            raise ValueError(
+                "value_river_range_equity_film_hidden_dim must be positive"
+            )
         if self.value_head_rank < 0:
             raise ValueError("value_head_rank must be non-negative")
+        if self.value_output_init_scale < 0.0:
+            raise ValueError("value_output_init_scale must be non-negative")
         if self.value_hand_basis_rank < 0:
             raise ValueError("value_hand_basis_rank must be non-negative")
         if self.belief_low_rank_dim < 0:
@@ -1588,8 +1879,16 @@ class BetterFFN(BaseMLPModel):
         # num_players * range_hidden_dim.
         combos = hand_combos_tensor()  # [NUM_HANDS, 2]
         self.register_buffer("hand_combos", combos, persistent=False)
-        self.register_buffer("hand_card_a", combos[:, 0].long(), persistent=False)
-        self.register_buffer("hand_card_b", combos[:, 1].long(), persistent=False)
+        self.register_buffer(
+            "hand_card_a",
+            combos[:, 0].long().contiguous(),
+            persistent=False,
+        )
+        self.register_buffer(
+            "hand_card_b",
+            combos[:, 1].long().contiguous(),
+            persistent=False,
+        )
         card_ids = torch.arange(52, dtype=torch.long)
         self.register_buffer("card_ids", card_ids, persistent=False)
         self.register_buffer("card_ranks", card_ids % 13, persistent=False)
@@ -1759,13 +2058,67 @@ class BetterFFN(BaseMLPModel):
                 self.value_strength_bucket_count,
                 strength_hidden_dim,
             )
-            self.value_strat_head = ValueStratificationHead(
+            bucket_head_name = (
+                "value_bucket_coarse_residual_head"
+                if self.value_strength_bucket_coarse_residual
+                else "value_strat_head"
+            )
+            setattr(
+                self,
+                bucket_head_name,
+                ValueStratificationHead(
                 strat_input_dim,
-                16,
+                self.value_bucket_coarse_dim,
                 num_players,
                 nonlinearity,
                 state_dim=hidden_dim if self.value_strength_bucket_film else 0,
+                ),
             )
+        if self.value_latent_bucket_count > 0:
+            self.value_latent_bucket_residual = LatentBucketValueResidual(
+                hidden_dim,
+                self.value_latent_bucket_count,
+                self.value_latent_bucket_dim,
+                num_players,
+                nonlinearity,
+            )
+        if self.value_exact_river_features:
+            self.value_exact_feature_head = nn.Sequential(
+                nn.Linear(4, 16),
+                get_activation(nonlinearity),
+                nn.Linear(16, 1),
+            )
+        if self.value_river_range_equity_feature_head:
+            self.value_river_equity_feature_head = nn.Sequential(
+                nn.Linear(6, 16),
+                nn.ReLU(),
+                nn.Linear(16, 1),
+            )
+            self._init_river_equity_feature_head()
+        if self.value_river_range_equity_trunk_context:
+            self.value_river_equity_context_proj = nn.Linear(
+                2 * self.value_river_range_equity_rank_bins,
+                hidden_dim,
+                bias=False,
+            )
+            nn.init.zeros_(self.value_river_equity_context_proj.weight)
+        if self.value_river_range_equity_film_rank > 0:
+            rank = self.value_river_range_equity_film_rank
+            film_hidden = self.value_river_range_equity_film_hidden_dim
+            self.value_river_equity_film_state = nn.Linear(
+                hidden_dim,
+                rank,
+                bias=False,
+            )
+            self.value_river_equity_film = nn.Sequential(
+                nn.Linear(6, film_hidden),
+                nn.ReLU(),
+                nn.Linear(film_hidden, 2 * rank),
+            )
+            self.value_river_equity_film_out = nn.Linear(rank, 1, bias=False)
+            nn.init.zeros_(self.value_river_equity_film_out.weight)
+        if self.value_action_summary_head:
+            self.value_action_summary = output_projection(hidden_dim, num_players)
         if board_interaction_dim > 0:
             self.rank_pair_low_embedding = nn.Embedding(91, board_interaction_dim)
             self.board_rank_low = nn.Linear(13, board_interaction_dim, bias=False)
@@ -1885,6 +2238,31 @@ class BetterFFN(BaseMLPModel):
         ]
         layers.append(output_projection(self.hidden_dim, self.num_players * NUM_HANDS))
         return nn.Sequential(*layers)
+
+    def _init_river_equity_feature_head(self) -> None:
+        if not hasattr(self, "value_river_equity_feature_head"):
+            return
+        first = self.value_river_equity_feature_head[0]
+        last = self.value_river_equity_feature_head[-1]
+        if not isinstance(first, nn.Linear) or not isinstance(last, nn.Linear):
+            return
+        nn.init.zeros_(first.weight)
+        nn.init.zeros_(first.bias)
+        nn.init.zeros_(last.weight)
+        nn.init.zeros_(last.bias)
+        first.weight.data[0, 0] = 1.0
+        first.weight.data[1, 0] = -1.0
+        if self.value_river_range_equity_pos_scale >= 0.0:
+            pos_scale = self.value_river_range_equity_pos_scale
+            neg_scale = self.value_river_range_equity_neg_scale
+            intercept = self.value_river_range_equity_intercept
+        else:
+            pos_scale = self.value_river_range_equity_baseline_scale
+            neg_scale = self.value_river_range_equity_baseline_scale
+            intercept = 0.0
+        last.weight.data[0, 0] = pos_scale
+        last.weight.data[0, 1] = -neg_scale
+        last.bias.data.fill_(intercept)
 
     @staticmethod
     def _unordered_pair_index(
@@ -2425,6 +2803,42 @@ class BetterFFN(BaseMLPModel):
             return token_values[:, player_idx, player_idx, :]
         return head(value_input).view(-1, self.num_players, NUM_HANDS)
 
+    def _hand_value_logits_and_state_from_head(
+        self, value_input: torch.Tensor, head: nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if not isinstance(head, nn.Sequential) or len(head) == 0:
+            return self._hand_value_logits_from_head(value_input, head), None
+        body = head[:-1]
+        output = head[-1]
+        if value_input.dim() == 3:
+            player_state = (
+                value_input[:, 1:]
+                if value_input.shape[1] == self.num_players + 1
+                else value_input
+            )
+            if player_state.shape[1] != self.num_players:
+                raise ValueError(
+                    "token value input must have one token per player, optionally "
+                    "preceded by one game token"
+                )
+            batch_size = player_state.shape[0]
+            flat_state = player_state.reshape(-1, player_state.shape[-1])
+            hidden = body(flat_state) if len(body) > 0 else flat_state
+            token_values = output(hidden).view(
+                batch_size,
+                self.num_players,
+                self.num_players,
+                NUM_HANDS,
+            )
+            player_idx = torch.arange(self.num_players, device=value_input.device)
+            return (
+                token_values[:, player_idx, player_idx, :],
+                hidden.view(batch_size, self.num_players, -1),
+            )
+        hidden = body(value_input) if len(body) > 0 else value_input
+        hand_values = output(hidden).view(-1, self.num_players, NUM_HANDS)
+        return hand_values, hidden[:, None, :].expand(-1, self.num_players, -1)
+
     def _policy_logits(
         self,
         policy_input: torch.Tensor,
@@ -2580,17 +2994,498 @@ class BetterFFN(BaseMLPModel):
         )
         return self.strength_bet_ctx_proj(bet_scalars)
 
+    def _river_rank_percentile(self, board: torch.Tensor) -> torch.Tensor:
+        if board.device.type == "cuda" and triton_is_available():
+            try:
+                hand_ranks, sorted_indices = rank_hands_triton(board.int())
+            except Exception:
+                hand_ranks, sorted_indices = rank_hands_torch(board.int())
+        else:
+            hand_ranks, sorted_indices = rank_hands_torch(board.int())
+        del hand_ranks
+        positions = torch.arange(NUM_HANDS, device=board.device, dtype=torch.float32)
+        positions = positions.view(1, NUM_HANDS).expand(board.shape[0], -1)
+        rank_percentile = torch.empty_like(positions)
+        rank_percentile.scatter_(1, sorted_indices.long(), positions)
+        return rank_percentile / float(NUM_HANDS - 1)
+
+    def _river_rank_groups(self, board: torch.Tensor) -> torch.Tensor:
+        if board.device.type == "cuda" and triton_is_available():
+            try:
+                hand_ranks, sorted_indices = rank_hands_triton(board.int())
+            except Exception:
+                hand_ranks, sorted_indices = rank_hands_torch(board.int())
+        else:
+            hand_ranks, sorted_indices = rank_hands_torch(board.int())
+        sorted_ranks = hand_ranks.gather(1, sorted_indices.long())
+        group_start = sorted_ranks[:, 1:] != sorted_ranks[:, :-1]
+        group_start = torch.cat(
+            (
+                torch.ones(
+                    sorted_ranks.shape[0],
+                    1,
+                    device=sorted_ranks.device,
+                    dtype=torch.bool,
+                ),
+                group_start,
+            ),
+            dim=1,
+        )
+        sorted_groups = group_start.to(dtype=torch.long).cumsum(dim=1) - 1
+        rank_groups = torch.empty_like(sorted_groups)
+        rank_groups.scatter_(1, sorted_indices.long(), sorted_groups)
+        return rank_groups
+
+    def _player_spr_context(self, context: torch.Tensor) -> torch.Tensor:
+        base = ValueScalarContext.NUM_SCALAR_CONTEXT.value
+        stride = PlayerContext.NUM_PLAYER_CONTEXT.value
+        spr_idx = base + torch.arange(
+            self.num_players,
+            device=context.device,
+            dtype=torch.long,
+        ) * stride + PlayerContext.SPR.value
+        return context.index_select(1, spr_idx)
+
+    def _river_range_equity_context_delta(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        if not self.value_river_range_equity_trunk_context:
+            return None
+        delta = player_beliefs.new_zeros(
+            player_beliefs.shape[0],
+            self.hidden_dim,
+            dtype=dtype,
+        )
+        river_mask = (features.street == 3) & (features.board >= 0).all(dim=1)
+        if not river_mask.any():
+            return delta
+        rows = torch.where(river_mask)[0]
+        rank_bins = self.value_river_range_equity_rank_bins
+        rank_groups = self._river_rank_groups(features.board[rows]).clamp(
+            min=0,
+            max=rank_bins - 1,
+        )
+        beliefs = player_beliefs[rows].float()
+        rank_idx = rank_groups[:, None, :].expand(-1, self.num_players, -1)
+        rank_mass = beliefs.new_zeros(
+            beliefs.shape[0],
+            self.num_players,
+            rank_bins,
+        )
+        rank_mass.scatter_add_(2, rank_idx, beliefs)
+        context_features = rank_mass.flatten(1).to(dtype=dtype)
+        delta[rows] = self.value_river_equity_context_proj(context_features).to(
+            dtype=dtype
+        )
+        return delta
+
+    def _river_range_equity_features(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        baseline = player_beliefs.new_zeros(
+            player_beliefs.shape[0],
+            self.num_players,
+            NUM_HANDS,
+            dtype=dtype,
+        )
+        feature_values = player_beliefs.new_zeros(
+            player_beliefs.shape[0],
+            self.num_players,
+            NUM_HANDS,
+            6,
+            dtype=dtype,
+        )
+        river_mask = (features.street == 3) & (features.board >= 0).all(dim=1)
+        if not river_mask.any():
+            return baseline, feature_values
+        rows = torch.where(river_mask)[0]
+        rank_bins = self.value_river_range_equity_rank_bins
+        rank_groups = self._river_rank_groups(features.board[rows]).clamp(
+            min=0,
+            max=rank_bins - 1,
+        )
+        beliefs = player_beliefs[rows].float()
+        opponent_beliefs = beliefs.sum(dim=1, keepdim=True) - beliefs
+        rank_idx = rank_groups[:, None, :].expand(-1, self.num_players, -1)
+        rank_mass = beliefs.new_zeros(
+            beliefs.shape[0],
+            self.num_players,
+            rank_bins,
+        )
+        rank_mass.scatter_add_(2, rank_idx, opponent_beliefs)
+        cumulative = rank_mass.cumsum(dim=2)
+        tie_mass = rank_mass.gather(2, rank_idx)
+        lower_mass = cumulative.gather(2, rank_idx) - tie_mass
+        total_mass = rank_mass.sum(dim=2, keepdim=True).clamp_min(1e-8)
+        blocked_top_decile = beliefs.new_zeros(
+            beliefs.shape[0],
+            self.num_players,
+            NUM_HANDS,
+        )
+        if self.value_river_range_equity_blockers:
+            card_a = self.hand_card_a.to(device=beliefs.device)
+            card_b = self.hand_card_b.to(device=beliefs.device)
+            card_a_idx = card_a.view(1, 1, NUM_HANDS).expand_as(rank_idx)
+            card_b_idx = card_b.view(1, 1, NUM_HANDS).expand_as(rank_idx)
+            card_rank_bins = 52 * rank_bins
+            card_rank_mass = beliefs.new_zeros(
+                beliefs.shape[0],
+                self.num_players,
+                card_rank_bins,
+            )
+            flat_idx_a = card_a_idx * rank_bins + rank_idx
+            flat_idx_b = card_b_idx * rank_bins + rank_idx
+            card_rank_mass.scatter_add_(2, flat_idx_a, opponent_beliefs)
+            card_rank_mass.scatter_add_(2, flat_idx_b, opponent_beliefs)
+            if (
+                triton is not None
+                and card_rank_mass.is_cuda
+                and rank_bins <= 256
+            ):
+                card_rank_cumulative, card_mass = _river_card_rank_prefix_triton(
+                    card_rank_mass,
+                    rank_bins=rank_bins,
+                    num_players=self.num_players,
+                )
+                same_combo_mass = opponent_beliefs
+                card_tie_a = card_rank_mass.gather(2, flat_idx_a)
+                card_tie_b = card_rank_mass.gather(2, flat_idx_b)
+                card_lower_a = card_rank_cumulative.gather(2, flat_idx_a) - card_tie_a
+                card_lower_b = card_rank_cumulative.gather(2, flat_idx_b) - card_tie_b
+                blocked_tie = card_tie_a + card_tie_b - same_combo_mass
+                blocked_lower = card_lower_a + card_lower_b
+                blocked_total = (
+                    card_mass.gather(2, card_a_idx)
+                    + card_mass.gather(2, card_b_idx)
+                    - same_combo_mass
+                )
+                top_start = rank_bins - max(1, math.ceil(rank_bins / 10))
+                card_rank_view = card_rank_mass.view(
+                    beliefs.shape[0],
+                    self.num_players,
+                    52,
+                    rank_bins,
+                )
+                card_top_mass = card_rank_view[..., top_start:].sum(dim=3)
+                same_combo_top = same_combo_mass * (rank_idx >= top_start).to(
+                    dtype=same_combo_mass.dtype
+                )
+                blocked_top_decile = (
+                    card_top_mass.gather(2, card_a_idx)
+                    + card_top_mass.gather(2, card_b_idx)
+                    - same_combo_top
+                ).clamp_min(0.0)
+            else:
+                card_rank_view = card_rank_mass.view(
+                    beliefs.shape[0],
+                    self.num_players,
+                    52,
+                    rank_bins,
+                )
+                card_mass = card_rank_view.sum(dim=3)
+                card_rank_cumulative = card_rank_view.cumsum(dim=3).reshape(
+                    beliefs.shape[0],
+                    self.num_players,
+                    card_rank_bins,
+                )
+                card_tie_a = card_rank_mass.gather(2, flat_idx_a)
+                card_tie_b = card_rank_mass.gather(2, flat_idx_b)
+                card_lower_a = card_rank_cumulative.gather(2, flat_idx_a) - card_tie_a
+                card_lower_b = card_rank_cumulative.gather(2, flat_idx_b) - card_tie_b
+                same_combo_mass = opponent_beliefs
+                blocked_tie = card_tie_a + card_tie_b - same_combo_mass
+                blocked_lower = card_lower_a + card_lower_b
+                blocked_total = (
+                    card_mass.gather(2, card_a_idx)
+                    + card_mass.gather(2, card_b_idx)
+                    - same_combo_mass
+                )
+                top_start = rank_bins - max(1, math.ceil(rank_bins / 10))
+                card_top_mass = card_rank_view[..., top_start:].sum(dim=3)
+                same_combo_top = same_combo_mass * (rank_idx >= top_start).to(
+                    dtype=same_combo_mass.dtype
+                )
+                blocked_top_decile = (
+                    card_top_mass.gather(2, card_a_idx)
+                    + card_top_mass.gather(2, card_b_idx)
+                    - same_combo_top
+                ).clamp_min(0.0)
+            tie_mass = (tie_mass - blocked_tie).clamp_min(0.0)
+            lower_mass = (lower_mass - blocked_lower).clamp_min(0.0)
+            total_mass = (total_mass - blocked_total).clamp_min(1e-8)
+        equity_score = (2.0 * lower_mass + tie_mass - total_mass) / total_mass
+        pot_scale = features.context[rows, ValueScalarContext.POT.value].float()
+        if self.value_river_range_equity_pot_power != 1.0:
+            pot_scale = pot_scale.clamp_min(0.0).pow(
+                self.value_river_range_equity_pot_power
+            )
+        sdv = equity_score * pot_scale[:, None, None]
+        if self.value_river_range_equity_pos_scale >= 0.0:
+            value = (
+                sdv.clamp_min(0.0) * self.value_river_range_equity_pos_scale
+                + sdv.clamp_max(0.0) * self.value_river_range_equity_neg_scale
+                + self.value_river_range_equity_intercept
+            )
+        else:
+            value = sdv * self.value_river_range_equity_baseline_scale
+        baseline[rows] = value.to(dtype=dtype)
+        spr = self._player_spr_context(features.context[rows]).float()
+        feature_values[rows] = torch.stack(
+            (
+                sdv,
+                beliefs,
+                total_mass.expand_as(equity_score),
+                blocked_top_decile,
+                pot_scale[:, None, None].expand_as(equity_score),
+                spr[:, :, None].expand_as(equity_score),
+            ),
+            dim=-1,
+        ).to(dtype=dtype)
+        return baseline, feature_values
+
+    def _river_range_equity_baseline(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        baseline, _ = self._river_range_equity_features(
+            player_beliefs,
+            features,
+            dtype,
+        )
+        return baseline
+
+    def _river_range_equity_value(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        baseline, feature_values = self._river_range_equity_features(
+            player_beliefs,
+            features,
+            dtype,
+        )
+        if not self.value_river_range_equity_feature_head:
+            return baseline
+        return self.value_river_equity_feature_head(feature_values).squeeze(-1)
+
+    def _river_range_equity_film_residual(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+        value_state: torch.Tensor | None,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        if self.value_river_range_equity_film_rank <= 0 or value_state is None:
+            return None
+        if value_state.dim() == 2:
+            value_state = value_state[:, None, :].expand(-1, self.num_players, -1)
+        if value_state.shape[:2] != (player_beliefs.shape[0], self.num_players):
+            raise ValueError(
+                "river equity FiLM value_state must have shape [B, num_players, D]"
+            )
+        _, feature_values = self._river_range_equity_features(
+            player_beliefs,
+            features,
+            dtype,
+        )
+        latent = self.value_river_equity_film_state(value_state)
+        film = self.value_river_equity_film(feature_values)
+        gamma, beta = film.chunk(2, dim=-1)
+        adapted = gamma * latent[:, :, None, :] + beta
+        residual = self.value_river_equity_film_out(adapted).squeeze(-1)
+        river_mask = ((features.street == 3) & (features.board >= 0).all(dim=1)).to(
+            dtype=residual.dtype
+        )
+        return residual * river_mask[:, None, None]
+
+    def _apply_river_range_equity_value(
+        self,
+        hand_values: torch.Tensor,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+    ) -> torch.Tensor:
+        if not self.value_river_range_equity_baseline:
+            return hand_values
+        return hand_values + self._river_range_equity_value(
+            player_beliefs,
+            features,
+            hand_values.dtype,
+        )
+
+    def _river_exact_aux(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+        dtype: torch.dtype,
+    ) -> dict[str, torch.Tensor]:
+        river_mask = (features.street == 3) & (features.board >= 0).all(dim=1)
+        rank_percentile = features.beliefs.new_zeros(
+            features.beliefs.shape[0], NUM_HANDS, dtype=torch.float32
+        )
+        if river_mask.any():
+            rows = torch.where(river_mask)[0]
+            rank_percentile[rows] = self._river_rank_percentile(features.board[rows])
+        rank_score = (2.0 * rank_percentile - 1.0).to(dtype=dtype)
+        pot_scale = features.context[:, ValueScalarContext.POT.value].to(dtype=dtype)
+        showdown_baseline = rank_score[:, None, :] * pot_scale[:, None, None]
+
+        aux = {
+            "river_rank_score": rank_score,
+            "showdown_baseline": showdown_baseline,
+        }
+        if self.value_exact_river_features:
+            opp_belief = player_beliefs.sum(dim=1, keepdim=True) - player_beliefs
+            opp_card_mass = self._card_mass(opp_belief)
+            opp_unblocked = self._unblocked_mass_from_card_mass(
+                opp_belief, opp_card_mass
+            )
+            exact_input = torch.stack(
+                (
+                    rank_score[:, None].expand(-1, self.num_players, -1),
+                    showdown_baseline.expand(-1, self.num_players, -1),
+                    opp_unblocked.to(dtype=dtype),
+                    player_beliefs.to(dtype=dtype),
+                ),
+                dim=-1,
+            )
+            aux["exact_feature_residual"] = self.value_exact_feature_head(
+                exact_input
+            ).squeeze(-1)
+        return aux
+
+    def _value_latent_bucket_residual(
+        self,
+        player_beliefs: torch.Tensor,
+        x: torch.Tensor,
+        hand_emb: torch.Tensor,
+        features: MLPFeatures,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        board_ctx = self._board_context(features.board).to(dtype=hand_emb.dtype)
+        state = x[:, 0] if x.dim() == 3 else x
+        return self.value_latent_bucket_residual(
+            hand_emb,
+            board_ctx,
+            state,
+            player_beliefs,
+        )
+
+    def _value_coarse_bucket_residual(
+        self,
+        player_beliefs: torch.Tensor,
+        x: torch.Tensor,
+        hand_emb: torch.Tensor,
+        features: MLPFeatures,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        board_ctx = self._board_context(features.board).to(dtype=hand_emb.dtype)
+        if self.value_strength_bucket_board_only:
+            bet_ctx = torch.zeros(
+                features.context.shape[0],
+                self.strength_bet_ctx_proj.out_features,
+                device=features.context.device,
+                dtype=hand_emb.dtype,
+            )
+        else:
+            bet_ctx = self._strength_bet_context(features.context).to(
+                dtype=hand_emb.dtype
+            )
+        bucket_weights = self.strength_bucket_enc._bucket_weights(
+            hand_emb,
+            board_ctx,
+            bet_ctx,
+        )
+        batch_size, num_players, num_hands = player_beliefs.shape
+        if bucket_weights.shape[0] == 1 and batch_size != 1:
+            bucket_weights = bucket_weights.expand(batch_size, -1, -1)
+        if bucket_weights.shape[:2] != (batch_size, num_hands):
+            raise ValueError("bucket weights must have shape [B, N, K]")
+
+        opp_beliefs = player_beliefs.sum(dim=1, keepdim=True) - player_beliefs
+        weighted = opp_beliefs[..., None].to(dtype=bucket_weights.dtype) * (
+            bucket_weights[:, None, :, :]
+        )
+        opp_bucket = weighted.sum(dim=2)
+        bucket_count = bucket_weights.shape[-1]
+        opp_features = opp_bucket[:, :, None, :].expand(
+            -1,
+            -1,
+            bucket_count,
+            -1,
+        )
+        bucket_eye = torch.eye(
+            bucket_count,
+            device=bucket_weights.device,
+            dtype=bucket_weights.dtype,
+        ).view(1, 1, bucket_count, bucket_count)
+        bucket_eye = bucket_eye.expand(batch_size, num_players, -1, -1)
+        strat_input = torch.cat((opp_features, bucket_eye), dim=-1)
+        if self.value_strength_bucket_relative:
+            opp_share = opp_bucket / opp_bucket.sum(dim=-1, keepdim=True).clamp_min(
+                1e-8
+            )
+            opp_share_features = opp_share[:, :, None, :].expand_as(opp_features)
+            strat_input = torch.cat(
+                (
+                    strat_input,
+                    opp_share_features,
+                    opp_share_features - bucket_eye,
+                ),
+                dim=-1,
+            )
+
+        player_state = None
+        if self.value_strength_bucket_film:
+            if x.dim() == 3:
+                player_state = x[:, 1:] if x.shape[1] == self.num_players + 1 else x
+            else:
+                player_state = x[:, None, :].expand(-1, self.num_players, -1)
+        bucket_values = self.value_bucket_coarse_residual_head(
+            strat_input,
+            player_state,
+        )
+        hand_residual = torch.einsum(
+            "bpk,bhk->bph",
+            bucket_values,
+            bucket_weights,
+        )
+        return hand_residual, bucket_weights
+
     def _value_stratification_residual(
         self,
         player_beliefs: torch.Tensor,
         x: torch.Tensor,
         hand_emb: torch.Tensor,
         features: MLPFeatures,
-    ) -> torch.Tensor | None:
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
         if self.value_strength_bucket_count <= 0:
             return None
+        if self.value_strength_bucket_coarse_residual:
+            return self._value_coarse_bucket_residual(
+                player_beliefs,
+                x,
+                hand_emb,
+                features,
+            )
         board_ctx = self._board_context(features.board).to(dtype=hand_emb.dtype)
-        bet_ctx = self._strength_bet_context(features.context).to(dtype=hand_emb.dtype)
+        if self.value_strength_bucket_board_only:
+            bet_ctx = torch.zeros(
+                features.context.shape[0],
+                self.strength_bet_ctx_proj.out_features,
+                device=features.context.device,
+                dtype=hand_emb.dtype,
+            )
+        else:
+            bet_ctx = self._strength_bet_context(features.context).to(
+                dtype=hand_emb.dtype
+            )
         compat_bucket, hero_bucket = self.strength_bucket_enc(
             hand_emb,
             board_ctx,
@@ -2598,6 +3493,7 @@ class BetterFFN(BaseMLPModel):
             player_beliefs,
             self.hand_card_a,
             self.hand_card_b,
+            use_blockers=self.value_strength_bucket_blockers,
         )
         hero_bucket = hero_bucket[:, None, :, :].expand(
             -1,
@@ -2625,7 +3521,7 @@ class BetterFFN(BaseMLPModel):
                 player_state = x[:, 1:] if x.shape[1] == self.num_players + 1 else x
             else:
                 player_state = x[:, None, :].expand(-1, self.num_players, -1)
-        return self.value_strat_head(strat_input, player_state)
+        return self.value_strat_head(strat_input, player_state), hero_bucket[:, 0]
 
     def static_feature_base(self, features: MLPFeatures) -> torch.Tensor:
         """Feature contribution that is fixed for a CFR leaf row."""
@@ -2707,6 +3603,15 @@ class BetterFFN(BaseMLPModel):
         )
         if board_mass_features is not None:
             flat_features = flat_features + board_mass_features
+        river_equity_context = self._river_range_equity_context_delta(
+            player_beliefs,
+            features,
+            flat_features.dtype,
+        )
+        trunk_game_features = static_base_features
+        if river_equity_context is not None:
+            flat_features = flat_features + river_equity_context
+            trunk_game_features = trunk_game_features + river_equity_context
         board_stats = self._board_stats(features.board, player_beliefs.dtype)
         interaction_features = self._belief_board_interaction(
             player_beliefs, board_stats
@@ -2716,7 +3621,7 @@ class BetterFFN(BaseMLPModel):
         # assert flat_features.isfinite().all()
 
         x = (
-            self._postflop_trunk_output(static_base_features, per_player_belief)
+            self._postflop_trunk_output(trunk_game_features, per_player_belief)
             if self.postflop_multi_token_trunk
             else self._postflop_trunk_output(flat_features, per_player_belief)
         )
@@ -2814,8 +3719,13 @@ class BetterFFN(BaseMLPModel):
         features: MLPFeatures,
         apply_zero_sum: bool = True,
     ) -> ModelOutput:
-        hand_values_raw = self._value_logits_from_head(
-            player_beliefs, x, hand_emb, self.hand_value_head, features
+        hand_values_raw, aux = self._value_logits_and_aux_from_head(
+            player_beliefs,
+            x,
+            hand_emb,
+            self.hand_value_head,
+            features,
+            collect_aux=True,
         )
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
@@ -2826,8 +3736,17 @@ class BetterFFN(BaseMLPModel):
             hand_values = hand_values_raw - hand_value_sums
         else:
             hand_values = hand_values_raw
+        if self.value_showdown_baseline and aux is not None:
+            baseline = aux.get("showdown_baseline")
+            if baseline is not None:
+                hand_values = hand_values + baseline.to(dtype=hand_values.dtype)
+        hand_values = self._apply_river_range_equity_value(
+            hand_values,
+            player_beliefs,
+            features,
+        )
         value = hand_values.mean(dim=-1)
-        return ModelOutput(value=value, hand_values=hand_values)
+        return ModelOutput(value=value, hand_values=hand_values, value_aux=aux)
 
     def _value_logits_from_head(
         self,
@@ -2837,6 +3756,26 @@ class BetterFFN(BaseMLPModel):
         head: nn.Module,
         features: MLPFeatures | None = None,
     ) -> torch.Tensor:
+        hand_values, _ = self._value_logits_and_aux_from_head(
+            player_beliefs,
+            x,
+            hand_emb,
+            head,
+            features,
+            collect_aux=False,
+        )
+        return hand_values
+
+    def _value_logits_and_aux_from_head(
+        self,
+        player_beliefs: torch.Tensor,
+        x: torch.Tensor,
+        hand_emb: torch.Tensor,
+        head: nn.Module,
+        features: MLPFeatures | None = None,
+        collect_aux: bool = False,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor] | None]:
+        value_state: torch.Tensor | None = None
         if isinstance(head, CardTokenValueHead):
             value_state = x[:, 0] if x.dim() == 3 else x
             hand_values = head(
@@ -2849,20 +3788,104 @@ class BetterFFN(BaseMLPModel):
         elif isinstance(head, HandBasisValueHead):
             hand_values = head(x, hand_emb)
         else:
-            hand_values = self._hand_value_logits_from_head(x, head)
+            if self.value_river_range_equity_film_rank > 0:
+                hand_values, value_state = self._hand_value_logits_and_state_from_head(
+                    x, head
+                )
+            else:
+                hand_values = self._hand_value_logits_from_head(x, head)
         if self.value_per_hand_residual:
             correction = self._value_residual_correction(player_beliefs)
             hand_values = hand_values + correction.to(dtype=hand_values.dtype)
+        aux: dict[str, torch.Tensor] | None = {} if collect_aux else None
         if features is not None:
-            stratification = self._value_stratification_residual(
+            if self.value_latent_bucket_count > 0:
+                latent_residual, latent_bucket_weights = (
+                    self._value_latent_bucket_residual(
+                        player_beliefs,
+                        x,
+                        hand_emb,
+                        features,
+                    )
+                )
+                hand_values = hand_values + latent_residual.to(
+                    dtype=hand_values.dtype
+                )
+                if aux is not None:
+                    aux["bucket_weights"] = latent_bucket_weights
+            stratification_out = self._value_stratification_residual(
                 player_beliefs,
                 x,
                 hand_emb,
                 features,
             )
-            if stratification is not None:
+            if stratification_out is not None:
+                stratification, bucket_weights = stratification_out
                 hand_values = hand_values + stratification.to(dtype=hand_values.dtype)
-        return hand_values
+                if aux is not None:
+                    aux["bucket_weights"] = bucket_weights
+            film_residual = self._river_range_equity_film_residual(
+                player_beliefs,
+                features,
+                value_state,
+                hand_values.dtype,
+            )
+            if film_residual is not None:
+                hand_values = hand_values + film_residual.to(dtype=hand_values.dtype)
+            if (
+                self.value_exact_river_features
+                or (collect_aux and self.value_showdown_baseline)
+            ):
+                exact_aux = self._river_exact_aux(
+                    player_beliefs, features, hand_values.dtype
+                )
+                exact_residual = exact_aux.get("exact_feature_residual")
+                if exact_residual is not None:
+                    hand_values = hand_values + exact_residual.to(
+                        dtype=hand_values.dtype
+                    )
+                if aux is not None:
+                    aux.update(exact_aux)
+            if collect_aux and self.value_action_summary_head and aux is not None:
+                state = x[:, 0] if x.dim() == 3 else x
+                aux["action_summary"] = self.value_action_summary(state)
+        return hand_values, (aux or None)
+
+    def _value_aux_from_base(
+        self,
+        player_beliefs: torch.Tensor,
+        x: torch.Tensor,
+        hand_emb: torch.Tensor,
+        features: MLPFeatures,
+        hand_values_dtype: torch.dtype,
+    ) -> dict[str, torch.Tensor] | None:
+        aux: dict[str, torch.Tensor] = {}
+        if self.value_latent_bucket_count > 0:
+            _, bucket_weights = self._value_latent_bucket_residual(
+                player_beliefs,
+                x,
+                hand_emb,
+                features,
+            )
+            aux["bucket_weights"] = bucket_weights
+        if self.value_strength_bucket_count > 0:
+            stratification_out = self._value_stratification_residual(
+                player_beliefs,
+                x,
+                hand_emb,
+                features,
+            )
+            if stratification_out is not None:
+                _, bucket_weights = stratification_out
+                aux["bucket_weights"] = bucket_weights
+        if self.value_exact_river_features or self.value_showdown_baseline:
+            aux.update(
+                self._river_exact_aux(player_beliefs, features, hand_values_dtype)
+            )
+        if self.value_action_summary_head:
+            state = x[:, 0] if x.dim() == 3 else x
+            aux["action_summary"] = self.value_action_summary(state)
+        return aux or None
 
     def _value_residual_correction(self, player_beliefs: torch.Tensor) -> torch.Tensor:
         card_mass = self._card_mass(player_beliefs)
@@ -2912,14 +3935,115 @@ class BetterFFN(BaseMLPModel):
             hand_values = hand_values_raw - hand_value_sums
         else:
             hand_values = hand_values_raw
+        aux = self._value_aux_from_base(
+            player_beliefs,
+            x,
+            hand_emb,
+            features,
+            hand_values.dtype,
+        )
+        if self.value_showdown_baseline and aux is not None:
+            baseline = aux.get("showdown_baseline")
+            if baseline is not None:
+                hand_values = hand_values + baseline.to(dtype=hand_values.dtype)
+        hand_values = self._apply_river_range_equity_value(
+            hand_values,
+            player_beliefs,
+            features,
+        )
         value = hand_values.mean(dim=-1)
         return ModelOutput(
             policy_logits=policy_logits,
             value=value,
             hand_values=hand_values,
+            value_aux=aux,
         )
 
     @profile
+    def forward(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = True,
+        apply_zero_sum: bool = True,
+        static_base_features: torch.Tensor | None = None,
+        latent=None,
+        value_head: str = "auto",
+    ) -> ModelOutput:
+        policy_logits = None
+        value = None
+        hand_values = None
+        if include_policy:
+            policy_logits = self.policy_model._call_forward_policy(features)
+        if include_value:
+            if value_head == "auto":
+                value_output = self._forward_value_auto_split(
+                    features,
+                    latent=latent,
+                    apply_zero_sum=apply_zero_sum,
+                    static_base_features=static_base_features,
+                )
+            else:
+                value_output = self.value_model._call_forward_value(
+                    features,
+                    latent=latent,
+                    apply_zero_sum=apply_zero_sum,
+                    static_base_features=static_base_features,
+                    value_head=value_head,
+                )
+            value = value_output.value
+            hand_values = value_output.hand_values
+        if not include_policy and not include_value:
+            raise ValueError(
+                "At least one of include_policy/include_value must be true"
+            )
+        return ModelOutput(
+            policy_logits=policy_logits,
+            value=value,
+            hand_values=hand_values,
+        )
+    def forward(
+        self,
+        features: MLPFeatures,
+        include_policy: bool = True,
+        include_value: bool = True,
+        apply_zero_sum: bool = True,
+        static_base_features: torch.Tensor | None = None,
+        latent=None,
+        value_head: str = "auto",
+    ) -> ModelOutput:
+        policy_logits = None
+        value = None
+        hand_values = None
+        if include_policy:
+            policy_logits = self.policy_model._call_forward_policy(features)
+        if include_value:
+            if value_head == "auto":
+                value_output = self._forward_value_auto_split(
+                    features,
+                    latent=latent,
+                    apply_zero_sum=apply_zero_sum,
+                    static_base_features=static_base_features,
+                )
+            else:
+                value_output = self.value_model._call_forward_value(
+                    features,
+                    latent=latent,
+                    apply_zero_sum=apply_zero_sum,
+                    static_base_features=static_base_features,
+                    value_head=value_head,
+                )
+            value = value_output.value
+            hand_values = value_output.hand_values
+        if not include_policy and not include_value:
+            raise ValueError(
+                "At least one of include_policy/include_value must be true"
+            )
+        return ModelOutput(
+            policy_logits=policy_logits,
+            value=value,
+            hand_values=hand_values,
+        )
     def forward(
         self,
         features: MLPFeatures,
@@ -2989,13 +4113,15 @@ class BetterFFN(BaseMLPModel):
                         generator=rng,
                     )
 
-        # Guess hand values are around stddev 0.1.
+        # Guess hand values are around stddev value_output_init_scale.
         for head_name in ("hand_value_head", "pre_value_head", "post_value_head"):
             head = getattr(self, head_name, None)
             if hasattr(head, "scale_output"):
-                head.scale_output(0.1)
+                head.scale_output(self.value_output_init_scale)
             elif head is not None:
-                head[-1].get_submodule("linear_out").weight.data.mul_(0.1)
+                head[-1].get_submodule("linear_out").weight.data.mul_(
+                    self.value_output_init_scale
+                )
         if self.board_interaction_dim > 0:
             if hasattr(self, "rank_board_interaction_out"):
                 self.rank_board_interaction_out.weight.data.mul_(0.1)
@@ -3003,6 +4129,13 @@ class BetterFFN(BaseMLPModel):
                 self.suit_board_interaction_out.weight.data.mul_(0.1)
         if hasattr(self, "belief_phase_shift"):
             nn.init.zeros_(self.belief_phase_shift.weight)
+        if hasattr(self, "value_latent_bucket_residual"):
+            nn.init.normal_(
+                self.value_latent_bucket_residual.bucket_query,
+                std=0.02,
+                generator=rng,
+            )
+            self.value_latent_bucket_residual.scale_output(0.1)
         if hasattr(self, "cross_proj"):
             self.cross_proj.weight.data.mul_(0.1)
         if hasattr(self, "card_offset_up"):
@@ -3014,6 +4147,12 @@ class BetterFFN(BaseMLPModel):
                 nn.init.zeros_(self.value_strat_head.film.weight)
                 nn.init.zeros_(self.value_strat_head.film.bias)
             self.value_strat_head.scale_output(0.1)
+        if hasattr(self, "value_river_equity_feature_head"):
+            self._init_river_equity_feature_head()
+        if hasattr(self, "value_river_equity_context_proj"):
+            nn.init.zeros_(self.value_river_equity_context_proj.weight)
+        if hasattr(self, "value_river_equity_film_out"):
+            nn.init.zeros_(self.value_river_equity_film_out.weight)
 
         # Start CFR warm-start policies close to uniform. The dominant low-rank
         # policy logit branch uses gain 0.1; auxiliary additive correction
@@ -3239,9 +4378,18 @@ class BetterStreetValueFFN(BetterFFN):
         )
         if interaction_features is not None:
             flat_features = flat_features + interaction_features
+        trunk_game_features = static_base_features
+        river_equity_context = self._river_range_equity_context_delta(
+            player_beliefs,
+            features,
+            flat_features.dtype,
+        )
+        if river_equity_context is not None:
+            flat_features = flat_features + river_equity_context
+            trunk_game_features = trunk_game_features + river_equity_context
 
         x = (
-            self._postflop_trunk_output(static_base_features, per_player_belief)
+            self._postflop_trunk_output(trunk_game_features, per_player_belief)
             if self.postflop_multi_token_trunk
             else self._postflop_trunk_output(flat_features, per_player_belief)
         )
@@ -3270,8 +4418,14 @@ class BetterStreetValueFFN(BetterFFN):
                 .sum(dim=2, keepdim=True)
                 .mean(dim=1, keepdim=True)
             )
-            return hand_values_raw - hand_value_sums
-        return hand_values_raw
+            hand_values = hand_values_raw - hand_value_sums
+        else:
+            hand_values = hand_values_raw
+        return self._apply_river_range_equity_value(
+            hand_values,
+            player_beliefs,
+            features,
+        )
 
     def _forward_value_head(
         self,

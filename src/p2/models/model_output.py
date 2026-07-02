@@ -55,6 +55,9 @@ class ModelOutput:
     latent: TRMLatent | None = None
     """Latent y tensor of shape (batch_size, hidden_dim)"""
 
+    value_aux: dict[str, torch.Tensor] | None = None
+    """Optional auxiliary value-head outputs keyed by loss name."""
+
     def __getitem__(self, index: torch.Tensor | slice | int) -> ModelOutput:
         """Get item by index."""
         return ModelOutput(
@@ -79,6 +82,11 @@ class ModelOutput:
                 else None
             ),
             latent=self.latent[index] if self.latent is not None else None,
+            value_aux=(
+                {key: value[index] for key, value in self.value_aux.items()}
+                if self.value_aux is not None
+                else None
+            ),
         )
 
     @classmethod
@@ -140,6 +148,17 @@ class ModelOutput:
                     z=torch.cat(z_tensors, dim=0),
                 )
 
+        value_aux = None
+        if outputs[0].value_aux is not None:
+            keys = outputs[0].value_aux.keys()
+            value_aux = {
+                key: torch.cat(
+                    [o.value_aux[key] for o in outputs if o.value_aux is not None],
+                    dim=0,
+                )
+                for key in keys
+            }
+
         # kv_cache is not concatenated as it's a complex nested structure
         # that doesn't have a clear concatenation semantics
         kv_cache = None
@@ -152,4 +171,5 @@ class ModelOutput:
             kv_cache=kv_cache,
             encoded_with_permutation=encoded_with_permutation,
             latent=latent,
+            value_aux=value_aux,
         )
