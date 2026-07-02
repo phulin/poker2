@@ -9,6 +9,7 @@ from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
 from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
 from p2.search.rebel_data_source import (
+    BootstrapPregeneratedRebelDataSource,
     HybridRebelDataSource,
     LiveRebelDataSource,
     PregeneratedRebelDataSource,
@@ -362,3 +363,63 @@ def test_pregenerated_rebel_data_source_can_sample_directly_from_dataset(tmp_pat
     )
     assert value_buffer.sample_calls == 0
     assert policy_buffer.sample_calls == 0
+
+
+def test_bootstrap_pregenerated_value_stages_into_live_replay_buffer(tmp_path):
+    write_rebel_solved_dataset(
+        tmp_path,
+        value_batches=[_batch("value", 0, 5)],
+        policy_batches=[_batch("policy", 100, 5)],
+    )
+    value_buffer = RebelValueBuffer(
+        capacity=8,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=torch.device("cpu"),
+    )
+    policy_buffer = RebelPolicyBuffer(
+        capacity=8,
+        num_actions=5,
+        num_players=2,
+        num_context_features=4,
+        device=torch.device("cpu"),
+    )
+    pregenerated = PregeneratedRebelDataSource(
+        [PregeneratedDatasetConfig(path=str(tmp_path))],
+        value_buffer,
+        policy_buffer,
+        value_sample_count=2,
+        policy_sample_count=0,
+        num_players=2,
+        num_actions=5,
+        context_length=4,
+        generator=torch.Generator().manual_seed(17),
+        shuffle=False,
+    )
+    live = LiveRebelDataSource(
+        _FakeGenerator(value_buffer, policy_buffer),
+        value_buffer,
+        policy_buffer,
+        value_sample_count=2,
+        max_return_policy_samples=2,
+    )
+    source = BootstrapPregeneratedRebelDataSource(pregenerated, live)
+
+    fresh = source.prepare_value_bootstrap_step(0)
+
+    assert fresh is not None
+    assert len(fresh) == 2
+    assert len(value_buffer) == 2
+    assert source.bootstrap_value_available() == 2
+    assert source.bootstrap_value_remaining() == 3
+    assert source._resident_value is None
+
+    source.ensure_min_value_samples(4)
+
+    assert len(value_buffer) == 4
+    assert source.bootstrap_value_available() == 4
+    assert source.bootstrap_value_remaining() == 1
+    sampled = source.sample_value(2, stratify_streets=None)
+    assert len(sampled) == 2
+    assert int(value_buffer.sample_count.sum().item()) == 2

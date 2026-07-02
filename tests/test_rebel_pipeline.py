@@ -369,6 +369,66 @@ def test_rebel_cfr_trainer_hybrid_mode_uses_holdout_metrics(tmp_path):
     assert len(trainer.policy_buffer) >= cfg.train.batch_size
 
 
+def test_rebel_cfr_trainer_bootstrap_pregenerated_samples_replay_buffer(
+    tmp_path, monkeypatch
+):
+    cfg = _tiny_rebel_cfg()
+    cfg.data.mode = "bootstrap_pregenerated"
+    cfg.data.live_root_source = "random_river"
+    cfg.num_steps = 1
+    cfg.train.batch_size = 2
+    cfg.train.episodes_per_step = 2
+    cfg.train.replay_buffer_batches = 4
+    cfg.train.value_reuse_goal = 1
+    cfg.search.depth = 1
+    cfg.data.pregenerated.value_batch_size = 1
+    cfg.data.pregenerated.policy_batch_size = 0
+    cfg.data.pregenerated.shuffle = False
+    cfg.data.pregenerated.datasets = [PregeneratedDatasetConfig(path=str(tmp_path))]
+    write_rebel_solved_dataset(
+        tmp_path,
+        value_batches=[_tiny_solved_batch(cfg, stream="value", start=0, count=4)],
+        policy_batches=[_tiny_solved_batch(cfg, stream="policy", start=10, count=4)],
+        metadata={
+            "model_family": cfg.model.name.value,
+            "action_schedule": {
+                "bet_bins": list(cfg.env.bet_bins),
+                "bet_bins_by_depth": cfg.search.bet_bins_by_depth,
+                "allin_by_depth": cfg.search.allin_by_depth,
+            },
+        },
+    )
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    captured_batches = []
+
+    def fake_train_value_batch(value_batch, step, *, sync_inference_model=True):
+        del step, sync_inference_model
+        captured_batches.append(value_batch)
+        return {
+            "loss": 1.0,
+            "total_loss": 1.0,
+            "value_loss": 1.0,
+            "permutation_loss": 0.0,
+            "pot_relative_mae": 0.1,
+            "pot_relative_mse": 0.01,
+            "pot_relative_rmse": 0.1,
+        }
+
+    monkeypatch.setattr(trainer, "train_value_batch", fake_train_value_batch)
+    monkeypatch.setattr(trainer, "_sync_inference_model", lambda: None)
+
+    metrics = trainer.train_step(0)
+
+    assert captured_batches
+    assert trainer.value_buffer is not None
+    assert len(trainer.value_buffer) >= cfg.train.batch_size
+    assert int(trainer.value_buffer.sample_count.sum().item()) >= cfg.train.batch_size
+    assert trainer.data_source._resident_value is None
+    assert metrics["bootstrap_pregenerated_value_only"] == 1.0
+    assert metrics["value_buffer_size"] == len(trainer.value_buffer)
+
+
 def test_rebel_cfr_trainer_pregenerated_resume_matches_uninterrupted(tmp_path):
     dataset_path = tmp_path / "dataset"
     cfg = _tiny_rebel_cfg()
