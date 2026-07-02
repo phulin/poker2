@@ -426,6 +426,12 @@ class RebelCFRTrainer:
             policy_node_weighting=cfg.train.policy_node_weighting,
             policy_loss_type=cfg.train.policy_loss_type,
             policy_logit_l2_coef=cfg.train.policy_logit_l2_coef,
+            value_multiresolution_coef=cfg.train.value_multiresolution_coef,
+            value_bucket_aux_coef=cfg.train.value_bucket_aux_coef,
+            value_ordering_coef=cfg.train.value_ordering_coef,
+            value_bucket_usage_coef=cfg.train.value_bucket_usage_coef,
+            value_bucket_entropy_coef=cfg.train.value_bucket_entropy_coef,
+            value_action_summary_coef=cfg.train.value_action_summary_coef,
         )
         self.loss_fn.to(self.device)
         if self.device.type == "cuda" and _compile_setting(cfg) != "off":

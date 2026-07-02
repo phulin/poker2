@@ -88,6 +88,12 @@ class RebelTrainingConfig:
     backup_consistency_sample_fraction: float
     backup_consistency_max_samples: int
     backup_consistency_min_policy_mass: float
+    value_multiresolution_coef: float
+    value_bucket_aux_coef: float
+    value_ordering_coef: float
+    value_bucket_usage_coef: float
+    value_bucket_entropy_coef: float
+    value_action_summary_coef: float
     grad_clip: float
     policy_grad_clip: float
     optimizer: str
@@ -143,6 +149,12 @@ class RebelTrainingConfig:
             backup_consistency_sample_fraction=cfg.backup_consistency_sample_fraction,
             backup_consistency_max_samples=cfg.backup_consistency_max_samples,
             backup_consistency_min_policy_mass=cfg.backup_consistency_min_policy_mass,
+            value_multiresolution_coef=cfg.value_multiresolution_coef,
+            value_bucket_aux_coef=cfg.value_bucket_aux_coef,
+            value_ordering_coef=cfg.value_ordering_coef,
+            value_bucket_usage_coef=cfg.value_bucket_usage_coef,
+            value_bucket_entropy_coef=cfg.value_bucket_entropy_coef,
+            value_action_summary_coef=cfg.value_action_summary_coef,
             grad_clip=cfg.grad_clip,
             policy_grad_clip=cfg.policy_grad_clip,
             optimizer=cfg.optimizer,
@@ -198,6 +210,12 @@ class RebelTrainingConfig:
         cfg.backup_consistency_sample_fraction = self.backup_consistency_sample_fraction
         cfg.backup_consistency_max_samples = self.backup_consistency_max_samples
         cfg.backup_consistency_min_policy_mass = self.backup_consistency_min_policy_mass
+        cfg.value_multiresolution_coef = self.value_multiresolution_coef
+        cfg.value_bucket_aux_coef = self.value_bucket_aux_coef
+        cfg.value_ordering_coef = self.value_ordering_coef
+        cfg.value_bucket_usage_coef = self.value_bucket_usage_coef
+        cfg.value_bucket_entropy_coef = self.value_bucket_entropy_coef
+        cfg.value_action_summary_coef = self.value_action_summary_coef
         cfg.grad_clip = self.grad_clip
         cfg.policy_grad_clip = self.policy_grad_clip
         cfg.optimizer = self.optimizer

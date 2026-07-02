@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
@@ -19,6 +20,7 @@ from p2.env.card_utils import (
     NUM_HANDS,
     PREFLOP_HANDS,
     combo_suit_permutation_tensor,
+    combo_to_preflop_class_tensor,
     hand_combos_tensor,
     preflop_class_compatibility_counts_tensor,
     preflop_class_multiplicity_tensor,
@@ -748,6 +750,12 @@ class RebelSupervisedLoss(nn.Module):
         policy_node_weighting: PolicyNodeWeighting | str = PolicyNodeWeighting.uniform,
         policy_loss_type: PolicyLossType | str = PolicyLossType.cross_entropy,
         policy_logit_l2_coef: float = 0.0,
+        value_multiresolution_coef: float = 0.0,
+        value_bucket_aux_coef: float = 0.0,
+        value_ordering_coef: float = 0.0,
+        value_bucket_usage_coef: float = 0.0,
+        value_bucket_entropy_coef: float = 0.0,
+        value_action_summary_coef: float = 0.0,
     ) -> None:
         super().__init__()
         self.policy_weight = policy_weight
@@ -756,8 +764,24 @@ class RebelSupervisedLoss(nn.Module):
         self.permutation_weight = permutation_weight
         self.num_players = num_players
         self.policy_logit_l2_coef = float(policy_logit_l2_coef)
+        self.value_multiresolution_coef = float(value_multiresolution_coef)
+        self.value_bucket_aux_coef = float(value_bucket_aux_coef)
+        self.value_ordering_coef = float(value_ordering_coef)
+        self.value_bucket_usage_coef = float(value_bucket_usage_coef)
+        self.value_bucket_entropy_coef = float(value_bucket_entropy_coef)
+        self.value_action_summary_coef = float(value_action_summary_coef)
         if self.policy_logit_l2_coef < 0.0:
             raise ValueError("policy_logit_l2_coef must be non-negative")
+        for name in (
+            "value_multiresolution_coef",
+            "value_bucket_aux_coef",
+            "value_ordering_coef",
+            "value_bucket_usage_coef",
+            "value_bucket_entropy_coef",
+            "value_action_summary_coef",
+        ):
+            if getattr(self, name) < 0.0:
+                raise ValueError(f"{name} must be non-negative")
         self.policy_node_weighting = (
             policy_node_weighting
             if isinstance(policy_node_weighting, PolicyNodeWeighting)
@@ -774,6 +798,11 @@ class RebelSupervisedLoss(nn.Module):
         self.register_buffer(
             "_combo_suit_permutations",
             combo_suit_permutation_tensor(),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_combo_rank_class",
+            combo_to_preflop_class_tensor(),
             persistent=False,
         )
 
@@ -1194,7 +1223,7 @@ class RebelSupervisedLoss(nn.Module):
         total_loss = self.value_weight * value_loss
 
         zero = self._zero(device)
-        return {
+        result = {
             "total_loss": total_loss,
             "policy_loss": zero,
             "policy_loss_all": None,
@@ -1217,6 +1246,178 @@ class RebelSupervisedLoss(nn.Module):
             "entropy": zero,
             "permutation_loss": zero,
         }
+        self._add_aux_value_losses(
+            result,
+            output,
+            batch,
+            hand_values,
+            value_targets,
+            value_weights,
+            allowed_hands_float,
+        )
+        return result
+
+    def _rank_class_resolution_loss(
+        self,
+        hand_values: torch.Tensor,
+        value_targets: torch.Tensor,
+        value_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        class_ids = self._combo_rank_class.to(device=hand_values.device)
+        class_count = PREFLOP_HANDS
+        expand_ids = class_ids.view(1, 1, NUM_HANDS).expand(
+            hand_values.shape[0], hand_values.shape[1], -1
+        )
+        weight_sum = hand_values.new_zeros(
+            hand_values.shape[0], hand_values.shape[1], class_count
+        )
+        pred_sum = torch.zeros_like(weight_sum)
+        target_sum = torch.zeros_like(weight_sum)
+        weights = value_weights.to(dtype=hand_values.dtype)
+        weight_sum.scatter_add_(2, expand_ids, weights)
+        pred_sum.scatter_add_(2, expand_ids, hand_values * weights)
+        target_sum.scatter_add_(2, expand_ids, value_targets * weights)
+        pred_mean = pred_sum / weight_sum.clamp_min(1e-8)
+        target_mean = target_sum / weight_sum.clamp_min(1e-8)
+        return (
+            (pred_mean - target_mean).square() * (weight_sum > 0).to(hand_values.dtype)
+        ).sum() / (weight_sum > 0).to(hand_values.dtype).sum().clamp_min(1.0)
+
+    def _bucket_resolution_loss(
+        self,
+        output: ModelOutput,
+        hand_values: torch.Tensor,
+        value_targets: torch.Tensor,
+        value_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        if output.value_aux is None or "bucket_weights" not in output.value_aux:
+            return self._zero(hand_values.device)
+        bucket = output.value_aux["bucket_weights"].to(
+            device=hand_values.device, dtype=hand_values.dtype
+        )
+        weights = value_weights.to(dtype=hand_values.dtype)
+        bucket_weights = weights[:, :, :, None] * bucket[:, None, :, :]
+        denom = bucket_weights.sum(dim=2).clamp_min(1e-8)
+        pred = (hand_values[:, :, :, None] * bucket_weights).sum(dim=2) / denom
+        target = (value_targets[:, :, :, None] * bucket_weights).sum(dim=2) / denom
+        active = (denom > 1e-8).to(hand_values.dtype)
+        return ((pred - target).square() * active).sum() / active.sum().clamp_min(1.0)
+
+    def _bucket_calibration_loss(
+        self,
+        output: ModelOutput,
+        allowed_hands_float: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        zero = self._zero(allowed_hands_float.device)
+        if output.value_aux is None or "bucket_weights" not in output.value_aux:
+            return zero, zero
+        bucket = output.value_aux["bucket_weights"].to(
+            device=allowed_hands_float.device, dtype=allowed_hands_float.dtype
+        )
+        allowed = allowed_hands_float[:, :, None]
+        usage = (bucket * allowed).sum(dim=1) / allowed.sum(dim=1).clamp_min(1e-8)
+        uniform = torch.full_like(usage, 1.0 / float(bucket.shape[-1]))
+        usage_loss = (usage - uniform).square().mean()
+        entropy = -(bucket.clamp_min(1e-8) * bucket.clamp_min(1e-8).log()).sum(dim=-1)
+        max_entropy = math.log(float(bucket.shape[-1]))
+        sharpness_loss = entropy.mean() / max(max_entropy, 1e-8)
+        return usage_loss, sharpness_loss
+
+    def _ordering_loss(
+        self,
+        output: ModelOutput,
+        hand_values: torch.Tensor,
+        value_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        if output.value_aux is None or "river_rank_score" not in output.value_aux:
+            return self._zero(hand_values.device)
+        rank_score = output.value_aux["river_rank_score"].to(
+            device=hand_values.device, dtype=hand_values.dtype
+        )
+        order = rank_score.argsort(dim=1)
+        pred_sorted = torch.gather(
+            hand_values,
+            2,
+            order[:, None, :].expand(-1, hand_values.shape[1], -1),
+        )
+        weight_sorted = torch.gather(
+            value_weights.to(dtype=hand_values.dtype),
+            2,
+            order[:, None, :].expand(-1, value_weights.shape[1], -1),
+        )
+        rank_sorted = torch.gather(rank_score, 1, order)
+        valid_pair = (rank_sorted[:, 1:] > rank_sorted[:, :-1])[:, None, :]
+        pair_weight = (
+            weight_sorted[:, :, 1:] * weight_sorted[:, :, :-1] * valid_pair
+        )
+        violation = (pred_sorted[:, :, :-1] - pred_sorted[:, :, 1:]).clamp_min(0.0)
+        denom = pair_weight.sum()
+        return torch.where(
+            denom > 0,
+            (violation.square() * pair_weight).sum() / denom.clamp_min(1e-8),
+            self._zero(hand_values.device),
+        )
+
+    def _action_summary_loss(
+        self,
+        output: ModelOutput,
+        batch: RebelBatch,
+    ) -> torch.Tensor:
+        if output.value_aux is None or "action_summary" not in output.value_aux:
+            return self._zero(batch.features.beliefs.device)
+        target = batch.statistics.get("local_best_response_values")
+        if target is None:
+            return self._zero(batch.features.beliefs.device)
+        pred = output.value_aux["action_summary"].float()
+        target = target.to(device=pred.device, dtype=pred.dtype)
+        if target.shape != pred.shape:
+            return self._zero(pred.device)
+        return F.mse_loss(pred, target)
+
+    def _add_aux_value_losses(
+        self,
+        result: dict[str, torch.Tensor],
+        output: ModelOutput,
+        batch: RebelBatch,
+        hand_values: torch.Tensor,
+        value_targets: torch.Tensor,
+        value_weights: torch.Tensor,
+        allowed_hands_float: torch.Tensor,
+    ) -> None:
+        aux_total = self._zero(hand_values.device)
+        if self.value_multiresolution_coef > 0.0:
+            rank_loss = self._rank_class_resolution_loss(
+                hand_values, value_targets, value_weights
+            )
+            result["value_multiresolution_loss"] = rank_loss
+            aux_total = aux_total + self.value_multiresolution_coef * rank_loss
+        if self.value_bucket_aux_coef > 0.0:
+            bucket_loss = self._bucket_resolution_loss(
+                output, hand_values, value_targets, value_weights
+            )
+            result["value_bucket_aux_loss"] = bucket_loss
+            aux_total = aux_total + self.value_bucket_aux_coef * bucket_loss
+        if self.value_ordering_coef > 0.0:
+            ordering_loss = self._ordering_loss(output, hand_values, value_weights)
+            result["value_ordering_loss"] = ordering_loss
+            aux_total = aux_total + self.value_ordering_coef * ordering_loss
+        if (
+            self.value_bucket_usage_coef > 0.0
+            or self.value_bucket_entropy_coef > 0.0
+        ):
+            usage_loss, entropy_loss = self._bucket_calibration_loss(
+                output, allowed_hands_float
+            )
+            result["value_bucket_usage_loss"] = usage_loss
+            result["value_bucket_entropy_loss"] = entropy_loss
+            aux_total = aux_total + self.value_bucket_usage_coef * usage_loss
+            aux_total = aux_total + self.value_bucket_entropy_coef * entropy_loss
+        if self.value_action_summary_coef > 0.0:
+            action_loss = self._action_summary_loss(output, batch)
+            result["value_action_summary_loss"] = action_loss
+            aux_total = aux_total + self.value_action_summary_coef * action_loss
+        result["total_loss"] = result["total_loss"] + aux_total
+        result["value_aux_weighted_loss"] = aux_total
 
     def forward_policy(
         self,
@@ -1288,7 +1489,7 @@ class RebelSupervisedLoss(nn.Module):
             total_loss -= self.entropy_coef * entropy
 
         zero = self._zero(device)
-        return {
+        result = {
             "total_loss": total_loss,
             "policy_loss": policy_loss,
             "policy_loss_all": policy_loss_all,
@@ -1314,6 +1515,7 @@ class RebelSupervisedLoss(nn.Module):
             "entropy": entropy,
             "permutation_loss": zero,
         }
+        return result
 
     def forward_value(
         self,
@@ -1453,7 +1655,7 @@ class RebelSupervisedLoss(nn.Module):
         if self.entropy_coef is not None and self.entropy_coef != 0.0:
             total_loss -= self.entropy_coef * entropy
 
-        return {
+        result = {
             "total_loss": total_loss,
             "policy_loss": policy_loss,
             "policy_loss_all": policy_loss_all,
@@ -1480,6 +1682,16 @@ class RebelSupervisedLoss(nn.Module):
             "entropy": entropy,
             "permutation_loss": self._zero(device),
         }
+        self._add_aux_value_losses(
+            result,
+            output,
+            batch,
+            hand_values,
+            value_targets,
+            value_weights,
+            allowed_hands_float,
+        )
+        return result
 
     def forward(
         self,

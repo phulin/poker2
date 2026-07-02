@@ -173,6 +173,12 @@ class TrainingConfig:
     backup_consistency_sample_fraction: float = 1.0
     backup_consistency_max_samples: int = 0
     backup_consistency_min_policy_mass: float = 1e-4
+    value_multiresolution_coef: float = 0.0
+    value_bucket_aux_coef: float = 0.0
+    value_ordering_coef: float = 0.0
+    value_bucket_usage_coef: float = 0.0
+    value_bucket_entropy_coef: float = 0.0
+    value_action_summary_coef: float = 0.0
     grad_clip: float = 1.0
     # Separate clip for the policy net's gradients. Only takes effect when the
     # policy and value heads have disjoint parameters (separate nets, or a TRM

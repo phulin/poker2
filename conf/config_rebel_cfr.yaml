@@ -49,6 +49,12 @@ train:
   backup_consistency_sample_fraction: 1.0
   backup_consistency_max_samples: 0
   backup_consistency_min_policy_mass: 1e-4
+  value_multiresolution_coef: 0.0
+  value_bucket_aux_coef: 0.0
+  value_ordering_coef: 0.0
+  value_bucket_usage_coef: 0.0
+  value_bucket_entropy_coef: 0.0
+  value_action_summary_coef: 0.0
   grad_clip: 1.0
 
   stratify_streets: []
