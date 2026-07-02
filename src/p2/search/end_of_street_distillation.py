@@ -152,6 +152,8 @@ def build_end_of_street_value_batch(
         "street": closed_street_tensor,
         "stage": 2 * closed_street_tensor + 1,
         "board": env.last_board_indices.clone(),
+        "pot": env.pot.clone(),
+        "scale": env.scale.clone(),
         "target_source": torch.full(
             (batch_size,),
             TARGET_SOURCE_CHANCE_EXPECTATION,

@@ -16,6 +16,7 @@ from p2.models.mlp.better_feature_encoder import (
 )
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.model_output import ModelOutput
+from p2.rl.value_metrics import pot_relative_value_error_metrics
 from p2.rl.target_provenance import TARGET_SOURCE_CHANCE_EXPECTATION
 from p2.search.end_of_street_distillation import build_end_of_street_value_batch
 from p2.search.postflop_spot_sampler import sample_end_of_street_chance_roots
@@ -111,6 +112,8 @@ def test_build_end_of_street_value_batch_uses_pre_chance_features_and_targets():
             batch.statistics["target_source"],
             torch.full((3,), TARGET_SOURCE_CHANCE_EXPECTATION),
         )
+        torch.testing.assert_close(batch.statistics["pot"], sample.pbs.env.pot)
+        torch.testing.assert_close(batch.statistics["scale"], sample.pbs.env.scale)
 
         previous_allowed = board_allowed_hands(sample.pbs.env.last_board_indices)
         expected_targets = torch.where(
@@ -119,6 +122,22 @@ def test_build_end_of_street_value_batch_uses_pre_chance_features_and_targets():
             torch.zeros(3, 2, NUM_HANDS),
         )
         torch.testing.assert_close(batch.value_targets, expected_targets)
+
+        output = ModelOutput(hand_values=batch.value_targets.clone())
+        metrics = pot_relative_value_error_metrics(
+            output,
+            batch,
+            {
+                "value_predictions": output.hand_values,
+                "value_weights": torch.ones_like(batch.value_targets),
+            },
+        )
+        assert set(metrics) == {
+            "pot_relative_mae",
+            "pot_relative_mse",
+            "pot_relative_rmse",
+        }
+        torch.testing.assert_close(metrics["pot_relative_rmse"], torch.tensor(0.0))
 
 
 def test_build_end_of_street_value_batch_supports_sampled_flop_targets():
