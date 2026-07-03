@@ -8,6 +8,7 @@ import json
 import os
 import statistics
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -113,6 +114,92 @@ PROPOSALS: dict[str, dict[str, Any]] = {
         "value_river_range_equity_intercept": -0.010797645393242563,
         "value_river_range_equity_blockers": True,
         "value_river_range_equity_rank_bins": 96,
+    },
+    "river_canonical_k32": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_canonical_head": True,
+        "value_river_canonical_bins": 32,
+        "value_river_canonical_dim": 64,
+        "value_river_canonical_layers": 2,
+        "value_output_init_scale": 0.0,
+        "train": {
+            "learning_rate": 0.04,
+            "learning_rate_final": 0.004,
+            "adamw_learning_rate": 0.04,
+        },
+    },
+    "river_canonical_k32_baseline_input": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_canonical_head": True,
+        "value_river_canonical_bins": 32,
+        "value_river_canonical_dim": 64,
+        "value_river_canonical_layers": 2,
+        "value_river_canonical_baseline_input": True,
+        "value_output_init_scale": 0.0,
+        "train": {
+            "learning_rate": 0.04,
+            "learning_rate_final": 0.004,
+            "adamw_learning_rate": 0.04,
+        },
+    },
+    "river_canonical_k32_no_baseline": {
+        "value_river_canonical_head": True,
+        "value_river_canonical_bins": 32,
+        "value_river_canonical_dim": 64,
+        "value_river_canonical_layers": 2,
+        "value_output_init_scale": 0.0,
+        "train": {
+            "learning_rate": 0.04,
+            "learning_rate_final": 0.004,
+            "adamw_learning_rate": 0.04,
+        },
+    },
+    "river_canonical_k64": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_canonical_head": True,
+        "value_river_canonical_bins": 64,
+        "value_river_canonical_dim": 64,
+        "value_river_canonical_layers": 2,
+        "value_output_init_scale": 0.0,
+        "train": {
+            "learning_rate": 0.04,
+            "learning_rate_final": 0.004,
+            "adamw_learning_rate": 0.04,
+        },
+    },
+    "river_canonical_k32_no_blocker_rows": {
+        "value_river_range_equity_baseline": True,
+        "value_river_range_equity_pos_scale": 0.8543022528460094,
+        "value_river_range_equity_neg_scale": 0.4753640305061305,
+        "value_river_range_equity_intercept": -0.010797645393242563,
+        "value_river_range_equity_blockers": True,
+        "value_river_range_equity_rank_bins": 96,
+        "value_river_canonical_head": True,
+        "value_river_canonical_bins": 32,
+        "value_river_canonical_dim": 64,
+        "value_river_canonical_layers": 2,
+        "value_river_canonical_blocker_rows": False,
+        "value_output_init_scale": 0.0,
+        "train": {
+            "learning_rate": 0.04,
+            "learning_rate_final": 0.004,
+            "adamw_learning_rate": 0.04,
+        },
     },
     "river_range_equity_blockers_posneg_r96_lr1p5": {
         "value_river_range_equity_baseline": True,
@@ -1119,6 +1206,40 @@ PROPOSALS: dict[str, dict[str, Any]] = {
 }
 
 
+def _canonical_baseline_input_variant(
+    *,
+    learning_rate: float,
+    init_scale: float,
+) -> dict[str, Any]:
+    """Derive a canonical-k32 + baseline-input proposal from the base entry,
+    overriding only the learning-rate schedule and the canonical head init
+    scale so LR / init-scale sweeps stay in lockstep with the base config."""
+    base = deepcopy(PROPOSALS["river_canonical_k32_baseline_input"])
+    base["value_river_canonical_init_scale"] = init_scale
+    base["train"] = {
+        "learning_rate": learning_rate,
+        "learning_rate_final": learning_rate / 10.0,
+        "adamw_learning_rate": learning_rate,
+    }
+    return base
+
+
+# LR sweep at the default zero init scale (lr 0.04 is the existing base entry).
+PROPOSALS["river_canonical_bi_lr02"] = _canonical_baseline_input_variant(
+    learning_rate=0.02, init_scale=0.0
+)
+PROPOSALS["river_canonical_bi_lr08"] = _canonical_baseline_input_variant(
+    learning_rate=0.08, init_scale=0.0
+)
+# Init-scale sweep at the default lr 0.04 (init 0.0 is the existing base entry).
+PROPOSALS["river_canonical_bi_init0p01"] = _canonical_baseline_input_variant(
+    learning_rate=0.04, init_scale=0.01
+)
+PROPOSALS["river_canonical_bi_init0p05"] = _canonical_baseline_input_variant(
+    learning_rate=0.04, init_scale=0.05
+)
+
+
 def _dataset_dir(path: Path) -> Path:
     return path.parent if path.name == "manifest.json" else path
 
@@ -1616,6 +1737,25 @@ def _run_one_proposal(
             ),
             "value_river_range_equity_film_hidden_dim": int(
                 cfg.model.value_river_range_equity_film_hidden_dim
+            ),
+            "value_river_canonical_head": bool(
+                cfg.model.value_river_canonical_head
+            ),
+            "value_river_canonical_bins": int(
+                cfg.model.value_river_canonical_bins
+            ),
+            "value_river_canonical_dim": int(cfg.model.value_river_canonical_dim),
+            "value_river_canonical_layers": int(
+                cfg.model.value_river_canonical_layers
+            ),
+            "value_river_canonical_blocker_rows": bool(
+                cfg.model.value_river_canonical_blocker_rows
+            ),
+            "value_river_canonical_baseline_input": bool(
+                cfg.model.value_river_canonical_baseline_input
+            ),
+            "value_river_canonical_init_scale": float(
+                cfg.model.value_river_canonical_init_scale
             ),
             "value_output_init_scale": float(cfg.model.value_output_init_scale),
             "value_action_summary_head": bool(cfg.model.value_action_summary_head),

@@ -287,6 +287,13 @@ class RebelModelConfig:
     value_river_range_equity_trunk_context: bool
     value_river_range_equity_film_rank: int
     value_river_range_equity_film_hidden_dim: int
+    value_river_canonical_head: bool
+    value_river_canonical_bins: int
+    value_river_canonical_dim: int
+    value_river_canonical_layers: int
+    value_river_canonical_blocker_rows: bool
+    value_river_canonical_baseline_input: bool
+    value_river_canonical_init_scale: float
     value_output_init_scale: float
     value_action_summary_head: bool
     value_head_rank: int
@@ -387,6 +394,19 @@ class RebelModelConfig:
             ),
             value_river_range_equity_film_hidden_dim=(
                 cfg.value_river_range_equity_film_hidden_dim
+            ),
+            value_river_canonical_head=cfg.value_river_canonical_head,
+            value_river_canonical_bins=cfg.value_river_canonical_bins,
+            value_river_canonical_dim=cfg.value_river_canonical_dim,
+            value_river_canonical_layers=cfg.value_river_canonical_layers,
+            value_river_canonical_blocker_rows=(
+                cfg.value_river_canonical_blocker_rows
+            ),
+            value_river_canonical_baseline_input=(
+                cfg.value_river_canonical_baseline_input
+            ),
+            value_river_canonical_init_scale=(
+                cfg.value_river_canonical_init_scale
             ),
             value_output_init_scale=cfg.value_output_init_scale,
             value_action_summary_head=cfg.value_action_summary_head,
@@ -490,6 +510,19 @@ class RebelModelConfig:
         )
         cfg.value_river_range_equity_film_hidden_dim = (
             self.value_river_range_equity_film_hidden_dim
+        )
+        cfg.value_river_canonical_head = self.value_river_canonical_head
+        cfg.value_river_canonical_bins = self.value_river_canonical_bins
+        cfg.value_river_canonical_dim = self.value_river_canonical_dim
+        cfg.value_river_canonical_layers = self.value_river_canonical_layers
+        cfg.value_river_canonical_blocker_rows = (
+            self.value_river_canonical_blocker_rows
+        )
+        cfg.value_river_canonical_baseline_input = (
+            self.value_river_canonical_baseline_input
+        )
+        cfg.value_river_canonical_init_scale = (
+            self.value_river_canonical_init_scale
         )
         cfg.value_output_init_scale = self.value_output_init_scale
         cfg.value_action_summary_head = self.value_action_summary_head

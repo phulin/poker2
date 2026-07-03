@@ -841,6 +841,19 @@ class RebelCFRTrainer:
             value_river_range_equity_film_hidden_dim=(
                 cfg.model.value_river_range_equity_film_hidden_dim
             ),
+            value_river_canonical_head=cfg.model.value_river_canonical_head,
+            value_river_canonical_bins=cfg.model.value_river_canonical_bins,
+            value_river_canonical_dim=cfg.model.value_river_canonical_dim,
+            value_river_canonical_layers=cfg.model.value_river_canonical_layers,
+            value_river_canonical_blocker_rows=(
+                cfg.model.value_river_canonical_blocker_rows
+            ),
+            value_river_canonical_baseline_input=(
+                cfg.model.value_river_canonical_baseline_input
+            ),
+            value_river_canonical_init_scale=(
+                cfg.model.value_river_canonical_init_scale
+            ),
             value_output_init_scale=cfg.model.value_output_init_scale,
             value_action_summary_head=cfg.model.value_action_summary_head,
             value_head_rank=cfg.model.value_head_rank,

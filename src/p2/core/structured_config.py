@@ -333,6 +333,13 @@ class ModelConfig:
     value_river_range_equity_trunk_context: bool = False
     value_river_range_equity_film_rank: int = 0
     value_river_range_equity_film_hidden_dim: int = 16
+    value_river_canonical_head: bool = False
+    value_river_canonical_bins: int = 32
+    value_river_canonical_dim: int = 64
+    value_river_canonical_layers: int = 2
+    value_river_canonical_blocker_rows: bool = True
+    value_river_canonical_baseline_input: bool = False
+    value_river_canonical_init_scale: float = 0.0
     value_output_init_scale: float = 0.1
     value_action_summary_head: bool = False
     value_head_rank: int = 0

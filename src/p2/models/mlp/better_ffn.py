@@ -1624,6 +1624,80 @@ class HandBasisValueHead(nn.Module):
         self.hand_bias.get_submodule("linear_out").weight.data.mul_(scale)
 
 
+class _RiverCanonicalMixerBlock(nn.Module):
+    """One MLP-mixer block over canonical strength tokens (token-mix + channel-MLP)."""
+
+    def __init__(self, dim: int, num_bins: int, nonlinearity: NonlinearityType) -> None:
+        super().__init__()
+        self.token_norm = nn.RMSNorm(dim, eps=1e-5)
+        self.token_mix = nn.Linear(num_bins, num_bins)
+        self.channel_norm = nn.RMSNorm(dim, eps=1e-5)
+        self.channel_mlp = nn.Sequential(
+            nn.Linear(dim, 2 * dim),
+            get_activation(nonlinearity),
+            nn.Linear(2 * dim, dim),
+        )
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        # tokens: [N, K, dim]
+        mixed = self.token_norm(tokens).transpose(1, 2)  # [N, dim, K]
+        mixed = self.token_mix(mixed).transpose(1, 2)  # [N, K, dim]
+        tokens = tokens + mixed
+        tokens = tokens + self.channel_mlp(self.channel_norm(tokens))
+        return tokens
+
+
+class RiverCanonicalValueHead(nn.Module):
+    """Canonical-strength mixer producing per-player nodal river values.
+
+    Consumes per-bin token features (both players' mass, mean-coordinate, equity
+    and blocked-mass row) plus broadcast globals, and emits ``num_players``
+    nodal values at each quantile bin midpoint. Suit isomorphism is exact by
+    construction: no 52-card identity ever enters the token features.
+    """
+
+    def __init__(
+        self,
+        num_bins: int,
+        dim: int,
+        num_layers: int,
+        num_players: int,
+        num_globals: int,
+        nonlinearity: NonlinearityType,
+        per_player_extra: int = 0,
+    ) -> None:
+        super().__init__()
+        self.num_bins = int(num_bins)
+        self.num_players = int(num_players)
+        # Per-bin token: both players' [mass, mean_u, equity, (extra), blocked-mass
+        # row (K)]. ``per_player_extra`` covers optional scalars such as the
+        # per-bin analytic-baseline value.
+        per_player = 3 + int(per_player_extra) + self.num_bins
+        token_dim = 2 * per_player
+        self.input_proj = nn.Linear(token_dim + int(num_globals), dim)
+        self.blocks = nn.ModuleList(
+            [
+                _RiverCanonicalMixerBlock(dim, self.num_bins, nonlinearity)
+                for _ in range(int(num_layers))
+            ]
+        )
+        self.out_norm = nn.RMSNorm(dim, eps=1e-5)
+        self.output_proj = nn.Linear(dim, self.num_players)
+        nn.init.zeros_(self.output_proj.weight)
+        nn.init.zeros_(self.output_proj.bias)
+
+    def forward(
+        self, token_features: torch.Tensor, globals_features: torch.Tensor
+    ) -> torch.Tensor:
+        # token_features: [N, K, token_dim]; globals_features: [N, num_globals]
+        broadcast = globals_features[:, None, :].expand(-1, self.num_bins, -1)
+        tokens = self.input_proj(torch.cat((token_features, broadcast), dim=-1))
+        for block in self.blocks:
+            tokens = block(tokens)
+        nodal = self.output_proj(self.out_norm(tokens))  # [N, K, num_players]
+        return nodal.transpose(1, 2)  # [N, num_players, K]
+
+
 class BetterFFN(BaseMLPModel):
     """Better PBS feed-forward poker model."""
 
@@ -1676,6 +1750,13 @@ class BetterFFN(BaseMLPModel):
         value_river_range_equity_trunk_context: bool = False,
         value_river_range_equity_film_rank: int = 0,
         value_river_range_equity_film_hidden_dim: int = 16,
+        value_river_canonical_head: bool = False,
+        value_river_canonical_bins: int = 32,
+        value_river_canonical_dim: int = 64,
+        value_river_canonical_layers: int = 2,
+        value_river_canonical_blocker_rows: bool = True,
+        value_river_canonical_baseline_input: bool = False,
+        value_river_canonical_init_scale: float = 0.0,
         value_output_init_scale: float = 0.1,
         value_action_summary_head: bool = False,
         value_head_rank: int = 0,
@@ -1762,6 +1843,19 @@ class BetterFFN(BaseMLPModel):
         self.value_river_range_equity_film_hidden_dim = int(
             value_river_range_equity_film_hidden_dim
         )
+        self.value_river_canonical_head = bool(value_river_canonical_head)
+        self.value_river_canonical_bins = int(value_river_canonical_bins)
+        self.value_river_canonical_dim = int(value_river_canonical_dim)
+        self.value_river_canonical_layers = int(value_river_canonical_layers)
+        self.value_river_canonical_blocker_rows = bool(
+            value_river_canonical_blocker_rows
+        )
+        self.value_river_canonical_baseline_input = bool(
+            value_river_canonical_baseline_input
+        )
+        self.value_river_canonical_init_scale = float(
+            value_river_canonical_init_scale
+        )
         self.value_output_init_scale = float(value_output_init_scale)
         self.value_action_summary_head = bool(value_action_summary_head)
         self.value_head_rank = int(value_head_rank)
@@ -1838,10 +1932,21 @@ class BetterFFN(BaseMLPModel):
             raise ValueError(
                 "value_river_range_equity_film_hidden_dim must be positive"
             )
+        if self.value_river_canonical_head:
+            if self.value_river_canonical_bins <= 1:
+                raise ValueError("value_river_canonical_bins must be > 1")
+            if self.value_river_canonical_dim <= 0:
+                raise ValueError("value_river_canonical_dim must be positive")
+            if self.value_river_canonical_layers <= 0:
+                raise ValueError("value_river_canonical_layers must be positive")
         if self.value_head_rank < 0:
             raise ValueError("value_head_rank must be non-negative")
         if self.value_output_init_scale < 0.0:
             raise ValueError("value_output_init_scale must be non-negative")
+        if self.value_river_canonical_init_scale < 0.0:
+            raise ValueError(
+                "value_river_canonical_init_scale must be non-negative"
+            )
         if self.value_hand_basis_rank < 0:
             raise ValueError("value_hand_basis_rank must be non-negative")
         if self.belief_low_rank_dim < 0:
@@ -2117,6 +2222,20 @@ class BetterFFN(BaseMLPModel):
             )
             self.value_river_equity_film_out = nn.Linear(rank, 1, bias=False)
             nn.init.zeros_(self.value_river_equity_film_out.weight)
+        if self.value_river_canonical_head:
+            # Globals: pot + per-player SPR.
+            num_globals = 1 + self.num_players
+            self.value_river_canonical = RiverCanonicalValueHead(
+                num_bins=self.value_river_canonical_bins,
+                dim=self.value_river_canonical_dim,
+                num_layers=self.value_river_canonical_layers,
+                num_players=self.num_players,
+                num_globals=num_globals,
+                nonlinearity=nonlinearity,
+                per_player_extra=(
+                    1 if self.value_river_canonical_baseline_input else 0
+                ),
+            )
         if self.value_action_summary_head:
             self.value_action_summary = output_projection(hidden_dim, num_players)
         if board_interaction_dim > 0:
@@ -3249,12 +3368,36 @@ class BetterFFN(BaseMLPModel):
         ).to(dtype=dtype)
         return baseline, feature_values
 
+    def _shared_river_range_equity(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Compute the analytic river-equity features once when more than one
+        consumer needs them, so the expensive blocker/equity kernel is not run
+        twice per forward. Returns a float32 ``(baseline, feature_values)`` tuple
+        (consumers cast to their own dtype) or ``None`` when sharing does not
+        apply."""
+        if (
+            self.value_river_range_equity_baseline
+            and self.value_river_canonical_head
+            and self.value_river_canonical_baseline_input
+        ):
+            return self._river_range_equity_features(
+                player_beliefs, features, torch.float32
+            )
+        return None
+
     def _river_range_equity_baseline(
         self,
         player_beliefs: torch.Tensor,
         features: MLPFeatures,
         dtype: torch.dtype,
+        equity: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
+        if equity is not None:
+            baseline, _ = equity
+            return baseline.to(dtype=dtype)
         baseline, _ = self._river_range_equity_features(
             player_beliefs,
             features,
@@ -3267,12 +3410,18 @@ class BetterFFN(BaseMLPModel):
         player_beliefs: torch.Tensor,
         features: MLPFeatures,
         dtype: torch.dtype,
+        equity: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        baseline, feature_values = self._river_range_equity_features(
-            player_beliefs,
-            features,
-            dtype,
-        )
+        if equity is not None:
+            baseline, feature_values = equity
+            baseline = baseline.to(dtype=dtype)
+            feature_values = feature_values.to(dtype=dtype)
+        else:
+            baseline, feature_values = self._river_range_equity_features(
+                player_beliefs,
+                features,
+                dtype,
+            )
         if not self.value_river_range_equity_feature_head:
             return baseline
         return self.value_river_equity_feature_head(feature_values).squeeze(-1)
@@ -3312,6 +3461,7 @@ class BetterFFN(BaseMLPModel):
         hand_values: torch.Tensor,
         player_beliefs: torch.Tensor,
         features: MLPFeatures,
+        equity: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         if not self.value_river_range_equity_baseline:
             return hand_values
@@ -3319,7 +3469,155 @@ class BetterFFN(BaseMLPModel):
             player_beliefs,
             features,
             hand_values.dtype,
+            equity=equity,
         )
+
+    def _river_canonical_value_residual(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+        dtype: torch.dtype,
+        equity: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor | None:
+        if not self.value_river_canonical_head:
+            return None
+        residual = player_beliefs.new_zeros(
+            player_beliefs.shape[0],
+            self.num_players,
+            NUM_HANDS,
+            dtype=dtype,
+        )
+        river_mask = (features.street == 3) & (features.board >= 0).all(dim=1)
+        if not river_mask.any():
+            return residual
+        rows = torch.where(river_mask)[0]
+        n_rows = rows.shape[0]
+        players = self.num_players
+        bins = self.value_river_canonical_bins
+        eps = 1e-8
+
+        beliefs = player_beliefs[rows].float()  # [N, P, H]
+        opponent_beliefs = beliefs.sum(dim=1, keepdim=True) - beliefs
+
+        # --- Steps 1-2: canonical strength coordinate u and quantile bins k ---
+        rank_groups = self._river_rank_groups(features.board[rows])  # [N, H]
+        combined = beliefs.sum(dim=1)  # reference mass b0 + b1 per hand, [N, H]
+        group_mass = beliefs.new_zeros(n_rows, NUM_HANDS)
+        group_mass.scatter_add_(1, rank_groups, combined)
+        cumulative_group = group_mass.cumsum(dim=1)
+        total_ref = group_mass.sum(dim=1, keepdim=True).clamp_min(eps)
+        u_group = (cumulative_group - 0.5 * group_mass) / total_ref  # [N, H]
+        u = u_group.gather(1, rank_groups).clamp(0.0, 1.0)  # per-hand coordinate
+        k = (u * bins).floor().clamp(max=bins - 1).long()  # [N, H]
+        k_idx = k[:, None, :].expand(-1, players, -1)  # [N, P, H]
+
+        # --- Exact per-hand equity score vs. opponent at rank-group resolution ---
+        rank_idx = rank_groups[:, None, :].expand(-1, players, -1)
+        opp_group_mass = beliefs.new_zeros(n_rows, players, NUM_HANDS)
+        opp_group_mass.scatter_add_(2, rank_idx, opponent_beliefs)
+        opp_cumulative = opp_group_mass.cumsum(dim=2)
+        tie = opp_group_mass.gather(2, rank_idx)
+        lower = opp_cumulative.gather(2, rank_idx) - tie
+        opp_total = opp_group_mass.sum(dim=2, keepdim=True).clamp_min(eps)
+        equity_score = (2.0 * lower + tie - opp_total) / opp_total  # [N, P, H]
+
+        # --- Step 3: per-bin features per player ---
+        bin_mass = beliefs.new_zeros(n_rows, players, bins)
+        bin_mass.scatter_add_(2, k_idx, beliefs)
+        bin_mass_safe = bin_mass.clamp_min(eps)
+
+        bin_u_sum = beliefs.new_zeros(n_rows, players, bins)
+        bin_u_sum.scatter_add_(2, k_idx, beliefs * u[:, None, :])
+        bin_u_mean = bin_u_sum / bin_mass_safe
+
+        bin_equity_sum = beliefs.new_zeros(n_rows, players, bins)
+        bin_equity_sum.scatter_add_(2, k_idx, beliefs * equity_score)
+        bin_equity = bin_equity_sum / bin_mass_safe
+
+        if self.value_river_canonical_blocker_rows:
+            card_a = self.hand_card_a.to(device=beliefs.device)
+            card_b = self.hand_card_b.to(device=beliefs.device)
+            card_a_idx = card_a.view(1, 1, NUM_HANDS).expand(n_rows, players, -1)
+            card_b_idx = card_b.view(1, 1, NUM_HANDS).expand(n_rows, players, -1)
+            flat_a = card_a_idx * bins + k_idx
+            flat_b = card_b_idx * bins + k_idx
+            card_bin_mass = beliefs.new_zeros(n_rows, players, 52 * bins)
+            card_bin_mass.scatter_add_(2, flat_a, beliefs)
+            card_bin_mass.scatter_add_(2, flat_b, beliefs)
+            # [N, P, 52, K]
+            card_bin_mass = card_bin_mass.view(n_rows, players, 52, bins)
+            card_bin_mass_opp = (
+                card_bin_mass.sum(dim=1, keepdim=True) - card_bin_mass
+            )
+            # B[p, k, j] = sum_c cbm[p, c, k] * cbm_opp[p, c, j]
+            blocked = torch.einsum(
+                "npck,npcj->npkj", card_bin_mass, card_bin_mass_opp
+            )
+            # Diagonal correction: subtract same-combo mass sum_{h in k} b_p * b_opp.
+            diag = beliefs.new_zeros(n_rows, players, bins)
+            diag.scatter_add_(2, k_idx, beliefs * opponent_beliefs)
+            eye = torch.eye(bins, device=beliefs.device, dtype=blocked.dtype)
+            blocked = blocked - diag[:, :, :, None] * eye[None, None]
+            # Row-normalize by mass[p, k] * mass[opp, j].
+            opp_bin_mass = bin_mass.sum(dim=1, keepdim=True) - bin_mass
+            denom = (
+                bin_mass_safe[:, :, :, None]
+                * opp_bin_mass.clamp_min(eps)[:, :, None, :]
+            )
+            blocked_rows = blocked / denom  # [N, P, K, K]
+        else:
+            blocked_rows = beliefs.new_zeros(n_rows, players, bins, bins)
+
+        # --- Optional: per-bin analytic-baseline value as a token feature ---
+        # Anchors the head's correction so it can see the value it is adjusting
+        # instead of reconstructing it blind. Uses the exact additive baseline
+        # (blocker-corrected, pot-scaled, posneg-transformed).
+        per_player_scalars = [
+            bin_mass[:, :, :, None],
+            bin_u_mean[:, :, :, None],
+            bin_equity[:, :, :, None],
+        ]
+        if self.value_river_canonical_baseline_input:
+            base_val = self._river_range_equity_baseline(
+                player_beliefs, features, torch.float32, equity=equity
+            )[rows].float()  # [N, P, H]
+            bin_base_sum = beliefs.new_zeros(n_rows, players, bins)
+            bin_base_sum.scatter_add_(2, k_idx, beliefs * base_val)
+            bin_base_mean = bin_base_sum / bin_mass_safe
+            per_player_scalars.append(bin_base_mean[:, :, :, None])
+
+        # --- Assemble per-bin tokens: concat both players' features ---
+        per_player = torch.cat(
+            (*per_player_scalars, blocked_rows),
+            dim=-1,
+        )  # [N, P, K, S + K], S = 3 (+1 if baseline input)
+        # concat over players -> [N, K, 2*(S + K)]
+        token_features = per_player.permute(0, 2, 1, 3).reshape(
+            n_rows, bins, players * per_player.shape[-1]
+        )
+
+        pot = features.context[rows, ValueScalarContext.POT.value].float()
+        spr = self._player_spr_context(features.context[rows]).float()
+        globals_features = torch.cat((pot[:, None], spr), dim=1)  # [N, 1 + P]
+
+        nodal = self.value_river_canonical(
+            token_features.to(dtype=dtype), globals_features.to(dtype=dtype)
+        ).float()  # [N, P, K]
+        nodal = nodal * pot[:, None, None]
+
+        # --- Step 5: interpolate nodal values (bin midpoints) at coordinate u_h ---
+        t = (u * bins - 0.5).clamp(0.0, bins - 1)  # [N, H]
+        lo = t.floor().long().clamp(0, bins - 1)
+        hi = (lo + 1).clamp(max=bins - 1)
+        frac = (t - lo.float())[:, None, :]  # [N, 1, H]
+        lo_idx = lo[:, None, :].expand(-1, players, -1)
+        hi_idx = hi[:, None, :].expand(-1, players, -1)
+        v_lo = nodal.gather(2, lo_idx)
+        v_hi = nodal.gather(2, hi_idx)
+        per_hand = v_lo * (1.0 - frac) + v_hi * frac  # [N, P, H]
+
+        residual[rows] = per_hand.to(dtype=dtype)
+        return residual
 
     def _river_exact_aux(
         self,
@@ -3719,6 +4017,7 @@ class BetterFFN(BaseMLPModel):
         features: MLPFeatures,
         apply_zero_sum: bool = True,
     ) -> ModelOutput:
+        equity = self._shared_river_range_equity(player_beliefs, features)
         hand_values_raw, aux = self._value_logits_and_aux_from_head(
             player_beliefs,
             x,
@@ -3726,6 +4025,7 @@ class BetterFFN(BaseMLPModel):
             self.hand_value_head,
             features,
             collect_aux=True,
+            equity=equity,
         )
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
@@ -3744,6 +4044,7 @@ class BetterFFN(BaseMLPModel):
             hand_values,
             player_beliefs,
             features,
+            equity=equity,
         )
         value = hand_values.mean(dim=-1)
         return ModelOutput(value=value, hand_values=hand_values, value_aux=aux)
@@ -3755,6 +4056,7 @@ class BetterFFN(BaseMLPModel):
         hand_emb: torch.Tensor,
         head: nn.Module,
         features: MLPFeatures | None = None,
+        equity: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         hand_values, _ = self._value_logits_and_aux_from_head(
             player_beliefs,
@@ -3763,6 +4065,7 @@ class BetterFFN(BaseMLPModel):
             head,
             features,
             collect_aux=False,
+            equity=equity,
         )
         return hand_values
 
@@ -3774,6 +4077,7 @@ class BetterFFN(BaseMLPModel):
         head: nn.Module,
         features: MLPFeatures | None = None,
         collect_aux: bool = False,
+        equity: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor] | None]:
         value_state: torch.Tensor | None = None
         if isinstance(head, CardTokenValueHead):
@@ -3832,6 +4136,16 @@ class BetterFFN(BaseMLPModel):
             )
             if film_residual is not None:
                 hand_values = hand_values + film_residual.to(dtype=hand_values.dtype)
+            canonical_residual = self._river_canonical_value_residual(
+                player_beliefs,
+                features,
+                hand_values.dtype,
+                equity=equity,
+            )
+            if canonical_residual is not None:
+                hand_values = hand_values + canonical_residual.to(
+                    dtype=hand_values.dtype
+                )
             if (
                 self.value_exact_river_features
                 or (collect_aux and self.value_showdown_baseline)
@@ -3923,8 +4237,9 @@ class BetterFFN(BaseMLPModel):
             hand_emb,
             board_stats,
         )
+        equity = self._shared_river_range_equity(player_beliefs, features)
         hand_values_raw = self._value_logits_from_head(
-            player_beliefs, x, hand_emb, self.hand_value_head, features
+            player_beliefs, x, hand_emb, self.hand_value_head, features, equity=equity
         )
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
@@ -3950,6 +4265,7 @@ class BetterFFN(BaseMLPModel):
             hand_values,
             player_beliefs,
             features,
+            equity=equity,
         )
         value = hand_values.mean(dim=-1)
         return ModelOutput(
@@ -4153,6 +4469,18 @@ class BetterFFN(BaseMLPModel):
             nn.init.zeros_(self.value_river_equity_context_proj.weight)
         if hasattr(self, "value_river_equity_film_out"):
             nn.init.zeros_(self.value_river_equity_film_out.weight)
+        if hasattr(self, "value_river_canonical"):
+            proj = self.value_river_canonical.output_proj
+            nn.init.zeros_(proj.bias)
+            scale = self.value_river_canonical_init_scale
+            if scale > 0.0:
+                # Break the residual-starts-at-baseline property on purpose:
+                # scale is roughly the per-bin nodal residual std at init
+                # (input to output_proj is RMSNorm'd to ~unit variance).
+                fan_in = proj.weight.shape[1]
+                nn.init.normal_(proj.weight, std=scale / math.sqrt(fan_in))
+            else:
+                nn.init.zeros_(proj.weight)
 
         # Start CFR warm-start policies close to uniform. The dominant low-rank
         # policy logit branch uses gain 0.1; auxiliary additive correction
@@ -4409,8 +4737,9 @@ class BetterStreetValueFFN(BetterFFN):
         features: MLPFeatures,
         apply_zero_sum: bool = True,
     ) -> torch.Tensor:
+        equity = self._shared_river_range_equity(player_beliefs, features)
         hand_values_raw = self._value_logits_from_head(
-            player_beliefs, x, hand_emb, head, features
+            player_beliefs, x, hand_emb, head, features, equity=equity
         )
         if self.enforce_zero_sum and apply_zero_sum:
             hand_value_sums = (
@@ -4425,6 +4754,7 @@ class BetterStreetValueFFN(BetterFFN):
             hand_values,
             player_beliefs,
             features,
+            equity=equity,
         )
 
     def _forward_value_head(
