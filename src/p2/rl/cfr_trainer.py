@@ -841,6 +841,36 @@ class RebelCFRTrainer:
             value_river_range_equity_film_hidden_dim=(
                 cfg.model.value_river_range_equity_film_hidden_dim
             ),
+            value_turn_range_equity_baseline=(
+                cfg.model.value_turn_range_equity_baseline
+            ),
+            value_turn_range_equity_baseline_scale=(
+                cfg.model.value_turn_range_equity_baseline_scale
+            ),
+            value_turn_range_equity_pot_power=(
+                cfg.model.value_turn_range_equity_pot_power
+            ),
+            value_turn_range_equity_pos_scale=(
+                cfg.model.value_turn_range_equity_pos_scale
+            ),
+            value_turn_range_equity_neg_scale=(
+                cfg.model.value_turn_range_equity_neg_scale
+            ),
+            value_turn_range_equity_intercept=(
+                cfg.model.value_turn_range_equity_intercept
+            ),
+            value_turn_range_equity_blockers=(
+                cfg.model.value_turn_range_equity_blockers
+            ),
+            value_turn_range_equity_rank_bins=(
+                cfg.model.value_turn_range_equity_rank_bins
+            ),
+            value_turn_range_equity_feature_head=(
+                cfg.model.value_turn_range_equity_feature_head
+            ),
+            value_turn_range_equity_chunk_size=(
+                cfg.model.value_turn_range_equity_chunk_size
+            ),
             value_river_canonical_head=cfg.model.value_river_canonical_head,
             value_river_canonical_bins=cfg.model.value_river_canonical_bins,
             value_river_canonical_dim=cfg.model.value_river_canonical_dim,
@@ -853,6 +883,16 @@ class RebelCFRTrainer:
             ),
             value_river_canonical_init_scale=(
                 cfg.model.value_river_canonical_init_scale
+            ),
+            value_river_canonical_only=cfg.model.value_river_canonical_only,
+            value_river_showdown_range_encoder=(
+                cfg.model.value_river_showdown_range_encoder
+            ),
+            value_river_showdown_perhand_head=(
+                cfg.model.value_river_showdown_perhand_head
+            ),
+            value_river_showdown_perhand_dim=(
+                cfg.model.value_river_showdown_perhand_dim
             ),
             value_output_init_scale=cfg.model.value_output_init_scale,
             value_action_summary_head=cfg.model.value_action_summary_head,

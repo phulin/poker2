@@ -287,6 +287,16 @@ class RebelModelConfig:
     value_river_range_equity_trunk_context: bool
     value_river_range_equity_film_rank: int
     value_river_range_equity_film_hidden_dim: int
+    value_turn_range_equity_baseline: bool
+    value_turn_range_equity_baseline_scale: float
+    value_turn_range_equity_pot_power: float
+    value_turn_range_equity_pos_scale: float
+    value_turn_range_equity_neg_scale: float
+    value_turn_range_equity_intercept: float
+    value_turn_range_equity_blockers: bool
+    value_turn_range_equity_rank_bins: int
+    value_turn_range_equity_feature_head: bool
+    value_turn_range_equity_chunk_size: int
     value_river_canonical_head: bool
     value_river_canonical_bins: int
     value_river_canonical_dim: int
@@ -294,6 +304,10 @@ class RebelModelConfig:
     value_river_canonical_blocker_rows: bool
     value_river_canonical_baseline_input: bool
     value_river_canonical_init_scale: float
+    value_river_canonical_only: bool
+    value_river_showdown_range_encoder: bool
+    value_river_showdown_perhand_head: bool
+    value_river_showdown_perhand_dim: int
     value_output_init_scale: float
     value_action_summary_head: bool
     value_head_rank: int
@@ -395,6 +409,36 @@ class RebelModelConfig:
             value_river_range_equity_film_hidden_dim=(
                 cfg.value_river_range_equity_film_hidden_dim
             ),
+            value_turn_range_equity_baseline=(
+                cfg.value_turn_range_equity_baseline
+            ),
+            value_turn_range_equity_baseline_scale=(
+                cfg.value_turn_range_equity_baseline_scale
+            ),
+            value_turn_range_equity_pot_power=(
+                cfg.value_turn_range_equity_pot_power
+            ),
+            value_turn_range_equity_pos_scale=(
+                cfg.value_turn_range_equity_pos_scale
+            ),
+            value_turn_range_equity_neg_scale=(
+                cfg.value_turn_range_equity_neg_scale
+            ),
+            value_turn_range_equity_intercept=(
+                cfg.value_turn_range_equity_intercept
+            ),
+            value_turn_range_equity_blockers=(
+                cfg.value_turn_range_equity_blockers
+            ),
+            value_turn_range_equity_rank_bins=(
+                cfg.value_turn_range_equity_rank_bins
+            ),
+            value_turn_range_equity_feature_head=(
+                cfg.value_turn_range_equity_feature_head
+            ),
+            value_turn_range_equity_chunk_size=(
+                cfg.value_turn_range_equity_chunk_size
+            ),
             value_river_canonical_head=cfg.value_river_canonical_head,
             value_river_canonical_bins=cfg.value_river_canonical_bins,
             value_river_canonical_dim=cfg.value_river_canonical_dim,
@@ -407,6 +451,16 @@ class RebelModelConfig:
             ),
             value_river_canonical_init_scale=(
                 cfg.value_river_canonical_init_scale
+            ),
+            value_river_canonical_only=cfg.value_river_canonical_only,
+            value_river_showdown_range_encoder=(
+                cfg.value_river_showdown_range_encoder
+            ),
+            value_river_showdown_perhand_head=(
+                cfg.value_river_showdown_perhand_head
+            ),
+            value_river_showdown_perhand_dim=(
+                cfg.value_river_showdown_perhand_dim
             ),
             value_output_init_scale=cfg.value_output_init_scale,
             value_action_summary_head=cfg.value_action_summary_head,
@@ -511,6 +565,36 @@ class RebelModelConfig:
         cfg.value_river_range_equity_film_hidden_dim = (
             self.value_river_range_equity_film_hidden_dim
         )
+        cfg.value_turn_range_equity_baseline = (
+            self.value_turn_range_equity_baseline
+        )
+        cfg.value_turn_range_equity_baseline_scale = (
+            self.value_turn_range_equity_baseline_scale
+        )
+        cfg.value_turn_range_equity_pot_power = (
+            self.value_turn_range_equity_pot_power
+        )
+        cfg.value_turn_range_equity_pos_scale = (
+            self.value_turn_range_equity_pos_scale
+        )
+        cfg.value_turn_range_equity_neg_scale = (
+            self.value_turn_range_equity_neg_scale
+        )
+        cfg.value_turn_range_equity_intercept = (
+            self.value_turn_range_equity_intercept
+        )
+        cfg.value_turn_range_equity_blockers = (
+            self.value_turn_range_equity_blockers
+        )
+        cfg.value_turn_range_equity_rank_bins = (
+            self.value_turn_range_equity_rank_bins
+        )
+        cfg.value_turn_range_equity_feature_head = (
+            self.value_turn_range_equity_feature_head
+        )
+        cfg.value_turn_range_equity_chunk_size = (
+            self.value_turn_range_equity_chunk_size
+        )
         cfg.value_river_canonical_head = self.value_river_canonical_head
         cfg.value_river_canonical_bins = self.value_river_canonical_bins
         cfg.value_river_canonical_dim = self.value_river_canonical_dim
@@ -523,6 +607,16 @@ class RebelModelConfig:
         )
         cfg.value_river_canonical_init_scale = (
             self.value_river_canonical_init_scale
+        )
+        cfg.value_river_canonical_only = self.value_river_canonical_only
+        cfg.value_river_showdown_range_encoder = (
+            self.value_river_showdown_range_encoder
+        )
+        cfg.value_river_showdown_perhand_head = (
+            self.value_river_showdown_perhand_head
+        )
+        cfg.value_river_showdown_perhand_dim = (
+            self.value_river_showdown_perhand_dim
         )
         cfg.value_output_init_scale = self.value_output_init_scale
         cfg.value_action_summary_head = self.value_action_summary_head

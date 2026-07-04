@@ -1750,6 +1750,16 @@ class BetterFFN(BaseMLPModel):
         value_river_range_equity_trunk_context: bool = False,
         value_river_range_equity_film_rank: int = 0,
         value_river_range_equity_film_hidden_dim: int = 16,
+        value_turn_range_equity_baseline: bool = False,
+        value_turn_range_equity_baseline_scale: float = 0.65,
+        value_turn_range_equity_pot_power: float = 1.0,
+        value_turn_range_equity_pos_scale: float = -1.0,
+        value_turn_range_equity_neg_scale: float = -1.0,
+        value_turn_range_equity_intercept: float = 0.0,
+        value_turn_range_equity_blockers: bool = False,
+        value_turn_range_equity_rank_bins: int = 144,
+        value_turn_range_equity_feature_head: bool = False,
+        value_turn_range_equity_chunk_size: int = 64,
         value_river_canonical_head: bool = False,
         value_river_canonical_bins: int = 32,
         value_river_canonical_dim: int = 64,
@@ -1757,6 +1767,10 @@ class BetterFFN(BaseMLPModel):
         value_river_canonical_blocker_rows: bool = True,
         value_river_canonical_baseline_input: bool = False,
         value_river_canonical_init_scale: float = 0.0,
+        value_river_canonical_only: bool = False,
+        value_river_showdown_range_encoder: bool = False,
+        value_river_showdown_perhand_head: bool = False,
+        value_river_showdown_perhand_dim: int = 0,
         value_output_init_scale: float = 0.1,
         value_action_summary_head: bool = False,
         value_head_rank: int = 0,
@@ -1843,6 +1857,36 @@ class BetterFFN(BaseMLPModel):
         self.value_river_range_equity_film_hidden_dim = int(
             value_river_range_equity_film_hidden_dim
         )
+        self.value_turn_range_equity_baseline = bool(
+            value_turn_range_equity_baseline
+        )
+        self.value_turn_range_equity_baseline_scale = float(
+            value_turn_range_equity_baseline_scale
+        )
+        self.value_turn_range_equity_pot_power = float(
+            value_turn_range_equity_pot_power
+        )
+        self.value_turn_range_equity_pos_scale = float(
+            value_turn_range_equity_pos_scale
+        )
+        self.value_turn_range_equity_neg_scale = float(
+            value_turn_range_equity_neg_scale
+        )
+        self.value_turn_range_equity_intercept = float(
+            value_turn_range_equity_intercept
+        )
+        self.value_turn_range_equity_blockers = bool(
+            value_turn_range_equity_blockers
+        )
+        self.value_turn_range_equity_rank_bins = int(
+            value_turn_range_equity_rank_bins
+        )
+        self.value_turn_range_equity_feature_head = bool(
+            value_turn_range_equity_feature_head
+        )
+        self.value_turn_range_equity_chunk_size = int(
+            value_turn_range_equity_chunk_size
+        )
         self.value_river_canonical_head = bool(value_river_canonical_head)
         self.value_river_canonical_bins = int(value_river_canonical_bins)
         self.value_river_canonical_dim = int(value_river_canonical_dim)
@@ -1855,6 +1899,18 @@ class BetterFFN(BaseMLPModel):
         )
         self.value_river_canonical_init_scale = float(
             value_river_canonical_init_scale
+        )
+        self.value_river_canonical_only = bool(value_river_canonical_only)
+        self.value_river_showdown_range_encoder = bool(
+            value_river_showdown_range_encoder
+        )
+        self.value_river_showdown_perhand_head = bool(
+            value_river_showdown_perhand_head
+        )
+        self.value_river_showdown_perhand_dim = (
+            int(value_river_showdown_perhand_dim)
+            if int(value_river_showdown_perhand_dim) > 0
+            else int(hidden_dim)
         )
         self.value_output_init_scale = float(value_output_init_scale)
         self.value_action_summary_head = bool(value_action_summary_head)
@@ -1932,6 +1988,34 @@ class BetterFFN(BaseMLPModel):
             raise ValueError(
                 "value_river_range_equity_film_hidden_dim must be positive"
             )
+        if self.value_turn_range_equity_baseline_scale < 0.0:
+            raise ValueError(
+                "value_turn_range_equity_baseline_scale must be non-negative"
+            )
+        if self.value_turn_range_equity_pot_power < 0.0:
+            raise ValueError("value_turn_range_equity_pot_power must be non-negative")
+        if (self.value_turn_range_equity_pos_scale >= 0.0) != (
+            self.value_turn_range_equity_neg_scale >= 0.0
+        ):
+            raise ValueError(
+                "value_turn_range_equity_pos_scale and "
+                "value_turn_range_equity_neg_scale must both be negative "
+                "or both be non-negative"
+            )
+        if self.value_turn_range_equity_rank_bins <= 0:
+            raise ValueError("value_turn_range_equity_rank_bins must be positive")
+        if self.value_turn_range_equity_rank_bins > NUM_HANDS:
+            raise ValueError("value_turn_range_equity_rank_bins must be <= NUM_HANDS")
+        if (
+            self.value_turn_range_equity_feature_head
+            and not self.value_turn_range_equity_baseline
+        ):
+            raise ValueError(
+                "turn range equity feature head requires "
+                "value_turn_range_equity_baseline=True"
+            )
+        if self.value_turn_range_equity_chunk_size <= 0:
+            raise ValueError("value_turn_range_equity_chunk_size must be positive")
         if self.value_river_canonical_head:
             if self.value_river_canonical_bins <= 1:
                 raise ValueError("value_river_canonical_bins must be > 1")
@@ -1939,6 +2023,10 @@ class BetterFFN(BaseMLPModel):
                 raise ValueError("value_river_canonical_dim must be positive")
             if self.value_river_canonical_layers <= 0:
                 raise ValueError("value_river_canonical_layers must be positive")
+        if self.value_river_canonical_only and not self.value_river_canonical_head:
+            raise ValueError(
+                "value_river_canonical_only requires value_river_canonical_head"
+            )
         if self.value_head_rank < 0:
             raise ValueError("value_head_rank must be non-negative")
         if self.value_output_init_scale < 0.0:
@@ -2200,6 +2288,13 @@ class BetterFFN(BaseMLPModel):
                 nn.Linear(16, 1),
             )
             self._init_river_equity_feature_head()
+        if self.value_turn_range_equity_feature_head:
+            self.value_turn_equity_feature_head = nn.Sequential(
+                nn.Linear(6, 16),
+                nn.ReLU(),
+                nn.Linear(16, 1),
+            )
+            self._init_turn_equity_feature_head()
         if self.value_river_range_equity_trunk_context:
             self.value_river_equity_context_proj = nn.Linear(
                 2 * self.value_river_range_equity_rank_bins,
@@ -2236,6 +2331,25 @@ class BetterFFN(BaseMLPModel):
                     1 if self.value_river_canonical_baseline_input else 0
                 ),
             )
+        if self.value_river_showdown_range_encoder:
+            # Pool each of the 4 per-hand channels (belief, blocker-corrected
+            # win / tie / loss mass) against the hand embedding, then project the
+            # concatenation into the trunk. Zero-init so it starts as a no-op.
+            self.showdown_range_proj = nn.Linear(
+                num_players * 4 * hidden_dim, hidden_dim, bias=False
+            )
+        if self.value_river_showdown_perhand_head:
+            # Dense showdown trunk encoder: for each player, map the full
+            # blocker-corrected showdown vector over all hands
+            # ([belief, win, tie, loss] concatenated -> 4*NUM_HANDS) straight to
+            # hidden_dim with a dense projection -- no pooling through the hand
+            # embedding, so there is no low-rank "range bottleneck". Then fuse the
+            # two players ([dim, P] -> hidden_dim) and add into the trunk. The
+            # fuse output is zero-initialised so it starts as a no-op.
+            sd_dim = self.value_river_showdown_perhand_dim
+            self.showdown_perhand_in = nn.Linear(4 * NUM_HANDS, sd_dim)
+            self.showdown_perhand_fuse = nn.Linear(num_players * sd_dim, hidden_dim)
+            self.showdown_perhand_act = get_activation(nonlinearity)
         if self.value_action_summary_head:
             self.value_action_summary = output_projection(hidden_dim, num_players)
         if board_interaction_dim > 0:
@@ -2378,6 +2492,31 @@ class BetterFFN(BaseMLPModel):
         else:
             pos_scale = self.value_river_range_equity_baseline_scale
             neg_scale = self.value_river_range_equity_baseline_scale
+            intercept = 0.0
+        last.weight.data[0, 0] = pos_scale
+        last.weight.data[0, 1] = -neg_scale
+        last.bias.data.fill_(intercept)
+
+    def _init_turn_equity_feature_head(self) -> None:
+        if not hasattr(self, "value_turn_equity_feature_head"):
+            return
+        first = self.value_turn_equity_feature_head[0]
+        last = self.value_turn_equity_feature_head[-1]
+        if not isinstance(first, nn.Linear) or not isinstance(last, nn.Linear):
+            return
+        nn.init.zeros_(first.weight)
+        nn.init.zeros_(first.bias)
+        nn.init.zeros_(last.weight)
+        nn.init.zeros_(last.bias)
+        first.weight.data[0, 0] = 1.0
+        first.weight.data[1, 0] = -1.0
+        if self.value_turn_range_equity_pos_scale >= 0.0:
+            pos_scale = self.value_turn_range_equity_pos_scale
+            neg_scale = self.value_turn_range_equity_neg_scale
+            intercept = self.value_turn_range_equity_intercept
+        else:
+            pos_scale = self.value_turn_range_equity_baseline_scale
+            neg_scale = self.value_turn_range_equity_baseline_scale
             intercept = 0.0
         last.weight.data[0, 0] = pos_scale
         last.weight.data[0, 1] = -neg_scale
@@ -3201,28 +3340,33 @@ class BetterFFN(BaseMLPModel):
         )
         return delta
 
-    def _river_range_equity_features(
+    def _river_showdown_masses(
         self,
         player_beliefs: torch.Tensor,
         features: MLPFeatures,
-        dtype: torch.dtype,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        baseline = player_beliefs.new_zeros(
-            player_beliefs.shape[0],
-            self.num_players,
-            NUM_HANDS,
-            dtype=dtype,
-        )
-        feature_values = player_beliefs.new_zeros(
-            player_beliefs.shape[0],
-            self.num_players,
-            NUM_HANDS,
-            6,
-            dtype=dtype,
-        )
+    ) -> (
+        tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]
+        | None
+    ):
+        """Blocker-corrected opponent showdown decomposition for each hero hand
+        on river rows. Returns row-indexed tensors ``(rows, beliefs, lower_mass,
+        tie_mass, total_mass, blocked_top_decile)`` where ``lower_mass`` is the
+        opponent belief mass the hero beats (win), ``tie_mass`` ties, and
+        ``total_mass - lower_mass - tie_mass`` losses; all corrected for card
+        removal when ``value_river_range_equity_blockers`` is set. Returns
+        ``None`` when the batch has no river rows. Shared by the analytic
+        equity baseline and the showdown-mass range encoder so the blocker math
+        lives in one place."""
         river_mask = (features.street == 3) & (features.board >= 0).all(dim=1)
         if not river_mask.any():
-            return baseline, feature_values
+            return None
         rows = torch.where(river_mask)[0]
         rank_bins = self.value_river_range_equity_rank_bins
         rank_groups = self._river_rank_groups(features.board[rows]).clamp(
@@ -3338,6 +3482,135 @@ class BetterFFN(BaseMLPModel):
             tie_mass = (tie_mass - blocked_tie).clamp_min(0.0)
             lower_mass = (lower_mass - blocked_lower).clamp_min(0.0)
             total_mass = (total_mass - blocked_total).clamp_min(1e-8)
+        return (
+            rows,
+            beliefs,
+            lower_mass,
+            tie_mass,
+            total_mass,
+            blocked_top_decile,
+        )
+
+    def _river_showdown_range_features(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+        hand_emb: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Wide range-encoder input: for each player/hand, pool [belief, win,
+        tie, loss] mass against the hand embedding and project into the trunk.
+        Gives a single ordinary value head explicit, per-hand, blocker-corrected
+        showdown information as input (rather than an additive equity baseline).
+        River rows only; zero on other rows."""
+        if not self.value_river_showdown_range_encoder:
+            return None
+        masses = self._river_showdown_masses(player_beliefs, features)
+        if masses is None:
+            return None
+        rows, beliefs_rows, lower_mass, tie_mass, total_mass, _ = masses
+        loss_mass = (total_mass - lower_mass - tie_mass).clamp_min(0.0)
+        n = player_beliefs.shape[0]
+
+        def _full(rows_value: torch.Tensor) -> torch.Tensor:
+            full = player_beliefs.new_zeros(
+                n, self.num_players, NUM_HANDS, dtype=torch.float32
+            )
+            full[rows] = rows_value.to(dtype=torch.float32)
+            return full
+
+        # Broadcast loss to [n_rows, P, H] before scattering (total_mass may be
+        # [n_rows, P, 1] when blockers are disabled).
+        loss_mass = loss_mass.expand(-1, self.num_players, NUM_HANDS)
+        channels = (
+            _full(beliefs_rows),
+            _full(lower_mass),
+            _full(tie_mass),
+            _full(loss_mass),
+        )
+        he = hand_emb
+        he_dtype = he.dtype
+
+        def _pool(channel: torch.Tensor) -> torch.Tensor:
+            c = channel.to(dtype=he_dtype)
+            if he.dim() == 2:
+                return c @ he  # [N, P, hidden]
+            return torch.einsum("bph,bhd->bpd", c, he)
+
+        pooled = torch.stack([_pool(c) for c in channels], dim=2)  # [N,P,4,hd]
+        flat = pooled.reshape(n, -1)  # [N, P * 4 * hidden]
+        return self.showdown_range_proj(flat)
+
+    def _river_showdown_dense_features(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+    ) -> torch.Tensor | None:
+        """Dense showdown trunk feature. For each player, the full
+        blocker-corrected showdown vector over all hands (``[belief, win, tie,
+        loss]`` -> ``4 * NUM_HANDS``) is projected straight to ``dim`` with a
+        dense linear (contracting the hand axis, so no low-rank range
+        bottleneck), the two players are fused ``[dim, P] -> hidden_dim``, and the
+        result is added into the trunk. River rows only; zero on other rows so it
+        starts (and stays off-river) as a no-op."""
+        if not self.value_river_showdown_perhand_head:
+            return None
+        full = player_beliefs.new_zeros(
+            player_beliefs.shape[0],
+            self.hidden_dim,
+            dtype=self.showdown_perhand_in.weight.dtype,
+        )
+        masses = self._river_showdown_masses(player_beliefs, features)
+        if masses is None:
+            return full
+        rows, beliefs, lower_mass, tie_mass, total_mass, _ = masses
+        players = self.num_players
+        n_rows = rows.shape[0]
+        wdtype = self.showdown_perhand_in.weight.dtype
+
+        # Broadcast to [n_rows, P, H] (total_mass may be [n_rows, P, 1] when
+        # blockers are disabled) and assemble the per-player showdown channels.
+        lower = lower_mass.expand(-1, players, NUM_HANDS)
+        tie = tie_mass.expand(-1, players, NUM_HANDS)
+        total = total_mass.expand(-1, players, NUM_HANDS)
+        loss = (total - lower - tie).clamp_min(0.0)
+        channels = torch.stack((beliefs, lower, tie, loss), dim=2)  # [Nr, P, 4, H]
+        x = channels.reshape(n_rows, players, -1)  # [Nr, P, 4*H]
+
+        # [Nr, P, 4H] -> [Nr, P, dim] (dense over hands), then fuse players.
+        per_player = self.showdown_perhand_act(
+            self.showdown_perhand_in(x.to(dtype=wdtype))
+        )  # [Nr, P, dim]
+        fused = self.showdown_perhand_fuse(
+            per_player.reshape(n_rows, -1)
+        )  # [Nr, hidden_dim]
+        full[rows] = fused.to(dtype=wdtype)
+        return full
+
+    def _river_range_equity_features(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        baseline = player_beliefs.new_zeros(
+            player_beliefs.shape[0],
+            self.num_players,
+            NUM_HANDS,
+            dtype=dtype,
+        )
+        feature_values = player_beliefs.new_zeros(
+            player_beliefs.shape[0],
+            self.num_players,
+            NUM_HANDS,
+            6,
+            dtype=dtype,
+        )
+        masses = self._river_showdown_masses(player_beliefs, features)
+        if masses is None:
+            return baseline, feature_values
+        rows, beliefs, lower_mass, tie_mass, total_mass, blocked_top_decile = (
+            masses
+        )
         equity_score = (2.0 * lower_mass + tie_mass - total_mass) / total_mass
         pot_scale = features.context[rows, ValueScalarContext.POT.value].float()
         if self.value_river_range_equity_pot_power != 1.0:
@@ -3366,6 +3639,187 @@ class BetterFFN(BaseMLPModel):
             ),
             dim=-1,
         ).to(dtype=dtype)
+        return baseline, feature_values
+
+    def _turn_runout_boards(
+        self, board: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        board4 = board[:, :4].long()
+        cards = self.card_ids.to(device=board.device)
+        river_ok = (cards[None, :, None] != board4[:, None, :]).all(dim=2)
+        rivers = cards.expand(board4.shape[0], -1)[river_ok].view(board4.shape[0], 48)
+        full = torch.cat(
+            (
+                board4[:, None, :].expand(-1, 48, -1),
+                rivers[:, :, None],
+            ),
+            dim=2,
+        ).reshape(-1, 5)
+        return rivers, full
+
+    def _turn_range_equity_features(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        baseline = player_beliefs.new_zeros(
+            player_beliefs.shape[0],
+            self.num_players,
+            NUM_HANDS,
+            dtype=dtype,
+        )
+        feature_values = player_beliefs.new_zeros(
+            player_beliefs.shape[0],
+            self.num_players,
+            NUM_HANDS,
+            6,
+            dtype=dtype,
+        )
+        turn_mask = (features.street == 2) & (features.board[:, :4] >= 0).all(dim=1)
+        if not turn_mask.any():
+            return baseline, feature_values
+        rows = torch.where(turn_mask)[0]
+        rank_bins = self.value_turn_range_equity_rank_bins
+        chunk_size = self.value_turn_range_equity_chunk_size
+        card_a = self.hand_card_a.to(device=player_beliefs.device)
+        card_b = self.hand_card_b.to(device=player_beliefs.device)
+
+        for start in range(0, int(rows.shape[0]), chunk_size):
+            chunk_rows = rows[start : start + chunk_size]
+            board = features.board[chunk_rows, :4].long()
+            beliefs = player_beliefs[chunk_rows].float()
+            opponents = beliefs.sum(dim=1, keepdim=True) - beliefs
+            rivers, full_boards = self._turn_runout_boards(features.board[chunk_rows])
+            chunk = int(chunk_rows.shape[0])
+
+            rank_groups = self._river_rank_groups(full_boards).clamp(
+                min=0,
+                max=rank_bins - 1,
+            )
+            rank_groups = rank_groups.view(chunk, 48, NUM_HANDS)
+
+            board_ok = (
+                (card_a[None, :, None] != board[:, None, :])
+                & (card_b[None, :, None] != board[:, None, :])
+            ).all(dim=2)
+            river_blocked = (card_a[None, None, :] == rivers[:, :, None]) | (
+                card_b[None, None, :] == rivers[:, :, None]
+            )
+            hand_runout_ok = board_ok[:, None, :] & ~river_blocked
+
+            rank_idx = rank_groups[:, None, :, :].expand(
+                -1, self.num_players, -1, -1
+            )
+            opp_weights = opponents[:, :, None, :] * hand_runout_ok[:, None, :, :]
+            flat_rank_idx = rank_idx.reshape(-1, NUM_HANDS)
+            flat_opp_weights = opp_weights.reshape(-1, NUM_HANDS)
+            rank_mass = beliefs.new_zeros(
+                flat_opp_weights.shape[0],
+                rank_bins,
+            )
+            rank_mass.scatter_add_(1, flat_rank_idx, flat_opp_weights)
+            cumulative = rank_mass.cumsum(dim=1)
+            tie = rank_mass.gather(1, flat_rank_idx)
+            lower = cumulative.gather(1, flat_rank_idx) - tie
+            per_river_total = rank_mass.sum(dim=1)
+            if self.value_turn_range_equity_blockers:
+                card_rank_bins = 52 * rank_bins
+                card_rank_mass = beliefs.new_zeros(
+                    flat_opp_weights.shape[0],
+                    card_rank_bins,
+                )
+                card_a_idx = card_a.view(1, NUM_HANDS).expand_as(flat_rank_idx)
+                card_b_idx = card_b.view(1, NUM_HANDS).expand_as(flat_rank_idx)
+                flat_idx_a = card_a_idx * rank_bins + flat_rank_idx
+                flat_idx_b = card_b_idx * rank_bins + flat_rank_idx
+                card_rank_mass.scatter_add_(1, flat_idx_a, flat_opp_weights)
+                card_rank_mass.scatter_add_(1, flat_idx_b, flat_opp_weights)
+                card_rank_view = card_rank_mass.view(
+                    flat_opp_weights.shape[0],
+                    52,
+                    rank_bins,
+                )
+                card_mass = card_rank_view.sum(dim=2)
+                card_rank_cumulative = card_rank_view.cumsum(dim=2).reshape(
+                    flat_opp_weights.shape[0],
+                    card_rank_bins,
+                )
+                card_tie_a = card_rank_mass.gather(1, flat_idx_a)
+                card_tie_b = card_rank_mass.gather(1, flat_idx_b)
+                card_lower_a = card_rank_cumulative.gather(1, flat_idx_a) - card_tie_a
+                card_lower_b = card_rank_cumulative.gather(1, flat_idx_b) - card_tie_b
+                same_combo_mass = flat_opp_weights
+                blocked_tie = card_tie_a + card_tie_b - same_combo_mass
+                blocked_lower = card_lower_a + card_lower_b
+                blocked_total = (
+                    card_mass.gather(1, card_a_idx)
+                    + card_mass.gather(1, card_b_idx)
+                    - same_combo_mass
+                )
+                tie = (tie - blocked_tie).clamp_min(0.0)
+                lower = (lower - blocked_lower).clamp_min(0.0)
+                total = (
+                    per_river_total[:, None] - blocked_total
+                ).clamp_min(0.0).view(chunk, self.num_players, 48, NUM_HANDS)
+            else:
+                total = per_river_total.view(
+                    chunk,
+                    self.num_players,
+                    48,
+                    1,
+                )
+
+            hero_ok = hand_runout_ok[:, None, :, :].to(dtype=beliefs.dtype)
+            lower_sum = (
+                lower.view(chunk, self.num_players, 48, NUM_HANDS) * hero_ok
+            ).sum(dim=2)
+            tie_sum = (
+                tie.view(chunk, self.num_players, 48, NUM_HANDS) * hero_ok
+            ).sum(dim=2)
+            total_sum = (total * hero_ok).sum(dim=2)
+            safe_total = total_sum.clamp_min(1e-8)
+            equity_score = (2.0 * lower_sum + tie_sum - total_sum) / safe_total
+            equity_score = torch.where(
+                total_sum > 0.0,
+                equity_score,
+                torch.zeros_like(equity_score),
+            )
+
+            pot_scale = features.context[
+                chunk_rows, ValueScalarContext.POT.value
+            ].float()
+            if self.value_turn_range_equity_pot_power != 1.0:
+                pot_scale = pot_scale.clamp_min(0.0).pow(
+                    self.value_turn_range_equity_pot_power
+                )
+            sdv = equity_score * pot_scale[:, None, None]
+            if self.value_turn_range_equity_pos_scale >= 0.0:
+                value = (
+                    sdv.clamp_min(0.0) * self.value_turn_range_equity_pos_scale
+                    + sdv.clamp_max(0.0) * self.value_turn_range_equity_neg_scale
+                    + self.value_turn_range_equity_intercept
+                )
+            else:
+                value = sdv * self.value_turn_range_equity_baseline_scale
+            baseline[chunk_rows] = value.to(dtype=dtype)
+
+            valid_rivers = hand_runout_ok.sum(dim=1).clamp_min(1)
+            avg_total_mass = total_sum / valid_rivers[:, None, :].to(
+                dtype=total_sum.dtype
+            )
+            spr = self._player_spr_context(features.context[chunk_rows]).float()
+            feature_values[chunk_rows] = torch.stack(
+                (
+                    sdv,
+                    beliefs,
+                    avg_total_mass,
+                    torch.zeros_like(avg_total_mass),
+                    pot_scale[:, None, None].expand_as(equity_score),
+                    spr[:, :, None].expand_as(equity_score),
+                ),
+                dim=-1,
+            ).to(dtype=dtype)
         return baseline, feature_values
 
     def _shared_river_range_equity(
@@ -3404,6 +3858,21 @@ class BetterFFN(BaseMLPModel):
             dtype,
         )
         return baseline
+
+    def _turn_range_equity_value(
+        self,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        baseline, feature_values = self._turn_range_equity_features(
+            player_beliefs,
+            features,
+            dtype,
+        )
+        if not self.value_turn_range_equity_feature_head:
+            return baseline
+        return self.value_turn_equity_feature_head(feature_values).squeeze(-1)
 
     def _river_range_equity_value(
         self,
@@ -3470,6 +3939,20 @@ class BetterFFN(BaseMLPModel):
             features,
             hand_values.dtype,
             equity=equity,
+        )
+
+    def _apply_turn_range_equity_value(
+        self,
+        hand_values: torch.Tensor,
+        player_beliefs: torch.Tensor,
+        features: MLPFeatures,
+    ) -> torch.Tensor:
+        if not self.value_turn_range_equity_baseline:
+            return hand_values
+        return hand_values + self._turn_range_equity_value(
+            player_beliefs,
+            features,
+            hand_values.dtype,
         )
 
     def _river_canonical_value_residual(
@@ -3901,6 +4384,16 @@ class BetterFFN(BaseMLPModel):
         )
         if board_mass_features is not None:
             flat_features = flat_features + board_mass_features
+        showdown_range = self._river_showdown_range_features(
+            player_beliefs, features, hand_emb
+        )
+        if showdown_range is not None:
+            flat_features = flat_features + showdown_range.to(flat_features.dtype)
+        showdown_dense = self._river_showdown_dense_features(
+            player_beliefs, features
+        )
+        if showdown_dense is not None:
+            flat_features = flat_features + showdown_dense.to(flat_features.dtype)
         river_equity_context = self._river_range_equity_context_delta(
             player_beliefs,
             features,
@@ -4046,6 +4539,11 @@ class BetterFFN(BaseMLPModel):
             features,
             equity=equity,
         )
+        hand_values = self._apply_turn_range_equity_value(
+            hand_values,
+            player_beliefs,
+            features,
+        )
         value = hand_values.mean(dim=-1)
         return ModelOutput(value=value, hand_values=hand_values, value_aux=aux)
 
@@ -4143,9 +4641,24 @@ class BetterFFN(BaseMLPModel):
                 equity=equity,
             )
             if canonical_residual is not None:
-                hand_values = hand_values + canonical_residual.to(
-                    dtype=hand_values.dtype
-                )
+                if self.value_river_canonical_only:
+                    # Canonical head is the *sole* river predictor: drop the
+                    # trunk's per-hand (belief/board-derived) value on river
+                    # rows so the river value depends only on the suit-invariant,
+                    # card-agnostic rank-space tokens. Non-river rows keep the
+                    # trunk head (canonical_residual is zero there anyway).
+                    river_mask = (features.street == 3) & (
+                        features.board >= 0
+                    ).all(dim=1)
+                    hand_values = torch.where(
+                        river_mask[:, None, None],
+                        canonical_residual.to(dtype=hand_values.dtype),
+                        hand_values,
+                    )
+                else:
+                    hand_values = hand_values + canonical_residual.to(
+                        dtype=hand_values.dtype
+                    )
             if (
                 self.value_exact_river_features
                 or (collect_aux and self.value_showdown_baseline)
@@ -4465,6 +4978,13 @@ class BetterFFN(BaseMLPModel):
             self.value_strat_head.scale_output(0.1)
         if hasattr(self, "value_river_equity_feature_head"):
             self._init_river_equity_feature_head()
+        if hasattr(self, "value_turn_equity_feature_head"):
+            self._init_turn_equity_feature_head()
+        if hasattr(self, "showdown_range_proj"):
+            nn.init.zeros_(self.showdown_range_proj.weight)
+        if hasattr(self, "showdown_perhand_fuse"):
+            nn.init.zeros_(self.showdown_perhand_fuse.weight)
+            nn.init.zeros_(self.showdown_perhand_fuse.bias)
         if hasattr(self, "value_river_equity_context_proj"):
             nn.init.zeros_(self.value_river_equity_context_proj.weight)
         if hasattr(self, "value_river_equity_film_out"):
@@ -4700,6 +5220,16 @@ class BetterStreetValueFFN(BetterFFN):
         )
         if board_mass_features is not None:
             flat_features = flat_features + board_mass_features
+        showdown_range = self._river_showdown_range_features(
+            player_beliefs, features, hand_emb
+        )
+        if showdown_range is not None:
+            flat_features = flat_features + showdown_range.to(flat_features.dtype)
+        showdown_dense = self._river_showdown_dense_features(
+            player_beliefs, features
+        )
+        if showdown_dense is not None:
+            flat_features = flat_features + showdown_dense.to(flat_features.dtype)
         board_stats = self._board_stats(features.board, player_beliefs.dtype)
         interaction_features = self._belief_board_interaction(
             player_beliefs, board_stats
@@ -4750,11 +5280,16 @@ class BetterStreetValueFFN(BetterFFN):
             hand_values = hand_values_raw - hand_value_sums
         else:
             hand_values = hand_values_raw
-        return self._apply_river_range_equity_value(
+        hand_values = self._apply_river_range_equity_value(
             hand_values,
             player_beliefs,
             features,
             equity=equity,
+        )
+        return self._apply_turn_range_equity_value(
+            hand_values,
+            player_beliefs,
+            features,
         )
 
     def _forward_value_head(
