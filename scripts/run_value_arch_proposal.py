@@ -1208,12 +1208,14 @@ PROPOSALS: dict[str, dict[str, Any]] = {
 
 def _canonical_baseline_input_variant(
     *,
-    learning_rate: float,
-    init_scale: float,
+    learning_rate: float = 0.04,
+    init_scale: float = 0.0,
+    overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Derive a canonical-k32 + baseline-input proposal from the base entry,
-    overriding only the learning-rate schedule and the canonical head init
-    scale so LR / init-scale sweeps stay in lockstep with the base config."""
+    overriding the learning-rate schedule, the canonical head init scale, and
+    any extra model dims (``overrides``) so LR / init-scale / capacity sweeps
+    stay in lockstep with the base config."""
     base = deepcopy(PROPOSALS["river_canonical_k32_baseline_input"])
     base["value_river_canonical_init_scale"] = init_scale
     base["train"] = {
@@ -1221,6 +1223,8 @@ def _canonical_baseline_input_variant(
         "learning_rate_final": learning_rate / 10.0,
         "adamw_learning_rate": learning_rate,
     }
+    if overrides:
+        base.update(overrides)
     return base
 
 
@@ -1238,6 +1242,270 @@ PROPOSALS["river_canonical_bi_init0p01"] = _canonical_baseline_input_variant(
 PROPOSALS["river_canonical_bi_init0p05"] = _canonical_baseline_input_variant(
     learning_rate=0.04, init_scale=0.05
 )
+# Capacity sweep at the winning lr 0.04 / init 0.0 (base is hidden 384 / ffn
+# 768 / 7 value layers): more value depth, a 3x FFN multiplier, and a wider
+# hidden 512 / ffn 1024 trunk.
+PROPOSALS["river_canonical_bi_value8"] = _canonical_baseline_input_variant(
+    overrides={"num_value_layers": 8}
+)
+PROPOSALS["river_canonical_bi_ffn3x"] = _canonical_baseline_input_variant(
+    overrides={"ffn_dim": 1152}
+)
+PROPOSALS["river_canonical_bi_h512_ffn1024"] = _canonical_baseline_input_variant(
+    overrides={"hidden_dim": 512, "ffn_dim": 1024}
+)
+
+
+# Architecture of the live no-baseline run (same trunk as the r96-canonical
+# live run) so init-scale results transfer straight to it.
+_LIVE_ARCH: dict[str, Any] = {
+    "num_value_layers": 6,
+    "board_interaction_dim": 96,
+    "belief_low_rank_dim": 128,
+}
+
+
+def _canonical_no_baseline_variant(
+    *,
+    learning_rate: float = 0.04,
+    value_output_init_scale: float = 0.0,
+    canonical_init_scale: float = 0.0,
+) -> dict[str, Any]:
+    """Derive an equity-input canonical-k32 NO-baseline proposal (no analytic
+    additive baseline; the head's built-in per-bin equity features are the only
+    equity signal) on the live architecture, overriding the LR schedule and the
+    two init knobs that govern the cold-start behavior: the base value head
+    (``value_output_init_scale``) and the canonical head output
+    (``value_river_canonical_init_scale``)."""
+    base = deepcopy(PROPOSALS["river_canonical_k32_no_baseline"])
+    base.update(_LIVE_ARCH)
+    base["value_output_init_scale"] = value_output_init_scale
+    base["value_river_canonical_init_scale"] = canonical_init_scale
+    base["train"] = {
+        "learning_rate": learning_rate,
+        "learning_rate_final": learning_rate / 10.0,
+        "adamw_learning_rate": learning_rate,
+    }
+    return base
+
+
+# No-baseline init-scale sweep at LR 0.04: 2x2 over base-head init
+# (value_output_init_scale) x canonical-head init (value_river_canonical_init_
+# scale). out0/canon0 is the current live cold-start config (the reference).
+PROPOSALS["river_canonical_nb_out0_canon0"] = _canonical_no_baseline_variant(
+    value_output_init_scale=0.0, canonical_init_scale=0.0
+)
+PROPOSALS["river_canonical_nb_out0p1_canon0"] = _canonical_no_baseline_variant(
+    value_output_init_scale=0.1, canonical_init_scale=0.0
+)
+PROPOSALS["river_canonical_nb_out0_canon0p05"] = _canonical_no_baseline_variant(
+    value_output_init_scale=0.0, canonical_init_scale=0.05
+)
+PROPOSALS["river_canonical_nb_out0p1_canon0p05"] = (
+    _canonical_no_baseline_variant(
+        value_output_init_scale=0.1, canonical_init_scale=0.05
+    )
+)
+
+
+# Showdown-mass range encoder: a single ordinary value head (no canonical head,
+# no analytic baseline) whose range encoder is widened to ingest, per player and
+# hand, [belief, blocker-corrected win mass, tie mass, loss mass]. Tests whether
+# handing the model explicit per-hand blocker-corrected showdown info as INPUT
+# lets a plain head recover what the removed baseline used to provide.
+# river_plain_value_head is the matched reference (same live arch, no extras).
+PROPOSALS["river_plain_value_head"] = {
+    "num_value_layers": 6,
+    "board_interaction_dim": 96,
+    "belief_low_rank_dim": 128,
+    "train": {
+        "learning_rate": 0.04,
+        "learning_rate_final": 0.004,
+        "adamw_learning_rate": 0.04,
+    },
+}
+PROPOSALS["river_showdown_range_encoder"] = {
+    "value_river_showdown_range_encoder": True,
+    "value_river_range_equity_blockers": True,
+    "value_river_range_equity_rank_bins": 96,
+    "num_value_layers": 6,
+    "board_interaction_dim": 96,
+    "belief_low_rank_dim": 128,
+    "train": {
+        "learning_rate": 0.04,
+        "learning_rate_final": 0.004,
+        "adamw_learning_rate": 0.04,
+    },
+}
+# Ablation: same encoder but naive (non-blocker-corrected) win/tie/loss mass,
+# to isolate how much of the win comes from the blocker correction specifically.
+PROPOSALS["river_showdown_range_encoder_noblock"] = {
+    "value_river_showdown_range_encoder": True,
+    "value_river_range_equity_blockers": False,
+    "value_river_range_equity_rank_bins": 96,
+    "num_value_layers": 6,
+    "board_interaction_dim": 96,
+    "belief_low_rank_dim": 128,
+    "train": {
+        "learning_rate": 0.04,
+        "learning_rate_final": 0.004,
+        "adamw_learning_rate": 0.04,
+    },
+}
+# Per-hand showdown value head: same blocker-corrected [belief, win, tie, loss]
+# input as the range encoder, but fed straight to hidden_dim per player with NO
+# pooling over hands, then fused across players ([dim, P] -> [dim]) and read out
+# as a per-hand nodal value residual. Tests whether preserving per-hand
+# correspondence (instead of the range-bottleneck pooling) closes the gap to the
+# structured canonical head. river_plain_value_head is the matched reference.
+PROPOSALS["river_showdown_perhand_head"] = {
+    "value_river_showdown_perhand_head": True,
+    "value_river_range_equity_blockers": True,
+    "value_river_range_equity_rank_bins": 96,
+    "num_value_layers": 6,
+    "board_interaction_dim": 96,
+    "belief_low_rank_dim": 128,
+    "train": {
+        "learning_rate": 0.04,
+        "learning_rate_final": 0.004,
+        "adamw_learning_rate": 0.04,
+    },
+}
+# Ablation: same per-hand head with naive (non-blocker-corrected) win/tie/loss.
+PROPOSALS["river_showdown_perhand_head_noblock"] = {
+    "value_river_showdown_perhand_head": True,
+    "value_river_range_equity_blockers": False,
+    "value_river_range_equity_rank_bins": 96,
+    "num_value_layers": 6,
+    "board_interaction_dim": 96,
+    "belief_low_rank_dim": 128,
+    "train": {
+        "learning_rate": 0.04,
+        "learning_rate_final": 0.004,
+        "adamw_learning_rate": 0.04,
+    },
+}
+
+# --- Compound experiment: does the dense showdown INPUT (trunk feature) stack
+# with the canonical structured OUTPUT head, and with the analytic-baseline
+# warm-start? Everything below is on the live arch so the dense-alone,
+# canonical, and combined configs are directly comparable (the older
+# river_canonical_k32* refs used the base arch and are NOT comparable). ---
+_LIVE_TRAIN = {
+    "learning_rate": 0.04,
+    "learning_rate_final": 0.004,
+    "adamw_learning_rate": 0.04,
+}
+# Canonical structured-output head core.
+_CANON_HEAD = {
+    "value_river_canonical_head": True,
+    "value_river_canonical_bins": 32,
+    "value_river_canonical_dim": 64,
+    "value_river_canonical_layers": 2,
+}
+# Analytic additive baseline (tuned posneg-blockers-r96) used as a warm start.
+_ANALYTIC_BASELINE = {
+    "value_river_range_equity_baseline": True,
+    "value_river_range_equity_pos_scale": 0.8543022528460094,
+    "value_river_range_equity_neg_scale": 0.4753640305061305,
+    "value_river_range_equity_intercept": -0.010797645393242563,
+    "value_river_range_equity_blockers": True,
+    "value_river_range_equity_rank_bins": 96,
+}
+# Dense showdown trunk encoder (no pooling; contracts the hand axis).
+_DENSE_SHOWDOWN = {
+    "value_river_showdown_perhand_head": True,
+    "value_river_range_equity_blockers": True,
+    "value_river_range_equity_rank_bins": 96,
+}
+
+# Canonical refs on the LIVE arch (so combos are comparable).
+PROPOSALS["river_canonical_nb_live"] = {
+    **_LIVE_ARCH,
+    **_CANON_HEAD,
+    "value_output_init_scale": 0.0,
+    "train": _LIVE_TRAIN,
+}
+PROPOSALS["river_canonical_bi_live"] = {
+    **_LIVE_ARCH,
+    **_CANON_HEAD,
+    **_ANALYTIC_BASELINE,
+    "value_river_canonical_baseline_input": True,
+    "value_output_init_scale": 0.0,
+    "train": _LIVE_TRAIN,
+}
+# Compound: dense showdown input + canonical output head (no baseline).
+PROPOSALS["river_dense_canonical_nb"] = {
+    **_LIVE_ARCH,
+    **_CANON_HEAD,
+    **_DENSE_SHOWDOWN,
+    "value_output_init_scale": 0.0,
+    "train": _LIVE_TRAIN,
+}
+# Compound: dense showdown input + canonical output head + baseline warm-start.
+PROPOSALS["river_dense_canonical_bi"] = {
+    **_LIVE_ARCH,
+    **_CANON_HEAD,
+    **_ANALYTIC_BASELINE,
+    **_DENSE_SHOWDOWN,
+    "value_river_canonical_baseline_input": True,
+    "value_output_init_scale": 0.0,
+    "train": _LIVE_TRAIN,
+}
+# Dense showdown input + analytic baseline warm-start (no canonical head).
+PROPOSALS["river_dense_baseline"] = {
+    **_LIVE_ARCH,
+    **_ANALYTIC_BASELINE,
+    **_DENSE_SHOWDOWN,
+    "value_output_init_scale": 0.0,
+    "train": _LIVE_TRAIN,
+}
+
+# Canonical head as the SOLE river predictor: the trunk's per-hand
+# (belief/board-derived) value is dropped on river rows, so river value depends
+# only on the suit-invariant, card-agnostic rank-space tokens. Tests whether the
+# model can ignore poker rules entirely on the river.
+PROPOSALS["river_canonical_only_nb"] = {
+    **_LIVE_ARCH,
+    **_CANON_HEAD,
+    "value_river_canonical_only": True,
+    "value_output_init_scale": 0.0,
+    "train": _LIVE_TRAIN,
+}
+PROPOSALS["river_canonical_only_nb_k48"] = {
+    **PROPOSALS["river_canonical_only_nb"],
+    "value_river_canonical_bins": 48,
+}
+PROPOSALS["river_canonical_only_nb_k64"] = {
+    **PROPOSALS["river_canonical_only_nb"],
+    "value_river_canonical_bins": 64,
+}
+# Canonical-only + analytic baseline warm-start (baseline fed as a token input).
+PROPOSALS["river_canonical_only_bi"] = {
+    **_LIVE_ARCH,
+    **_CANON_HEAD,
+    **_ANALYTIC_BASELINE,
+    "value_river_canonical_only": True,
+    "value_river_canonical_baseline_input": True,
+    "value_output_init_scale": 0.0,
+    "train": _LIVE_TRAIN,
+}
+PROPOSALS["river_canonical_only_bi_k48"] = {
+    **PROPOSALS["river_canonical_only_bi"],
+    "value_river_canonical_bins": 48,
+}
+PROPOSALS["river_canonical_only_bi_k64"] = {
+    **PROPOSALS["river_canonical_only_bi"],
+    "value_river_canonical_bins": 64,
+}
+PROPOSALS["river_canonical_only_bi_k128"] = {
+    **PROPOSALS["river_canonical_only_bi"],
+    "value_river_canonical_bins": 128,
+}
+PROPOSALS["river_canonical_only_bi_k128_no_blocker_rows"] = {
+    **PROPOSALS["river_canonical_only_bi_k128"],
+    "value_river_canonical_blocker_rows": False,
+}
 
 
 def _dataset_dir(path: Path) -> Path:
@@ -1756,6 +2024,18 @@ def _run_one_proposal(
             ),
             "value_river_canonical_init_scale": float(
                 cfg.model.value_river_canonical_init_scale
+            ),
+            "value_river_canonical_only": bool(
+                cfg.model.value_river_canonical_only
+            ),
+            "value_river_showdown_range_encoder": bool(
+                cfg.model.value_river_showdown_range_encoder
+            ),
+            "value_river_showdown_perhand_head": bool(
+                cfg.model.value_river_showdown_perhand_head
+            ),
+            "value_river_showdown_perhand_dim": int(
+                cfg.model.value_river_showdown_perhand_dim
             ),
             "value_output_init_scale": float(cfg.model.value_output_init_scale),
             "value_action_summary_head": bool(cfg.model.value_action_summary_head),

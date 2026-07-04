@@ -22,6 +22,8 @@ Reusable profiling, benchmark, data-prep, and diagnostic scripts. ReBeL Hydra sc
 - `combine_rebel_solved_datasets.py`: Combines compatible ReBeL solved postflop datasets into one manifest/shard set using symlinks, hardlinks, or copies.
 - `convert_allin_dataset_to_169.py`: Converts pregenerated all-in datasets to native 169-class tensors.
 - `diagnose_river_convergence.py`: Diagnoses river CFR convergence details.
+- `diagnose_river_value_fidelity.py`: Decomposes river value-target variance into canonical strength-bin and card-agnostic scalar components.
+- `diagnose_turn_value_fidelity.py`: Fits E-turn range-equity positive/negative baseline coefficients against S-river chance targets.
 - `distill_epreflop_6p_live_pair.py`: Runs 6-player compact E-preflop live-pair distillation.
 - `eflop_distill_lr_sweep.py`: Runs E-flop distillation learning-rate sweeps.
 - `eturn_distill_mab_search.py`: Runs E-turn distillation bandit searches.

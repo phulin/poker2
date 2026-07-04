@@ -185,3 +185,144 @@ and
   about 1.4-1.55ms, while the final H->2N projection alone costs about
   0.37-0.40ms. The residual tower therefore dominates the value-head compute,
   not just the final wide projection.
+
+## RiverCanonicalValueHead (canonical-strength quantile mixer)
+
+New module `RiverCanonicalValueHead` (see `src/p2/models/mlp/better_ffn.py`).
+It builds a board-invariant canonical strength coordinate `u ∈ [0,1]` per hand
+(combined-belief mass-midpoint of each rank group), quantile-bins it into `K`
+tokens of equal combined mass, computes per-bin per-player features
+(`mass`, mean-`u`, belief-weighted equity vs. opponent, and a `K`-dim
+row-normalized blocked-mass matrix `B[p,k,:]`), runs a 2-block MLP-mixer over
+the `K` tokens with broadcast globals (pot + per-player SPR), and emits per
+player `K` nodal values (pot-scaled) that are linearly interpolated back to each
+hand at coordinate `u_h`. No 52-card identity ever enters the token features, so
+suit isomorphism is exact by construction (verified: residual is invariant to a
+board+range suit permutation to 1e-5). The final linear is zero-initialized and
+the residual is added into `hand_values` for river rows next to the FiLM
+residual, so training starts exactly at the analytic
+`river_range_equity_blockers_posneg_r96` baseline and only learns the residual it
+misses (k32's step-50 validation `0.00238` matches the baseline's final
+`0.00237`).
+
+All runs: same `--steps 500` river value dataset and validation set as above,
+`lr=0.04→0.004`, `value_output_init_scale=0.0`, analytic
+posneg-blockers-r96 baseline enabled.
+
+| Proposal | Settings | Final validation value loss | Pot-relative RMSE | Inference mean 4096 forward | Training mean excl. first |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `river_range_equity_blockers_posneg_r96_lr0p04_out0p00` | analytic posneg-blockers-r96 baseline only (no canonical head) | 0.0023664166 | 0.5144 | — | — |
+| `river_canonical_k32` | baseline + canonical head `K=32`, `d=64`, 2 layers | 0.0011141200 | 0.4389 | 0.011908s | 0.04352s |
+| `river_canonical_k64` | baseline + canonical head `K=64`, `d=64`, 2 layers | 0.0011705970 | 0.4474 | 0.013158s | 0.04595s |
+| `river_canonical_k32_no_blocker_rows` | `K=32` head with the `B`-matrix blocker rows dropped | 0.0011110898 | 0.4406 | 0.010597s | 0.04283s |
+
+Findings:
+- The canonical head roughly halves the analytic baseline's validation value
+  loss (`0.00237 → 0.00111`, −53%). Training is monotone and stable (no NaNs).
+- `K=32` slightly beats `K=64` and is cheaper, so 32 bins is the better default.
+- Dropping the pairwise blocked-mass rows (the spec's "key move") costs
+  essentially nothing on this dataset (`0.0011111` vs `0.0011141`) and is a bit
+  faster. On this pregenerated river distribution the cross-range strength mixer
+  alone (mass / mean-u / equity tokens) captures almost all of the gain; the
+  second-order blocker structure adds negligible marginal value here.
+- Cost: the head's per-hand scatter/gather/einsum makes the value forward
+  markedly slower than the analytic-only baseline post head (~1.6ms → ~10–13ms
+  at 4096 rows). The `no_blocker_rows` variant is the fastest of the three.
+
+## Canonical head as sole river predictor
+
+Follow-up live-arch ablation: on river rows, drop the trunk's per-hand value and
+replace it with the canonical head output. Non-river rows still use the trunk.
+When the analytic baseline is enabled it remains an exact per-hand additive
+output anchor; `value_river_canonical_only` only removes the learned trunk value.
+
+| Config | Train | Val | vs. residual val |
+| --- | ---: | ---: | ---: |
+| canonical nb -- residual (add to trunk) | 0.000839 | 0.001357 | -- |
+| canonical-only nb (trunk dropped on river) | 0.000895 | 0.001373 | +1.2% |
+| canonical-only nb K48 | 0.000903 | 0.001399 | +3.1% vs K32 nb |
+| canonical-only nb K64 | 0.000931 | 0.001409 | +3.8% vs K32 nb |
+| canonical bi -- residual (add to trunk) | 0.000613 | 0.001105 | -- |
+| canonical-only bi (trunk dropped on river) | 0.000585 | 0.001097 | -0.7% |
+| canonical-only bi K48 | 0.000632 | 0.001113 | +0.7% |
+| canonical-only bi K64 | 0.000655 | 0.001105 | ~0.0% |
+| canonical-only bi K128 no blocker rows | 0.000680 | 0.001171 | +6.7% |
+
+Conclusion: the trunk's card-aware per-hand value contributes essentially
+nothing on river for this setup. With the blocker-corrected analytic baseline as
+an output anchor, replacing the learned trunk value with the canonical
+rank-space computation is marginally better; without that baseline it costs only
+about 1.2%. Both differences are within likely run-to-run noise.
+
+Higher-bin follow-up:
+- No-baseline higher-bin runs also failed to beat K32:
+  `river_canonical_only_nb_k48` reached validation `0.0013989617`,
+  pot-relative RMSE `0.45382`, 4096-row post-forward mean `0.00763s`, and
+  training mean excluding first `0.03818s`; `river_canonical_only_nb_k64`
+  reached validation `0.0014089439`, pot-relative RMSE `0.45082`, 4096-row
+  post-forward mean `0.00809s`, and training mean excluding first `0.03786s`.
+- `river_canonical_only_bi_k48` completed at validation `0.0011130023`,
+  pot-relative RMSE `0.45054`, 4096-row post-forward mean `0.01294s`, and
+  training mean excluding first `0.04100s`. It does not beat K32.
+- `river_canonical_only_bi_k64` completed at validation `0.0011045693`,
+  pot-relative RMSE `0.44937`, 4096-row post-forward mean `0.04309s`, and
+  training mean excluding first `0.07857s`. It does not beat K32.
+- `river_canonical_only_bi_k128` with blocker rows OOMed at the current
+  1024-example value batch because the blocker row feature scales as `K x K`.
+- `river_canonical_only_bi_k128_no_blocker_rows` completed at validation
+  `0.0011706989`, pot-relative RMSE `0.45014`, 4096-row post-forward mean
+  `0.01455s`, and training mean excluding first `0.04522s`; it is worse than
+  K32/K64.
+- Result: more bins are not the next lever for this 500-step setup.
+
+## River hand-independent fidelity diagnostic
+
+Added `scripts/diagnose_river_value_fidelity.py` to quantify the representation
+ceiling on the validation set without training. It computes an oracle
+per-board/per-player canonical strength-bin mean, then asks how much of the
+within-bin residual is explained by hand-independent per-hand scalars. Full
+outputs:
+`task_notes/river_hand_independent_fidelity/river_value_fidelity_val8192.json`
+and
+`task_notes/river_hand_independent_fidelity/river_value_fidelity_val8192_noblock.json`.
+
+Validation-set target scale:
+
+| Metric | Value |
+| --- | ---: |
+| Weighted target variance MSE | 0.028490 |
+| Weighted zero-prediction MSE | 0.028608 |
+
+Blocker-corrected scalar diagnostic (`showdown_rank_bins=96`):
+
+| K | Strength-bin oracle MSE | + posneg baseline scalar MSE | Baseline explains within-bin |
+| ---: | ---: | ---: | ---: |
+| 16 | 0.0005368 | 0.0002166 | 59.6% |
+| 32 | 0.0004083 | 0.0001612 | 60.5% |
+| 64 | 0.0003689 | 0.0001449 | 60.7% |
+| 128 | 0.0003507 | 0.0001374 | 60.8% |
+
+No-blocker scalar ablation:
+
+| K | Strength-bin oracle MSE | + posneg baseline scalar MSE | Baseline explains within-bin |
+| ---: | ---: | ---: | ---: |
+| 32 | 0.0004083 | 0.0003906 | 4.3% |
+| 128 | 0.0003507 | 0.0003502 | 0.1% |
+
+Read:
+- More bins help, but only modestly once the exact per-hand baseline is present
+  (`K=32 -> 128` improves the baseline-augmented oracle from `0.000161` to
+  `0.000137`, about 15% of the remaining oracle residual).
+- The useful per-hand fidelity signal is overwhelmingly blocker correction.
+  Without blocker correction, per-hand showdown/equity scalars explain almost
+  none of the within-bin residual at high K.
+- A generic per-hand scalar MLP is not the first thing to try. In this linear
+  oracle, all scalar features barely improve over the single posneg baseline
+  scalar (`K=32`: `0.0001605` vs `0.0001612`).
+- Since `river_canonical_only_bi` already uses the exact per-hand analytic
+  baseline as an output anchor, the larger gap between its 500-step validation
+  (`~0.00110`) and the oracle ceiling (`~0.00016`) is more likely
+  optimization/training horizon/canonical-head capacity than missing per-hand
+  scalar information. The next clean experiments are a longer
+  `river_canonical_only_bi` convergence run and, secondarily, `K=64/128`
+  canonical-only-bi checks.
