@@ -12,10 +12,62 @@ wandb_tags: ["rebel", "cfr", "postflop-curriculum", "river"]
 data:
   mode: live
   live_root_source: random_river
+  belief_mode: mixed
+  belief_profile: actions_12_end
+
+train:
+  learning_rate: 4e-2
+  learning_rate_final: 4e-3
+  lr_schedule: cosine
+  adamw_learning_rate: 0.04
+  batch_size: 2048
+  episodes_per_step: 5
+  replay_buffer_batches: 32
+  value_reuse_goal: 2
+  value_coef: 1.0
+
+model:
+  board_interaction_dim: 96
+  belief_low_rank_dim: 128
+  num_value_layers: 6
+  value_output_init_scale: 0.0
+
+  # Fitted from S_river run yduykc9r. Regress new pos/neg/intercept values for
+  # other stages or changed target distributions.
+  value_river_range_equity_baseline: true
+  value_river_range_equity_pos_scale: 0.8543022528460094
+  value_river_range_equity_neg_scale: 0.4753640305061305
+  value_river_range_equity_intercept: -0.010797645393242563
+  value_river_range_equity_blockers: true
+  value_river_range_equity_rank_bins: 96
+  value_river_canonical_head: true
+  value_river_canonical_bins: 32
+  value_river_canonical_dim: 64
+  value_river_canonical_layers: 2
+
+search:
+  depth: 5
+  bet_bins_by_depth:
+    - [0.25, 0.5, 0.75, 1.0, 1.5]
+    - [0.5, 1.0]
+    - [1.0]
+    - [1.0]
+    - []
+  allin_by_depth: [true, true, true, true, false]
+  cfr_type: sapcfr
+  iterations: 300
+  iterations_final: 300
+  sapcfr_alpha: 2.0
+  predictive_cfr_delay: 40
+  predictive_cfr_dcfr_hybrid: true
+  dcfr_plus_delay: 80
+  warm_start_iterations: 15
+  warm_start_type: model_br
+  warm_start_multiplier: 2
 
 validation_set:
-  enabled: false
-  dataset: null
+  enabled: true
+  dataset: outputs/rebel_postflop/river_val_8192_10k_sapdcfr_nowarm_ctx41_20260630
   interval: 50
   batch_size: 1024
   max_examples: null

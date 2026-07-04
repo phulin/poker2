@@ -15,6 +15,26 @@ wandb_tags: ["rebel", "cfr", "postflop-curriculum", "turn"]
 data:
   mode: live
   live_root_source: random_turn
+  belief_mode: mixed
+  belief_profile: actions_12_end
+
+model:
+  board_interaction_dim: 96
+  belief_low_rank_dim: 128
+
+  # Fitted for the current E_turn distillation target distribution. Regress new
+  # pos/neg/intercept values before reusing this baseline for other stages.
+  value_turn_range_equity_baseline: true
+  value_turn_range_equity_rank_bins: 144
+  value_turn_range_equity_chunk_size: 64
+  value_turn_range_equity_blockers: false
+  value_turn_range_equity_pos_scale: 0.8108713632309251
+  value_turn_range_equity_neg_scale: 0.4734914215276203
+  value_turn_range_equity_intercept: -0.004416146041135697
+
+search:
+  iterations: 300
+  iterations_final: 300
 
 curriculum:
   stages: [distill_E_turn, turn]
@@ -26,12 +46,12 @@ curriculum:
       net: E_turn
       from_net: S_river
       chance: single_card
-      num_steps: ${num_steps}
+      num_steps: 100000
       train_overrides:
-        learning_rate: 0.08
-        learning_rate_final: 0.008
+        learning_rate: 0.02
+        learning_rate_final: 0.002
         lr_schedule: linear
-        adamw_learning_rate: 0.08
+        adamw_learning_rate: 0.02
         batch_size: 1024
     turn:
       kind: train

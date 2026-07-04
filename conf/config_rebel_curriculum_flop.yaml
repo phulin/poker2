@@ -16,6 +16,16 @@ wandb_tags: ["rebel", "cfr", "postflop-curriculum", "flop"]
 data:
   mode: live
   live_root_source: random_flop
+  belief_mode: mixed
+  belief_profile: actions_12_end
+
+model:
+  board_interaction_dim: 96
+  belief_low_rank_dim: 128
+
+search:
+  iterations: 300
+  iterations_final: 300
 
 curriculum:
   stages: [distill_E_flop, flop, distill_E_preflop]

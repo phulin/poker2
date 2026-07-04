@@ -33,7 +33,6 @@ train:
   policy_loss_type: mse
   value_coef: 1.0
   grad_clip: 1.0
-  policy_grad_clip: 10
 
 model:
   name: BetterFFN
@@ -50,6 +49,29 @@ model:
   compile: default
   enforce_zero_sum: true
   belief_low_rank_dim: 128
+  value_output_init_scale: 0.0
+
+  # Baseline coefficients are fitted for the current river/E_turn stages.
+  # Regress fresh pos/neg/intercept values before enabling these baselines for
+  # new stages or materially different target distributions.
+  value_river_range_equity_baseline: true
+  value_river_range_equity_pos_scale: 0.8543022528460094
+  value_river_range_equity_neg_scale: 0.4753640305061305
+  value_river_range_equity_intercept: -0.010797645393242563
+  value_river_range_equity_blockers: true
+  value_river_range_equity_rank_bins: 96
+  value_river_canonical_head: true
+  value_river_canonical_bins: 32
+  value_river_canonical_dim: 64
+  value_river_canonical_layers: 2
+
+  value_turn_range_equity_baseline: true
+  value_turn_range_equity_rank_bins: 144
+  value_turn_range_equity_chunk_size: 64
+  value_turn_range_equity_blockers: false
+  value_turn_range_equity_pos_scale: 0.8108713632309251
+  value_turn_range_equity_neg_scale: 0.4734914215276203
+  value_turn_range_equity_intercept: -0.004416146041135697
 
 search:
   depth: 5
@@ -107,12 +129,12 @@ curriculum:
       net: E_turn
       from_net: S_river
       chance: single_card
-      num_steps: 20000
+      num_steps: 100000
       train_overrides:
-        learning_rate: 0.08
-        learning_rate_final: 0.008
+        learning_rate: 0.02
+        learning_rate_final: 0.002
         lr_schedule: linear
-        adamw_learning_rate: 0.08
+        adamw_learning_rate: 0.02
         batch_size: 1024
     turn:
       kind: train

@@ -56,6 +56,7 @@ train:
   value_bucket_entropy_coef: 0.0
   value_action_summary_coef: 0.0
   grad_clip: 1.0
+  policy_grad_clip: 10
 
   stratify_streets: []
     # - threshold: 500
