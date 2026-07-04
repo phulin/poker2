@@ -166,6 +166,8 @@ profile_output*.txt
 /allin_lr_sweep/checkpoints*/
 /secret*
 /logs/
+/run_logs/
+/task_notes/
 /outputs/
 /profiler_logs/
 /website/.wrangler/
