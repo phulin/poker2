@@ -200,8 +200,6 @@ def _stage_config(
     stage_cfg.resume_from = resume_from
     stage_cfg.wandb_name = _stage_wandb_name(cfg, substep_name)
     stage_cfg.trueskill.enabled = False
-    if substep.kind == "distill":
-        stage_cfg.model.street_value_heads = StreetValueHeads.pre
     if substep.net in {"E_preflop", "S_preflop", "S_0"}:
         stage_cfg.model.preflop_hand_dim = 169
     _apply_overrides(
@@ -216,6 +214,10 @@ def _stage_config(
     _apply_overrides(
         stage_cfg.search, substep.search_overrides, label=f"{substep_name}.search"
     )
+    if substep.net.startswith("E_"):
+        stage_cfg.model.street_value_heads = StreetValueHeads.pre
+    elif substep.net.startswith("S_"):
+        stage_cfg.model.street_value_heads = StreetValueHeads.post
     closing_checkpoint = substep.closing_checkpoint
     if closing_checkpoint is None and promoted is not None and substep.closing_net:
         closing_checkpoint = promoted.get(substep.closing_net)

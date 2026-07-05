@@ -59,6 +59,27 @@ def test_curriculum_distill_substep_uses_pre_only_value_head() -> None:
     assert stage_cfg.model.street_value_heads == StreetValueHeads.pre
 
 
+def test_curriculum_train_substep_uses_post_only_value_head() -> None:
+    cfg = Config()
+    substep = CurriculumSubstepConfig(
+        kind="train",
+        net="S_turn",
+        closing_net="E_turn",
+        num_steps=1,
+        model_overrides={"street_value_heads": "pre"},
+    )
+
+    stage_cfg = curriculum_stage._stage_config(
+        cfg,
+        "turn",
+        substep,
+        resume_from=None,
+        promoted={},
+    )
+
+    assert stage_cfg.model.street_value_heads == StreetValueHeads.post
+
+
 def test_curriculum_train_substeps_do_not_run_preflop_analyzer() -> None:
     assert curriculum_stage._should_print_preflop_analyzer("E_preflop") is False
     assert curriculum_stage._should_print_preflop_analyzer("S_0") is False
