@@ -30,6 +30,7 @@ Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton ke
 - `bench_showdown_active_runner.py`: Active-hand exact showdown benchmark.
 - `bench_triton_pbs_env.py`: PBSEnv and TritonPBSEnv benchmark.
 - `bench_triton_small_k_dot.py`: Small-K Triton dot benchmark.
+- `bench_turn_training_hotspots.py`: S_turn training hotspot benchmark that separates turn equity baseline, value-forward, leaf-value writeback, and full random-turn CFR solve costs.
 - `cfr_optimizations_bench.py`: CFR optimization comparison benchmark.
 - `multiway_showdown_estimators.py`: Multiway showdown estimator validation harness.
 - `profile_chance_helper.py`: Chance-node helper profiler.

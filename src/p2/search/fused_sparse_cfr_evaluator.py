@@ -47,6 +47,10 @@ from p2.env.rules_triton import (
     triton_is_available as _rules_triton_ok,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
+from p2.models.mlp.turn_range_equity import (
+    TurnRangeEquityBoardCache,
+    build_turn_range_equity_board_cache,
+)
 from p2.search.allin_payoff import (
     FLOP_I8_SCALE,
     I16_SCALE,
@@ -230,6 +234,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # Pre-allocated buffer used by set_leaf_values to keep
         # self.last_model_values pinned across calls (no rebinding → graph-safe).
         self._last_model_values_buf: torch.Tensor | None = None
+        self._turn_range_equity_board_cache_key: tuple[int, int, int, int] | None = (
+            None
+        )
+        self._turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None
         # When True, cfr_iteration skips the full policy_probs.clone() kept for
         # _record_stats. Set by GraphedCFRIteration when stats are stubbed out.
         self._skip_record_stats: bool = False
@@ -2549,6 +2557,39 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
     # Model value mixing: fused (old+new)*h - old*l / new.
     # ------------------------------------------------------------------
 
+    def _turn_range_equity_board_cache_for_features(
+        self,
+        base_model,
+        features: MLPFeatures,
+    ) -> TurnRangeEquityBoardCache | None:
+        equity_model = getattr(base_model, "value_model", base_model)
+        if not bool(getattr(equity_model, "value_turn_range_equity_baseline", False)):
+            return None
+        rank_bins = int(getattr(equity_model, "value_turn_range_equity_rank_bins", 0))
+        if rank_bins <= 0:
+            return None
+        key = (
+            int(self._subgame_generation),
+            int(features.board.data_ptr()),
+            int(features.board.shape[0]),
+            rank_bins,
+        )
+        if (
+            self._turn_range_equity_board_cache_key != key
+            or self._turn_range_equity_board_cache is None
+        ):
+            self._turn_range_equity_board_cache = build_turn_range_equity_board_cache(
+                features.board[:, :4],
+                rank_bins=rank_bins,
+                rank_groups_fn=equity_model._river_rank_groups,
+                include_hand_runout_ok=True,
+                dedupe_boards=True,
+                balanced_bins=True,
+                include_sorted_bins=True,
+            )
+            self._turn_range_equity_board_cache_key = key
+        return self._turn_range_equity_board_cache
+
     def _eval_model_for_fused_writeback(
         self,
         value_model,
@@ -2600,6 +2641,17 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                             base_model.forward_value_static_base
                         ).parameters
                     )
+                    static_value_sig = inspect.signature(
+                        base_model.forward_value_static_base
+                    )
+                    self._static_model_base_accepts_turn_equity_cache = (
+                        "turn_range_equity_board_cache"
+                        in static_value_sig.parameters
+                        or any(
+                            param.kind is inspect.Parameter.VAR_KEYWORD
+                            for param in static_value_sig.parameters.values()
+                        )
+                    )
                 key = (
                     int(self._subgame_generation),
                     int(features.context.data_ptr()),
@@ -2620,11 +2672,25 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 value_kwargs = {"apply_zero_sum": False}
                 if getattr(self, "_static_model_base_accepts_value_head", False):
                     value_kwargs["value_head"] = "pre" if use_pre_head else "auto"
-                call_static_value = getattr(
-                    base_model,
-                    "_call_forward_value_static_base",
-                    base_model.forward_value_static_base,
-                )
+                if getattr(
+                    self,
+                    "_static_model_base_accepts_turn_equity_cache",
+                    False,
+                ):
+                    value_kwargs["turn_range_equity_board_cache"] = (
+                        self._turn_range_equity_board_cache_for_features(
+                            base_model,
+                            features,
+                        )
+                    )
+                if "turn_range_equity_board_cache" in value_kwargs:
+                    call_static_value = base_model.forward_value_static_base
+                else:
+                    call_static_value = getattr(
+                        base_model,
+                        "_call_forward_value_static_base",
+                        base_model.forward_value_static_base,
+                    )
                 model_output = call_static_value(
                     features,
                     self._static_model_base_features,

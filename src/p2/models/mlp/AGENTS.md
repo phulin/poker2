@@ -12,6 +12,7 @@ Flat feature encoders and MLP/TRM model family used heavily by ReBeL-style CFR t
 - `preflop_token_mixer_mpk.py`: Experimental Mirage/MPK wrapper for the compact preflop token mixer.
 - `rebel_feature_encoder.py`: ReBeL public-belief feature encoder.
 - `rebel_ffn.py`: ReBeL feed-forward model and config.
+- `turn_range_equity.py`: Turn-board range-equity baseline utilities, including reusable board/runout/rank cache construction and belief-dependent equity reduction.
 
 ### Subdirectories
 There are no child source directories.

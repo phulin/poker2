@@ -34,6 +34,13 @@ from p2.models.mlp.better_features import (
     context_length,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
+from p2.models.mlp.turn_range_equity import (
+    TurnRangeEquityBoardCache,
+    TurnRangeEquityConfig,
+    turn_range_equity_baseline,
+    turn_range_equity_features,
+    turn_runout_boards as turn_equity_runout_boards,
+)
 from p2.models.model_output import ModelOutput
 from p2.utils.profiling import profile
 
@@ -3644,183 +3651,35 @@ class BetterFFN(BaseMLPModel):
     def _turn_runout_boards(
         self, board: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        board4 = board[:, :4].long()
-        cards = self.card_ids.to(device=board.device)
-        river_ok = (cards[None, :, None] != board4[:, None, :]).all(dim=2)
-        rivers = cards.expand(board4.shape[0], -1)[river_ok].view(board4.shape[0], 48)
-        full = torch.cat(
-            (
-                board4[:, None, :].expand(-1, 48, -1),
-                rivers[:, :, None],
-            ),
-            dim=2,
-        ).reshape(-1, 5)
-        return rivers, full
+        return turn_equity_runout_boards(board)
+
+    def _turn_range_equity_config(self) -> TurnRangeEquityConfig:
+        return TurnRangeEquityConfig(
+            rank_bins=self.value_turn_range_equity_rank_bins,
+            chunk_size=self.value_turn_range_equity_chunk_size,
+            blockers=self.value_turn_range_equity_blockers,
+            baseline_scale=self.value_turn_range_equity_baseline_scale,
+            pot_power=self.value_turn_range_equity_pot_power,
+            pos_scale=self.value_turn_range_equity_pos_scale,
+            neg_scale=self.value_turn_range_equity_neg_scale,
+            intercept=self.value_turn_range_equity_intercept,
+        )
 
     def _turn_range_equity_features(
         self,
         player_beliefs: torch.Tensor,
         features: MLPFeatures,
         dtype: torch.dtype,
+        board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        baseline = player_beliefs.new_zeros(
-            player_beliefs.shape[0],
-            self.num_players,
-            NUM_HANDS,
+        return turn_range_equity_features(
+            player_beliefs,
+            features,
+            config=self._turn_range_equity_config(),
             dtype=dtype,
+            board_cache=board_cache,
+            rank_groups_fn=self._river_rank_groups,
         )
-        feature_values = player_beliefs.new_zeros(
-            player_beliefs.shape[0],
-            self.num_players,
-            NUM_HANDS,
-            6,
-            dtype=dtype,
-        )
-        turn_mask = (features.street == 2) & (features.board[:, :4] >= 0).all(dim=1)
-        if not turn_mask.any():
-            return baseline, feature_values
-        rows = torch.where(turn_mask)[0]
-        rank_bins = self.value_turn_range_equity_rank_bins
-        chunk_size = self.value_turn_range_equity_chunk_size
-        card_a = self.hand_card_a.to(device=player_beliefs.device)
-        card_b = self.hand_card_b.to(device=player_beliefs.device)
-
-        for start in range(0, int(rows.shape[0]), chunk_size):
-            chunk_rows = rows[start : start + chunk_size]
-            board = features.board[chunk_rows, :4].long()
-            beliefs = player_beliefs[chunk_rows].float()
-            opponents = beliefs.sum(dim=1, keepdim=True) - beliefs
-            rivers, full_boards = self._turn_runout_boards(features.board[chunk_rows])
-            chunk = int(chunk_rows.shape[0])
-
-            rank_groups = self._river_rank_groups(full_boards).clamp(
-                min=0,
-                max=rank_bins - 1,
-            )
-            rank_groups = rank_groups.view(chunk, 48, NUM_HANDS)
-
-            board_ok = (
-                (card_a[None, :, None] != board[:, None, :])
-                & (card_b[None, :, None] != board[:, None, :])
-            ).all(dim=2)
-            river_blocked = (card_a[None, None, :] == rivers[:, :, None]) | (
-                card_b[None, None, :] == rivers[:, :, None]
-            )
-            hand_runout_ok = board_ok[:, None, :] & ~river_blocked
-
-            rank_idx = rank_groups[:, None, :, :].expand(
-                -1, self.num_players, -1, -1
-            )
-            opp_weights = opponents[:, :, None, :] * hand_runout_ok[:, None, :, :]
-            flat_rank_idx = rank_idx.reshape(-1, NUM_HANDS)
-            flat_opp_weights = opp_weights.reshape(-1, NUM_HANDS)
-            rank_mass = beliefs.new_zeros(
-                flat_opp_weights.shape[0],
-                rank_bins,
-            )
-            rank_mass.scatter_add_(1, flat_rank_idx, flat_opp_weights)
-            cumulative = rank_mass.cumsum(dim=1)
-            tie = rank_mass.gather(1, flat_rank_idx)
-            lower = cumulative.gather(1, flat_rank_idx) - tie
-            per_river_total = rank_mass.sum(dim=1)
-            if self.value_turn_range_equity_blockers:
-                card_rank_bins = 52 * rank_bins
-                card_rank_mass = beliefs.new_zeros(
-                    flat_opp_weights.shape[0],
-                    card_rank_bins,
-                )
-                card_a_idx = card_a.view(1, NUM_HANDS).expand_as(flat_rank_idx)
-                card_b_idx = card_b.view(1, NUM_HANDS).expand_as(flat_rank_idx)
-                flat_idx_a = card_a_idx * rank_bins + flat_rank_idx
-                flat_idx_b = card_b_idx * rank_bins + flat_rank_idx
-                card_rank_mass.scatter_add_(1, flat_idx_a, flat_opp_weights)
-                card_rank_mass.scatter_add_(1, flat_idx_b, flat_opp_weights)
-                card_rank_view = card_rank_mass.view(
-                    flat_opp_weights.shape[0],
-                    52,
-                    rank_bins,
-                )
-                card_mass = card_rank_view.sum(dim=2)
-                card_rank_cumulative = card_rank_view.cumsum(dim=2).reshape(
-                    flat_opp_weights.shape[0],
-                    card_rank_bins,
-                )
-                card_tie_a = card_rank_mass.gather(1, flat_idx_a)
-                card_tie_b = card_rank_mass.gather(1, flat_idx_b)
-                card_lower_a = card_rank_cumulative.gather(1, flat_idx_a) - card_tie_a
-                card_lower_b = card_rank_cumulative.gather(1, flat_idx_b) - card_tie_b
-                same_combo_mass = flat_opp_weights
-                blocked_tie = card_tie_a + card_tie_b - same_combo_mass
-                blocked_lower = card_lower_a + card_lower_b
-                blocked_total = (
-                    card_mass.gather(1, card_a_idx)
-                    + card_mass.gather(1, card_b_idx)
-                    - same_combo_mass
-                )
-                tie = (tie - blocked_tie).clamp_min(0.0)
-                lower = (lower - blocked_lower).clamp_min(0.0)
-                total = (
-                    per_river_total[:, None] - blocked_total
-                ).clamp_min(0.0).view(chunk, self.num_players, 48, NUM_HANDS)
-            else:
-                total = per_river_total.view(
-                    chunk,
-                    self.num_players,
-                    48,
-                    1,
-                )
-
-            hero_ok = hand_runout_ok[:, None, :, :].to(dtype=beliefs.dtype)
-            lower_sum = (
-                lower.view(chunk, self.num_players, 48, NUM_HANDS) * hero_ok
-            ).sum(dim=2)
-            tie_sum = (
-                tie.view(chunk, self.num_players, 48, NUM_HANDS) * hero_ok
-            ).sum(dim=2)
-            total_sum = (total * hero_ok).sum(dim=2)
-            safe_total = total_sum.clamp_min(1e-8)
-            equity_score = (2.0 * lower_sum + tie_sum - total_sum) / safe_total
-            equity_score = torch.where(
-                total_sum > 0.0,
-                equity_score,
-                torch.zeros_like(equity_score),
-            )
-
-            pot_scale = features.context[
-                chunk_rows, ValueScalarContext.POT.value
-            ].float()
-            if self.value_turn_range_equity_pot_power != 1.0:
-                pot_scale = pot_scale.clamp_min(0.0).pow(
-                    self.value_turn_range_equity_pot_power
-                )
-            sdv = equity_score * pot_scale[:, None, None]
-            if self.value_turn_range_equity_pos_scale >= 0.0:
-                value = (
-                    sdv.clamp_min(0.0) * self.value_turn_range_equity_pos_scale
-                    + sdv.clamp_max(0.0) * self.value_turn_range_equity_neg_scale
-                    + self.value_turn_range_equity_intercept
-                )
-            else:
-                value = sdv * self.value_turn_range_equity_baseline_scale
-            baseline[chunk_rows] = value.to(dtype=dtype)
-
-            valid_rivers = hand_runout_ok.sum(dim=1).clamp_min(1)
-            avg_total_mass = total_sum / valid_rivers[:, None, :].to(
-                dtype=total_sum.dtype
-            )
-            spr = self._player_spr_context(features.context[chunk_rows]).float()
-            feature_values[chunk_rows] = torch.stack(
-                (
-                    sdv,
-                    beliefs,
-                    avg_total_mass,
-                    torch.zeros_like(avg_total_mass),
-                    pot_scale[:, None, None].expand_as(equity_score),
-                    spr[:, :, None].expand_as(equity_score),
-                ),
-                dim=-1,
-            ).to(dtype=dtype)
-        return baseline, feature_values
 
     def _shared_river_range_equity(
         self,
@@ -3864,14 +3723,24 @@ class BetterFFN(BaseMLPModel):
         player_beliefs: torch.Tensor,
         features: MLPFeatures,
         dtype: torch.dtype,
+        board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> torch.Tensor:
+        if not self.value_turn_range_equity_feature_head:
+            return turn_range_equity_baseline(
+                player_beliefs,
+                features,
+                config=self._turn_range_equity_config(),
+                dtype=dtype,
+                board_cache=board_cache,
+                rank_groups_fn=self._river_rank_groups,
+            )
         baseline, feature_values = self._turn_range_equity_features(
             player_beliefs,
             features,
             dtype,
+            board_cache=board_cache,
         )
-        if not self.value_turn_range_equity_feature_head:
-            return baseline
+        del baseline
         return self.value_turn_equity_feature_head(feature_values).squeeze(-1)
 
     def _river_range_equity_value(
@@ -3946,6 +3815,7 @@ class BetterFFN(BaseMLPModel):
         hand_values: torch.Tensor,
         player_beliefs: torch.Tensor,
         features: MLPFeatures,
+        board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> torch.Tensor:
         if not self.value_turn_range_equity_baseline:
             return hand_values
@@ -3953,6 +3823,7 @@ class BetterFFN(BaseMLPModel):
             player_beliefs,
             features,
             hand_values.dtype,
+            board_cache=board_cache,
         )
 
     def _river_canonical_value_residual(
@@ -4463,6 +4334,7 @@ class BetterFFN(BaseMLPModel):
         features: MLPFeatures,
         latent=None,
         apply_zero_sum: bool = True,
+        turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> ModelOutput:
         """
         Value-only pass.
@@ -4480,6 +4352,7 @@ class BetterFFN(BaseMLPModel):
             hand_emb,
             features,
             apply_zero_sum=apply_zero_sum,
+            turn_range_equity_board_cache=turn_range_equity_board_cache,
         )
 
     def forward_value_static_base(
@@ -4488,6 +4361,7 @@ class BetterFFN(BaseMLPModel):
         static_base_features: torch.Tensor,
         latent=None,
         apply_zero_sum: bool = True,
+        turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> ModelOutput:
         """Value-only pass for callers that precomputed static public features."""
         player_beliefs, _, x, hand_emb, board_stats = self._forward_base_from_static(
@@ -4500,6 +4374,7 @@ class BetterFFN(BaseMLPModel):
             hand_emb,
             features,
             apply_zero_sum=apply_zero_sum,
+            turn_range_equity_board_cache=turn_range_equity_board_cache,
         )
 
     def _value_from_base(
@@ -4509,6 +4384,7 @@ class BetterFFN(BaseMLPModel):
         hand_emb: torch.Tensor,
         features: MLPFeatures,
         apply_zero_sum: bool = True,
+        turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> ModelOutput:
         equity = self._shared_river_range_equity(player_beliefs, features)
         hand_values_raw, aux = self._value_logits_and_aux_from_head(
@@ -4543,6 +4419,7 @@ class BetterFFN(BaseMLPModel):
             hand_values,
             player_beliefs,
             features,
+            board_cache=turn_range_equity_board_cache,
         )
         value = hand_values.mean(dim=-1)
         return ModelOutput(value=value, hand_values=hand_values, value_aux=aux)
@@ -5266,6 +5143,7 @@ class BetterStreetValueFFN(BetterFFN):
         head: nn.Module,
         features: MLPFeatures,
         apply_zero_sum: bool = True,
+        turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> torch.Tensor:
         equity = self._shared_river_range_equity(player_beliefs, features)
         hand_values_raw = self._value_logits_from_head(
@@ -5290,6 +5168,7 @@ class BetterStreetValueFFN(BetterFFN):
             hand_values,
             player_beliefs,
             features,
+            board_cache=turn_range_equity_board_cache,
         )
 
     def _forward_value_head(
@@ -5298,6 +5177,7 @@ class BetterStreetValueFFN(BetterFFN):
         head: nn.Module,
         static_base_features: torch.Tensor | None = None,
         apply_zero_sum: bool = True,
+        turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> torch.Tensor:
         if static_base_features is None:
             player_beliefs, _, x, hand_emb, _ = self._forward_base(features)
@@ -5312,6 +5192,7 @@ class BetterStreetValueFFN(BetterFFN):
             head,
             features,
             apply_zero_sum=apply_zero_sum,
+            turn_range_equity_board_cache=turn_range_equity_board_cache,
         )
 
     def forward_pre(
@@ -5319,6 +5200,7 @@ class BetterStreetValueFFN(BetterFFN):
         features: MLPFeatures,
         static_base_features: torch.Tensor | None = None,
         apply_zero_sum: bool = True,
+        turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> torch.Tensor:
         if not hasattr(self, "pre_value_head"):
             raise RuntimeError(
@@ -5329,6 +5211,7 @@ class BetterStreetValueFFN(BetterFFN):
             self.pre_value_head,
             static_base_features=static_base_features,
             apply_zero_sum=apply_zero_sum,
+            turn_range_equity_board_cache=turn_range_equity_board_cache,
         )
 
     def forward_post(
@@ -5336,6 +5219,7 @@ class BetterStreetValueFFN(BetterFFN):
         features: MLPFeatures,
         static_base_features: torch.Tensor | None = None,
         apply_zero_sum: bool = True,
+        turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> torch.Tensor:
         if not hasattr(self, "post_value_head"):
             raise RuntimeError(
@@ -5346,6 +5230,7 @@ class BetterStreetValueFFN(BetterFFN):
             self.post_value_head,
             static_base_features=static_base_features,
             apply_zero_sum=apply_zero_sum,
+            turn_range_equity_board_cache=turn_range_equity_board_cache,
         )
 
     def forward_policy(self, features: MLPFeatures, latent=None) -> torch.Tensor:
@@ -5358,12 +5243,14 @@ class BetterStreetValueFFN(BetterFFN):
         apply_zero_sum: bool = True,
         static_base_features: torch.Tensor | None = None,
         value_head: str = "auto",
+        turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> ModelOutput:
         if value_head == "pre":
             hand_values = self.forward_pre(
                 features,
                 static_base_features=static_base_features,
                 apply_zero_sum=apply_zero_sum,
+                turn_range_equity_board_cache=turn_range_equity_board_cache,
             )
             return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
         if value_head == "post":
@@ -5371,6 +5258,7 @@ class BetterStreetValueFFN(BetterFFN):
                 features,
                 static_base_features=static_base_features,
                 apply_zero_sum=apply_zero_sum,
+                turn_range_equity_board_cache=turn_range_equity_board_cache,
             )
             return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
         if value_head != "auto":
@@ -5380,6 +5268,7 @@ class BetterStreetValueFFN(BetterFFN):
                 features,
                 static_base_features=static_base_features,
                 apply_zero_sum=apply_zero_sum,
+                turn_range_equity_board_cache=turn_range_equity_board_cache,
             )
             return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
         if self.value_heads == "post":
@@ -5387,6 +5276,7 @@ class BetterStreetValueFFN(BetterFFN):
                 features,
                 static_base_features=static_base_features,
                 apply_zero_sum=apply_zero_sum,
+                turn_range_equity_board_cache=turn_range_equity_board_cache,
             )
             return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
 
@@ -5397,11 +5287,13 @@ class BetterStreetValueFFN(BetterFFN):
                 features,
                 static_base_features=static_base_features,
                 apply_zero_sum=apply_zero_sum,
+                turn_range_equity_board_cache=turn_range_equity_board_cache,
             )
             post = self.forward_post(
                 features,
                 static_base_features=static_base_features,
                 apply_zero_sum=apply_zero_sum,
+                turn_range_equity_board_cache=turn_range_equity_board_cache,
             )
             hand_values = torch.where(pre_mask, pre, post)
             return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
@@ -5425,6 +5317,11 @@ class BetterStreetValueFFN(BetterFFN):
                 self.pre_value_head,
                 features[pre_rows],
                 apply_zero_sum=apply_zero_sum,
+                turn_range_equity_board_cache=(
+                    None
+                    if turn_range_equity_board_cache is None
+                    else turn_range_equity_board_cache.slice(pre_rows)
+                ),
             ).to(dtype=hand_values.dtype)
         if post_rows.numel() > 0:
             hand_values[post_rows] = self._value_tensor_from_base(
@@ -5434,6 +5331,11 @@ class BetterStreetValueFFN(BetterFFN):
                 self.post_value_head,
                 features[post_rows],
                 apply_zero_sum=apply_zero_sum,
+                turn_range_equity_board_cache=(
+                    None
+                    if turn_range_equity_board_cache is None
+                    else turn_range_equity_board_cache.slice(post_rows)
+                ),
             ).to(dtype=hand_values.dtype)
         return ModelOutput(value=hand_values.mean(dim=-1), hand_values=hand_values)
 
@@ -5444,6 +5346,7 @@ class BetterStreetValueFFN(BetterFFN):
         latent=None,
         apply_zero_sum: bool = True,
         value_head: str = "auto",
+        turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> ModelOutput:
         return self.forward_value(
             features,
@@ -5451,6 +5354,7 @@ class BetterStreetValueFFN(BetterFFN):
             apply_zero_sum=apply_zero_sum,
             static_base_features=static_base_features,
             value_head=value_head,
+            turn_range_equity_board_cache=turn_range_equity_board_cache,
         )
 
     def forward_both(
@@ -7340,7 +7244,7 @@ class BetterSplitFFN(BaseMLPModel):
         value_model = self.value_model
         value_model._compiled_forward_dynamic_batch = dynamic_batch
         value_model._compiled_forward_value_dynamic_batch = dynamic_batch
-        value_model._compiled_forward_value_static_base_dynamic_batch = dynamic_batch
+        value_model._compiled_forward_value_static_base_dynamic_batch = False
         value_model._compiled_forward_both_dynamic_batch = dynamic_batch
         value_ns = {"value_model": value_model}
         exec(
@@ -7451,6 +7355,7 @@ class BetterSplitFFN(BaseMLPModel):
         apply_zero_sum: bool = True,
         static_base_features: torch.Tensor | None = None,
         value_head: str = "auto",
+        turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None,
     ) -> ModelOutput:
         if value_head == "auto":
             return self.value_model.forward_value(
@@ -7459,6 +7364,7 @@ class BetterSplitFFN(BaseMLPModel):
                 apply_zero_sum=apply_zero_sum,
                 static_base_features=static_base_features,
                 value_head=value_head,
+                turn_range_equity_board_cache=turn_range_equity_board_cache,
             )
         return self.value_model._call_forward_value(
             features,
@@ -7466,6 +7372,7 @@ class BetterSplitFFN(BaseMLPModel):
             apply_zero_sum=apply_zero_sum,
             static_base_features=static_base_features,
             value_head=value_head,
+            turn_range_equity_board_cache=turn_range_equity_board_cache,
         )
 
     def static_feature_base(self, features: MLPFeatures) -> torch.Tensor:
