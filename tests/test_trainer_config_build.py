@@ -102,7 +102,9 @@ def test_rebel_curriculum_river_config_loads_from_yaml():
     assert cfg.curriculum.stages == ["river"]
     assert cfg.curriculum.substeps["river"].kind == "train"
     assert cfg.curriculum.substeps["river"].net == "S_river"
-    assert cfg.validation_set.enabled is False
+    assert cfg.model.num_value_layers == 7
+    assert cfg.model.value_output_init_scale == 0.0
+    assert cfg.validation_set.enabled is True
     assert cfg.validation_set.interval == 50
 
 
@@ -120,6 +122,13 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
         "adamw_learning_rate": 0.08,
         "batch_size": 1024,
     }
+    turn_distill_train_overrides = {
+        "learning_rate": 0.02,
+        "learning_rate_final": 0.002,
+        "lr_schedule": "linear",
+        "adamw_learning_rate": 0.02,
+        "batch_size": 1024,
+    }
 
     assert turn_cfg.data.live_root_source == "random_turn"
     assert turn_cfg.curriculum.stages == ["distill_E_turn", "turn"]
@@ -129,9 +138,11 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert turn_cfg.curriculum.substeps["distill_E_turn"].chance == "single_card"
     assert (
         turn_cfg.curriculum.substeps["distill_E_turn"].train_overrides
-        == distill_train_overrides
+        == turn_distill_train_overrides
     )
-    assert turn_cfg.curriculum.substeps["turn"].from_net == "S_river"
+    assert turn_cfg.model.num_value_layers == 7
+    assert turn_cfg.model.value_output_init_scale == 0.0
+    assert turn_cfg.curriculum.substeps["turn"].from_net is None
     assert turn_cfg.curriculum.substeps["turn"].closing_net == "E_turn"
     assert turn_cfg.curriculum.substeps["turn"].closing_checkpoint is None
     assert turn_cfg.curriculum.substeps["turn"].train_overrides == {}
@@ -180,6 +191,13 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
         "adamw_learning_rate": 0.08,
         "batch_size": 1024,
     }
+    turn_distill_train_overrides = {
+        "learning_rate": 0.02,
+        "learning_rate_final": 0.002,
+        "lr_schedule": "linear",
+        "adamw_learning_rate": 0.02,
+        "batch_size": 1024,
+    }
 
     assert cfg.data.mode == "live"
     assert cfg.curriculum.stages == [
@@ -190,14 +208,33 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
         "flop",
         "distill_E_preflop",
     ]
-    assert cfg.curriculum.substeps["river"].num_steps == 200000
-    assert cfg.curriculum.substeps["distill_E_turn"].num_steps == 20000
+    assert cfg.model.num_value_layers == 7
+    assert cfg.model.value_output_init_scale == 0.0
+    assert cfg.curriculum.substeps["river"].num_steps == 2000
+    assert cfg.curriculum.substeps["distill_E_turn"].num_steps == 100000
     assert cfg.curriculum.substeps["turn"].num_steps == 150000
     assert cfg.curriculum.substeps["distill_E_flop"].num_steps == 20000
     assert cfg.curriculum.substeps["flop"].num_steps == 150000
     assert cfg.curriculum.substeps["distill_E_preflop"].num_steps == 30000
     assert cfg.curriculum.substeps["river"].data_overrides == {
-        "live_root_source": "random_river"
+        "mode": "bootstrap_pregenerated",
+        "live_root_source": "random_river",
+        "pregenerated": {
+            "value_batch_size": 1024,
+            "policy_batch_size": 0,
+            "shuffle": True,
+            "direct_sample": False,
+            "pin_memory": True,
+            "async_shard_prefetch": True,
+            "validate_manifest": True,
+            "datasets": [
+                {
+                    "path": "outputs/rebel_postflop/river_value_500steps_512000_300it_20260630",
+                    "value_weight": 1.0,
+                    "policy_weight": 0.0,
+                }
+            ],
+        },
     }
     assert cfg.curriculum.substeps["turn"].data_overrides == {
         "live_root_source": "random_turn"
@@ -206,7 +243,7 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
         "live_root_source": "random_flop"
     }
     assert cfg.curriculum.substeps["turn"].closing_net == "E_turn"
-    assert cfg.curriculum.substeps["turn"].from_net == "S_river"
+    assert cfg.curriculum.substeps["turn"].from_net is None
     assert cfg.curriculum.substeps["flop"].closing_net == "E_flop"
     assert cfg.curriculum.substeps["flop"].from_net == "S_turn"
     assert cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"
@@ -216,7 +253,7 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
     assert cfg.curriculum.substeps["river"].train_overrides == {}
     assert (
         cfg.curriculum.substeps["distill_E_turn"].train_overrides
-        == distill_train_overrides
+        == turn_distill_train_overrides
     )
     assert cfg.curriculum.substeps["turn"].train_overrides == {}
     assert (

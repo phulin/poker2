@@ -175,6 +175,7 @@ def test_better_ffn_initial_policy_is_near_uniform():
         board_interaction_dim=16,
         policy_rank=16,
         policy_hand_bias_rank=8,
+        value_output_init_scale=0.1,
         nonlinearity="leaky_relu",
     )
     model.init_weights(torch.Generator(device="cpu").manual_seed(0))
@@ -748,6 +749,7 @@ def test_better_street_value_phase_conditioning_changes_output():
         num_policy_layers=1,
         num_value_layers=1,
         num_players=num_players,
+        value_output_init_scale=0.1,
     )
     model.init_weights(torch.Generator(device="cpu").manual_seed(2))
     assert torch.count_nonzero(model.belief_phase_shift.weight) == 0

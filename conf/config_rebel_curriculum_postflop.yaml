@@ -44,7 +44,7 @@ model:
   policy_hand_bias_rank: 24
   shared_trunk: true
   num_hidden_layers: 0
-  num_value_layers: 6
+  num_value_layers: 7
   num_policy_layers: 6
   compile: default
   enforce_zero_sum: true
@@ -69,9 +69,9 @@ model:
   value_turn_range_equity_rank_bins: 144
   value_turn_range_equity_chunk_size: 64
   value_turn_range_equity_blockers: false
-  value_turn_range_equity_pos_scale: 0.8108713632309251
-  value_turn_range_equity_neg_scale: 0.4734914215276203
-  value_turn_range_equity_intercept: -0.004416146041135697
+  value_turn_range_equity_pos_scale: 0.9798079151360882
+  value_turn_range_equity_neg_scale: 0.49473875960356073
+  value_turn_range_equity_intercept: -0.010443360992850112
 
 search:
   depth: 5
@@ -139,7 +139,9 @@ curriculum:
     turn:
       kind: train
       net: S_turn
-      from_net: S_river
+      # The train runner initializes the value model from closing_net when no
+      # explicit value_checkpoint is set. Leave from_net unset so policy starts
+      # fresh instead of inheriting the river policy.
       closing_net: E_turn
       closing_checkpoint: null
       num_steps: 150000

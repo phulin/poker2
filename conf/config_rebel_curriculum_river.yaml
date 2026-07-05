@@ -29,7 +29,7 @@ train:
 model:
   board_interaction_dim: 96
   belief_low_rank_dim: 128
-  num_value_layers: 6
+  num_value_layers: 7
   value_output_init_scale: 0.0
 
   # Fitted from S_river run yduykc9r. Regress new pos/neg/intercept values for

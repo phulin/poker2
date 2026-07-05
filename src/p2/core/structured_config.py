@@ -290,7 +290,7 @@ class ModelConfig:
     hidden_dim: int = 1536
     num_hidden_layers: int = 3
     num_policy_layers: int = 3
-    num_value_layers: int = 3
+    num_value_layers: int = 7
 
     # Better FFN parameters
     range_hidden_dim: int = 128
@@ -354,7 +354,7 @@ class ModelConfig:
     value_river_showdown_range_encoder: bool = False
     value_river_showdown_perhand_head: bool = False
     value_river_showdown_perhand_dim: int = 0
-    value_output_init_scale: float = 0.1
+    value_output_init_scale: float = 0.0
     value_action_summary_head: bool = False
     value_head_rank: int = 0
     value_hand_basis_rank: int = 0
