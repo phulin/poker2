@@ -539,6 +539,15 @@ def test_compile_forward_modes_can_leave_policy_eager_with_static_values(monkeyp
         for name, kwargs in compiled_calls
     )
 
+    model.compile_forward_modes(
+        dynamic=True,
+        policy_dynamic=True,
+        policy_compile=False,
+    )
+
+    assert model.value_model._compiled_forward_value_dynamic_batch is True
+    assert model.value_model._compiled_forward_value_static_base_dynamic_batch is False
+
 
 def test_dynamic_batch_marking_uses_strict_mark_dynamic(monkeypatch):
     calls = []

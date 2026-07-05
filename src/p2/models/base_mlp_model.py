@@ -33,7 +33,7 @@ class BaseMLPModel(nn.Module, ABC):
             policy_dynamic if compile_policy else False
         )
         self._compiled_forward_value_dynamic_batch = dynamic_batch
-        self._compiled_forward_value_static_base_dynamic_batch = dynamic_batch
+        self._compiled_forward_value_static_base_dynamic_batch = False
         self._compiled_forward_both_dynamic_batch = dynamic_batch
         if compile_policy:
             self._compiled_forward_policy = torch.compile(
