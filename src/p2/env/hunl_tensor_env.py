@@ -128,6 +128,11 @@ class HUNLTensorEnv:
         self.bb = int(bb)
         self.default_bet_bins = default_bet_bins or DEFAULT_BET_BINS
         self.num_bet_bins = len(self.default_bet_bins) + 3
+        self._default_bet_bins_tensor = torch.tensor(
+            self.default_bet_bins,
+            dtype=torch.float32,
+            device=self.device,
+        )
         self.debug_step_table = debug_step_table
         self.flop_showdown = flop_showdown
         self.randomize_stacks = stack_mode == "fixed_total_random_split"
@@ -227,6 +232,11 @@ class HUNLTensorEnv:
             self.chips_placed.zero_()
             self.done.zero_()
             self.winner.fill_(-1)
+
+    def _bet_bins_tensor(self, bet_bins: list[float]) -> torch.Tensor:
+        if bet_bins is self.default_bet_bins or list(bet_bins) == self.default_bet_bins:
+            return self._default_bet_bins_tensor
+        return torch.tensor(bet_bins, dtype=torch.float32, device=self.device)
 
     @classmethod
     def from_proto(
@@ -468,13 +478,13 @@ class HUNLTensorEnv:
         # Check/Call: you can always check or call, even if it might put you all in.
         mask[:, 1] = 1
 
-        # Pre-compute candidate concrete amounts for preset bins 2..B-2
-        bet_bins_t = torch.tensor(
-            [0] * 2 + bet_bins + [0], dtype=torch.float32, device=self.device
-        )
+        # Pre-compute candidate concrete amounts for preset bins 2..B-2.
+        # Reuse the device-resident default tensor so CUDA graph capture does
+        # not record a host-to-device copy from a Python list.
+        bet_bins_t = self._bet_bins_tensor(bet_bins)
         can_bet_raise = (me_stack > 0) & (opp_stack > 0)
         additional_amounts = (
-            bet_bins_t[2:-1].view(1, B - 3) * self.pot.view(N, 1)
+            bet_bins_t.view(1, B - 3) * self.pot.view(N, 1)
         ).long()
         bet_raise_amounts = to_call.view(N, 1) + additional_amounts  # [N, B-3]
 
@@ -529,11 +539,9 @@ class HUNLTensorEnv:
         opp_committed = self.committed[indices, opp]
         to_call = opp_committed - me_committed
 
-        bet_bins_t = torch.tensor(
-            [0] * 2 + bet_bins + [0], dtype=torch.float32, device=self.device
-        )
+        bet_bins_t = self._bet_bins_tensor(bet_bins)
         additional_amounts = (
-            bet_bins_t[2:-1].view(1, B - 3) * self.pot[indices].view(M, 1)
+            bet_bins_t.view(1, B - 3) * self.pot[indices].view(M, 1)
         ).long()
         amounts[:, 2:-1] = to_call.view(M, 1) + additional_amounts
         amounts[:, B - 1] = me_stack
