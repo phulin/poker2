@@ -455,6 +455,14 @@ class CFREvaluator(ABC):
             indices=node_indices,
         )
         encoded.beliefs = features.beliefs[positions]
+        if features.source_rows is not None and int(positions.numel()) == len(features):
+            encoded.source_rows = features.source_rows
+        else:
+            encoded.source_rows = (
+                positions.to(torch.long).contiguous()
+                if features.source_rows is None
+                else features.source_rows[positions].to(torch.long).contiguous()
+            )
         return encoded
 
     def _closing_model_num_players(self) -> int:

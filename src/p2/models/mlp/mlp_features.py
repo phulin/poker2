@@ -39,6 +39,7 @@ class MLPFeatures:
     board: torch.Tensor
     beliefs: torch.Tensor
     hand_dim: int = NUM_HANDS
+    source_rows: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         N = self.context.shape[0]
@@ -73,6 +74,11 @@ class MLPFeatures:
                     board=self.board[index],
                     beliefs=self.beliefs[index],
                     hand_dim=self.hand_dim,
+                    source_rows=(
+                        None
+                        if self.source_rows is None
+                        else self.source_rows[index].contiguous()
+                    ),
                 )
             ctx, street, to_act, board, beliefs = _index_all(
                 self.context, self.street, self.to_act, self.board, self.beliefs, index
@@ -84,6 +90,11 @@ class MLPFeatures:
                 board=board,
                 beliefs=beliefs,
                 hand_dim=self.hand_dim,
+                source_rows=(
+                    None
+                    if self.source_rows is None
+                    else self.source_rows[index].contiguous()
+                ),
             )
         return MLPFeatures(
             context=self.context[index],
@@ -92,6 +103,9 @@ class MLPFeatures:
             board=self.board[index],
             beliefs=self.beliefs[index],
             hand_dim=self.hand_dim,
+            source_rows=(
+                None if self.source_rows is None else self.source_rows[index]
+            ),
         )
 
     def __setitem__(
@@ -112,6 +126,7 @@ class MLPFeatures:
             board=self.board.to(device),
             beliefs=self.beliefs.to(device),
             hand_dim=self.hand_dim,
+            source_rows=None if self.source_rows is None else self.source_rows.to(device),
         )
 
     def clone(self) -> "MLPFeatures":
@@ -122,6 +137,7 @@ class MLPFeatures:
             board=self.board.clone(),
             beliefs=self.beliefs.clone(),
             hand_dim=self.hand_dim,
+            source_rows=None if self.source_rows is None else self.source_rows.clone(),
         )
 
     @classmethod
@@ -140,6 +156,11 @@ class MLPFeatures:
             board=torch.cat([f.board for f in features_list], dim=0),
             beliefs=torch.cat([f.beliefs for f in features_list], dim=0),
             hand_dim=hand_dim,
+            source_rows=(
+                None
+                if any(f.source_rows is None for f in features_list)
+                else torch.cat([f.source_rows for f in features_list], dim=0)
+            ),
         )
 
     def permute_suits(

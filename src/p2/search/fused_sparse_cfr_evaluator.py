@@ -137,6 +137,13 @@ def _compile_setting_from_env(cfg=None) -> str:
     return value
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _compile_kwargs_from_env(cfg=None) -> dict[str, object]:
     dynamic_env = os.environ.get("P2_FUSED_COMPILE_DYNAMIC")
     if dynamic_env is None:
@@ -234,10 +241,12 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         # Pre-allocated buffer used by set_leaf_values to keep
         # self.last_model_values pinned across calls (no rebinding → graph-safe).
         self._last_model_values_buf: torch.Tensor | None = None
-        self._turn_range_equity_board_cache_key: tuple[int, int, int, int] | None = (
-            None
-        )
+        self._turn_range_equity_board_cache_key: tuple[int, ...] | None = None
         self._turn_range_equity_board_cache: TurnRangeEquityBoardCache | None = None
+        self._turn_range_equity_board_cache_by_key: dict[
+            tuple[int, ...],
+            TurnRangeEquityBoardCache,
+        ] = {}
         # When True, cfr_iteration skips the full policy_probs.clone() kept for
         # _record_stats. Set by GraphedCFRIteration when stats are stubbed out.
         self._skip_record_stats: bool = False
@@ -277,6 +286,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._static_model_base_fn_key: int | None = None
         self._static_model_feature_key: tuple[int, int, int, int] | None = None
         self._static_model_feature_fields: tuple[torch.Tensor, ...] | None = None
+        self._static_model_feature_rows: torch.Tensor | None = None
         self._leaf_belief_gather_indices: torch.Tensor | None = None
         self._leaf_belief_gather_key: tuple[int, int, int] | None = None
         self._model_leaf_scatter_enabled: bool = True
@@ -571,6 +581,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._static_model_feature_key = None
         if not hasattr(self, "_static_model_feature_fields"):
             self._static_model_feature_fields = None
+        if not hasattr(self, "_static_model_feature_rows"):
+            self._static_model_feature_rows = None
         if not hasattr(self, "_leaf_belief_gather_indices"):
             self._leaf_belief_gather_indices = None
         if not hasattr(self, "_leaf_belief_gather_key"):
@@ -589,6 +601,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             self._model_leaf_beliefs_valid = False
         if not hasattr(self, "_subgame_generation"):
             self._subgame_generation = 0
+        if not hasattr(self, "_turn_range_equity_board_cache_by_key"):
+            self._turn_range_equity_board_cache_by_key = {}
         if not hasattr(self, "_br_action_parent_index_cache"):
             self._br_action_parent_index_cache = {}
         if not hasattr(self, "_tree_slice_key"):
@@ -659,6 +673,10 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         self._static_model_base_features = None
         self._static_model_feature_key = None
         self._static_model_feature_fields = None
+        self._static_model_feature_rows = None
+        self._turn_range_equity_board_cache_key = None
+        self._turn_range_equity_board_cache = None
+        self._turn_range_equity_board_cache_by_key.clear()
         self._leaf_belief_gather_indices = None
         self._leaf_belief_gather_key = None
         self._model_leaf_slot = None
@@ -1858,6 +1876,11 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
                 static_features.to_act,
                 static_features.board,
             )
+            self._static_model_feature_rows = torch.arange(
+                int(static_features.board.shape[0]),
+                dtype=torch.long,
+                device=static_features.board.device,
+            )
             self._static_model_feature_key = key
 
         ctx, street, to_act, board = self._static_model_feature_fields
@@ -1867,6 +1890,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             to_act=to_act,
             board=board,
             beliefs=beliefs_at_model.reshape(-1, 2 * NUM_HANDS),
+            source_rows=self._static_model_feature_rows,
         )
 
     def _leaf_beliefs_for_model(self, beliefs: torch.Tensor) -> torch.Tensor:
@@ -2568,27 +2592,75 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
         rank_bins = int(getattr(equity_model, "value_turn_range_equity_rank_bins", 0))
         if rank_bins <= 0:
             return None
-        key = (
-            int(self._subgame_generation),
-            int(features.board.data_ptr()),
-            int(features.board.shape[0]),
-            rank_bins,
+        use_pair_operator = (
+            _env_bool("P2_TURN_EQUITY_PAIR_OPERATOR_BASELINE", True)
+            and not bool(
+                getattr(equity_model, "value_turn_range_equity_blockers", False)
+            )
         )
-        if (
-            self._turn_range_equity_board_cache_key != key
-            or self._turn_range_equity_board_cache is None
-        ):
-            self._turn_range_equity_board_cache = build_turn_range_equity_board_cache(
-                features.board[:, :4],
+        source_rows = getattr(features, "source_rows", None)
+        full_board = None
+        full_rows = getattr(self, "_static_model_feature_rows", None)
+        if source_rows is not None and self._static_model_feature_fields is not None:
+            full_board = self._static_model_feature_fields[3]
+        board_for_cache = full_board if full_board is not None else features.board
+        base_key = (
+            int(self._subgame_generation),
+            int(board_for_cache.data_ptr()),
+            int(board_for_cache.shape[0]),
+            rank_bins,
+            int(use_pair_operator),
+            0,
+        )
+        cache = self._turn_range_equity_board_cache_by_key.get(base_key)
+        if cache is None:
+            if (
+                board_for_cache.is_cuda
+                and torch.cuda.is_available()
+                and torch.cuda.is_current_stream_capturing()
+            ):
+                raise RuntimeError(
+                    "turn range-equity board cache was not warmed before "
+                    "CUDA graph capture"
+                )
+            cache = build_turn_range_equity_board_cache(
+                board_for_cache[:, :4],
                 rank_bins=rank_bins,
                 rank_groups_fn=equity_model._river_rank_groups,
                 include_hand_runout_ok=True,
                 dedupe_boards=True,
                 balanced_bins=True,
                 include_sorted_bins=True,
+                include_pair_operator=use_pair_operator,
+                pair_operator_dtype=torch.float16,
             )
-            self._turn_range_equity_board_cache_key = key
-        return self._turn_range_equity_board_cache
+            self._turn_range_equity_board_cache_by_key[base_key] = cache
+
+        key = base_key
+        if source_rows is not None and source_rows is not full_rows:
+            key = (
+                *base_key,
+                int(source_rows.data_ptr()),
+                int(source_rows.numel()),
+            )
+            sliced = self._turn_range_equity_board_cache_by_key.get(key)
+            if sliced is None:
+                if (
+                    source_rows.is_cuda
+                    and torch.cuda.is_available()
+                    and torch.cuda.is_current_stream_capturing()
+                ):
+                    raise RuntimeError(
+                        "turn range-equity board cache slice was not warmed "
+                        "before CUDA graph capture"
+                    )
+                sliced = cache.slice(source_rows)
+                self._turn_range_equity_board_cache_by_key[key] = sliced
+            cache = sliced
+
+        self._turn_range_equity_board_cache_key = key
+        self._turn_range_equity_board_cache = cache
+        return cache
 
     def _eval_model_for_fused_writeback(
         self,
@@ -3369,6 +3441,8 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
 
     def _graph_capture_regime(self, t: int) -> str | None:
         """Return the Python-branch regime that is safe to CUDA-graph replay."""
+        if not _env_bool("P2_FUSED_CFR_CUDA_GRAPHS", True):
+            return None
         if t < 2:
             return None
         if self._uses_dcfr_backbone() and t <= self.dcfr_delay:

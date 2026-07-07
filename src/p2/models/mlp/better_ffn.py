@@ -37,6 +37,7 @@ from p2.models.mlp.mlp_features import MLPFeatures
 from p2.models.mlp.turn_range_equity import (
     TurnRangeEquityBoardCache,
     TurnRangeEquityConfig,
+    apply_turn_pair_operator_baseline_value,
     turn_range_equity_baseline,
     turn_range_equity_features,
     turn_runout_boards as turn_equity_runout_boards,
@@ -3819,6 +3820,16 @@ class BetterFFN(BaseMLPModel):
     ) -> torch.Tensor:
         if not self.value_turn_range_equity_baseline:
             return hand_values
+        if os.environ.get("P2_TURN_EQUITY_PAIR_DIRECT_APPLY", "0") not in {"", "0"}:
+            pair_applied = apply_turn_pair_operator_baseline_value(
+                hand_values,
+                player_beliefs,
+                features,
+                config=self._turn_range_equity_config(),
+                board_cache=board_cache,
+            )
+            if pair_applied is not None:
+                return pair_applied
         return hand_values + self._turn_range_equity_value(
             player_beliefs,
             features,
