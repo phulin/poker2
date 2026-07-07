@@ -31,6 +31,7 @@ Focused microbenchmarks for tensor operations, CFR evaluator variants, Triton ke
 - `bench_triton_pbs_env.py`: PBSEnv and TritonPBSEnv benchmark.
 - `bench_triton_small_k_dot.py`: Small-K Triton dot benchmark.
 - `bench_turn_training_hotspots.py`: S_turn training hotspot benchmark that separates turn equity baseline, value-forward, leaf-value writeback, and full random-turn CFR solve costs.
+- `bench_turn_equity_operator.py`: Turn equity baseline microbenchmark comparing the current prefix/rank-cache path to a precomputed per-root hand-pair operator with batched GEMM over leaves sharing a root.
 - `cfr_optimizations_bench.py`: CFR optimization comparison benchmark.
 - `multiway_showdown_estimators.py`: Multiway showdown estimator validation harness.
 - `profile_chance_helper.py`: Chance-node helper profiler.
