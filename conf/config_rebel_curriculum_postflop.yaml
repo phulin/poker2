@@ -69,9 +69,9 @@ model:
   value_turn_range_equity_rank_bins: 144
   value_turn_range_equity_chunk_size: 64
   value_turn_range_equity_blockers: false
-  value_turn_range_equity_pos_scale: 0.9798079151360882
-  value_turn_range_equity_neg_scale: 0.49473875960356073
-  value_turn_range_equity_intercept: -0.010443360992850112
+  value_turn_range_equity_pos_scale: 1.0111476615306025
+  value_turn_range_equity_neg_scale: 0.5328414364058676
+  value_turn_range_equity_intercept: -0.008690868801753902
 
 search:
   depth: 5
