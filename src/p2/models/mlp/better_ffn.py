@@ -4789,6 +4789,11 @@ class BetterFFN(BaseMLPModel):
                     nn.init.zeros_(module.bias)
             elif isinstance(module, (nn.RMSNorm, nn.LayerNorm)):
                 nn.init.ones_(module.weight)
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(module.weight, mean=0.0, std=0.02, generator=rng)
+                if module.padding_idx is not None:
+                    with torch.no_grad():
+                        module.weight[module.padding_idx].zero_()
 
         expansion_gain = math.sqrt(self.ffn_dim / self.hidden_dim)
         sequentials = [self.trunk]
