@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from p2.env.card_utils import NUM_HANDS, combo_compatible_tensor, hand_combos_tensor
@@ -107,7 +108,7 @@ def test_turn_range_equity_matches_reference_with_blockers() -> None:
     )
     features = _features_for_turn(board, beliefs, pot=1.0)
 
-    baseline, _ = model._turn_range_equity_features(
+    baseline, feature_values = model._turn_range_equity_features(
         beliefs,
         features,
         torch.float32,
@@ -115,3 +116,51 @@ def test_turn_range_equity_matches_reference_with_blockers() -> None:
 
     expected = _reference_turn_equity(board[0, :4], beliefs[0], blockers=True)
     torch.testing.assert_close(baseline[0], expected, rtol=1e-5, atol=1e-5)
+    assert torch.all(feature_values[..., 3] >= 0.0)
+    assert torch.any(feature_values[..., 3] > 0.0)
+
+
+@pytest.mark.parametrize(
+    "film_kwargs",
+    [
+        {"value_turn_range_equity_board_film": True},
+        {"value_turn_range_equity_hand_board_film": True},
+        {"value_turn_range_equity_decomposition_features": True},
+        {"value_turn_range_equity_runout_std_feature": True},
+        {
+            "value_turn_range_equity_decomposition_features": True,
+            "value_turn_range_equity_runout_std_feature": True,
+        },
+        {"value_turn_range_equity_blocker_interactions": True},
+        {"value_turn_range_equity_feature_hidden_dim": 32},
+        {
+            "value_turn_range_equity_blocker_interactions": True,
+            "value_turn_range_equity_feature_hidden_dim": 32,
+        },
+    ],
+)
+def test_turn_range_equity_conditioned_feature_heads(film_kwargs) -> None:
+    board = torch.tensor([[1, 15, 29, 43, -1]], dtype=torch.long)
+    beliefs = torch.rand(1, 2, NUM_HANDS, generator=torch.Generator().manual_seed(9))
+    model = BetterFFN(
+        num_actions=3,
+        hidden_dim=16,
+        range_hidden_dim=8,
+        ffn_dim=16,
+        num_hidden_layers=1,
+        num_policy_layers=1,
+        num_value_layers=1,
+        value_turn_range_equity_baseline=True,
+        value_turn_range_equity_feature_head=True,
+        value_turn_range_equity_blockers=True,
+        value_turn_range_equity_rank_bins=NUM_HANDS,
+        value_turn_range_equity_chunk_size=1,
+        **film_kwargs,
+    )
+    model.init_weights(torch.Generator().manual_seed(2))
+    features = _features_for_turn(board, beliefs, pot=1.0)
+
+    values = model._turn_range_equity_value(beliefs, features, torch.float32)
+
+    assert values.shape == beliefs.shape
+    assert torch.isfinite(values).all()

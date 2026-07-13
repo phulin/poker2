@@ -16,7 +16,7 @@ CFR/DCFR search, public-belief state handling, ReBeL data generation, evaluator 
 - `preflop_live_pair_distillation.py`: Live-pair E-preflop distillation batch builder.
 - `preflop_sparse_cfr_evaluator.py`: Compact preflop sparse CFR evaluator.
 - `rebel_data_generator.py`: ReBeL public-belief training data generator.
-- `rebel_data_source.py`: Data-source boundary for ReBeL trainer batches, including live, pregenerated, hybrid holdout, and finite pregenerated-bootstrap streams.
+- `rebel_data_source.py`: Data-source boundary for ReBeL trainer batches, including rational-rate live generation for streaming epochs, pregenerated data, hybrid holdout, and finite bootstrap streams.
 - `rebel_solved_dataset.py`: Tensor-only solved-example dataset reader/writer.
 - `sparse_cfr_evaluator.py`: Reference sparse CFR evaluator implementation.
 - `subgame_constructor_triton.py`: Triton kernels for sparse subgame construction.

@@ -1320,6 +1320,8 @@ class TurnRangeEquityConfig:
     pos_scale: float
     neg_scale: float
     intercept: float
+    runout_std: bool = False
+    decomposition: bool = False
 
 
 def _leaf_grouping_tensors(
@@ -2947,6 +2949,9 @@ def _turn_range_equity_chunk(
     tie = rank_mass.gather(1, flat_rank_idx)
     lower = cumulative.gather(1, flat_rank_idx) - tie
     per_river_total = rank_mass.sum(dim=1)
+    raw_total = per_river_total.view(chunk, num_players, 48, 1)
+    raw_tie = tie
+    raw_lower = lower
 
     if config.blockers:
         combos = hand_combos_tensor(device=beliefs.device)
@@ -2994,12 +2999,18 @@ def _turn_range_equity_chunk(
             NUM_HANDS,
         )
     else:
-        total = per_river_total.view(chunk, num_players, 48, 1)
+        total = raw_total
 
     hero_ok = hand_runout_ok[:, None, :, :].to(dtype=beliefs.dtype)
     lower_sum = (lower.view(chunk, num_players, 48, NUM_HANDS) * hero_ok).sum(dim=2)
     tie_sum = (tie.view(chunk, num_players, 48, NUM_HANDS) * hero_ok).sum(dim=2)
     total_sum = (total * hero_ok).sum(dim=2)
+    raw_total_sum = (raw_total * hero_ok).sum(dim=2)
+    blocked_fraction = torch.where(
+        raw_total_sum > 0.0,
+        (raw_total_sum - total_sum).clamp_min(0.0) / raw_total_sum.clamp_min(1e-8),
+        torch.zeros_like(raw_total_sum),
+    )
     safe_total = total_sum.clamp_min(1e-8)
     equity_score = (2.0 * lower_sum + tie_sum - total_sum) / safe_total
     equity_score = torch.where(
@@ -3007,11 +3018,50 @@ def _turn_range_equity_chunk(
         equity_score,
         torch.zeros_like(equity_score),
     )
+    if config.decomposition:
+        raw_lower_sum = (
+            raw_lower.view(chunk, num_players, 48, NUM_HANDS) * hero_ok
+        ).sum(dim=2)
+        raw_tie_sum = (
+            raw_tie.view(chunk, num_players, 48, NUM_HANDS) * hero_ok
+        ).sum(dim=2)
+        raw_equity_score = torch.where(
+            raw_total_sum > 0.0,
+            (2.0 * raw_lower_sum + raw_tie_sum - raw_total_sum)
+            / raw_total_sum.clamp_min(1e-8),
+            torch.zeros_like(raw_total_sum),
+        )
+    else:
+        raw_equity_score = torch.zeros_like(equity_score)
+
+    if config.runout_std:
+        river_lower = lower.view(chunk, num_players, 48, NUM_HANDS)
+        river_tie = tie.view(chunk, num_players, 48, NUM_HANDS)
+        river_total = total.expand_as(river_lower)
+        river_valid = (river_total > 0.0) & (hero_ok > 0.0)
+        river_equity = torch.where(
+            river_valid,
+            (2.0 * river_lower + river_tie - river_total)
+            / river_total.clamp_min(1e-8),
+            torch.zeros_like(river_total),
+        )
+        river_valid_float = river_valid.to(beliefs.dtype)
+        river_count = river_valid_float.sum(dim=2).clamp_min(1.0)
+        river_mean = (river_equity * river_valid_float).sum(dim=2) / river_count
+        river_variance = (
+            (river_equity - river_mean[:, :, None, :]).square()
+            * river_valid_float
+        ).sum(dim=2) / river_count
+    else:
+        river_variance = torch.zeros_like(equity_score)
 
     pot_scale = context[:, ValueScalarContext.POT.value].float()
     if config.pot_power != 1.0:
         pot_scale = pot_scale.clamp_min(0.0).pow(config.pot_power)
     sdv = equity_score * pot_scale[:, None, None]
+    raw_sdv = raw_equity_score * pot_scale[:, None, None]
+    blocker_sdv = sdv - raw_sdv
+    runout_sdv_std = river_variance.clamp_min(0.0).sqrt() * pot_scale[:, None, None]
     if config.pos_scale >= 0.0:
         value = (
             sdv.clamp_min(0.0) * config.pos_scale
@@ -3023,15 +3073,24 @@ def _turn_range_equity_chunk(
 
     valid_rivers = hand_runout_ok.sum(dim=1).clamp_min(1)
     avg_total_mass = total_sum / valid_rivers[:, None, :].to(dtype=total_sum.dtype)
+    avg_blocked_mass = (raw_total_sum - total_sum).clamp_min(0.0) / valid_rivers[
+        :, None, :
+    ].to(dtype=total_sum.dtype)
     spr = player_spr_context(context, num_players).float()
     feature_values = torch.stack(
         (
             sdv,
             beliefs,
             avg_total_mass,
-            torch.zeros_like(avg_total_mass),
+            blocked_fraction,
             pot_scale[:, None, None].expand_as(equity_score),
             spr[:, :, None].expand_as(equity_score),
+            raw_sdv,
+            blocker_sdv,
+            runout_sdv_std,
+            avg_blocked_mass,
+            blocked_fraction * sdv,
+            blocked_fraction.square(),
         ),
         dim=-1,
     )
@@ -3055,9 +3114,9 @@ def turn_range_equity_features(
     )
     feature_values = player_beliefs.new_zeros(
         player_beliefs.shape[0],
-        player_beliefs.shape[1],
-        NUM_HANDS,
-        6,
+            player_beliefs.shape[1],
+            NUM_HANDS,
+            12,
         dtype=dtype,
     )
     rows = torch.arange(player_beliefs.shape[0], device=player_beliefs.device)

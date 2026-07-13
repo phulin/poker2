@@ -145,6 +145,15 @@ curriculum:
       closing_net: E_turn
       closing_checkpoint: null
       num_steps: 150000
+      train_overrides:
+        learning_rate: 0.004
+        learning_rate_final: 0.0004
+        lr_schedule: cosine
+        adamw_learning_rate: 0.0004
+        batch_size: 4096
+        value_replay_mode: streaming_epoch
+        value_replay_epochs: 3
+        value_epoch_block_batches: 20
       data_overrides:
         live_root_source: random_turn
     distill_E_flop:
@@ -166,6 +175,15 @@ curriculum:
       closing_net: E_flop
       closing_checkpoint: null
       num_steps: 150000
+      train_overrides:
+        learning_rate: 0.004
+        learning_rate_final: 0.0004
+        lr_schedule: cosine
+        adamw_learning_rate: 0.0004
+        batch_size: 4096
+        value_replay_mode: streaming_epoch
+        value_replay_epochs: 3
+        value_epoch_block_batches: 20
       data_overrides:
         live_root_source: random_flop
     distill_E_preflop:

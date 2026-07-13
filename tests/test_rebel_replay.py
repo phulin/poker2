@@ -4,7 +4,11 @@ import pytest
 from p2.env.card_utils import NUM_HANDS
 from p2.models.mlp.mlp_features import MLPFeatures
 from p2.rl.rebel_batch import RebelBatch
-from p2.rl.rebel_replay import RebelPolicyBuffer, RebelReplayBuffer
+from p2.rl.rebel_replay import (
+    RebelPolicyBuffer,
+    RebelReplayBuffer,
+    StreamingEpochValueBuffer,
+)
 
 
 def _make_policy_batch(batch_size: int, num_actions: int, depths: torch.Tensor):
@@ -25,6 +29,116 @@ def _make_policy_batch(batch_size: int, num_actions: int, depths: torch.Tensor):
         legal_masks=torch.ones(batch_size, num_actions, dtype=torch.bool),
         statistics={"node_depth": depths},
     )
+
+
+def _make_value_batch(ids: torch.Tensor, num_actions: int = 3) -> RebelBatch:
+    count = int(ids.shape[0])
+    return RebelBatch(
+        features=MLPFeatures(
+            context=ids.float()[:, None],
+            street=torch.full((count,), 2, dtype=torch.long),
+            to_act=torch.zeros(count, dtype=torch.long),
+            board=torch.zeros(count, 5, dtype=torch.long),
+            beliefs=torch.ones(count, 2 * NUM_HANDS),
+        ),
+        policy_targets=None,
+        value_targets=torch.zeros(count, 2, NUM_HANDS),
+        legal_masks=torch.ones(count, num_actions, dtype=torch.bool),
+        statistics={"sample_id": ids.clone()},
+    )
+
+
+def test_streaming_epoch_value_buffer_exact_coverage_and_swap() -> None:
+    buffer = StreamingEpochValueBuffer(
+        block_capacity=8,
+        epochs=3,
+        num_actions=3,
+        num_players=2,
+        num_context_features=1,
+        device=torch.device("cpu"),
+        generator=torch.Generator().manual_seed(17),
+    )
+    buffer.add_batch(_make_value_batch(torch.arange(3)))
+    assert len(buffer) == 0
+    buffer.add_batch(_make_value_batch(torch.arange(3, 8)))
+    assert len(buffer) == 8
+
+    buffer.add_batch(_make_value_batch(torch.arange(8, 16)))
+    seen = []
+    for _ in range(12):
+        seen.extend(buffer.sample(2).statistics["sample_id"].tolist())
+
+    assert sorted(seen) == sorted(list(range(8)) * 3)
+    assert buffer.read_block == 1
+    assert buffer.write_size == 0
+    assert set(buffer.sample(2).statistics["sample_id"].tolist()).issubset(
+        set(range(8, 16))
+    )
+
+
+def test_streaming_epoch_value_buffer_checkpoint_roundtrip() -> None:
+    source = StreamingEpochValueBuffer(
+        block_capacity=8,
+        epochs=3,
+        num_actions=3,
+        num_players=2,
+        num_context_features=1,
+        device=torch.device("cpu"),
+        generator=torch.Generator().manual_seed(19),
+    )
+    source.add_batch(_make_value_batch(torch.arange(8)))
+    source.add_batch(_make_value_batch(torch.arange(8, 12)))
+    source.sample(2)
+
+    restored = StreamingEpochValueBuffer(
+        block_capacity=8,
+        epochs=3,
+        num_actions=3,
+        num_players=2,
+        num_context_features=1,
+        device=torch.device("cpu"),
+        generator=torch.Generator().manual_seed(19),
+    )
+    restored.load_state_dict(source.state_dict())
+
+    assert restored.read_block == source.read_block
+    assert restored.write_block == source.write_block
+    assert restored.write_size == source.write_size
+    assert restored.read_epoch == source.read_epoch
+    assert restored.read_cursor == source.read_cursor
+    torch.testing.assert_close(restored.read_order, source.read_order)
+    torch.testing.assert_close(
+        restored.sample(2).statistics["sample_id"],
+        source.sample(2).statistics["sample_id"],
+    )
+
+
+def test_streaming_epoch_value_buffer_carries_generation_overflow() -> None:
+    buffer = StreamingEpochValueBuffer(
+        block_capacity=8,
+        epochs=1,
+        num_actions=3,
+        num_players=2,
+        num_context_features=1,
+        device=torch.device("cpu"),
+        generator=torch.Generator().manual_seed(23),
+    )
+    buffer.add_batch(_make_value_batch(torch.arange(10)))
+
+    assert len(buffer) == 8
+    assert buffer.write_size == 2
+    assert not buffer.pending_batches
+
+    buffer.add_batch(_make_value_batch(torch.arange(10, 18)))
+    assert buffer.write_size == 8
+    assert len(buffer.pending_batches) == 1
+    assert len(buffer.pending_batches[0]) == 2
+
+    for _ in range(4):
+        buffer.sample(2)
+
+    assert buffer.write_size == 2
+    assert not buffer.pending_batches
 
 
 def test_rebel_replay_buffer_roundtrip():

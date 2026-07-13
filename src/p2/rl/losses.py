@@ -994,6 +994,20 @@ class RebelSupervisedLoss(nn.Module):
         )
         return value_weights * multiplicity.view(1, 1, PREFLOP_HANDS)
 
+    @staticmethod
+    def _apply_value_loss_weight(
+        value_weights: torch.Tensor,
+        batch: RebelBatch,
+    ) -> torch.Tensor:
+        loss_weight = batch.statistics.get("value_loss_weight")
+        if loss_weight is None:
+            return value_weights
+        loss_weight = loss_weight.to(
+            device=value_weights.device,
+            dtype=value_weights.dtype,
+        ).clamp_min(0.0)
+        return value_weights * loss_weight.view(-1, 1, 1)
+
     def _zero(self, device: torch.device) -> torch.Tensor:
         return torch.zeros((), device=device)
 
@@ -1208,13 +1222,7 @@ class RebelSupervisedLoss(nn.Module):
     ) -> dict[str, torch.Tensor]:
         device = hand_values.device
         value_weights = self._compact_value_weights(batch, hand_values.dtype)
-        loss_weight = batch.statistics.get("value_loss_weight")
-        if loss_weight is not None:
-            loss_weight = loss_weight.to(
-                device=value_weights.device,
-                dtype=value_weights.dtype,
-            ).clamp_min(0.0)
-            value_weights = value_weights * loss_weight.view(-1, 1, 1)
+        value_weights = self._apply_value_loss_weight(value_weights, batch)
         sq_error = F.mse_loss(hand_values, value_targets, reduction="none")
         value_loss_all = sq_error.detach() * value_weights
         value_loss = (sq_error * value_weights).sum() / value_weights.sum().clamp(
@@ -1534,6 +1542,7 @@ class RebelSupervisedLoss(nn.Module):
             allowed_hands_float,
             live_mask=self._live_player_mask(batch),
         )
+        value_weights = self._apply_value_loss_weight(value_weights, batch)
         value_loss = F.mse_loss(hand_values, value_targets, weight=value_weights)
         value_loss_all = F.mse_loss(
             hand_values.detach(),
@@ -1641,6 +1650,7 @@ class RebelSupervisedLoss(nn.Module):
                 allowed_hands_float,
                 live_mask=self._live_player_mask(batch),
             )
+        value_weights = self._apply_value_loss_weight(value_weights, batch)
         value_loss = F.mse_loss(hand_values, value_targets, weight=value_weights)
         value_loss_all = F.mse_loss(
             hand_values.detach(),

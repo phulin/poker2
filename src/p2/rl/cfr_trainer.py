@@ -58,7 +58,11 @@ from p2.rl.losses import RebelSupervisedLoss
 from p2.rl.optimizers import build_optimizer
 from p2.rl.rebel_batch import RebelBatch
 from p2.rl.trueskill_tracker import TrueSkillTracker
-from p2.rl.rebel_replay import RebelPolicyBuffer, RebelValueBuffer
+from p2.rl.rebel_replay import (
+    RebelPolicyBuffer,
+    RebelValueBuffer,
+    StreamingEpochValueBuffer,
+)
 from p2.rl.value_metrics import (
     pot_relative_value_error_metrics as _pot_relative_value_error_metrics,
 )
@@ -190,15 +194,21 @@ def _compile_kwargs(cfg: Config) -> dict[str, object]:
         dynamic = dynamic_env.strip().lower() not in {"0", "false", "no", "off"}
     kwargs: dict[str, object] = {"dynamic": dynamic}
     if policy_dynamic_env is not None:
-        kwargs["policy_dynamic"] = (
-            policy_dynamic_env.strip().lower() not in {"0", "false", "no", "off"}
-        )
+        kwargs["policy_dynamic"] = policy_dynamic_env.strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
     elif mode == "static":
         kwargs["policy_dynamic"] = True
     if policy_compile_env is not None:
-        kwargs["policy_compile"] = (
-            policy_compile_env.strip().lower() not in {"0", "false", "no", "off"}
-        )
+        kwargs["policy_compile"] = policy_compile_env.strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
     elif mode == "static":
         kwargs["policy_compile"] = False
     if mode in {"reduce-overhead", "max-autotune"}:
@@ -365,9 +375,17 @@ class RebelCFRTrainer:
         init_trace("training model ready")
 
         # data generation rate per training step
-        self.K_value = _value_samples_per_step(
-            self.batch_size, self.cfg.train.value_reuse_goal
-        )
+        self.value_replay_mode = cfg.train.value_replay_mode
+        if self.value_replay_mode == "streaming_epoch":
+            self.K_value = math.ceil(
+                self.batch_size
+                * cfg.train.episodes_per_step
+                / cfg.train.value_replay_epochs
+            )
+        else:
+            self.K_value = _value_samples_per_step(
+                self.batch_size, self.cfg.train.value_reuse_goal
+            )
         # approximate number of policy samples when collecting K_value value samples
         policy_decimate = (
             self.num_actions / 2
@@ -376,7 +394,11 @@ class RebelCFRTrainer:
         self.stream_live_batches = False
 
         C_over_K = self.cfg.train.replay_buffer_batches
-        value_capacity = int(math.ceil(C_over_K * self.K_value))
+        value_capacity = (
+            self.batch_size * cfg.train.value_epoch_block_batches
+            if self.value_replay_mode == "streaming_epoch"
+            else int(math.ceil(C_over_K * self.K_value))
+        )
         policy_capacity = int(
             math.ceil(value_capacity * self.cfg.train.policy_capacity_factor)
         )
@@ -387,16 +409,30 @@ class RebelCFRTrainer:
             self.policy_buffer = None
         else:
             # Replay buffers
-            self.value_buffer = RebelValueBuffer(
-                capacity=value_capacity,
-                num_actions=self.num_actions,
-                num_players=self.num_players,
-                num_context_features=num_context_features,
-                device=self.buffer_device,
-                hand_dim=replay_hand_dim,
-                underfull_evict_fraction=cfg.train.replay_buffer_underfull_evict_fraction,
-                generator=self.buffer_rng,
-            )
+            if self.value_replay_mode == "streaming_epoch":
+                self.value_buffer = StreamingEpochValueBuffer(
+                    block_capacity=value_capacity,
+                    epochs=cfg.train.value_replay_epochs,
+                    num_actions=self.num_actions,
+                    num_players=self.num_players,
+                    num_context_features=num_context_features,
+                    device=self.buffer_device,
+                    hand_dim=replay_hand_dim,
+                    generator=self.buffer_rng,
+                )
+            else:
+                self.value_buffer = RebelValueBuffer(
+                    capacity=value_capacity,
+                    num_actions=self.num_actions,
+                    num_players=self.num_players,
+                    num_context_features=num_context_features,
+                    device=self.buffer_device,
+                    hand_dim=replay_hand_dim,
+                    underfull_evict_fraction=(
+                        cfg.train.replay_buffer_underfull_evict_fraction
+                    ),
+                    generator=self.buffer_rng,
+                )
             # Larger policy buffer since we store more samples there
             self.policy_buffer = RebelPolicyBuffer(
                 capacity=policy_capacity,
@@ -603,9 +639,7 @@ class RebelCFRTrainer:
                 warmup=cfg.data.warmup_self_play_roots,
                 root_sampler=root_sampler,
                 store_replay=not pregeneration_only,
-                sample_continuations=(
-                    root_sampler is None and not pregeneration_only
-                ),
+                sample_continuations=(root_sampler is None and not pregeneration_only),
                 record_batch_diag=not pregeneration_only,
             )
             init_trace("data generator ready")
@@ -623,6 +657,12 @@ class RebelCFRTrainer:
                 self.policy_buffer,
                 value_sample_count=self.K_value,
                 max_return_policy_samples=self.batch_size,
+                value_generation_numerator=(
+                    self.batch_size * cfg.train.episodes_per_step
+                    if self.value_replay_mode == "streaming_epoch"
+                    else None
+                ),
+                value_generation_denominator=cfg.train.value_replay_epochs,
             )
             if cfg.data.mode == "bootstrap_pregenerated":
                 bootstrap_rng = torch.Generator(device="cpu")
@@ -794,9 +834,7 @@ class RebelCFRTrainer:
             value_strength_bucket_board_only=(
                 cfg.model.value_strength_bucket_board_only
             ),
-            value_strength_bucket_blockers=(
-                cfg.model.value_strength_bucket_blockers
-            ),
+            value_strength_bucket_blockers=(cfg.model.value_strength_bucket_blockers),
             value_strength_bucket_coarse_residual=(
                 cfg.model.value_strength_bucket_coarse_residual
             ),
@@ -867,6 +905,24 @@ class RebelCFRTrainer:
             ),
             value_turn_range_equity_feature_head=(
                 cfg.model.value_turn_range_equity_feature_head
+            ),
+            value_turn_range_equity_decomposition_features=(
+                cfg.model.value_turn_range_equity_decomposition_features
+            ),
+            value_turn_range_equity_runout_std_feature=(
+                cfg.model.value_turn_range_equity_runout_std_feature
+            ),
+            value_turn_range_equity_blocker_interactions=(
+                cfg.model.value_turn_range_equity_blocker_interactions
+            ),
+            value_turn_range_equity_feature_hidden_dim=(
+                cfg.model.value_turn_range_equity_feature_hidden_dim
+            ),
+            value_turn_range_equity_board_film=(
+                cfg.model.value_turn_range_equity_board_film
+            ),
+            value_turn_range_equity_hand_board_film=(
+                cfg.model.value_turn_range_equity_hand_board_film
             ),
             value_turn_range_equity_chunk_size=(
                 cfg.model.value_turn_range_equity_chunk_size
@@ -1098,9 +1154,7 @@ class RebelCFRTrainer:
         frozen_cfg = self._config_for_frozen_checkpoint(checkpoint)
         model_component = checkpoint.get("model_component")
         model_state = checkpoint["model"]
-        frozen_cfg = self._reconcile_frozen_config_with_state(
-            frozen_cfg, model_state
-        )
+        frozen_cfg = self._reconcile_frozen_config_with_state(frozen_cfg, model_state)
         preflop_context_in_dim = _preflop_context_in_dim_from_state(model_state)
         model = self._make_eval_twin(
             compile_model=False,
@@ -1115,9 +1169,7 @@ class RebelCFRTrainer:
             if type(model) is not BetterSplitFFN:
                 raise TypeError("value-only checkpoints require model.name=BetterFFN")
             model = model.value_model
-        self._maybe_restore_legacy_preflop_belief_proj(
-            model, frozen_cfg, model_state
-        )
+        self._maybe_restore_legacy_preflop_belief_proj(model, frozen_cfg, model_state)
         model.load_state_dict(model_state, strict=self.cfg.strict_model_loading)
         model.eval()
         for param in model.parameters():
@@ -1326,7 +1378,9 @@ class RebelCFRTrainer:
         if any(key not in stats for key in required):
             return zero, zero
 
-        child_valid_all = stats["backup_child_valid"].to(device=device, dtype=torch.bool)
+        child_valid_all = stats["backup_child_valid"].to(
+            device=device, dtype=torch.bool
+        )
         eligible = child_valid_all.any(dim=1)
         sample_indices = torch.where(eligible)[0]
         if sample_indices.numel() == 0:
@@ -1364,16 +1418,24 @@ class RebelCFRTrainer:
         sample_count = int(sample_indices.numel())
         action_count = int(child_valid.shape[1])
         hand_dim = int(batch.features.hand_dim)
-        actor = stats["backup_actor"][sample_indices].long().clamp(
-            min=0,
-            max=max(self.num_players - 1, 0),
+        actor = (
+            stats["backup_actor"][sample_indices]
+            .long()
+            .clamp(
+                min=0,
+                max=max(self.num_players - 1, 0),
+            )
         )
 
         flat_child_valid = child_valid.reshape(-1)
-        child_context = stats["backup_child_context"][sample_indices].reshape(
-            sample_count * action_count,
-            -1,
-        )[flat_child_valid].float()
+        child_context = (
+            stats["backup_child_context"][sample_indices]
+            .reshape(
+                sample_count * action_count,
+                -1,
+            )[flat_child_valid]
+            .float()
+        )
         child_features = MLPFeatures(
             context=child_context,
             street=stats["backup_child_street"][sample_indices].reshape(-1)[
@@ -1385,10 +1447,12 @@ class RebelCFRTrainer:
             board=stats["backup_child_board"][sample_indices].reshape(-1, 5)[
                 flat_child_valid
             ],
-            beliefs=stats["backup_child_beliefs"][sample_indices].reshape(
+            beliefs=stats["backup_child_beliefs"][sample_indices]
+            .reshape(
                 sample_count * action_count,
                 -1,
-            )[flat_child_valid].float(),
+            )[flat_child_valid]
+            .float(),
             hand_dim=hand_dim,
         )
         parent_features = batch.features[sample_indices]
@@ -1434,7 +1498,10 @@ class RebelCFRTrainer:
         ).squeeze(2)
 
         policy_logits = policy_output.policy_logits.float()
-        if policy_logits.shape[-1] != action_count or policy_logits.shape[1] != hand_dim:
+        if (
+            policy_logits.shape[-1] != action_count
+            or policy_logits.shape[1] != hand_dim
+        ):
             raise ValueError(
                 "Backup-consistency policy shape mismatch: "
                 f"got {tuple(policy_logits.shape)}, expected "
@@ -1455,8 +1522,8 @@ class RebelCFRTrainer:
         action_probs = action_probs / valid_policy_mass.clamp_min(1e-12)
 
         backup_target = (
-            action_probs.transpose(1, 2) * child_actor_values
-        ).sum(dim=1).detach()
+            (action_probs.transpose(1, 2) * child_actor_values).sum(dim=1).detach()
+        )
         parent_values = value_output.hand_values[sample_indices].float()
         parent_actor_values = parent_values.gather(
             1,
@@ -2031,10 +2098,7 @@ class RebelCFRTrainer:
             "policy_loss_street": ratio_vector("policy_loss_street", list(STREETS)),
             "policy_target_model_kl_depth": ratio_vector(
                 "policy_target_model_kl_depth",
-                [
-                    f"depth_{i}"
-                    for i in range(int(self.cfg.search.depth) + 1)
-                ],
+                [f"depth_{i}" for i in range(int(self.cfg.search.depth) + 1)],
             ),
             "policy_target_model_kl_reach_bucket": ratio_vector(
                 "policy_target_model_kl_reach_bucket",
@@ -2197,8 +2261,11 @@ class RebelCFRTrainer:
         has_replay_buffers = (
             self.value_buffer is not None and self.policy_buffer is not None
         )
+        value_buffer_indices = (
+            self.value_buffer._valid_physical_indices() if has_replay_buffers else None
+        )
         value_buffer_streets_stats = (
-            street_count(self.value_buffer.features.street[: len(self.value_buffer)])
+            street_count(self.value_buffer.features.street[value_buffer_indices])
             if has_replay_buffers
             else {}
         )
@@ -2206,8 +2273,8 @@ class RebelCFRTrainer:
             value_buffer_hand_dim = self.value_buffer.features.hand_dim
             value_buffer_target_mean_abs_tensor = (
                 (
-                    self.value_buffer.value_targets[: len(self.value_buffer)]
-                    * self.value_buffer.features.beliefs[: len(self.value_buffer)].view(
+                    self.value_buffer.value_targets[value_buffer_indices]
+                    * self.value_buffer.features.beliefs[value_buffer_indices].view(
                         -1, self.num_players, value_buffer_hand_dim
                     )
                 )
@@ -2219,7 +2286,7 @@ class RebelCFRTrainer:
             )
             value_buffer_target_mean_abs_street = by_street(
                 value_buffer_target_mean_abs_tensor.mean(dim=1),
-                street=self.value_buffer.features.street[: len(self.value_buffer)],
+                street=self.value_buffer.features.street[value_buffer_indices],
             )
         else:
             value_buffer_target_mean_abs = 0.0
@@ -2298,7 +2365,7 @@ class RebelCFRTrainer:
             "value_buffer_size": len(self.value_buffer) if has_replay_buffers else 0,
             "policy_buffer_size": len(self.policy_buffer) if has_replay_buffers else 0,
             "value_buffer_mean_sample_count": (
-                self.value_buffer.sample_count[: len(self.value_buffer)]
+                self.value_buffer.sample_count[value_buffer_indices]
                 .float()
                 .mean()
                 .item()
@@ -2326,6 +2393,8 @@ class RebelCFRTrainer:
             "value_mean_std": value_mean_std,
             **self.cfr_evaluator.stats,
         }
+        if isinstance(self.value_buffer, StreamingEpochValueBuffer):
+            metrics.update(self.value_buffer.epoch_metrics())
         if self.policy_extra_updates_per_step > 0:
             extra_updates = self.policy_extra_updates_per_step
             metrics.update(
@@ -2936,8 +3005,7 @@ class RebelCFRTrainer:
 
         value_fullness = min(
             1.0,
-            available_value
-            / max(1, self.data_source.bootstrap_value_capacity()),
+            available_value / max(1, self.data_source.bootstrap_value_capacity()),
         )
         episodes = max(1, math.ceil(self.cfg.train.episodes_per_step * value_fullness))
         stratify = self._get_stratify_streets(step)
@@ -3003,6 +3071,26 @@ class RebelCFRTrainer:
                     flush=True,
                 )
 
+        min_policy_samples = max(
+            self.batch_size,
+            (
+                self.policy_extra_batch_size
+                if self.policy_extra_updates_per_step > 0
+                else self.batch_size
+            ),
+        )
+        if (
+            self.value_replay_mode == "streaming_epoch"
+            and self.value_buffer is not None
+        ):
+            if len(self.value_buffer) == 0:
+                trace("initial streaming epoch block fill start")
+                self.data_source.ensure_min_samples(
+                    self.batch_size,
+                    min_policy_samples,
+                )
+                trace("initial streaming epoch block fill done")
+
         trace(f"step {step} prepare_step start")
         fresh_value_batch, fresh_policy_batch = self.data_source.prepare_step(step)
         trace(
@@ -3012,14 +3100,6 @@ class RebelCFRTrainer:
         )
 
         # Warmup: make sure we have enough samples.
-        min_policy_samples = max(
-            self.batch_size,
-            (
-                self.policy_extra_batch_size
-                if self.policy_extra_updates_per_step > 0
-                else self.batch_size
-            ),
-        )
         trace(
             f"step {step} ensure_min_samples start "
             f"value={self.batch_size} policy={min_policy_samples}"
@@ -3035,8 +3115,11 @@ class RebelCFRTrainer:
         else:
             if self.value_buffer is None:
                 raise RuntimeError("Buffered data source requires value_buffer")
-            value_fullness = len(self.value_buffer) / self.value_buffer.capacity
-            episodes = math.ceil(self.cfg.train.episodes_per_step * value_fullness)
+            if self.value_replay_mode == "streaming_epoch":
+                episodes = self.cfg.train.episodes_per_step
+            else:
+                value_fullness = len(self.value_buffer) / self.value_buffer.capacity
+                episodes = math.ceil(self.cfg.train.episodes_per_step * value_fullness)
         updates = episodes * supervisions
         metric_value_batch = None
         metric_policy_batch = None
@@ -3130,9 +3213,7 @@ class RebelCFRTrainer:
                     supervision_idx == 0 or supervision_idx == supervisions - 1
                 )
                 if log_supervision:
-                    trace(
-                        f"episode {episode} supervise {supervision_idx} start"
-                    )
+                    trace(f"episode {episode} supervise {supervision_idx} start")
                 (
                     episode_stats,
                     permuted_value_output,
@@ -3424,9 +3505,7 @@ class RebelCFRTrainer:
                 )
             state["cfr_target_model"] = cfr_target_state
             state["cfr_target_model_step"] = self.cfr_target_model_step
-            state["cfr_target_update_block_batches"] = (
-                self.target_update_block_batches
-            )
+            state["cfr_target_update_block_batches"] = self.target_update_block_batches
 
         # Save batch if provided (move to CPU for storage)
         if batch is not None:

@@ -107,6 +107,30 @@ def test_live_rebel_data_source_delegates_generation_sampling_and_state():
     assert generator.loaded_state == {"cursor": 4}
 
 
+def test_live_rebel_data_source_uses_exact_rational_generation_rate():
+    value_buffer = _FakeBuffer()
+    policy_buffer = _FakeBuffer()
+    generator = _FakeGenerator(value_buffer, policy_buffer)
+    source = LiveRebelDataSource(
+        generator,
+        value_buffer,
+        policy_buffer,
+        value_sample_count=4,
+        max_return_policy_samples=4,
+        value_generation_numerator=10,
+        value_generation_denominator=3,
+    )
+
+    for step in range(3):
+        source.prepare_step(step)
+
+    assert [call[0] for call in generator.calls] == [3, 3, 4]
+    assert source.state_dict() == {
+        "generator": {"cursor": 3},
+        "value_generation_calls": 3,
+    }
+
+
 def test_hybrid_rebel_data_source_trains_live_and_returns_holdout_metrics():
     live_value_buffer = _FakeBuffer()
     live_policy_buffer = _FakeBuffer()

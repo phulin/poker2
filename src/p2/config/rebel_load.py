@@ -56,8 +56,7 @@ def _reject_legacy_rebel_keys(container: Mapping[str, Any]) -> None:
     if legacy_keys:
         joined = ", ".join(legacy_keys)
         raise ValueError(
-            "ReBeL configs no longer accept PPO/K-best top-level fields: "
-            f"{joined}"
+            f"ReBeL configs no longer accept PPO/K-best top-level fields: {joined}"
         )
 
 
@@ -80,6 +79,32 @@ def validate_rebel_config(cfg: Config) -> None:
             "or bootstrap_pregenerated; "
             f"got {cfg.data.mode!r}"
         )
+    if cfg.train.value_replay_mode not in {"random", "streaming_epoch"}:
+        raise ValueError(
+            "train.value_replay_mode must be random or streaming_epoch; got "
+            f"{cfg.train.value_replay_mode!r}"
+        )
+    if cfg.train.value_replay_epochs <= 0:
+        raise ValueError("train.value_replay_epochs must be positive")
+    if cfg.train.value_epoch_block_batches <= 0:
+        raise ValueError("train.value_epoch_block_batches must be positive")
+    if cfg.train.value_replay_mode == "streaming_epoch":
+        if cfg.data.mode not in {"live", "hybrid"}:
+            raise ValueError(
+                "streaming_epoch value replay requires live or hybrid data"
+            )
+        if cfg.train.stratify_streets:
+            raise ValueError(
+                "streaming_epoch value replay does not support stratify_streets"
+            )
+        total_epoch_batches = (
+            cfg.train.value_replay_epochs * cfg.train.value_epoch_block_batches
+        )
+        if total_epoch_batches % cfg.train.episodes_per_step != 0:
+            raise ValueError(
+                "value_replay_epochs * value_epoch_block_batches must be "
+                "divisible by episodes_per_step"
+            )
     if cfg.data.live_root_source not in _LIVE_ROOT_SOURCES:
         raise ValueError(
             "data.live_root_source must be self_play, random_flop, random_turn, "

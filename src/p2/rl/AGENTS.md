@@ -12,7 +12,7 @@ Reinforcement learning and ReBeL training support: PPO losses, replay buffers, o
 - `self_play.py`: SelfPlayTrainer and model-history support.
 - `replay.py`: Scalar trajectory storage and GAE/PPO batch preparation.
 - `vectorized_replay.py`: Batched replay buffer for tensorized environments.
-- `rebel_replay.py`: ReBeL policy/value replay buffers with serializable buffer state.
+- `rebel_replay.py`: ReBeL policy/value replay buffers, including random ring replay and double-buffered exact-epoch value replay, with serializable state.
 - `rebel_batch.py`: ReBeL batch dataclass and permutation helpers.
 - `pbs_games.py`: Public-belief game rollout utilities.
 - `opponent_pool.py`: Abstract opponent-pool interface.

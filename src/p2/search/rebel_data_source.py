@@ -58,17 +58,35 @@ class LiveRebelDataSource(RebelDataSource):
         *,
         value_sample_count: int,
         max_return_policy_samples: int,
+        value_generation_numerator: int | None = None,
+        value_generation_denominator: int = 1,
     ) -> None:
         self.generator = generator
         self.value_buffer = value_buffer
         self.policy_buffer = policy_buffer
         self.value_sample_count = int(value_sample_count)
         self.max_return_policy_samples = int(max_return_policy_samples)
+        self.value_generation_numerator = value_generation_numerator
+        self.value_generation_denominator = int(value_generation_denominator)
+        self.value_generation_calls = 0
+        if self.value_generation_denominator <= 0:
+            raise ValueError("value generation denominator must be positive")
+
+    def _next_value_sample_count(self) -> int:
+        if self.value_generation_numerator is None:
+            return self.value_sample_count
+        call = self.value_generation_calls
+        numerator = int(self.value_generation_numerator)
+        count = ((call + 1) * numerator) // self.value_generation_denominator - (
+            call * numerator
+        ) // self.value_generation_denominator
+        self.value_generation_calls += 1
+        return count
 
     def prepare_step(self, step: int) -> tuple[RebelBatch | None, RebelBatch | None]:
         del step
         return self.generator.generate_data(
-            self.value_sample_count,
+            self._next_value_sample_count(),
             return_policy_batch=True,
             max_return_policy_samples=self.max_return_policy_samples,
         )
@@ -100,7 +118,7 @@ class LiveRebelDataSource(RebelDataSource):
             or len(self.policy_buffer) < policy_samples
         ):
             self.generator.generate_data(
-                self.value_sample_count,
+                self._next_value_sample_count(),
                 return_value_batch=False,
                 return_policy_batch=False,
             )
@@ -116,10 +134,19 @@ class LiveRebelDataSource(RebelDataSource):
         return self.policy_buffer.sample(batch_size, stratify_streets=stratify_streets)
 
     def state_dict(self) -> dict:
-        return self.generator.state_dict()
+        if self.value_generation_numerator is None:
+            return self.generator.state_dict()
+        return {
+            "generator": self.generator.state_dict(),
+            "value_generation_calls": self.value_generation_calls,
+        }
 
     def load_state_dict(self, state: dict) -> None:
-        self.generator.load_state_dict(state)
+        if self.value_generation_numerator is not None and "generator" in state:
+            self.generator.load_state_dict(state["generator"])
+            self.value_generation_calls = int(state.get("value_generation_calls", 0))
+        else:
+            self.generator.load_state_dict(state)
 
 
 class HybridRebelDataSource(RebelDataSource):
@@ -180,9 +207,7 @@ class _PregeneratedDatasetState:
     policy_order: torch.Tensor | None = None
 
     def active_at(self, step: int) -> bool:
-        return step >= self.min_step and (
-            self.max_step is None or step < self.max_step
-        )
+        return step >= self.min_step and (self.max_step is None or step < self.max_step)
 
 
 class PregeneratedRebelDataSource(RebelDataSource):
@@ -209,7 +234,9 @@ class PregeneratedRebelDataSource(RebelDataSource):
         async_shard_prefetch: bool = False,
     ) -> None:
         if not dataset_configs:
-            raise ValueError("data.pregenerated.datasets must list at least one dataset")
+            raise ValueError(
+                "data.pregenerated.datasets must list at least one dataset"
+            )
 
         self.value_buffer = value_buffer
         self.policy_buffer = policy_buffer
@@ -249,10 +276,13 @@ class PregeneratedRebelDataSource(RebelDataSource):
             for state in self.datasets
         ):
             raise ValueError("pregenerated data has no positive-weight value examples")
-        if not any(
-            state.dataset.stream_len("policy") > 0 and state.policy_weight > 0.0
-            for state in self.datasets
-        ) and self.policy_sample_count > 0:
+        if (
+            not any(
+                state.dataset.stream_len("policy") > 0 and state.policy_weight > 0.0
+                for state in self.datasets
+            )
+            and self.policy_sample_count > 0
+        ):
             raise ValueError("pregenerated data has no positive-weight policy examples")
 
     def stream_enabled(self, stream: str) -> bool:
@@ -282,7 +312,9 @@ class PregeneratedRebelDataSource(RebelDataSource):
                 f"pregenerated {stream} stream has no active examples at "
                 f"step {self.current_step}"
             )
-        return int(torch.multinomial(weights_tensor, 1, generator=self.generator).item())
+        return int(
+            torch.multinomial(weights_tensor, 1, generator=self.generator).item()
+        )
 
     def _next_batch(self, stream: str, count: int) -> RebelBatch:
         index = self._choose_dataset(stream)
@@ -341,7 +373,9 @@ class PregeneratedRebelDataSource(RebelDataSource):
                 or state.dataset.stream_len(stream) <= 0
             ):
                 continue
-            total += max(0, state.dataset.stream_len(stream) - self._stream_cursor(state, stream))
+            total += max(
+                0, state.dataset.stream_len(stream) - self._stream_cursor(state, stream)
+            )
         return int(total)
 
     def _choose_finite_dataset(self, stream: str) -> int | None:
@@ -360,7 +394,9 @@ class PregeneratedRebelDataSource(RebelDataSource):
         weights_tensor = torch.tensor(weights, dtype=torch.float32)
         if weights_tensor.sum() <= 0:
             return None
-        return int(torch.multinomial(weights_tensor, 1, generator=self.generator).item())
+        return int(
+            torch.multinomial(weights_tensor, 1, generator=self.generator).item()
+        )
 
     def _next_finite_batch(self, stream: str, max_count: int) -> RebelBatch | None:
         if max_count <= 0:
@@ -428,12 +464,8 @@ class PregeneratedRebelDataSource(RebelDataSource):
         return value_batch, policy_batch
 
     def ensure_min_samples(self, value_samples: int, policy_samples: int) -> None:
-        while (
-            len(self.value_buffer) < value_samples
-            or (
-                self.policy_sample_count > 0
-                and len(self.policy_buffer) < policy_samples
-            )
+        while len(self.value_buffer) < value_samples or (
+            self.policy_sample_count > 0 and len(self.policy_buffer) < policy_samples
         ):
             value_batch = self._next_batch("value", self.value_sample_count)
             self.value_buffer.add_batch(value_batch)
@@ -496,8 +528,7 @@ class PregeneratedRebelDataSource(RebelDataSource):
         self.current_step = int(state.get("current_step", self.current_step))
         if "value_cursors" not in state and dataset_states is not None:
             state["value_cursors"] = [
-                dataset_state.get("value_cursor", 0)
-                for dataset_state in dataset_states
+                dataset_state.get("value_cursor", 0) for dataset_state in dataset_states
             ]
         if "policy_cursors" not in state and dataset_states is not None:
             state["policy_cursors"] = [
@@ -576,7 +607,9 @@ class BootstrapPregeneratedRebelDataSource(RebelDataSource):
             )
         if not batches:
             raise RuntimeError("bootstrap pregenerated value stream is empty")
-        self._resident_value = batches[0] if len(batches) == 1 else RebelBatch.cat(batches)
+        self._resident_value = (
+            batches[0] if len(batches) == 1 else RebelBatch.cat(batches)
+        )
         if self.pregenerated_source.shuffle:
             if self._resident_value_order is None:
                 order = torch.randperm(

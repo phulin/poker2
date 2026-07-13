@@ -129,6 +129,16 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
         "adamw_learning_rate": 0.02,
         "batch_size": 1024,
     }
+    street_train_overrides = {
+        "learning_rate": 0.004,
+        "learning_rate_final": 0.0004,
+        "lr_schedule": "cosine",
+        "adamw_learning_rate": 0.0004,
+        "batch_size": 4096,
+        "value_replay_mode": "streaming_epoch",
+        "value_replay_epochs": 3,
+        "value_epoch_block_batches": 20,
+    }
 
     assert turn_cfg.data.live_root_source == "random_turn"
     assert turn_cfg.curriculum.stages == ["distill_E_turn", "turn"]
@@ -145,7 +155,9 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert turn_cfg.curriculum.substeps["turn"].from_net is None
     assert turn_cfg.curriculum.substeps["turn"].closing_net == "E_turn"
     assert turn_cfg.curriculum.substeps["turn"].closing_checkpoint is None
-    assert turn_cfg.curriculum.substeps["turn"].train_overrides == {}
+    assert (
+        turn_cfg.curriculum.substeps["turn"].train_overrides == street_train_overrides
+    )
     assert flop_cfg.data.live_root_source == "random_flop"
     assert flop_cfg.curriculum.stages == [
         "distill_E_flop",
@@ -163,7 +175,9 @@ def test_rebel_curriculum_turn_and_flop_configs_load_from_yaml():
     assert flop_cfg.curriculum.substeps["flop"].from_net == "S_turn"
     assert flop_cfg.curriculum.substeps["flop"].closing_net == "E_flop"
     assert flop_cfg.curriculum.substeps["flop"].closing_checkpoint is None
-    assert flop_cfg.curriculum.substeps["flop"].train_overrides == {}
+    assert (
+        flop_cfg.curriculum.substeps["flop"].train_overrides == street_train_overrides
+    )
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].net == "E_preflop"
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].from_net == "S_flop"
     assert flop_cfg.curriculum.substeps["distill_E_preflop"].chance == "sample_flops"
@@ -197,6 +211,16 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
         "lr_schedule": "linear",
         "adamw_learning_rate": 0.02,
         "batch_size": 1024,
+    }
+    street_train_overrides = {
+        "learning_rate": 0.004,
+        "learning_rate_final": 0.0004,
+        "lr_schedule": "cosine",
+        "adamw_learning_rate": 0.0004,
+        "batch_size": 4096,
+        "value_replay_mode": "streaming_epoch",
+        "value_replay_epochs": 3,
+        "value_epoch_block_batches": 20,
     }
 
     assert cfg.data.mode == "live"
@@ -255,12 +279,12 @@ def test_rebel_curriculum_postflop_config_loads_fixed_schedule_from_yaml():
         cfg.curriculum.substeps["distill_E_turn"].train_overrides
         == turn_distill_train_overrides
     )
-    assert cfg.curriculum.substeps["turn"].train_overrides == {}
+    assert cfg.curriculum.substeps["turn"].train_overrides == street_train_overrides
     assert (
         cfg.curriculum.substeps["distill_E_flop"].train_overrides
         == distill_train_overrides
     )
-    assert cfg.curriculum.substeps["flop"].train_overrides == {}
+    assert cfg.curriculum.substeps["flop"].train_overrides == street_train_overrides
     assert (
         cfg.curriculum.substeps["distill_E_preflop"].train_overrides
         == distill_train_overrides

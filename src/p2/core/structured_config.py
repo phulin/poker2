@@ -141,6 +141,9 @@ class TrainingConfig:
     save_replay_buffers: bool = True
     replay_buffer_device: str = "cpu"
     replay_buffer_underfull_evict_fraction: float = 0.25
+    value_replay_mode: str = "random"
+    value_replay_epochs: int = 3
+    value_epoch_block_batches: int = 20
 
     # how many times do we want to reuse the same policy/value data?
     value_reuse_goal: float = 8.0
@@ -342,6 +345,12 @@ class ModelConfig:
     value_turn_range_equity_blockers: bool = False
     value_turn_range_equity_rank_bins: int = 144
     value_turn_range_equity_feature_head: bool = False
+    value_turn_range_equity_decomposition_features: bool = False
+    value_turn_range_equity_runout_std_feature: bool = False
+    value_turn_range_equity_blocker_interactions: bool = False
+    value_turn_range_equity_feature_hidden_dim: int = 16
+    value_turn_range_equity_board_film: bool = False
+    value_turn_range_equity_hand_board_film: bool = False
     value_turn_range_equity_chunk_size: int = 64
     value_river_canonical_head: bool = False
     value_river_canonical_bins: int = 32

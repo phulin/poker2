@@ -609,3 +609,245 @@ class RebelValueBuffer(RebelReplayBuffer):
             underfull_evict_fraction=underfull_evict_fraction,
             generator=generator,
         )
+
+
+class StreamingEpochValueBuffer(RebelValueBuffer):
+    """Double-buffered value storage with exact shuffled epoch coverage."""
+
+    def __init__(
+        self,
+        *,
+        block_capacity: int,
+        epochs: int,
+        num_actions: int,
+        num_players: int,
+        num_context_features: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+        hand_dim: int = NUM_HANDS,
+        generator: Optional[torch.Generator] = None,
+    ) -> None:
+        if block_capacity <= 0:
+            raise ValueError("streaming epoch block capacity must be positive")
+        if epochs <= 0:
+            raise ValueError("streaming epoch count must be positive")
+        self.block_capacity = int(block_capacity)
+        self.epochs = int(epochs)
+        super().__init__(
+            capacity=2 * self.block_capacity,
+            num_actions=num_actions,
+            num_players=num_players,
+            num_context_features=num_context_features,
+            device=device,
+            dtype=dtype,
+            hand_dim=hand_dim,
+            generator=generator,
+        )
+        self.read_block: int | None = None
+        self.write_block = 0
+        self.write_size = 0
+        self.read_epoch = 0
+        self.read_cursor = 0
+        self.read_order: torch.Tensor | None = None
+        self.pending_batches: list[RebelBatch] = []
+
+    def __len__(self) -> int:
+        return self.block_capacity if self.read_block is not None else 0
+
+    def _block_start(self, block: int) -> int:
+        return int(block) * self.block_capacity
+
+    def _valid_physical_indices(self) -> torch.Tensor:
+        if self.read_block is None:
+            return torch.empty(0, dtype=torch.long, device=self.device)
+        start = self._block_start(self.read_block)
+        return torch.arange(start, start + self.block_capacity, device=self.device)
+
+    def epoch_metrics(self) -> dict[str, float]:
+        return {
+            "value_epoch": float(self.read_epoch),
+            "value_epoch_cursor_fraction": (
+                self.read_cursor / self.block_capacity
+                if self.read_block is not None
+                else 0.0
+            ),
+            "value_epoch_write_fraction": self.write_size / self.block_capacity,
+            "value_epoch_ready": float(self.read_block is not None),
+        }
+
+    def _new_read_order(self) -> None:
+        self.read_order = torch.randperm(
+            self.block_capacity,
+            device=self.device,
+            generator=self.generator,
+        )
+        self.read_cursor = 0
+
+    def _seal_initial_block(self) -> None:
+        self.read_block = self.write_block
+        self.read_epoch = 0
+        self._new_read_order()
+        self.write_block = 1 - self.read_block
+        self.write_size = 0
+        self.size = self.block_capacity
+
+    def _append_to_write_block(self, batch: RebelBatch) -> None:
+        batch_size = len(batch)
+        if batch_size == 0:
+            return
+        remaining = self.block_capacity - self.write_size
+        batch = batch.to(self.device)
+        write_count = min(batch_size, remaining)
+        write_batch = batch[:write_count]
+        start = self._block_start(self.write_block) + self.write_size
+        dest = torch.arange(start, start + write_count, device=self.device)
+        self.features[dest] = write_batch.features
+        if write_batch.value_targets is None:
+            raise ValueError("streaming epoch value buffer requires value targets")
+        self.value_targets[dest] = write_batch.value_targets
+        self.legal_masks[dest] = write_batch.legal_masks
+        self.sample_count[dest] = 0
+        for key, value in write_batch.statistics.items():
+            if key not in self.statistics:
+                self.statistics[key] = torch.zeros(
+                    self.capacity,
+                    *value.shape[1:],
+                    dtype=value.dtype,
+                    device=self.device,
+                )
+            self.statistics[key][dest] = value.to(self.device)
+        for key, value in self.statistics.items():
+            if key not in write_batch.statistics:
+                value[dest] = 0
+        self.write_size += write_count
+        if self.write_size == self.block_capacity and self.read_block is None:
+            self._seal_initial_block()
+        if write_count < batch_size:
+            remainder_batch = batch[write_count:]
+            if self.write_size < self.block_capacity:
+                self._append_to_write_block(remainder_batch)
+            else:
+                self.pending_batches.append(remainder_batch)
+
+    def add_batch(self, batch: RebelBatch) -> None:
+        if self.pending_batches:
+            self.pending_batches.append(batch.to(self.device))
+            return
+        self._append_to_write_block(batch)
+
+    def _drain_pending_batches(self) -> None:
+        pending = self.pending_batches
+        self.pending_batches = []
+        for index, batch in enumerate(pending):
+            self._append_to_write_block(batch)
+            if self.pending_batches:
+                self.pending_batches.extend(pending[index + 1 :])
+                break
+
+    def _swap_completed_read_block(self) -> None:
+        if self.write_size != self.block_capacity:
+            raise RuntimeError(
+                "streaming epoch read block completed before write block filled: "
+                f"write_size={self.write_size}, capacity={self.block_capacity}"
+            )
+        old_read = self.read_block
+        self.read_block = self.write_block
+        self.write_block = int(old_read)
+        self.write_size = 0
+        self.read_epoch = 0
+        self._new_read_order()
+        self._drain_pending_batches()
+
+    def sample(
+        self,
+        batch_size: int,
+        stratify_streets: list[float] | None = None,
+    ) -> RebelBatch:
+        if stratify_streets is not None:
+            raise ValueError("streaming epoch replay does not support stratification")
+        if self.read_block is None or self.read_order is None:
+            raise ValueError("streaming epoch value buffer has no sealed read block")
+        if self.block_capacity % batch_size != 0:
+            raise ValueError("streaming epoch block capacity must divide by batch size")
+        end = self.read_cursor + batch_size
+        if end > self.block_capacity:
+            raise RuntimeError("streaming epoch sample crossed an epoch boundary")
+        logical = self.read_order[self.read_cursor : end]
+        idxs = logical + self._block_start(self.read_block)
+        self.sample_count.scatter_add_(0, idxs, torch.ones_like(idxs))
+        self.read_cursor = end
+        result = RebelBatch(
+            features=MLPFeatures(
+                context=torch.index_select(self.features.context, 0, idxs),
+                street=torch.index_select(self.features.street, 0, idxs),
+                to_act=torch.index_select(self.features.to_act, 0, idxs),
+                board=torch.index_select(self.features.board, 0, idxs),
+                beliefs=torch.index_select(self.features.beliefs, 0, idxs),
+                hand_dim=self.hand_dim,
+            ),
+            policy_targets=None,
+            value_targets=torch.index_select(self.value_targets, 0, idxs),
+            legal_masks=torch.index_select(self.legal_masks, 0, idxs),
+            statistics={
+                key: torch.index_select(value, 0, idxs)
+                for key, value in self.statistics.items()
+            },
+        )
+        if self.read_cursor == self.block_capacity:
+            self.read_epoch += 1
+            if self.read_epoch == self.epochs:
+                self._swap_completed_read_block()
+            else:
+                self._new_read_order()
+        return result
+
+    def clear(self) -> None:
+        super().clear()
+        self.read_block = None
+        self.write_block = 0
+        self.write_size = 0
+        self.read_epoch = 0
+        self.read_cursor = 0
+        self.read_order = None
+        self.pending_batches = []
+
+    def state_dict(self) -> dict[str, Any]:
+        state = super().state_dict()
+        state["streaming_epoch"] = {
+            "block_capacity": self.block_capacity,
+            "epochs": self.epochs,
+            "read_block": self.read_block,
+            "write_block": self.write_block,
+            "write_size": self.write_size,
+            "read_epoch": self.read_epoch,
+            "read_cursor": self.read_cursor,
+            "read_order": (
+                self.read_order.detach().cpu().clone()
+                if self.read_order is not None
+                else None
+            ),
+            "pending_batches": [
+                batch.to(torch.device("cpu")) for batch in self.pending_batches
+            ],
+        }
+        return state
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        super().load_state_dict(state)
+        stream = state.get("streaming_epoch")
+        if stream is None:
+            raise ValueError("checkpoint lacks streaming epoch replay state")
+        if int(stream["block_capacity"]) != self.block_capacity:
+            raise ValueError("streaming epoch block capacity mismatch")
+        if int(stream["epochs"]) != self.epochs:
+            raise ValueError("streaming epoch count mismatch")
+        self.read_block = stream["read_block"]
+        self.write_block = int(stream["write_block"])
+        self.write_size = int(stream["write_size"])
+        self.read_epoch = int(stream["read_epoch"])
+        self.read_cursor = int(stream["read_cursor"])
+        order = stream["read_order"]
+        self.read_order = order.to(self.device) if order is not None else None
+        self.pending_batches = [
+            batch.to(self.device) for batch in stream.get("pending_batches", [])
+        ]

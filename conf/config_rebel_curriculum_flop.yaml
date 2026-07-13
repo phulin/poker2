@@ -51,6 +51,15 @@ curriculum:
       closing_net: E_flop
       closing_checkpoint: null
       num_steps: ${num_steps}
+      train_overrides:
+        learning_rate: 0.004
+        learning_rate_final: 0.0004
+        lr_schedule: cosine
+        adamw_learning_rate: 0.0004
+        batch_size: 4096
+        value_replay_mode: streaming_epoch
+        value_replay_epochs: 3
+        value_epoch_block_batches: 20
     distill_E_preflop:
       kind: distill
       net: E_preflop

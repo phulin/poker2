@@ -231,6 +231,44 @@ def _tiny_rebel_cfg() -> Config:
     return cfg
 
 
+def test_rebel_cfr_trainer_constructs_streaming_epoch_value_buffer():
+    from p2.rl.rebel_replay import StreamingEpochValueBuffer
+    from p2.search.rebel_data_source import LiveRebelDataSource
+
+    cfg = _tiny_rebel_cfg()
+    cfg.train.episodes_per_step = 1
+    cfg.train.value_replay_mode = "streaming_epoch"
+    cfg.train.value_replay_epochs = 2
+    cfg.train.value_epoch_block_batches = 2
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+
+    assert isinstance(trainer.value_buffer, StreamingEpochValueBuffer)
+    assert trainer.value_buffer.block_capacity == 2
+    assert isinstance(trainer.data_source, LiveRebelDataSource)
+    assert trainer.data_source.value_generation_numerator == 1
+    assert trainer.data_source.value_generation_denominator == 2
+
+
+def test_rebel_cfr_trainer_runs_streaming_epoch_value_step():
+    cfg = _tiny_rebel_cfg()
+    cfg.num_steps = 1
+    cfg.train.episodes_per_step = 1
+    cfg.train.replay_buffer_batches = 2
+    cfg.train.policy_capacity_factor = 1
+    cfg.train.value_replay_mode = "streaming_epoch"
+    cfg.train.value_replay_epochs = 1
+    cfg.train.value_epoch_block_batches = 1
+    cfg.search.depth = 1
+
+    trainer = RebelCFRTrainer(cfg, torch.device("cpu"))
+    metrics = trainer.train_step(0)
+
+    assert metrics["updates"] == 1
+    assert metrics["value_epoch_ready"] == 1.0
+    assert metrics["value_epoch"] == 0.0
+
+
 def _tiny_solved_batch(
     cfg: Config, *, stream: str, start: int, count: int
 ) -> RebelBatch:
@@ -675,9 +713,7 @@ def test_rebel_cfr_trainer_constructs_preflop_gated_token_mixer_models():
         BetterPreflopGatedTokenMixerValueFFN,
     )
 
-    assert isinstance(
-        trainer.model.policy_model, BetterPreflopGatedTokenMixerPolicyFFN
-    )
+    assert isinstance(trainer.model.policy_model, BetterPreflopGatedTokenMixerPolicyFFN)
     assert isinstance(trainer.model.value_model, BetterPreflopGatedTokenMixerValueFFN)
 
 
@@ -844,15 +880,43 @@ def test_rebel_supervised_loss_multiway_finite():
     loss_dict["total_loss"].backward()
 
 
+def test_rebel_supervised_postflop_value_loss_honors_per_example_weights():
+    batch_size = 2
+    beliefs = torch.full((batch_size, 2, NUM_HANDS), 1.0 / NUM_HANDS)
+    value_targets = torch.zeros(batch_size, 2, NUM_HANDS)
+    hand_values = torch.ones_like(value_targets)
+    batch = RebelBatch(
+        features=MLPFeatures(
+            context=torch.zeros(batch_size, 4),
+            street=torch.full((batch_size,), 2, dtype=torch.long),
+            to_act=torch.zeros(batch_size, dtype=torch.long),
+            board=torch.full((batch_size, 5), -1, dtype=torch.long),
+            beliefs=beliefs.reshape(batch_size, -1),
+        ),
+        legal_masks=torch.ones(batch_size, 1, dtype=torch.bool),
+        value_targets=value_targets,
+        statistics={"value_loss_weight": torch.tensor([0.0, 2.0])},
+    )
+
+    loss = RebelSupervisedLoss().forward_value(
+        ModelOutput(hand_values=hand_values),
+        batch,
+    )
+
+    assert torch.count_nonzero(loss["value_weights"][0]) == 0
+    assert torch.all(loss["value_weights"][1] > 0)
+    torch.testing.assert_close(loss["value_loss"], torch.tensor(1.0))
+
+
 def test_rebel_supervised_loss_folded_beliefs_block_but_folded_values_untrained():
     num_players = 3
     loss_fn = RebelSupervisedLoss(num_players=num_players)
     focal_hand = 0
     combos = hand_combos_tensor()
     focal_cards = combos[focal_hand]
-    conflicts = (combos == focal_cards[0]).any(dim=1) | (
-        combos == focal_cards[1]
-    ).any(dim=1)
+    conflicts = (combos == focal_cards[0]).any(dim=1) | (combos == focal_cards[1]).any(
+        dim=1
+    )
     conflict_hand = torch.where(conflicts)[0][0]
     nonconflict_hand = torch.where(~conflicts)[0][0]
 
@@ -885,8 +949,9 @@ def test_rebel_supervised_loss_folded_beliefs_block_but_folded_values_untrained(
         loss_conflict["value_predictions"][:, 2],
         torch.full((1, NUM_HANDS), 7.0),
     )
-    assert loss_conflict["value_weights"][0, 0, focal_hand] < (
-        loss_nonconflict["value_weights"][0, 0, focal_hand]
+    assert (
+        loss_conflict["value_weights"][0, 0, focal_hand]
+        < (loss_nonconflict["value_weights"][0, 0, focal_hand])
     )
     assert torch.count_nonzero(loss_conflict["value_weights"][0, 2]) == 0
 

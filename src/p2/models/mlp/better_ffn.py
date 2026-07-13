@@ -1767,6 +1767,12 @@ class BetterFFN(BaseMLPModel):
         value_turn_range_equity_blockers: bool = False,
         value_turn_range_equity_rank_bins: int = 144,
         value_turn_range_equity_feature_head: bool = False,
+        value_turn_range_equity_decomposition_features: bool = False,
+        value_turn_range_equity_runout_std_feature: bool = False,
+        value_turn_range_equity_blocker_interactions: bool = False,
+        value_turn_range_equity_feature_hidden_dim: int = 16,
+        value_turn_range_equity_board_film: bool = False,
+        value_turn_range_equity_hand_board_film: bool = False,
         value_turn_range_equity_chunk_size: int = 64,
         value_river_canonical_head: bool = False,
         value_river_canonical_bins: int = 32,
@@ -1892,6 +1898,24 @@ class BetterFFN(BaseMLPModel):
         self.value_turn_range_equity_feature_head = bool(
             value_turn_range_equity_feature_head
         )
+        self.value_turn_range_equity_decomposition_features = bool(
+            value_turn_range_equity_decomposition_features
+        )
+        self.value_turn_range_equity_runout_std_feature = bool(
+            value_turn_range_equity_runout_std_feature
+        )
+        self.value_turn_range_equity_blocker_interactions = bool(
+            value_turn_range_equity_blocker_interactions
+        )
+        self.value_turn_range_equity_feature_hidden_dim = int(
+            value_turn_range_equity_feature_hidden_dim
+        )
+        self.value_turn_range_equity_board_film = bool(
+            value_turn_range_equity_board_film
+        )
+        self.value_turn_range_equity_hand_board_film = bool(
+            value_turn_range_equity_hand_board_film
+        )
         self.value_turn_range_equity_chunk_size = int(
             value_turn_range_equity_chunk_size
         )
@@ -2014,6 +2038,8 @@ class BetterFFN(BaseMLPModel):
             raise ValueError("value_turn_range_equity_rank_bins must be positive")
         if self.value_turn_range_equity_rank_bins > NUM_HANDS:
             raise ValueError("value_turn_range_equity_rank_bins must be <= NUM_HANDS")
+        if self.value_turn_range_equity_feature_hidden_dim < 2:
+            raise ValueError("turn equity feature hidden dim must be at least 2")
         if (
             self.value_turn_range_equity_feature_head
             and not self.value_turn_range_equity_baseline
@@ -2022,6 +2048,19 @@ class BetterFFN(BaseMLPModel):
                 "turn range equity feature head requires "
                 "value_turn_range_equity_baseline=True"
             )
+        if (
+            self.value_turn_range_equity_board_film
+            or self.value_turn_range_equity_hand_board_film
+            or self.value_turn_range_equity_decomposition_features
+            or self.value_turn_range_equity_runout_std_feature
+            or self.value_turn_range_equity_blocker_interactions
+        ) and not self.value_turn_range_equity_feature_head:
+            raise ValueError("turn equity FiLM requires the turn equity feature head")
+        if (
+            self.value_turn_range_equity_board_film
+            and self.value_turn_range_equity_hand_board_film
+        ):
+            raise ValueError("turn equity board FiLM modes are mutually exclusive")
         if self.value_turn_range_equity_chunk_size <= 0:
             raise ValueError("value_turn_range_equity_chunk_size must be positive")
         if self.value_river_canonical_head:
@@ -2297,12 +2336,38 @@ class BetterFFN(BaseMLPModel):
             )
             self._init_river_equity_feature_head()
         if self.value_turn_range_equity_feature_head:
+            turn_equity_feature_dim = 6
+            if self.value_turn_range_equity_decomposition_features:
+                turn_equity_feature_dim += 2
+            if self.value_turn_range_equity_runout_std_feature:
+                turn_equity_feature_dim += 1
+            if self.value_turn_range_equity_blocker_interactions:
+                turn_equity_feature_dim += 3
+            turn_equity_hidden_dim = self.value_turn_range_equity_feature_hidden_dim
             self.value_turn_equity_feature_head = nn.Sequential(
-                nn.Linear(6, 16),
+                nn.Linear(turn_equity_feature_dim, turn_equity_hidden_dim),
                 nn.ReLU(),
-                nn.Linear(16, 1),
+                nn.Linear(turn_equity_hidden_dim, 1),
             )
             self._init_turn_equity_feature_head()
+        if self.value_turn_range_equity_board_film:
+            self.value_turn_equity_board_film_proj = nn.Linear(
+                hidden_dim, 2 * self.value_turn_range_equity_feature_hidden_dim
+            )
+            nn.init.zeros_(self.value_turn_equity_board_film_proj.weight)
+            nn.init.zeros_(self.value_turn_equity_board_film_proj.bias)
+        if self.value_turn_range_equity_hand_board_film:
+            self.value_turn_equity_hand_film_proj = nn.Linear(
+                hidden_dim,
+                2 * self.value_turn_range_equity_feature_hidden_dim,
+                bias=False,
+            )
+            self.value_turn_equity_hand_board_film_proj = nn.Linear(
+                hidden_dim, 2 * self.value_turn_range_equity_feature_hidden_dim
+            )
+            nn.init.zeros_(self.value_turn_equity_hand_film_proj.weight)
+            nn.init.zeros_(self.value_turn_equity_hand_board_film_proj.weight)
+            nn.init.zeros_(self.value_turn_equity_hand_board_film_proj.bias)
         if self.value_river_range_equity_trunk_context:
             self.value_river_equity_context_proj = nn.Linear(
                 2 * self.value_river_range_equity_rank_bins,
@@ -3664,6 +3729,8 @@ class BetterFFN(BaseMLPModel):
             pos_scale=self.value_turn_range_equity_pos_scale,
             neg_scale=self.value_turn_range_equity_neg_scale,
             intercept=self.value_turn_range_equity_intercept,
+            runout_std=self.value_turn_range_equity_runout_std_feature,
+            decomposition=self.value_turn_range_equity_decomposition_features,
         )
 
     def _turn_range_equity_features(
@@ -3742,7 +3809,33 @@ class BetterFFN(BaseMLPModel):
             board_cache=board_cache,
         )
         del baseline
-        return self.value_turn_equity_feature_head(feature_values).squeeze(-1)
+        selected_features = [feature_values[..., :6]]
+        if self.value_turn_range_equity_decomposition_features:
+            selected_features.append(feature_values[..., 6:8])
+        if self.value_turn_range_equity_runout_std_feature:
+            selected_features.append(feature_values[..., 8:9])
+        if self.value_turn_range_equity_blocker_interactions:
+            selected_features.append(feature_values[..., 9:12])
+        feature_values = torch.cat(selected_features, dim=-1)
+        hidden = self.value_turn_equity_feature_head[1](
+            self.value_turn_equity_feature_head[0](feature_values)
+        )
+        if self.value_turn_range_equity_board_film:
+            film = self.value_turn_equity_board_film_proj(
+                self._board_context(features.board)
+            )[:, None, None, :]
+            gamma, beta = film.chunk(2, dim=-1)
+            hidden = hidden * (1.0 + gamma) + beta
+        elif self.value_turn_range_equity_hand_board_film:
+            board_film = self.value_turn_equity_hand_board_film_proj(
+                self._board_context(features.board)
+            )[:, None, :]
+            hand_film = self.value_turn_equity_hand_film_proj(
+                self._hand_embedding()
+            )[None, :, :]
+            gamma, beta = (board_film + hand_film).chunk(2, dim=-1)
+            hidden = hidden * (1.0 + gamma[:, None, :, :]) + beta[:, None, :, :]
+        return self.value_turn_equity_feature_head[2](hidden).squeeze(-1)
 
     def _river_range_equity_value(
         self,
@@ -4873,6 +4966,13 @@ class BetterFFN(BaseMLPModel):
             self._init_river_equity_feature_head()
         if hasattr(self, "value_turn_equity_feature_head"):
             self._init_turn_equity_feature_head()
+        if hasattr(self, "value_turn_equity_board_film_proj"):
+            nn.init.zeros_(self.value_turn_equity_board_film_proj.weight)
+            nn.init.zeros_(self.value_turn_equity_board_film_proj.bias)
+        if hasattr(self, "value_turn_equity_hand_film_proj"):
+            nn.init.zeros_(self.value_turn_equity_hand_film_proj.weight)
+            nn.init.zeros_(self.value_turn_equity_hand_board_film_proj.weight)
+            nn.init.zeros_(self.value_turn_equity_hand_board_film_proj.bias)
         if hasattr(self, "showdown_range_proj"):
             nn.init.zeros_(self.showdown_range_proj.weight)
         if hasattr(self, "showdown_perhand_fuse"):
