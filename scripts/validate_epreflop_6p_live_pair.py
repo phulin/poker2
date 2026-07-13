@@ -34,7 +34,9 @@ from distill_epreflop_6p_live_pair import (
 )
 
 
-DEFAULT_STATE_DATASET = "outputs/preflop_street_closed_states/live_pair_all"
+DEFAULT_STATE_DATASET = (
+    "outputs/preflop_street_closed_states/live_pair_all_shuffled_seed20260628"
+)
 
 
 def _parse_args() -> argparse.Namespace:
