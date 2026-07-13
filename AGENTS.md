@@ -17,6 +17,7 @@ This repository trains and evaluates neural-network-based heads-up no-limit Texa
 - `pyproject.toml`: Python package metadata, dependencies, uv/PyTorch indexes, setuptools package discovery, and tool configuration.
 - `uv.lock`: Locked Python dependency graph for `uv`.
 - `showdown_evaluator_deliverable.md`: Summary of the reusable showdown evaluator package deliverable, verification commands, and remaining exact-evaluator follow-up.
+- `outputs_cleanup_task_plan.md`, `outputs_cleanup_notes.md`, `outputs_cleanup_audit.md`: Read-only disk-retention audit plan, supporting findings, and deletion tiers for generated artifacts under `outputs/`.
 
 ### Top-level directories
 - `src/`: Python source root for the `p2` package.
