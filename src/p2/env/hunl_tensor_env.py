@@ -20,7 +20,8 @@ class HUNLTensorEnv:
 
     Maintains key game scalars/vectors as tensors of shape [N] or [N, 2]:
       - stacks, committed, has_folded, is_allin: [N, 2]
-      - pot, to_act, street, actions_this_round, min_raise: [N]
+      - pot, to_act, street, actions_this_round, min_raise,
+        last_aggressive_amount: [N]
       - board_onehot: [N, 5, 4, 13], hole_onehot: [N, 2 players, 2 cards, 4, 13]
       - done mask: [N] bool, winner: [N] in {0,1,2}
 
@@ -51,6 +52,7 @@ class HUNLTensorEnv:
     last_to_act: torch.Tensor
     pot: torch.Tensor
     min_raise: torch.Tensor
+    last_aggressive_amount: torch.Tensor
     actions_this_round: torch.Tensor
     actions_last_round: torch.Tensor
     stacks: torch.Tensor
@@ -154,6 +156,9 @@ class HUNLTensorEnv:
         self.last_to_act = torch.empty(self.N, dtype=torch.long, device=self.device)
         self.pot = torch.empty(self.N, dtype=torch.long, device=self.device)
         self.min_raise = torch.empty(self.N, dtype=torch.long, device=self.device)
+        self.last_aggressive_amount = torch.empty(
+            self.N, dtype=torch.long, device=self.device
+        )
         self.actions_this_round = torch.empty(
             self.N, dtype=torch.long, device=self.device
         )
@@ -215,6 +220,7 @@ class HUNLTensorEnv:
             self.last_to_act.zero_()
             self.pot.zero_()
             self.min_raise.zero_()
+            self.last_aggressive_amount.zero_()
             self.actions_this_round.zero_()
             self.actions_last_round.zero_()
             self.acted_since_reset.zero_()
@@ -405,6 +411,7 @@ class HUNLTensorEnv:
         self.last_to_act[ids] = p_sb
         self.pot[ids] = self.sb + self.bb
         self.min_raise[ids] = self.bb
+        self.last_aggressive_amount[ids] = self.bb
         self.actions_this_round[ids] = 0
         self.actions_last_round[ids] = 0
         self.acted_since_reset[ids] = False
@@ -565,6 +572,7 @@ class HUNLTensorEnv:
             "to_act": self.to_act,
             "pot": self.pot,
             "min_raise": self.min_raise,
+            "last_aggressive_amount": self.last_aggressive_amount,
             "done": self.done,
         }
 
@@ -656,6 +664,9 @@ class HUNLTensorEnv:
         self.last_to_act[dest_select] = src_env.last_to_act[src_select]
         self.pot[dest_select] = src_env.pot[src_select]
         self.min_raise[dest_select] = src_env.min_raise[src_select]
+        self.last_aggressive_amount[dest_select] = src_env.last_aggressive_amount[
+            src_select
+        ]
         self.actions_this_round[dest_select] = src_env.actions_this_round[src_select]
         self.actions_last_round[dest_select] = src_env.actions_last_round[src_select]
         self.acted_since_reset[dest_select] = src_env.acted_since_reset[src_select]
@@ -732,6 +743,9 @@ class HUNLTensorEnv:
             repeats, dim=0, output_size=output_size
         )
         dst_env.min_raise[:] = self.min_raise.repeat_interleave(
+            repeats, dim=0, output_size=output_size
+        )
+        dst_env.last_aggressive_amount[:] = self.last_aggressive_amount.repeat_interleave(
             repeats, dim=0, output_size=output_size
         )
         dst_env.actions_this_round[:] = self.actions_this_round.repeat_interleave(
@@ -816,6 +830,7 @@ class HUNLTensorEnv:
         dst_env.last_to_act[:] = self.last_to_act[indices]
         dst_env.pot[:] = self.pot[indices]
         dst_env.min_raise[:] = self.min_raise[indices]
+        dst_env.last_aggressive_amount[:] = self.last_aggressive_amount[indices]
         dst_env.actions_this_round[:] = self.actions_this_round[indices]
         dst_env.actions_last_round[:] = self.actions_last_round[indices]
         dst_env.acted_since_reset[:] = self.acted_since_reset[indices]
@@ -1009,6 +1024,11 @@ class HUNLTensorEnv:
         all_in_amount = actor_stack[action_idx]
         self.bet(action_idx, all_in_amount)
         self.is_allin[action_idx, actor_idx[action_idx]] = True
+        aggressive_allin = all_in_amount > to_call[action_idx]
+        aggressive_allin_idx = action_idx[aggressive_allin]
+        self.last_aggressive_amount[aggressive_allin_idx] = self.committed[
+            aggressive_allin_idx, actor_idx[aggressive_allin_idx]
+        ]
 
         # Bet/Raise bins: approximate mapping using pot * mult (pot includes committed)
         # Semantics: e.g. 0.5x pot means raise ABOVE the current call amount by 0.5x pot
@@ -1017,6 +1037,9 @@ class HUNLTensorEnv:
         action_idx = torch.where(is_bet_raise)[0]
         bet_raise_amount = bet_amounts[action_idx]
         self.bet(action_idx, bet_raise_amount)
+        self.last_aggressive_amount[action_idx] = self.committed[
+            action_idx, actor_idx[action_idx]
+        ]
         self.min_raise[action_idx] = torch.maximum(
             self.min_raise[action_idx], bet_raise_amount - to_call[action_idx]
         )
@@ -1073,6 +1096,7 @@ class HUNLTensorEnv:
             self.min_raise[round_closed_idx] = (
                 self.bb
             )  # Reset min_raise to big blind for new street
+            self.last_aggressive_amount[round_closed_idx] = 0
             # Advance street and deal
             s = self.street[round_closed_idx]
 

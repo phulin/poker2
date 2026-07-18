@@ -5,7 +5,7 @@ Heads-up no-limit Texas Hold 'Em environment logic, tensorized simulation, hand 
 - `__init__.py`: Package exports.
 - `types.py`: Dataclasses for actions, player state, and game state.
 - `hunl_env.py`: Scalar Python HUNL environment.
-- `hunl_tensor_env.py`: Batched tensorized HUNL environment for high-throughput training.
+- `hunl_tensor_env.py`: Batched tensorized HUNL environment for high-throughput training, including per-street last-aggression state.
 - `nl_env.py`: Scalar reference multiway no-limit Hold 'Em environment.
 - `pbs_env.py`: Batched multi-player public-belief-state environment.
 - `triton_pbs_env.py`: CUDA/Triton PBSEnv implementation.

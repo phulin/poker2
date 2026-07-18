@@ -19,6 +19,7 @@ from p2.models.mlp.better_feature_encoder import (
 )
 from p2.models.mlp.better_features import (
     ChancePhase,
+    context_schemas,
     PlayerContext,
     ScalarContext,
     ValueScalarContext,
@@ -254,6 +255,31 @@ def test_better_policy_and_value_feature_context_slots():
     torch.testing.assert_close(value_features.context, value_features_changed_actions.context)
 
 
+def test_heads_up_context_is_compact_and_includes_last_aggression():
+    env = make_env(2)
+    env.last_aggressive_amount[:] = torch.tensor([250, 900], device=env.device)
+    beliefs = torch.full(
+        (2, 2, NUM_HANDS), 1.0 / NUM_HANDS, dtype=torch.float32, device=env.device
+    )
+
+    features = BetterPolicyFeatureEncoder(
+        env, device=env.device, dtype=torch.float32
+    ).encode(beliefs)
+
+    assert features.context.shape == (2, 31)
+    assert not hasattr(ScalarContext, "CAN_CALL")
+    assert not hasattr(ScalarContext, "ACTOR")
+    assert not hasattr(ScalarContext, "POSITION")
+    assert not hasattr(ScalarContext, "UNOPENED_OR_CHECKED_TO_ACTOR")
+    assert not hasattr(PlayerContext, "FOLDED")
+    assert not hasattr(PlayerContext, "ACTED_THIS_ROUND")
+    assert not hasattr(PlayerContext, "REL_POS_TO_ACTOR")
+    torch.testing.assert_close(
+        features.context[:, ScalarContext.LAST_AGGRESSIVE_AMOUNT.value],
+        env.last_aggressive_amount.to(torch.float32) / env.scale,
+    )
+
+
 def test_better_feature_encoder_includes_multiway_betting_and_status_context():
     env = PBSEnv(
         num_envs=2,
@@ -264,6 +290,11 @@ def test_better_feature_encoder_includes_multiway_betting_and_status_context():
         device=torch.device("cpu"),
         float_dtype=torch.float32,
     )
+    policy_schema, player_schema = context_schemas(env.num_players)
+    value_schema, _ = context_schemas(env.num_players, value=True)
+    ScalarContext = policy_schema
+    ValueScalarContext = value_schema
+    PlayerContext = player_schema
     env.button[:] = torch.tensor([3, 1], device=env.device)
     env.to_act[:] = torch.tensor([1, 2], device=env.device)
     env.pot[:] = torch.tensor([220, 550], device=env.device)

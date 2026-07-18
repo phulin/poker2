@@ -110,6 +110,7 @@ if triton is not None:
         last_to_act,
         pot,
         min_raise,
+        last_aggressive_amount,
         actions_this_round,
         actions_last_round,
         acted_since_reset,
@@ -154,6 +155,9 @@ if triton is not None:
         src_street = tl.load(street + src, mask=local_mask, other=0)
         src_pot = tl.load(pot + src, mask=local_mask, other=0)
         src_min_raise = tl.load(min_raise + src, mask=local_mask, other=0)
+        src_last_aggressive = tl.load(
+            last_aggressive_amount + src, mask=local_mask, other=0
+        )
         src_actions = tl.load(actions_this_round + src, mask=local_mask, other=0)
         src_actions_last = tl.load(actions_last_round + src, mask=local_mask, other=0)
         src_deck_pos = tl.load(deck_pos + src, mask=local_mask, other=0)
@@ -181,6 +185,7 @@ if triton is not None:
 
             new_pot = src_pot
             new_min_raise = src_min_raise
+            new_last_aggressive = src_last_aggressive
             new_actions = src_actions + 1
             new_actions_last = src_actions_last
             new_to_act = src_opp
@@ -231,6 +236,13 @@ if triton is not None:
             allin0 = tl.where(implicit_allin & (src_actor == 0), True, allin0)
             allin1 = tl.where(implicit_allin & (src_actor == 1), True, allin1)
             new_pot = new_pot + chips
+            aggressive = ((action > 1) & (action < num_actions - 1)) | (
+                (action == num_actions - 1) & (chips > to_call)
+            )
+            actor_committed_after = tl.where(src_actor == 0, committed0, committed1)
+            new_last_aggressive = tl.where(
+                aggressive, actor_committed_after, new_last_aggressive
+            )
 
             equal_committed = committed0 == committed1
             allin_committed = (
@@ -251,6 +263,7 @@ if triton is not None:
             new_actions = tl.where(round_closed, 0, new_actions)
             new_to_act = tl.where(round_closed, 1 - src_button, new_to_act)
             new_min_raise = tl.where(round_closed, bb, new_min_raise)
+            new_last_aggressive = tl.where(round_closed, 0, new_last_aggressive)
             new_street = tl.where(round_closed, src_street + 1, src_street)
             new_done = tl.where(showdown, True, new_done)
 
@@ -260,6 +273,9 @@ if triton is not None:
             tl.store(last_to_act + dst, new_last_to_act, mask=write)
             tl.store(pot + dst, new_pot, mask=write)
             tl.store(min_raise + dst, new_min_raise, mask=write)
+            tl.store(
+                last_aggressive_amount + dst, new_last_aggressive, mask=write
+            )
             tl.store(actions_this_round + dst, new_actions, mask=write)
             tl.store(actions_last_round + dst, new_actions_last, mask=write)
             tl.store(deck_pos + dst, src_deck_pos, mask=write)
@@ -322,6 +338,7 @@ if triton is not None:
         last_to_act,
         pot,
         min_raise,
+        last_aggressive_amount,
         actions_this_round,
         actions_last_round,
         acted_since_reset,
@@ -384,6 +401,9 @@ if triton is not None:
         src_street = tl.load(street + src, mask=local_mask, other=0)
         src_pot = tl.load(pot + src, mask=local_mask, other=0)
         src_min_raise = tl.load(min_raise + src, mask=local_mask, other=0)
+        src_last_aggressive = tl.load(
+            last_aggressive_amount + src, mask=local_mask, other=0
+        )
         src_actions = tl.load(actions_this_round + src, mask=local_mask, other=0)
         src_actions_last = tl.load(actions_last_round + src, mask=local_mask, other=0)
         src_winner = tl.load(winner + src, mask=local_mask, other=-1)
@@ -424,6 +444,7 @@ if triton is not None:
         new_min_raise = tl.where(
             is_bet_action, tl.maximum(src_min_raise, chips - to_call), src_min_raise
         )
+        aggressive = is_bet_action | (is_allin_action & (chips > to_call))
         new_actions = src_actions + 1
         new_actions_last = src_actions_last
         new_to_act = src_opp
@@ -438,6 +459,10 @@ if triton is not None:
         stack1 = tl.where(src_actor == 1, stack1 - chips, stack1)
         committed0 = tl.where(src_actor == 0, committed0 + chips, committed0)
         committed1 = tl.where(src_actor == 1, committed1 + chips, committed1)
+        actor_committed_after = tl.where(src_actor == 0, committed0, committed1)
+        new_last_aggressive = tl.where(
+            aggressive, actor_committed_after, src_last_aggressive
+        )
         chips0 = tl.where(src_actor == 0, chips0 + chips, chips0)
         chips1 = tl.where(src_actor == 1, chips1 + chips, chips1)
         actor_stack_after = tl.where(src_actor == 0, stack0, stack1)
@@ -464,6 +489,7 @@ if triton is not None:
         new_actions = tl.where(round_closed, 0, new_actions)
         new_to_act = tl.where(round_closed, 1 - src_button, new_to_act)
         new_min_raise = tl.where(round_closed, bb, new_min_raise)
+        new_last_aggressive = tl.where(round_closed, 0, new_last_aggressive)
         new_street = tl.where(round_closed, src_street + 1, src_street)
         new_done = tl.where(showdown, True, new_done)
 
@@ -473,6 +499,7 @@ if triton is not None:
         tl.store(last_to_act + dst, new_last_to_act, mask=write)
         tl.store(pot + dst, new_pot, mask=write)
         tl.store(min_raise + dst, new_min_raise, mask=write)
+        tl.store(last_aggressive_amount + dst, new_last_aggressive, mask=write)
         tl.store(actions_this_round + dst, new_actions, mask=write)
         tl.store(actions_last_round + dst, new_actions_last, mask=write)
         tl.store(winner + dst, new_winner, mask=write)
@@ -746,6 +773,7 @@ def write_children_same_street_triton_legacy_(
         env.last_to_act,
         env.pot,
         env.min_raise,
+        env.last_aggressive_amount,
         env.actions_this_round,
         env.actions_last_round,
         env.acted_since_reset,
@@ -817,6 +845,7 @@ def write_children_same_street_triton_optimized_(
         env.last_to_act,
         env.pot,
         env.min_raise,
+        env.last_aggressive_amount,
         env.actions_this_round,
         env.actions_last_round,
         env.acted_since_reset,

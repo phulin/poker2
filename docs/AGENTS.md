@@ -11,4 +11,4 @@ Design notes and implementation plans for larger architecture changes that span 
 - `showdown_per_hand_equity_vector_plan.md`: Plan for per-hand showdown equity vectors.
 
 ### Subdirectories
-There are no child source directories.
+- `two_player_context_cleanup/`: Plans and findings for compact heads-up BetterFFN context and HUNL aggression tracking.

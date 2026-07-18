@@ -29,6 +29,7 @@ from p2.models.mlp.better_feature_encoder import (
 )
 from p2.models.mlp.better_features import (
     ChancePhase,
+    context_schemas,
     PlayerContext,
     ValueScalarContext,
     context_length,
@@ -6212,8 +6213,9 @@ class _BetterPreflopTransformerBase(BaseMLPModel):
         self.transformer_heads = int(transformer_heads)
         self.range_slot_moment_slots = int(range_slot_moment_slots)
 
-        self.scalar_context_dim = context_length(num_players) - num_players * 13
-        self.player_context_dim = 13
+        scalar_schema, player_schema = context_schemas(num_players)
+        self.scalar_context_dim = scalar_schema.NUM_SCALAR_CONTEXT.value
+        self.player_context_dim = player_schema.NUM_PLAYER_CONTEXT.value
         hand_embed_dim = (
             max(1, ffn_dim // num_players)
             if range_hidden_dim == 0

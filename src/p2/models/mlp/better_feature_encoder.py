@@ -6,9 +6,7 @@ from p2.env.card_utils import PREFLOP_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.better_features import (
     ChancePhase,
-    PlayerContext,
-    ScalarContext,
-    ValueScalarContext,
+    context_schemas,
 )
 from p2.models.mlp.mlp_features import MLPFeatures
 
@@ -95,19 +93,20 @@ class _BetterFeatureEncoderBase:
     ) -> torch.Tensor:
         stacks = self._env_tensor("stacks", indices).to(self.dtype)
         committed = self._env_tensor("committed", indices).to(self.dtype)
+        _, player_schema = context_schemas(num_players)
         player_context = torch.zeros(
             N,
-            PlayerContext.NUM_PLAYER_CONTEXT.value,
+            player_schema.NUM_PLAYER_CONTEXT.value,
             num_players,
             device=self.device,
             dtype=self.dtype,
         )
-        player_context[:, PlayerContext.STACK.value] = stacks / scale[:, None]
-        player_context[:, PlayerContext.COMMITTED.value] = committed / scale[:, None]
-        player_context[:, PlayerContext.SPR.value] = (
+        player_context[:, player_schema.STACK.value] = stacks / scale[:, None]
+        player_context[:, player_schema.COMMITTED.value] = committed / scale[:, None]
+        player_context[:, player_schema.SPR.value] = (
             stacks / pot_float.clamp_min(1.0)[:, None]
         )
-        player_context[:, PlayerContext.LOG_COMMITTED_BB.value] = torch.log1p(
+        player_context[:, player_schema.LOG_COMMITTED_BB.value] = torch.log1p(
             committed / bb
         )
 
@@ -116,34 +115,37 @@ class _BetterFeatureEncoderBase:
         call_amount = torch.minimum(to_call, stacks)
         players = torch.arange(num_players, device=self.device)
         denom = float(max(num_players - 1, 1))
-        folded = self._optional_env_tensor(
-            "has_folded", indices, (N, num_players), torch.bool
-        ).to(torch.bool)
         all_in = self._optional_env_tensor(
             "is_allin", indices, (N, num_players), torch.bool
         ).to(torch.bool)
-        acted = self._optional_env_tensor(
-            "acted_this_round", indices, (N, num_players), torch.bool
-        ).to(torch.bool)
         is_actor = players[None, :] == to_act[:, None]
-        rel_pos_to_actor = ((players[None, :] - to_act[:, None]) % num_players).to(
-            self.dtype
-        ) / denom
         rel_pos_to_button = ((players[None, :] - button[:, None]) % num_players).to(
             self.dtype
         ) / denom
 
-        player_context[:, PlayerContext.FOLDED.value] = folded.to(self.dtype)
-        player_context[:, PlayerContext.ALL_IN.value] = all_in.to(self.dtype)
-        player_context[:, PlayerContext.ACTED_THIS_ROUND.value] = acted.to(self.dtype)
-        player_context[:, PlayerContext.IS_ACTOR.value] = is_actor.to(self.dtype)
-        player_context[:, PlayerContext.REL_POS_TO_ACTOR.value] = rel_pos_to_actor
-        player_context[:, PlayerContext.REL_POS_TO_BUTTON.value] = rel_pos_to_button
-        player_context[:, PlayerContext.TO_CALL_SCALE.value] = to_call / scale[:, None]
-        player_context[:, PlayerContext.TO_CALL_POT.value] = (
+        if hasattr(player_schema, "FOLDED"):
+            folded = self._optional_env_tensor(
+                "has_folded", indices, (N, num_players), torch.bool
+            ).to(torch.bool)
+            acted = self._optional_env_tensor(
+                "acted_this_round", indices, (N, num_players), torch.bool
+            ).to(torch.bool)
+            rel_pos_to_actor = (
+                (players[None, :] - to_act[:, None]) % num_players
+            ).to(self.dtype) / denom
+            player_context[:, player_schema.FOLDED.value] = folded.to(self.dtype)
+            player_context[:, player_schema.ACTED_THIS_ROUND.value] = acted.to(
+                self.dtype
+            )
+            player_context[:, player_schema.REL_POS_TO_ACTOR.value] = rel_pos_to_actor
+        player_context[:, player_schema.ALL_IN.value] = all_in.to(self.dtype)
+        player_context[:, player_schema.IS_ACTOR.value] = is_actor.to(self.dtype)
+        player_context[:, player_schema.REL_POS_TO_BUTTON.value] = rel_pos_to_button
+        player_context[:, player_schema.TO_CALL_SCALE.value] = to_call / scale[:, None]
+        player_context[:, player_schema.TO_CALL_POT.value] = (
             to_call / pot_float.clamp_min(1.0)[:, None]
         )
-        player_context[:, PlayerContext.STACK_AFTER_CALL_SCALE.value] = (
+        player_context[:, player_schema.STACK_AFTER_CALL_SCALE.value] = (
             (stacks - call_amount).clamp_min(0.0) / scale[:, None]
         )
         return player_context.flatten(1)
@@ -155,6 +157,7 @@ class _BetterFeatureEncoderBase:
         pot_float: torch.Tensor,
         scale: torch.Tensor,
         indices: torch.Tensor | None,
+        scalar_schema,
     ) -> None:
         committed = self._env_tensor("committed", indices).to(self.dtype)
         actor_committed = committed.gather(1, to_act[:, None]).squeeze(1)
@@ -165,22 +168,26 @@ class _BetterFeatureEncoderBase:
         ).to(self.dtype)
         legal = self._legal_bins_mask(indices)
         num_actions = legal.shape[1]
-        scalar_context[:, ScalarContext.MAX_COMMITTED.value] = max_committed / scale
-        scalar_context[:, ScalarContext.LAST_AGGRESSIVE_AMOUNT.value] = (
+        scalar_context[:, scalar_schema.MAX_COMMITTED.value] = max_committed / scale
+        scalar_context[:, scalar_schema.LAST_AGGRESSIVE_AMOUNT.value] = (
             last_aggressive / scale
         )
-        scalar_context[:, ScalarContext.UNOPENED_OR_CHECKED_TO_ACTOR.value] = (
-            actor_to_call <= 0
-        ).to(self.dtype)
-        scalar_context[:, ScalarContext.NUM_LEGAL_ACTIONS.value] = (
+        if hasattr(scalar_schema, "UNOPENED_OR_CHECKED_TO_ACTOR"):
+            scalar_context[:, scalar_schema.UNOPENED_OR_CHECKED_TO_ACTOR.value] = (
+                actor_to_call <= 0
+            ).to(self.dtype)
+        scalar_context[:, scalar_schema.NUM_LEGAL_ACTIONS.value] = (
             legal.to(self.dtype).sum(dim=1) / float(max(num_actions, 1))
         )
-        scalar_context[:, ScalarContext.CAN_FOLD.value] = legal[:, 0].to(self.dtype)
-        scalar_context[:, ScalarContext.CAN_CALL.value] = legal[:, 1].to(self.dtype)
-        scalar_context[:, ScalarContext.CAN_RAISE.value] = legal[:, 2:-1].any(
+        scalar_context[:, scalar_schema.CAN_FOLD.value] = legal[:, 0].to(self.dtype)
+        if hasattr(scalar_schema, "CAN_CALL"):
+            scalar_context[:, scalar_schema.CAN_CALL.value] = legal[:, 1].to(
+                self.dtype
+            )
+        scalar_context[:, scalar_schema.CAN_RAISE.value] = legal[:, 2:-1].any(
             dim=1
         ).to(self.dtype)
-        scalar_context[:, ScalarContext.CAN_ALLIN.value] = legal[:, -1].to(self.dtype)
+        scalar_context[:, scalar_schema.CAN_ALLIN.value] = legal[:, -1].to(self.dtype)
 
     def _fill_value_betting_context(
         self,
@@ -189,6 +196,7 @@ class _BetterFeatureEncoderBase:
         pot_float: torch.Tensor,
         scale: torch.Tensor,
         indices: torch.Tensor | None,
+        scalar_schema,
     ) -> None:
         committed = self._env_tensor("committed", indices).to(self.dtype)
         actor_committed = committed.gather(1, to_act[:, None]).squeeze(1)
@@ -199,28 +207,30 @@ class _BetterFeatureEncoderBase:
         ).to(self.dtype)
         legal = self._legal_bins_mask(indices)
         num_actions = legal.shape[1]
-        scalar_context[:, ValueScalarContext.MAX_COMMITTED.value] = (
+        scalar_context[:, scalar_schema.MAX_COMMITTED.value] = (
             max_committed / scale
         )
-        scalar_context[:, ValueScalarContext.LAST_AGGRESSIVE_AMOUNT.value] = (
+        scalar_context[:, scalar_schema.LAST_AGGRESSIVE_AMOUNT.value] = (
             last_aggressive / scale
         )
-        scalar_context[
-            :, ValueScalarContext.UNOPENED_OR_CHECKED_TO_ACTOR.value
-        ] = (actor_to_call <= 0).to(self.dtype)
-        scalar_context[:, ValueScalarContext.NUM_LEGAL_ACTIONS.value] = (
+        if hasattr(scalar_schema, "UNOPENED_OR_CHECKED_TO_ACTOR"):
+            scalar_context[
+                :, scalar_schema.UNOPENED_OR_CHECKED_TO_ACTOR.value
+            ] = (actor_to_call <= 0).to(self.dtype)
+        scalar_context[:, scalar_schema.NUM_LEGAL_ACTIONS.value] = (
             legal.to(self.dtype).sum(dim=1) / float(max(num_actions, 1))
         )
-        scalar_context[:, ValueScalarContext.CAN_FOLD.value] = legal[:, 0].to(
+        scalar_context[:, scalar_schema.CAN_FOLD.value] = legal[:, 0].to(
             self.dtype
         )
-        scalar_context[:, ValueScalarContext.CAN_CALL.value] = legal[:, 1].to(
-            self.dtype
-        )
-        scalar_context[:, ValueScalarContext.CAN_RAISE.value] = legal[:, 2:-1].any(
+        if hasattr(scalar_schema, "CAN_CALL"):
+            scalar_context[:, scalar_schema.CAN_CALL.value] = legal[:, 1].to(
+                self.dtype
+            )
+        scalar_context[:, scalar_schema.CAN_RAISE.value] = legal[:, 2:-1].any(
             dim=1
         ).to(self.dtype)
-        scalar_context[:, ValueScalarContext.CAN_ALLIN.value] = legal[:, -1].to(
+        scalar_context[:, scalar_schema.CAN_ALLIN.value] = legal[:, -1].to(
             self.dtype
         )
 
@@ -251,9 +261,10 @@ class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
 
         N = beliefs.shape[0]
         num_players = beliefs.shape[1]
+        scalar_schema, _ = context_schemas(num_players)
         scalar_context = torch.zeros(
             N,
-            ScalarContext.NUM_SCALAR_CONTEXT.value,
+            scalar_schema.NUM_SCALAR_CONTEXT.value,
             device=self.device,
             dtype=self.dtype,
         )
@@ -268,31 +279,33 @@ class BetterPolicyFeatureEncoder(_BetterFeatureEncoderBase):
         # even in the pre-chance node context.
         to_act = self._env_tensor("to_act", indices)
         button = self._env_tensor("button", indices)
-        scalar_context[:, ScalarContext.ACTOR.value] = to_act
-        scalar_context[:, ScalarContext.POSITION.value] = (
-            to_act - button
-        ) % num_players
-        scalar_context[:, ScalarContext.ACTIONS_ROUND.value] = actions_round
+        if hasattr(scalar_schema, "ACTOR"):
+            scalar_context[:, scalar_schema.ACTOR.value] = to_act
+            scalar_context[:, scalar_schema.POSITION.value] = (
+                to_act - button
+            ) % num_players
+        scalar_context[:, scalar_schema.ACTIONS_ROUND.value] = actions_round
         pot = self._env_tensor("pot", indices)
         scale = self._env_tensor("scale", indices).to(self.dtype).clamp_min(1.0)
         bb = self._bb_tensor
         pot_float = pot.to(self.dtype)
         stack_depth_bb = scale / bb
         pot_bb = pot_float / bb
-        scalar_context[:, ScalarContext.POT.value] = pot_float / scale
-        scalar_context[:, ScalarContext.MIN_RAISE.value] = (
+        scalar_context[:, scalar_schema.POT.value] = pot_float / scale
+        scalar_context[:, scalar_schema.MIN_RAISE.value] = (
             self._env_tensor("min_raise", indices).to(self.dtype) / scale
         )
-        scalar_context[:, ScalarContext.LOG_STACK_DEPTH_BB.value] = torch.log(
+        scalar_context[:, scalar_schema.LOG_STACK_DEPTH_BB.value] = torch.log(
             stack_depth_bb.clamp_min(1.0)
         ) / self._log_max_stack_bb_tensor
-        scalar_context[:, ScalarContext.LOG_POT_BB.value] = torch.log1p(pot_bb)
+        scalar_context[:, scalar_schema.LOG_POT_BB.value] = torch.log1p(pot_bb)
         self._fill_policy_betting_context(
             scalar_context,
             to_act,
             pot_float,
             scale,
             indices,
+            scalar_schema,
         )
 
         player_context = self._player_context(
@@ -334,9 +347,10 @@ class BetterStreetValueFeatureEncoder(_BetterFeatureEncoderBase):
 
         N = beliefs.shape[0]
         num_players = beliefs.shape[1]
+        scalar_schema, _ = context_schemas(num_players, value=True)
         scalar_context = torch.zeros(
             N,
-            ValueScalarContext.NUM_SCALAR_CONTEXT.value,
+            scalar_schema.NUM_SCALAR_CONTEXT.value,
             device=self.device,
             dtype=self.dtype,
         )
@@ -344,11 +358,12 @@ class BetterStreetValueFeatureEncoder(_BetterFeatureEncoderBase):
         pre_chance_node = self._pre_chance_mask(N, pre_chance_node)
         to_act = self._env_tensor("to_act", indices)
         button = self._env_tensor("button", indices)
-        scalar_context[:, ValueScalarContext.ACTOR.value] = to_act
-        scalar_context[:, ValueScalarContext.POSITION.value] = (
-            to_act - button
-        ) % num_players
-        scalar_context[:, ValueScalarContext.CHANCE_PHASE.value] = torch.where(
+        if hasattr(scalar_schema, "ACTOR"):
+            scalar_context[:, scalar_schema.ACTOR.value] = to_act
+            scalar_context[:, scalar_schema.POSITION.value] = (
+                to_act - button
+            ) % num_players
+        scalar_context[:, scalar_schema.CHANCE_PHASE.value] = torch.where(
             pre_chance_node,
             torch.full(
                 (N,),
@@ -370,20 +385,21 @@ class BetterStreetValueFeatureEncoder(_BetterFeatureEncoderBase):
         pot_float = pot.to(self.dtype)
         stack_depth_bb = scale / bb
         pot_bb = pot_float / bb
-        scalar_context[:, ValueScalarContext.POT.value] = pot_float / scale
-        scalar_context[:, ValueScalarContext.MIN_RAISE.value] = (
+        scalar_context[:, scalar_schema.POT.value] = pot_float / scale
+        scalar_context[:, scalar_schema.MIN_RAISE.value] = (
             self._env_tensor("min_raise", indices).to(self.dtype) / scale
         )
-        scalar_context[:, ValueScalarContext.LOG_STACK_DEPTH_BB.value] = torch.log(
+        scalar_context[:, scalar_schema.LOG_STACK_DEPTH_BB.value] = torch.log(
             stack_depth_bb.clamp_min(1.0)
         ) / self._log_max_stack_bb_tensor
-        scalar_context[:, ValueScalarContext.LOG_POT_BB.value] = torch.log1p(pot_bb)
+        scalar_context[:, scalar_schema.LOG_POT_BB.value] = torch.log1p(pot_bb)
         self._fill_value_betting_context(
             scalar_context,
             to_act,
             pot_float,
             scale,
             indices,
+            scalar_schema,
         )
 
         player_context = self._player_context(

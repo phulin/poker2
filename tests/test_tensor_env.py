@@ -313,6 +313,9 @@ def test_n2_independence_and_mixed_actions():
 def test_repeat_interleave_copies_rows():
     env = _make_env(N=3, seed=321, device="cpu")
     env.pot[:] = torch.tensor([10, 20, 30], dtype=torch.long, device=env.device)
+    env.last_aggressive_amount[:] = torch.tensor(
+        [5, 15, 25], dtype=torch.long, device=env.device
+    )
     env.stacks += torch.arange(3, device=env.device).view(-1, 1)
 
     repeats = torch.tensor([2, 0, 1])  # CPU tensor on purpose
@@ -323,6 +326,9 @@ def test_repeat_interleave_copies_rows():
 
     expected = torch.tensor([0, 0, 2], device=env.device)
     torch.testing.assert_close(repeated.pot, env.pot[expected])
+    torch.testing.assert_close(
+        repeated.last_aggressive_amount, env.last_aggressive_amount[expected]
+    )
     torch.testing.assert_close(repeated.stacks, env.stacks[expected])
     torch.testing.assert_close(repeated.deck, env.deck[expected])
     assert torch.equal(repeated.has_folded, env.has_folded[expected])
@@ -330,6 +336,23 @@ def test_repeat_interleave_copies_rows():
     original_pot = env.pot[0].item()
     repeated.pot[0] = torch.tensor(-999, dtype=torch.long, device=env.device)
     assert env.pot[0].item() == original_pot
+
+
+def test_last_aggressive_amount_tracks_raise_and_resets_on_street_close():
+    env = _make_env(N=1, seed=322, device="cpu")
+    assert env.last_aggressive_amount.item() == env.bb
+
+    amounts, legal = env.legal_bins_amounts_and_mask()
+    raise_bins = torch.where(legal[0, 2:-1])[0] + 2
+    assert raise_bins.numel() > 0
+    raise_bin = int(raise_bins[0].item())
+    actor = int(env.to_act.item())
+    env.step_bins(torch.tensor([raise_bin]), amounts, legal)
+    assert env.last_aggressive_amount.item() == env.committed[0, actor].item()
+
+    env.step_bins(torch.tensor([1]))
+    assert env.actions_this_round.item() == 0
+    assert env.last_aggressive_amount.item() == 0
 
 
 def test_gather_rows_matches_repeat_interleave_cuda():
@@ -356,6 +379,7 @@ def test_gather_rows_matches_repeat_interleave_cuda():
         "last_to_act",
         "pot",
         "min_raise",
+        "last_aggressive_amount",
         "actions_this_round",
         "actions_last_round",
         "acted_since_reset",

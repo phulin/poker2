@@ -778,6 +778,7 @@ class FusedSparseCFREvaluator(SparseCFREvaluator):
             "last_to_act",
             "pot",
             "min_raise",
+            "last_aggressive_amount",
             "actions_this_round",
             "actions_last_round",
             "acted_since_reset",

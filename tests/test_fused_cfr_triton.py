@@ -224,6 +224,7 @@ def test_same_street_constructor_marks_implicit_allin_river_call(
     assert env.is_allin[1].tolist() == [True, True]
     assert env.done[1].item() is True
     assert env.street[1].item() == 4
+    assert env.last_aggressive_amount[1].item() == 0
     assert allin_leaf[1].item() is False
 
 

@@ -25,6 +25,7 @@ if triton is not None:
         src_last_to_act,
         src_pot,
         src_min_raise,
+        src_last_aggressive_amount,
         src_actions_this_round,
         src_actions_last_round,
         src_deck_pos,
@@ -38,6 +39,7 @@ if triton is not None:
         dst_last_to_act,
         dst_pot,
         dst_min_raise,
+        dst_last_aggressive_amount,
         dst_actions_this_round,
         dst_actions_last_round,
         dst_deck_pos,
@@ -63,6 +65,11 @@ if triton is not None:
         tl.store(dst_pot + dst, tl.load(src_pot + src, mask=mask), mask=mask)
         tl.store(
             dst_min_raise + dst, tl.load(src_min_raise + src, mask=mask), mask=mask
+        )
+        tl.store(
+            dst_last_aggressive_amount + dst,
+            tl.load(src_last_aggressive_amount + src, mask=mask),
+            mask=mask,
         )
         tl.store(
             dst_actions_this_round + dst,
@@ -248,6 +255,7 @@ def gather_env_rows_into_triton(
         src_env.last_to_act,
         src_env.pot,
         src_env.min_raise,
+        src_env.last_aggressive_amount,
         src_env.actions_this_round,
         src_env.actions_last_round,
         src_env.deck_pos,
@@ -261,6 +269,7 @@ def gather_env_rows_into_triton(
         dst_env.last_to_act,
         dst_env.pot,
         dst_env.min_raise,
+        dst_env.last_aggressive_amount,
         dst_env.actions_this_round,
         dst_env.actions_last_round,
         dst_env.deck_pos,
