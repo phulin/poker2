@@ -1,0 +1,144 @@
+{
+  "after": {
+    "buffer_rng_hash": "4f682ea54797993860625c1584952bd9d1f8e9a7f7d691eb893e7e57379b67ca",
+    "checkpoint_step": 7399,
+    "env_rng_hash": "d2e3c1504a94b9ec6b26c494bb6ef87f55664dcb13f3f21e3b54d41f795c0ed8",
+    "global_cpu_rng_hash": "d403d0f6dd60589107b0f55b9217e93cd1d2773dcdc2ae4b558b05853441c81d",
+    "global_cuda_rng_hashes": [
+      "aefdce03def94ffed42159e55677ec20e91200e1981f25b1f271b6fd99c3c263"
+    ],
+    "last_extra": 272,
+    "model_hash": "12ede8fb6a49dbe3c39318c23865c05d242934a1b18a4fc9ff64a9c7a47e257d",
+    "pbs_beliefs_hash": "9e1812eb65284a85a8dab716b53530f83baf1ad42bb9cbd71dc871a948d24ba7",
+    "pbs_env_hash": "d909dcb6eddf1d5ec09edfbd8b3475e994a7814b3b52f8c35a37b6e8f3ca5283",
+    "policy_replay": {
+      "position": 59739,
+      "sample_hash": "453eb49be633dfc1b218c7cf5580dc258e5736a805c1522195ab887e7ea83c9b",
+      "size": 50498,
+      "start": 9241
+    },
+    "trainer_rng_hash": "3f5542d8bf605eb08ab116a05db6c62df5fc6be5520b2e2011e96473034219c0",
+    "value_replay": {
+      "position": 1892,
+      "sample_hash": "a52826ff94b3811981b10d6ed44238e6b8c8da1e3497e023c6be8d9afc0944d2",
+      "size": 1548,
+      "start": 344
+    }
+  },
+  "before": {
+    "buffer_rng_hash": "4f682ea54797993860625c1584952bd9d1f8e9a7f7d691eb893e7e57379b67ca",
+    "checkpoint_step": 7399,
+    "env_rng_hash": "5592425f8a376c2edf876400355c3fd32a9e5fe7f47ac6eba1405f5c66be1b93",
+    "global_cpu_rng_hash": "d403d0f6dd60589107b0f55b9217e93cd1d2773dcdc2ae4b558b05853441c81d",
+    "global_cuda_rng_hashes": [
+      "aefdce03def94ffed42159e55677ec20e91200e1981f25b1f271b6fd99c3c263"
+    ],
+    "last_extra": 350,
+    "model_hash": "12ede8fb6a49dbe3c39318c23865c05d242934a1b18a4fc9ff64a9c7a47e257d",
+    "pbs_beliefs_hash": null,
+    "pbs_env_hash": null,
+    "policy_replay": {
+      "position": 0,
+      "sample_hash": "ba8158d3be245ed0ef86a42989cf6630d00af271b5f3b65f357962285904b649",
+      "size": 0,
+      "start": 0
+    },
+    "trainer_rng_hash": "f5859858f579e28eb56e18a9398b7bb505b3ce3edb7c3f24f1604f3f64d6ed4e",
+    "value_replay": {
+      "position": 0,
+      "sample_hash": "9b437b754266ec9fc666b7b95f256518430e4b15823280f6bd83833384b78291",
+      "size": 0,
+      "start": 0
+    }
+  },
+  "evaluator_stats": {
+    "action_mix": {
+      "allin": 0.08335129171609879,
+      "bet": 0.08176755905151367,
+      "call": 0.6743359565734863,
+      "fold": 0.3014250695705414
+    },
+    "cfr_entropy": 0.3708687424659729,
+    "evaluator_root_nodes": 512.0,
+    "evaluator_street": 1.6953125,
+    "evaluator_total_nodes": 51153.0,
+    "evaluator_tree_depth": 5.0,
+    "gen_batch": {
+      "any_allin_frac": 0.427734375,
+      "commit_frac_mean": 0.0015006470493972301,
+      "facing_allin_frac": 0.0,
+      "refilled": 1.0,
+      "spr_lt1_frac": 0.427734375,
+      "spr_p50": 7.797260284423828,
+      "street_flop": 0.0,
+      "street_preflop": 0.15234375,
+      "street_river": 0.0,
+      "street_turn": 0.84765625
+    },
+    "local_exploitability": 0.0004192452470306307,
+    "local_exploitability_init": 0.21825632452964783,
+    "local_exploitability_init_mbbg": 41073.71484375,
+    "local_exploitability_init_mbbg_street": {
+      "preflop": 21824.62890625,
+      "turn": 44533.2265625
+    },
+    "local_exploitability_init_street": {
+      "preflop": 0.13655787706375122,
+      "turn": 0.2329394370317459
+    },
+    "local_exploitability_max": 0.0085489796474576,
+    "local_exploitability_mbbg": 68.08831787109375,
+    "local_exploitability_mbbg_street": {
+      "preflop": 0.21271835267543793,
+      "turn": 80.28716278076172
+    },
+    "local_exploitability_min": -4.945588383264976e-10,
+    "local_exploitability_street": {
+      "preflop": 1.466588287257764e-06,
+      "turn": 0.000494329840876162
+    },
+    "mean_positive_regret": 0.8210409283638,
+    "root_action_mix": {
+      "allin": 0.13037317991256714,
+      "bet": 0.24263706803321838,
+      "call": 0.775780439376831,
+      "fold": 0.0
+    },
+    "value_target_count": 434.0
+  },
+  "fresh_policy": {
+    "count": 2048,
+    "hash": "b009a1f3eaa95d6b532dda79bad026ef911bc1afd24954556fb00f67bd89741b",
+    "pot_mean": 7549.78076171875,
+    "pot_over_scale_mean": 0.5590517520904541,
+    "pot_over_scale_rms": 0.7379635572433472,
+    "pot_rms": 11984.2001953125,
+    "scale_mean": 14996.79296875,
+    "scale_rms": 17887.177734375,
+    "street_counts": [
+      2048,
+      0,
+      0,
+      0
+    ]
+  },
+  "fresh_value": {
+    "count": 1892,
+    "hash": "a85fa8fc4d2e6f412fb4f7567819edfeb1468e7a0058217b717b12a48a28c33a",
+    "pot_mean": 11426.2255859375,
+    "pot_over_scale_mean": 0.9613916873931885,
+    "pot_over_scale_rms": 1.3624076843261719,
+    "pot_rms": 21294.78125,
+    "scale_mean": 15053.5107421875,
+    "scale_rms": 18085.91015625,
+    "street_counts": [
+      512,
+      946,
+      434,
+      0
+    ],
+    "target_abs_mean": 0.006392671260982752,
+    "target_rms": 0.0276201032102108
+  },
+  "mode": "generate"
+}

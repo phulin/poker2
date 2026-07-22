@@ -1,0 +1,386 @@
+{
+  "before": {
+    "buffer_rng_hash": "4f682ea54797993860625c1584952bd9d1f8e9a7f7d691eb893e7e57379b67ca",
+    "checkpoint_step": 7399,
+    "env_rng_hash": "5592425f8a376c2edf876400355c3fd32a9e5fe7f47ac6eba1405f5c66be1b93",
+    "global_cpu_rng_hash": "d403d0f6dd60589107b0f55b9217e93cd1d2773dcdc2ae4b558b05853441c81d",
+    "global_cuda_rng_hashes": [
+      "aefdce03def94ffed42159e55677ec20e91200e1981f25b1f271b6fd99c3c263"
+    ],
+    "last_extra": 350,
+    "model_hash": "12ede8fb6a49dbe3c39318c23865c05d242934a1b18a4fc9ff64a9c7a47e257d",
+    "pbs_beliefs_hash": null,
+    "pbs_env_hash": null,
+    "policy_replay": {
+      "position": 0,
+      "sample_hash": "ba8158d3be245ed0ef86a42989cf6630d00af271b5f3b65f357962285904b649",
+      "size": 0,
+      "start": 0
+    },
+    "trainer_rng_hash": "f5859858f579e28eb56e18a9398b7bb505b3ce3edb7c3f24f1604f3f64d6ed4e",
+    "value_replay": {
+      "position": 0,
+      "sample_hash": "9b437b754266ec9fc666b7b95f256518430e4b15823280f6bd83833384b78291",
+      "size": 0,
+      "start": 0
+    }
+  },
+  "constructed": {
+    "action_from_parent": "d088b371385194d3a4ce13fd624d9a36725dc6c2ce0267b6900625e9b8769697",
+    "beliefs": "c2af94fa03c946d25909ca423559fc028cdfc3f693bdd7f5228bf386c35553a3",
+    "child_count": "5e48ff246f3e166da74a3165c4534ea54b86d4c46f9681e7fe9f70922b79e9a4",
+    "child_mask": "b241580be4e93e712366a4fb5b3a8885f95406cf59da6c713d7187bd94dea3f0",
+    "child_offsets": "acfa9b3165f0578741f8d8b44c2cb6f21e288a20f0933b76056e5fe5ca097407",
+    "cumulative_regrets": "e3604488653a42dae740ca94a0cf1089d03c116bc82cbf36e5bde150a3a82248",
+    "env": "82c0a7a3b92728a12087998831bcb6550ca22ba7c7a3b7b876cb9c68b9878701",
+    "env_field_finite": {
+      "_default_bet_bins_tensor": {
+        "dtype": "torch.float32",
+        "nonfinite_total": 0,
+        "shape": [
+          5
+        ]
+      },
+      "acted_since_reset": {
+        "child_max": 1,
+        "child_min": 1,
+        "dtype": "torch.bool",
+        "max": 1,
+        "min": 0,
+        "shape": [
+          67289
+        ]
+      },
+      "actions_last_round": {
+        "child_max": 5,
+        "child_min": 0,
+        "dtype": "torch.int64",
+        "max": 5,
+        "min": 0,
+        "shape": [
+          67289
+        ]
+      },
+      "actions_this_round": {
+        "child_max": 5,
+        "child_min": 0,
+        "dtype": "torch.int64",
+        "max": 5,
+        "min": 0,
+        "shape": [
+          67289
+        ]
+      },
+      "arange_n": {
+        "child_max": 67288,
+        "child_min": 512,
+        "dtype": "torch.int64",
+        "max": 67288,
+        "min": 0,
+        "shape": [
+          67289
+        ]
+      },
+      "board_indices": {
+        "child_max": -1,
+        "child_min": -1,
+        "dtype": "torch.int64",
+        "max": -1,
+        "min": -1,
+        "shape": [
+          67289,
+          5
+        ]
+      },
+      "board_onehot": {
+        "child_max": 1,
+        "child_min": 1,
+        "dtype": "torch.bool",
+        "max": 1,
+        "min": 0,
+        "shape": [
+          67289,
+          5,
+          4,
+          13
+        ]
+      },
+      "button": {
+        "child_max": 1,
+        "child_min": 0,
+        "dtype": "torch.int64",
+        "max": 1,
+        "min": 0,
+        "shape": [
+          67289
+        ]
+      },
+      "card_onehot_cache": {
+        "dtype": "torch.bool",
+        "max": 1,
+        "min": 0,
+        "shape": [
+          52,
+          4,
+          13
+        ]
+      },
+      "chips_placed": {
+        "child_max": 39732,
+        "child_min": 50,
+        "dtype": "torch.int64",
+        "max": 39732,
+        "min": 50,
+        "shape": [
+          67289,
+          2
+        ]
+      },
+      "committed": {
+        "child_max": 39732,
+        "child_min": 0,
+        "dtype": "torch.int64",
+        "max": 39732,
+        "min": 0,
+        "shape": [
+          67289,
+          2
+        ]
+      },
+      "deck": {
+        "child_max": 51,
+        "child_min": 0,
+        "dtype": "torch.int64",
+        "max": 51,
+        "min": 0,
+        "shape": [
+          67289,
+          9
+        ]
+      },
+      "deck_pos": {
+        "child_max": 4,
+        "child_min": 4,
+        "dtype": "torch.int64",
+        "max": 4,
+        "min": 4,
+        "shape": [
+          67289
+        ]
+      },
+      "done": {
+        "child_max": 1,
+        "child_min": 0,
+        "dtype": "torch.bool",
+        "max": 1,
+        "min": 0,
+        "shape": [
+          67289
+        ]
+      },
+      "has_folded": {
+        "child_max": 1,
+        "child_min": 1,
+        "dtype": "torch.bool",
+        "max": 1,
+        "min": 0,
+        "shape": [
+          67289,
+          2
+        ]
+      },
+      "hole_indices": {
+        "child_max": 51,
+        "child_min": 0,
+        "dtype": "torch.int64",
+        "max": 51,
+        "min": 0,
+        "shape": [
+          67289,
+          2,
+          2
+        ]
+      },
+      "hole_onehot": {
+        "child_max": 1,
+        "child_min": 1,
+        "dtype": "torch.bool",
+        "max": 1,
+        "min": 0,
+        "shape": [
+          67289,
+          2,
+          2,
+          4,
+          13
+        ]
+      },
+      "is_allin": {
+        "child_max": 1,
+        "child_min": 0,
+        "dtype": "torch.bool",
+        "max": 1,
+        "min": 0,
+        "shape": [
+          67289,
+          2
+        ]
+      },
+      "last_aggressive_amount": {
+        "child_max": 39732,
+        "child_min": 0,
+        "dtype": "torch.int64",
+        "max": 39732,
+        "min": 0,
+        "shape": [
+          67289
+        ]
+      },
+      "last_board_indices": {
+        "child_max": -1,
+        "child_min": -1,
+        "dtype": "torch.int64",
+        "max": -1,
+        "min": -1,
+        "shape": [
+          67289,
+          5
+        ]
+      },
+      "last_to_act": {
+        "child_max": 1,
+        "child_min": 0,
+        "dtype": "torch.int64",
+        "max": 1,
+        "min": 0,
+        "shape": [
+          67289
+        ]
+      },
+      "min_raise": {
+        "child_max": 2575,
+        "child_min": 100,
+        "dtype": "torch.int64",
+        "max": 2575,
+        "min": 100,
+        "shape": [
+          67289
+        ]
+      },
+      "pot": {
+        "child_max": 79464,
+        "child_min": 150,
+        "dtype": "torch.int64",
+        "max": 79464,
+        "min": 150,
+        "shape": [
+          67289
+        ]
+      },
+      "scale": {
+        "dtype": "torch.float32",
+        "nonfinite_children": 0,
+        "nonfinite_roots": 0,
+        "nonfinite_total": 0,
+        "shape": [
+          67289
+        ]
+      },
+      "stacks": {
+        "child_max": 39682,
+        "child_min": 0,
+        "dtype": "torch.int64",
+        "max": 39682,
+        "min": 0,
+        "shape": [
+          67289,
+          2
+        ]
+      },
+      "starting_stacks": {
+        "child_max": 39732,
+        "child_min": 1080,
+        "dtype": "torch.int64",
+        "max": 39732,
+        "min": 1080,
+        "shape": [
+          67289,
+          2
+        ]
+      },
+      "street": {
+        "child_max": 1,
+        "child_min": 0,
+        "dtype": "torch.int64",
+        "max": 1,
+        "min": 0,
+        "shape": [
+          67289
+        ]
+      },
+      "to_act": {
+        "child_max": 1,
+        "child_min": 0,
+        "dtype": "torch.int64",
+        "max": 1,
+        "min": 0,
+        "shape": [
+          67289
+        ]
+      },
+      "winner": {
+        "child_max": 1,
+        "child_min": -1,
+        "dtype": "torch.int64",
+        "max": 1,
+        "min": -1,
+        "shape": [
+          67289
+        ]
+      }
+    },
+    "env_tensors": {
+      "_default_bet_bins_tensor": "b3a8824f5c4ed762b40a24e606b7e6c71a831e0f184ff3006f1f3480656093a9",
+      "acted_since_reset": "ac000d969f5620c1c92c9a5d4621d59dfc3271afcaf5192eb3beccdb40621f73",
+      "actions_last_round": "6a46d991d9078bd232ff038fd851ffbddd65313850951a21816e47a9932fe7b6",
+      "actions_this_round": "e2a3222a3f832cba5e7f12b8ad84b83c8357a9df3a5b23cc7c5377a848b09808",
+      "arange_n": "983cb2c805cc2c1b761e2d2b901c384f4adcb6a93f36816808c18057b2c3d00e",
+      "board_indices": "220bb503ae928be46c7639437b5a0697a71e7daa88be79aa13e6aa25122aba3a",
+      "board_onehot": "93d579631f0c9f77f6819077bc8524f9778da06533cb69dd9eeae53d0d43a8b9",
+      "button": "5b5e0dfbcc624a94a55e85192a329781b317e99fa1bca8dba170bb208e579646",
+      "card_onehot_cache": "79ef11c693a666a4410a61612c11b3eb2dbc8ebf9defa7279c0b203df010e3d3",
+      "chips_placed": "297a1df0125644a5d4cec8c2e1913c60a347f0abf3dd3890596cdda2a9bd539b",
+      "committed": "5035a108a333c29e4d926ba6a872f9041068d9aed79d8daafc33367c91f240a5",
+      "deck": "1c44522ce549ddc42d6fc2ba75cf839574afd7f1818c16efc1ca9d47c7014f3e",
+      "deck_pos": "8ffcf11da9e27edd44b4818fa403d17d58e97e212e604ae662a575c01d775ef6",
+      "done": "f889c87d12015d6adae9c98ddb32eb35912225ea357048c56b5cd3d984d167f1",
+      "has_folded": "a45455c89b36b02d7b7dca20446a3120a3115425492e2023a06dc486a8718cd9",
+      "hole_indices": "55b93d5e4d798eb406f58051271470924390ba0866bc3ade55b562a84d38d46f",
+      "hole_onehot": "e274d7749c30abe71e00b3ee3c457fa365e3b03739f266712eea1fd24da8c597",
+      "is_allin": "03daecb6b29189d85e0f6a04d75bb08239b17e42c371630b3634467edd1ed46b",
+      "last_aggressive_amount": "71a6ab64a1b62062d099b9e4cdd315a576838c83919148517348025ec58413de",
+      "last_board_indices": "8624a2682b9ca7a64d92920e2bfc031392e05a462888582e5ac50eda0a9bcbbf",
+      "last_to_act": "06af1f7ce2c1a423db6d00222b27d11666f6009813f9fe717c87498f34a40ef1",
+      "min_raise": "cc0370ed7c1775e76e342bc88e8c58b1703b807da7b7fdf2f62c52c11240081f",
+      "pot": "7ded5d182b736c9436cb9d26761d852aa1dcba4be7310fa06dc12ca948b4866b",
+      "scale": "cf162316b3bc87858b092e8ea0e9d60c749d2fef34cc10384a8ee53cd835f40d",
+      "stacks": "80d4e7e82a1803a58c936c7caee750381a17fa7b5e531827a6a47232a3a8a987",
+      "starting_stacks": "d0a2d7c66ec33b61676f0d7ea639127440c71790b36a8e6553fe701a2889946d",
+      "street": "68493d4c7d427e07ad2203e7dd55f2cc44899262f760ba668881f2a4c1932428",
+      "to_act": "f935e6b0a8d2c46b8a6653f6c8f3770fb974b82e0f3bf6bb723e090c543446db",
+      "winner": "2335eac7c647613e2e35c7d2d580eeeecc1545dfccda640eaa2f5987f8827d41"
+    },
+    "latest_values": "37f773af853e4c57beb1a8ca75410ba3e0dd522d5a9ee359a9764c76f1c25aab",
+    "leaf_mask": "1da4587698510642e905239193e17b77c0f20cb95501d564fd71551e5d936e8c",
+    "legal_mask": "0ffc891010de13c0ce63e7d8c4ac5d46d33573110fe8a5a9faf9e16c73350e67",
+    "new_street_mask": "4863f04d166d15a75907d9588a28b97d7b7708c214df423873c1c6c1bbd26621",
+    "parent_index": "201494af1ccdf1eea66a68ec403c5b18ab45929dfd5ad1e2072e580254f58209",
+    "prev_actor": "66bedc75f32fb9d00bf5f306eb15c2d904709954389878739d69f46f403ae4d9",
+    "root_nodes": 512,
+    "self_reach": "59d47f400b58e1e17b04dfbf491138d79e6cc9bbe23a7766a3f0fadfa13b70e8",
+    "total_nodes": 67289,
+    "uniform_policy": "7e58c3e28a4c08d518eba007841d478be62c9d2664d9329bc8f9fe6c4c2c95d0",
+    "valid_mask": "bfd61b2e69eff1e5dc970e28f8fb0a9260ca7ed0a258944402b8bbdcc117c3f2"
+  },
+  "mode": "construct"
+}
