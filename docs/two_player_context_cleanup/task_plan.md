@@ -9,7 +9,7 @@ Track `last_aggressive_amount` in `HUNLTensorEnv` and remove constant or redunda
 - [x] Phase 3: Implement environment propagation and encoder/model layout changes
 - [x] Phase 4: Add focused regression tests
 - [x] Phase 5: Run verification and write the implementation report
-- [ ] Phase 6: Commit the scoped changes and launch a fresh W&B run from step 0
+- [x] Phase 6: Commit the scoped changes and launch a fresh W&B run from step 0
 
 ## Key Questions
 1. Which environment constructors, copies, gathers, resets, and action kernels must propagate `last_aggressive_amount`?
@@ -28,6 +28,10 @@ Track `last_aggressive_amount` in `HUNLTensorEnv` and remove constant or redunda
   heads-up schema or `last_aggressive_amount` paths.
 - Two existing compact-value-loss tests fail with `NameError: output` inside
   `RebelSupervisedLoss._forward_compact_value`; this is unrelated to context size.
+- The first fresh-run launch used resolved-config group paths for two Hydra
+  overrides; `checkpoint_dir` is flat and the optional run name must be appended
+  as `+wandb_name`. Corrected before trainer initialization, so no run or
+  checkpoint was created.
 
 ## Status
-**Currently in Phase 6** - Committing the scoped changes and launching the fresh run.
+**Complete** - Commit `dab97193`; fresh W&B run `ool717bi` completed step 0.

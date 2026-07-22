@@ -39,6 +39,9 @@ Reusable profiling, benchmark, data-prep, and diagnostic scripts. ReBeL Hydra sc
 - `launch_sturn_blocker_replications_20260712.sh`: Replicates baseline and blocker-aware S-turn variants across independent fixed-data seeds.
 - `launch_sturn_equity_input_experiments_20260712.sh`: Runs blocker-aware learned turn-equity input-head experiments on fixed turn data.
 - `launch_sturn_3epoch_optimizer_sweep_20260712.sh`: Queues three-epoch S-turn LR, schedule, warmup, and batch-size experiments on the fixed pregen dataset.
+- `launch_rebel_10k_from_o6vbd6ax.sh`: Reproduces the historical `o6vbd6ax` ReBeL launch settings with current configuration fields and a 10k-step horizon.
+- `launch_rebel_hu_context_v3_refold_fix.sh`: Records the historical fresh HU context-v3 launch associated with the fused-child folded-state investigation.
+- `launch_sturn_no_teb_experiments_20260713.sh`: Runs production-relative three-epoch S-turn no-turn-equity-baseline LR and cold output-head initialization-scale sweeps on fixed data.
 - `resume_sturn_3epoch_optimizer_sweep_20260712.sh`: Resumes the unfinished cheap S-turn optimizer sweep after completed trials, then runs the batch-size matrix.
 - `queue_sturn_3epoch_lr10_20260712.sh`: Waits for the active cheap S-turn sweep, then runs the three-epoch LR 0.01 cosine trial.
 - `pack_preflop_state_buckets.py`: Packs preflop public-state bucket datasets.
@@ -50,6 +53,7 @@ Reusable profiling, benchmark, data-prep, and diagnostic scripts. ReBeL Hydra sc
 - `probe_action_mix_bimodal.py`: Probes bimodality in action mixes.
 - `probe_cfr_fp_precision.py`: Probes CFR fp32 precision behavior.
 - `probe_eos_in_domain_beliefs.py`: Probes EOS values under in-domain beliefs.
+- `probe_rebel_resume_equivalence.py`: Hashes restored ReBeL state and compares the next generated batch or training step across independent checkpoint loads.
 - `profile_preflop_bi_outer_step.py`: Profiles preflop backward-induction outer steps.
 - `profile_showdown_kernel.py`: Profiles showdown kernels.
 - `profile_train_rebel.py`: Profiles the ReBeL training loop.
@@ -58,6 +62,7 @@ Reusable profiling, benchmark, data-prep, and diagnostic scripts. ReBeL Hydra sc
 - `run_sturn_pregen_sweep.py`: Runs controlled 500-step S-turn value experiments on a shared pregenerated turn dataset.
 - `smoke_sturn_streaming_epoch_pregen.py`: Simulates one double-buffered S-turn streaming epoch cycle from pregenerated GPU data and checks exact coverage/swap invariants.
 - `run_value_arch_proposal.py`: Runs value-only S_river BetterFFN architecture proposal tests on pregenerated postflop data.
+- `resume_rebel_hu_context_v2_from_7150.sh`: Reproduces the historical command used to resume the HU context-v2 run from its step-7150 checkpoint.
 - `sample_preflop_continuation_beliefs.py`: Samples preflop continuation belief cascades.
 - `shuffle_preflop_street_closed_states.py`: Shuffles preflop street-closed state datasets.
 - `sweep_preflop_value_lr_bs.py`: Runs preflop value LR/batch-size sweeps.

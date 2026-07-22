@@ -18,6 +18,7 @@ This repository trains and evaluates neural-network-based heads-up no-limit Texa
 - `uv.lock`: Locked Python dependency graph for `uv`.
 - `showdown_evaluator_deliverable.md`: Summary of the reusable showdown evaluator package deliverable, verification commands, and remaining exact-evaluator follow-up.
 - `outputs_cleanup_task_plan.md`, `outputs_cleanup_notes.md`, `outputs_cleanup_audit.md`: Read-only disk-retention audit plan, supporting findings, and deletion tiers for generated artifacts under `outputs/`.
+- `sturn_no_teb_experiments.md`: Implementation and validation summary for the no-turn-equity-baseline S-turn LR and output-head initialization-scale experiments.
 
 ### Top-level directories
 - `src/`: Python source root for the `p2` package.
