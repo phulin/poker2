@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from p2.core.structured_config import StreetValueHeads
 from p2.env.card_utils import NUM_HANDS
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.models.mlp.mlp_features import MLPFeatures
@@ -21,6 +22,7 @@ class DummyEnv:
         self.num_actions = int(num_actions)
         self.states = torch.arange(base_state, base_state + self.N, dtype=torch.float32)
         self.street = torch.zeros(self.N, dtype=torch.long)
+        self.last_aggressive_amount = torch.zeros(self.N, dtype=torch.long)
         rows = torch.arange(self.N, dtype=torch.long).unsqueeze(1)
         cols = torch.arange(self.num_actions, dtype=torch.long).unsqueeze(0)
         self._legal_mask = (rows + cols) % 2 == 0
@@ -41,6 +43,7 @@ class DummyEnv:
         self.copy_history.append((src.clone(), dest.clone()))
         self.states[dest] = src_env.states[src]
         self.street[dest] = src_env.street[src]
+        self.last_aggressive_amount[dest] = src_env.last_aggressive_amount[src]
 
     def reset(self, indices: torch.Tensor | None = None) -> None:
         if indices is None:
@@ -52,6 +55,7 @@ class DummyEnv:
         self.reset_history.append(ids.clone())
         self.states[ids] = -1.0
         self.street[ids] = 0
+        self.last_aggressive_amount[ids] = 0
 
     def legal_bins_mask(self) -> torch.Tensor:
         return self._legal_mask.clone()
@@ -93,6 +97,7 @@ class DummyEvaluator:
         num_players: int,
         num_actions: int,
         feature_dim: int = 3,
+        street_value_heads: StreetValueHeads = StreetValueHeads.post,
     ):
         self.device = torch.device("cpu")
         self.float_dtype = torch.float32
@@ -103,6 +108,9 @@ class DummyEvaluator:
         self.num_actions = num_actions
         self.hand_dim = NUM_HANDS
         self.feature_dim = feature_dim
+        self.cfg = SimpleNamespace(
+            model=SimpleNamespace(street_value_heads=street_value_heads)
+        )
 
         self.env = HUNLTensorEnv.from_proto(env_proto, num_envs=total_nodes)
         self.feature_matrix = torch.arange(
@@ -343,6 +351,36 @@ def test_rebel_data_generator_returns_fresh_batches(monkeypatch, env_proto):
     assert evaluator.pre_chance_value_batch_requests == [False]
 
 
+def test_rebel_data_generator_includes_pre_chance_batches_for_both_heads(
+    monkeypatch, env_proto
+):
+    monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
+    evaluator = DummyEvaluator(
+        env_proto=env_proto,
+        search_batch_size=2,
+        total_nodes=4,
+        num_players=2,
+        num_actions=env_proto.num_actions,
+        street_value_heads=StreetValueHeads.both,
+    )
+
+    buffer = DummyBuffer()
+    generator = RebelDataGenerator(
+        env_proto=env_proto,
+        evaluator=evaluator,
+        value_buffer=buffer,
+        policy_buffer=buffer,
+    )
+
+    fresh_value_batch, fresh_policy_batch = generator.generate_data(2)
+
+    assert fresh_value_batch is not None
+    assert fresh_policy_batch is not None
+    assert len(fresh_value_batch) == 2 * evaluator.search_batch_size
+    assert len(buffer.batches) == 3
+    assert evaluator.pre_chance_value_batch_requests == [True]
+
+
 def test_rebel_data_generator_can_use_sampled_roots(monkeypatch, env_proto):
     monkeypatch.setattr(HUNLTensorEnv, "from_proto", fake_from_proto)
     evaluator = DummyEvaluator(
@@ -546,6 +584,7 @@ def test_rebel_data_generator_state_dict_roundtrip(monkeypatch):
         warmup=False,
     )
     generator.current_pbs.env.street[:] = torch.tensor([1, 3])
+    generator.current_pbs.env.last_aggressive_amount[:] = torch.tensor([250, 700])
     generator.current_pbs.beliefs.fill_(0.25)
     generator.last_extra = 7
 
@@ -560,6 +599,10 @@ def test_rebel_data_generator_state_dict_roundtrip(monkeypatch):
 
     assert restored.last_extra == 7
     torch.testing.assert_close(restored.current_pbs.env.street, torch.tensor([1, 3]))
+    torch.testing.assert_close(
+        restored.current_pbs.env.last_aggressive_amount,
+        torch.tensor([250, 700]),
+    )
     torch.testing.assert_close(
         restored.current_pbs.beliefs, generator.current_pbs.beliefs
     )

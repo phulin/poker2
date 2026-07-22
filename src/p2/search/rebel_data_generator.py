@@ -3,6 +3,7 @@ import time
 
 import torch
 
+from p2.core.structured_config import StreetValueHeads
 from p2.env.card_utils import (
     PREFLOP_HANDS,
     preflop_class_multiplicity_tensor,
@@ -24,6 +25,7 @@ _ENV_STATE_FIELDS = (
     "last_to_act",
     "pot",
     "min_raise",
+    "last_aggressive_amount",
     "actions_this_round",
     "actions_last_round",
     "acted_since_reset",
@@ -64,6 +66,9 @@ class RebelDataGenerator:
         self.device = evaluator.device
         self.target_batch_size = int(evaluator.root_nodes)
         self.root_sampler = root_sampler
+        self.include_pre_chance_value_batches = (
+            evaluator.cfg.model.street_value_heads is StreetValueHeads.both
+        )
         self.store_replay = bool(store_replay)
         self.sample_continuations = bool(sample_continuations)
         self.record_batch_diag = bool(record_batch_diag)
@@ -285,8 +290,7 @@ class RebelDataGenerator:
             if log_progress:
                 elapsed = time.perf_counter() - progress_t0
                 print(
-                    f"[RebelDataGenerator:first-generate +{elapsed:.1f}s] "
-                    f"{message}",
+                    f"[RebelDataGenerator:first-generate +{elapsed:.1f}s] {message}",
                     flush=True,
                 )
 
@@ -337,14 +341,24 @@ class RebelDataGenerator:
                 trace("record_batch_diag done")
 
             need_policy_batch = self.store_replay or return_policy_batch
-            trace("training_data start")
-            value_batch, _, policy_batch = self.evaluator.training_data(
-                include_pre_chance_value_batch=False,
-                include_policy_batch=need_policy_batch,
+            need_pre_chance_value_batch = self.include_pre_chance_value_batches and (
+                self.store_replay or return_value_batch
             )
+            trace("training_data start")
+            value_batch, pre_chance_value_batch, policy_batch = (
+                self.evaluator.training_data(
+                    include_pre_chance_value_batch=need_pre_chance_value_batch,
+                    include_policy_batch=need_policy_batch,
+                )
+            )
+            if need_pre_chance_value_batch and pre_chance_value_batch is None:
+                raise RuntimeError(
+                    "street_value_heads=both requires a pre-chance value batch"
+                )
             trace(
                 "training_data done "
                 f"value={len(value_batch)} "
+                f"pre_chance={len(pre_chance_value_batch) if pre_chance_value_batch is not None else 0} "
                 f"policy={len(policy_batch) if policy_batch is not None else 0}"
             )
             if policy_batch is not None and policy_batch.policy_targets is not None:
@@ -365,6 +379,8 @@ class RebelDataGenerator:
                 trace("add replay start")
                 self.policy_buffer.add_batch(policy_batch)
                 self.value_buffer.add_batch(value_batch)
+                if pre_chance_value_batch is not None:
+                    self.value_buffer.add_batch(pre_chance_value_batch)
                 trace(
                     "add replay done "
                     f"value_buffer={len(self.value_buffer)} "
@@ -389,6 +405,8 @@ class RebelDataGenerator:
                     returned_policy_samples += len(policy_batch)
             if return_value_batch:
                 value_batches.append(value_batch)
+                if pre_chance_value_batch is not None:
+                    value_batches.append(pre_chance_value_batch)
 
             collected += len(value_batch)
             trace(f"generate loop collected={collected}")
