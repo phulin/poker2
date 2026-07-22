@@ -31,8 +31,7 @@ from run_value_arch_proposal import (
 
 
 DEFAULT_DATASET = Path(
-    "outputs/rebel_postflop/"
-    "sturn_value_500steps_1024000_300it_eturn300k_20260711"
+    "outputs/rebel_postflop/sturn_value_500steps_1024000_300it_eturn300k_20260711"
 )
 DEFAULT_HARD_VALIDATION = Path(
     "outputs/rebel_postflop/"
@@ -52,13 +51,9 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
     "belief_second_moment": {"model": {"belief_second_moment": True}},
     "range_stats": {"model": {"context_range_stats": True}},
     "board_mass": {"model": {"belief_board_mass_features": True}},
-    "board_conditioned": {
-        "model": {"belief_low_rank_board_conditioned": True}
-    },
+    "board_conditioned": {"model": {"belief_low_rank_board_conditioned": True}},
     "cross_range64": {"model": {"cross_range_rank": 64}},
-    "turn_blockers": {
-        "model": {"value_turn_range_equity_blockers": True}
-    },
+    "turn_blockers": {"model": {"value_turn_range_equity_blockers": True}},
     "turn_equity_feature_head": {
         "model": {"value_turn_range_equity_feature_head": True}
     },
@@ -282,6 +277,120 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "train": {"lr_schedule": "wsd", "lr_wsd_decay_fraction": 0.4}
     },
     "cheap_turn_lr40_cosine_warmup100": {"train": {"warmup_steps": 100}},
+    "no_teb_prod_lr2_cosine": {
+        "model": {"value_turn_range_equity_baseline": False},
+        "train": {
+            "learning_rate": 0.002,
+            "learning_rate_final": 0.0002,
+            "adamw_learning_rate": 0.0002,
+        },
+    },
+    "no_teb_prod_lr4_cosine": {
+        "model": {"value_turn_range_equity_baseline": False},
+        "train": {
+            "learning_rate": 0.004,
+            "learning_rate_final": 0.0004,
+            "adamw_learning_rate": 0.0004,
+        },
+    },
+    "no_teb_prod_lr8_cosine": {
+        "model": {"value_turn_range_equity_baseline": False},
+        "train": {
+            "learning_rate": 0.008,
+            "learning_rate_final": 0.0008,
+            "adamw_learning_rate": 0.0008,
+        },
+    },
+    # Output initialization is applied when the model is constructed. These
+    # trials intentionally skip E_turn initialization, which would otherwise
+    # overwrite the initialized S_turn value-head tensors.
+    "no_teb_cold_out0p00": {
+        "model": {
+            "value_turn_range_equity_baseline": False,
+            "value_output_init_scale": 0.0,
+        },
+        "train": {
+            "learning_rate": 0.004,
+            "learning_rate_final": 0.0004,
+            "adamw_learning_rate": 0.0004,
+        },
+        "initialize_from_checkpoint": False,
+    },
+    "no_teb_cold_out0p03": {
+        "model": {
+            "value_turn_range_equity_baseline": False,
+            "value_output_init_scale": 0.03,
+        },
+        "train": {
+            "learning_rate": 0.004,
+            "learning_rate_final": 0.0004,
+            "adamw_learning_rate": 0.0004,
+        },
+        "initialize_from_checkpoint": False,
+    },
+    "no_teb_cold_out0p10": {
+        "model": {
+            "value_turn_range_equity_baseline": False,
+            "value_output_init_scale": 0.1,
+        },
+        "train": {
+            "learning_rate": 0.004,
+            "learning_rate_final": 0.0004,
+            "adamw_learning_rate": 0.0004,
+        },
+        "initialize_from_checkpoint": False,
+    },
+    "no_teb_cold_out0p30": {
+        "model": {
+            "value_turn_range_equity_baseline": False,
+            "value_output_init_scale": 0.3,
+        },
+        "train": {
+            "learning_rate": 0.004,
+            "learning_rate_final": 0.0004,
+            "adamw_learning_rate": 0.0004,
+        },
+        "initialize_from_checkpoint": False,
+    },
+    "no_teb_cold_layers6_out0p30": {
+        "model": {
+            "num_value_layers": 6,
+            "value_turn_range_equity_baseline": False,
+            "value_output_init_scale": 0.3,
+        },
+        "train": {
+            "learning_rate": 0.004,
+            "learning_rate_final": 0.0004,
+            "adamw_learning_rate": 0.0004,
+        },
+        "initialize_from_checkpoint": False,
+    },
+    "no_teb_cold_layers10_out0p30": {
+        "model": {
+            "num_value_layers": 10,
+            "value_turn_range_equity_baseline": False,
+            "value_output_init_scale": 0.3,
+        },
+        "train": {
+            "learning_rate": 0.004,
+            "learning_rate_final": 0.0004,
+            "adamw_learning_rate": 0.0004,
+        },
+        "initialize_from_checkpoint": False,
+    },
+    "no_teb_cold_layers14_out0p30": {
+        "model": {
+            "num_value_layers": 14,
+            "value_turn_range_equity_baseline": False,
+            "value_output_init_scale": 0.3,
+        },
+        "train": {
+            "learning_rate": 0.004,
+            "learning_rate_final": 0.0004,
+            "adamw_learning_rate": 0.0004,
+        },
+        "initialize_from_checkpoint": False,
+    },
     "turn_equity_input_blockers_second": {
         "model": {
             "value_turn_range_equity_feature_head": True,
@@ -335,9 +444,7 @@ def _parse_args() -> argparse.Namespace:
         choices=sorted(EXPERIMENTS),
     )
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
-    parser.add_argument(
-        "--hard-validation", type=Path, default=DEFAULT_HARD_VALIDATION
-    )
+    parser.add_argument("--hard-validation", type=Path, default=DEFAULT_HARD_VALIDATION)
     parser.add_argument("--initialization", type=Path, default=DEFAULT_INITIALIZATION)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--steps", type=int, default=500)
@@ -474,10 +581,17 @@ def _run_experiment(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     trainer = RebelCFRTrainer(cfg, torch.device(cfg.device))
-    initialization_counts = _initialize_value_from_checkpoint(
-        trainer,
-        str(args.initialization),
-        substep_name=f"sturn_pregen_{experiment}",
+    initialize_from_checkpoint = bool(
+        EXPERIMENTS[experiment].get("initialize_from_checkpoint", True)
+    )
+    initialization_counts = (
+        _initialize_value_from_checkpoint(
+            trainer,
+            str(args.initialization),
+            substep_name=f"sturn_pregen_{experiment}",
+        )
+        if initialize_from_checkpoint
+        else None
     )
     weighting = EXPERIMENTS[experiment].get("batch_weighting")
     metadata = {
@@ -485,7 +599,9 @@ def _run_experiment(
         "settings": EXPERIMENTS[experiment],
         "dataset": str(dataset_dir),
         "dataset_manifest": manifest,
-        "initialization": str(args.initialization),
+        "initialization": (
+            str(args.initialization) if initialize_from_checkpoint else None
+        ),
         "initialization_counts": initialization_counts,
         "steps": int(args.steps),
         "batch_size": int(args.batch_size),
@@ -507,9 +623,7 @@ def _run_experiment(
             if int(args.train_cycle_examples) > 0
             else int(args.steps)
         )
-        batch = _with_batch_weight(
-            gpu_epoch.step_batch(step % cycle_steps), weighting
-        )
+        batch = _with_batch_weight(gpu_epoch.step_batch(step % cycle_steps), weighting)
         metrics = trainer.train_value_batch(batch, step)
         metrics["step_time_s"] = time.time() - started
         step_times.append(metrics["step_time_s"])
@@ -591,7 +705,11 @@ def main() -> None:
             f"steps*batch={required_examples}, "
             f"dataset={manifest['value_examples']}"
         )
-    if not args.initialization.exists():
+    needs_initialization = any(
+        bool(EXPERIMENTS[name].get("initialize_from_checkpoint", True))
+        for name in args.experiments
+    )
+    if needs_initialization and not args.initialization.exists():
         raise FileNotFoundError(args.initialization)
     if not args.hard_validation.exists():
         raise FileNotFoundError(args.hard_validation)
