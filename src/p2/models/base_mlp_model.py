@@ -55,7 +55,12 @@ class BaseMLPModel(nn.Module, ABC):
     def _mark_dynamic_batch(tensor: torch.Tensor | None) -> None:
         if tensor is None or tensor.dim() == 0:
             return
-        torch._dynamo.mark_dynamic(tensor, 0)
+        # maybe_mark_dynamic (a hint), not mark_dynamic (a hard constraint):
+        # keep the batch dim dynamic when possible, but let the compiler
+        # specialize+recompile for a rare shape (e.g. a subgame with exactly 4
+        # model-leaf nodes) instead of raising ConstraintViolationError and
+        # killing the run.
+        torch._dynamo.maybe_mark_dynamic(tensor, 0)
 
     @classmethod
     def _mark_feature_batch_dynamic(cls, features) -> None:
