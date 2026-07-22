@@ -386,6 +386,89 @@ def test_fused_initialize_subgame_invalidates_static_feature_cache() -> None:
     torch.testing.assert_close(cached.board, direct.board)
 
 
+def test_fused_subgame_construction_writes_child_has_folded() -> None:
+    """The fast same-street child writer must write has_folded.
+
+    The subgame arena is persistent and never zeroed, and
+    ``_postprocess_model_leaf_values`` reads ``env.has_folded`` on every
+    leaf-value query. If the writer left child rows unwritten, they would carry
+    frozen uninitialized bytes and silently override model leaf values with the
+    stack fold baseline. Poison the arena with all-folded, construct from a
+    non-folded root env, and assert every child inherited ``False``.
+    """
+    pytest.importorskip("triton")
+    from hydra import compose, initialize_config_dir
+
+    from p2.core.structured_config import Config
+    from p2.env.hunl_tensor_env import HUNLTensorEnv
+    from p2.models.mlp.rebel_ffn import RebelFFN
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+
+    conf_dir = str(
+        (__import__("pathlib").Path(__file__).parent.parent / "conf").resolve()
+    )
+    with initialize_config_dir(config_dir=conf_dir, version_base=None):
+        dcfg = compose(
+            config_name="config_rebel_cfr",
+            overrides=[
+                "num_envs=4",
+                "search.depth=3",
+                "search.iterations=2",
+                "search.warm_start_iterations=0",
+                "model.hidden_dim=32",
+                "model.ffn_dim=32",
+                "model.num_hidden_layers=1",
+                "model.num_value_layers=1",
+                "model.num_policy_layers=1",
+                "use_wandb=false",
+            ],
+        )
+    cfg = Config.from_dict_config(dcfg)
+    device = torch.device("cuda")
+
+    def make_env() -> HUNLTensorEnv:
+        torch.manual_seed(7)
+        env = HUNLTensorEnv(
+            num_envs=cfg.num_envs,
+            starting_stack=cfg.env.stack,
+            sb=cfg.env.sb,
+            bb=cfg.env.bb,
+            default_bet_bins=cfg.env.bet_bins,
+            device=device,
+            float_dtype=torch.float32,
+            flop_showdown=cfg.env.flop_showdown,
+        )
+        env.reset()
+        env.has_folded.zero_()  # live roots: nobody has folded
+        return env
+
+    model = RebelFFN(
+        input_dim=cfg.model.input_dim,
+        num_actions=cfg.model.num_actions,
+        hidden_dim=cfg.model.hidden_dim,
+        num_hidden_layers=cfg.model.num_hidden_layers,
+        detach_value_head=cfg.model.detach_value_head,
+        num_players=2,
+    ).to(device)
+    evaluator = FusedSparseCFREvaluator(
+        model=model, device=device, cfg=cfg, compile_model=False
+    )
+    root_indices = torch.arange(cfg.num_envs, dtype=torch.long, device=device)
+
+    # First construct allocates the persistent arena; then poison every cell.
+    evaluator.initialize_subgame(make_env(), root_indices)
+    evaluator._subgame_env.has_folded.fill_(True)
+
+    evaluator.initialize_subgame(make_env(), root_indices)
+    torch.cuda.synchronize()
+
+    child = evaluator.env.has_folded[evaluator.root_nodes : evaluator.total_nodes]
+    assert evaluator.total_nodes > evaluator.root_nodes, "expected child nodes"
+    assert not bool(child.any()), (
+        "child has_folded left stale: the fast writer must inherit parent folds"
+    )
+
+
 def _mirror_evaluator_state(src, dst) -> None:
     """Make two independently built evaluators start from the same subgame.
 

@@ -345,6 +345,7 @@ if triton is not None:
         stacks,
         committed,
         is_allin,
+        has_folded,
         starting_stacks,
         scale,
         chips_placed,
@@ -517,6 +518,20 @@ if triton is not None:
         tl.store(starting_stacks + dst * 2 + 1, start1, mask=write)
         tl.store(is_allin + dst * 2 + 0, allin0, mask=write)
         tl.store(is_allin + dst * 2 + 1, allin1, mask=write)
+        # Inherit folded state from the parent (same-street children are never
+        # newly folded: a fold is terminal via done/winner, not has_folded).
+        # Must be written -- the subgame arena is persistent and
+        # _postprocess_model_leaf_values reads has_folded on every leaf.
+        tl.store(
+            has_folded + dst * 2 + 0,
+            tl.load(has_folded + src * 2 + 0, mask=local_mask, other=0),
+            mask=write,
+        )
+        tl.store(
+            has_folded + dst * 2 + 1,
+            tl.load(has_folded + src * 2 + 1, mask=local_mask, other=0),
+            mask=write,
+        )
 
         tl.store(parent_index + dst, src, mask=write)
         tl.store(action_from_parent + dst, action, mask=write)
@@ -827,10 +842,9 @@ def write_children_same_street_triton_optimized_(
 ) -> None:
     """Write same-street children with one Triton lane per parent-action slot.
 
-    The fused CFR path never reads ``has_folded`` after construction, and card
-    state is copied by ``copy_child_cards_triton_`` immediately after this
-    writer. This kernel therefore avoids writing ``has_folded``, ``deck_pos``,
-    ``deck``, ``board_indices``, ``last_board_indices``, and ``hole_indices``.
+    Card state is copied by ``copy_child_cards_triton_`` immediately after this
+    writer, so this kernel avoids writing ``deck_pos``, ``deck``,
+    ``board_indices``, ``last_board_indices``, and ``hole_indices``.
     """
     if not triton_is_available():
         raise RuntimeError("Triton is not installed.")
@@ -852,6 +866,7 @@ def write_children_same_street_triton_optimized_(
         env.stacks,
         env.committed,
         env.is_allin,
+        env.has_folded,
         env.starting_stacks,
         env.scale,
         env.chips_placed,
