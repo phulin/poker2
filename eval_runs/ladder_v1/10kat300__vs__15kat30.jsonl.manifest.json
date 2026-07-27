@@ -1,0 +1,82 @@
+{
+  "agent_a": {
+    "checkpoint": "/home/user/poker2/eval_anchors/checkpoints-rebel-hu-context-v3@rebel_step_10000.pt",
+    "extra": {
+      "fidelity": {
+        "cfr_iterations": 300,
+        "dcfr_delay": 75,
+        "warm_start_iterations": 10
+      }
+    },
+    "id": "10k@300|/home/user/poker2/eval_anchors/checkpoints-rebel-hu-context-v3@rebel_step_10000.pt|step=9999",
+    "kind": "search",
+    "name": "10k@300",
+    "step": 9999
+  },
+  "agent_a_fidelity": {
+    "cfr_iterations": 300,
+    "dcfr_delay": 75,
+    "evaluator": "FusedSparseCFREvaluator",
+    "hand_dim": 1326,
+    "max_depth": 5,
+    "num_actions": 8,
+    "warm_start_iterations": 10
+  },
+  "agent_b": {
+    "checkpoint": "/home/user/poker2/eval_anchors/checkpoints-rebel-hu-context-v3-to15k@rebel_step_15000.pt",
+    "extra": {
+      "fidelity": {
+        "cfr_iterations": 30,
+        "dcfr_delay": 7,
+        "warm_start_iterations": 7
+      }
+    },
+    "id": "15k@30|/home/user/poker2/eval_anchors/checkpoints-rebel-hu-context-v3-to15k@rebel_step_15000.pt|step=14999",
+    "kind": "search",
+    "name": "15k@30",
+    "step": 14999
+  },
+  "agent_b_fidelity": {
+    "cfr_iterations": 30,
+    "dcfr_delay": 7,
+    "evaluator": "FusedSparseCFREvaluator",
+    "hand_dim": 1326,
+    "max_depth": 5,
+    "num_actions": 8,
+    "warm_start_iterations": 7
+  },
+  "env": {
+    "bb": 100,
+    "bet_bins": [
+      0.25,
+      0.5,
+      0.75,
+      1.0,
+      1.5
+    ],
+    "flop_showdown": false,
+    "mean_stack": 10000,
+    "sb": 50,
+    "stack_mode": "weighted_uniform_bb"
+  },
+  "eval_id": "10kat300__vs__15kat30",
+  "extra": {
+    "rung_a": {
+      "cfr_iterations": 300,
+      "checkpoint": "/home/user/poker2/eval_anchors/checkpoints-rebel-hu-context-v3@rebel_step_10000.pt",
+      "name": "10k@300"
+    },
+    "rung_b": {
+      "cfr_iterations": 30,
+      "checkpoint": "/home/user/poker2/eval_anchors/checkpoints-rebel-hu-context-v3-to15k@rebel_step_15000.pt",
+      "name": "15k@30"
+    }
+  },
+  "max_decisions": 40,
+  "num_games": 512,
+  "num_pairs": 256,
+  "records_path": "eval_runs/ladder_v1/10kat300__vs__15kat30.jsonl",
+  "schema_version": 1,
+  "scoring": "duplicate_real_hand_chips",
+  "seed": 1004
+}

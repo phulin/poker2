@@ -57,7 +57,7 @@ import torch
 
 from p2.env.hunl_tensor_env import HUNLTensorEnv
 from p2.eval.agents import CallAgent, FoldAgent, MatchAgent, RandomAgent
-from p2.eval.duplicate_match import MatchResult, play_duplicate_match
+from p2.eval.duplicate_match import MatchResult, play_duplicate_match, pool_results
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ANCHORS = REPO_ROOT / "eval_anchors"
@@ -262,7 +262,9 @@ def gate_self_play(result: MatchResult, detail: str, sigma: float = 3.0) -> Gate
 # --------------------------------------------------------------- match pooling
 
 
-# `pool_results` lives in the package so non-gate runners share it.
+# `pool_results` lives in the package so non-gate runners share it; it is
+# re-exported here because the gates are the harness's documented entry point.
+__all__ = ["pool_results"]
 
 
 def run_batched_match(

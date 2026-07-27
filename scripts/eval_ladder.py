@@ -86,7 +86,7 @@ def default_rungs() -> list[Rung]:
 
 
 @contextlib.contextmanager
-def loaded(rung: Rung, device: str, num_envs: int):
+def loaded(rung: Rung, device: str, num_envs: int, compile_mode: str = "off"):
     """Load a rung's agent, yield it, and free the GPU memory afterwards.
 
     Agents are loaded per matchup rather than all at once: each one carries a
@@ -100,6 +100,7 @@ def loaded(rung: Rung, device: str, num_envs: int):
         fidelity=rung.fidelity(),
         name=rung.name,
         num_envs=num_envs,
+        compile_mode=compile_mode,
     )
     evaluator_type = type(handle.trainer.cfr_evaluator).__name__
     if "Fused" not in evaluator_type:
@@ -125,6 +126,7 @@ def run_matchup(
     num_envs: int,
     seed: int,
     out_dir: Path,
+    compile_mode: str = "off",
 ) -> dict:
     """Play one matchup, streaming per-game records to JSONL."""
     tag = f"{rung_a.name}__vs__{rung_b.name}".replace("@", "at")
@@ -135,8 +137,8 @@ def run_matchup(
     records_path.unlink(missing_ok=True)
     started = time.time()
 
-    with loaded(rung_a, device, num_envs) as handle_a:
-        with loaded(rung_b, device, num_envs) as handle_b:
+    with loaded(rung_a, device, num_envs, compile_mode) as handle_a:
+        with loaded(rung_b, device, num_envs, compile_mode) as handle_b:
             writer = RecordWriter(records_path)
             parts = []
             for batch in range(batches):
@@ -201,12 +203,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--pairs-per-batch",
         type=int,
-        default=256,
+        default=512,
         help="duplicate pairs per batch; the match env holds 2x this many envs",
     )
-    parser.add_argument("--num-envs", type=int, default=512)
+    parser.add_argument("--num-envs", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--compile",
+        default="off",
+        choices=["off", "default", "static", "reduce-overhead", "max-autotune"],
+        help=(
+            "torch.compile mode for the leaf model. Anything but 'static' "
+            "compiles with dynamic=True. Enables recompile logging."
+        ),
+    )
     parser.add_argument(
         "--rungs",
         nargs="+",
@@ -214,6 +225,18 @@ def main(argv: list[str] | None = None) -> int:
         help="restrict the ladder to these rung names (default: all)",
     )
     args = parser.parse_args(argv)
+
+    if args.compile != "off":
+        # The active set shrinks every decision round, so a new batch size shows
+        # up on nearly every call. dynamic=True is supposed to keep that to one
+        # graph; this logging is how we find out whether it actually does rather
+        # than silently recompiling per shape and losing more than we gain.
+        torch._logging.set_logs(recompiles=True, graph_breaks=True)
+        # The fused evaluator swallows compile failures in a bare `except`, so
+        # a compiled run that silently fell back would otherwise look like a
+        # real "compile does not help" measurement.
+        torch._dynamo.config.suppress_errors = False
+        print(f"torch.compile={args.compile} (dynamic), recompile logging on")
 
     rungs = default_rungs()
     if args.rungs:
@@ -246,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             num_envs=args.num_envs,
             seed=args.seed,
             out_dir=args.out_dir,
+            compile_mode=args.compile,
         )
         rows.append(row)
         # Written after every matchup so an interrupted run resumes cleanly.

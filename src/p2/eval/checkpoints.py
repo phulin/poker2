@@ -118,12 +118,19 @@ def load_eval_config(
     device: str | torch.device = "cuda",
     fidelity: SearchFidelity = SearchFidelity(),
     num_envs: int = 32,
+    compile_mode: str = "off",
 ) -> Config:
     """Build an eval-mode ``Config`` for ``checkpoint``.
 
     ``resolved_config`` (a run's ``resolved_config.json``) wins over the config
     embedded in the checkpoint, because the embedded copy can predate config
     schema changes made mid-run.
+
+    ``compile_mode`` defaults to ``"off"`` because the match loop shrinks its
+    active set every decision round, so the model sees a new batch size on
+    nearly every call -- the worst case for ``torch.compile``. Any setting other
+    than ``"static"`` compiles with ``dynamic=True``, which is what makes
+    turning this on viable; measure before trusting it, and watch for recompiles.
     """
     if resolved_config is not None:
         container = json.loads(Path(resolved_config).read_text())
@@ -143,7 +150,7 @@ def load_eval_config(
     cfg.trueskill.enabled = False
     cfg.validation_set.enabled = False
     cfg.data.mode = "live"
-    cfg.model.compile = "off"
+    cfg.model.compile = str(compile_mode)
     cfg.num_envs = int(num_envs)
     cfg.train.replay_buffer_device = "cpu"
     cfg.train.replay_buffer_batches = 1
@@ -232,6 +239,7 @@ def load_search_agent(
     fidelity: SearchFidelity = SearchFidelity(),
     name: Optional[str] = None,
     num_envs: int = 32,
+    compile_mode: str = "off",
     cfg: Config | None = None,
 ) -> LoadedSearchAgent:
     """Load ``checkpoint`` into a ``SearchAgent`` ready to play real hands.
@@ -262,6 +270,7 @@ def load_search_agent(
             device=device,
             fidelity=fidelity,
             num_envs=num_envs,
+            compile_mode=compile_mode,
         )
 
     torch_device = device_from_config(cfg)

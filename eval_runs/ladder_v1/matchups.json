@@ -1,0 +1,74 @@
+[
+  {
+    "matchup": "initat300__vs__10kat300",
+    "a": "init@300",
+    "b": "10k@300",
+    "mean_bb_per_100": -512.2382640838623,
+    "se_bb_per_100": 97.28333887410619,
+    "num_games": 4096,
+    "num_pairs": 2048,
+    "seconds": 331.19886922836304,
+    "hands_per_second": 12.367191982095175,
+    "records": "eval_runs/ladder_v1/initat300__vs__10kat300.jsonl"
+  },
+  {
+    "matchup": "initat300__vs__15kat10",
+    "a": "init@300",
+    "b": "15k@10",
+    "mean_bb_per_100": -279.12793159484863,
+    "se_bb_per_100": 90.21177204355435,
+    "num_games": 4096,
+    "num_pairs": 2048,
+    "seconds": 170.2232871055603,
+    "hands_per_second": 24.062512654099752,
+    "records": "eval_runs/ladder_v1/initat300__vs__15kat10.jsonl"
+  },
+  {
+    "matchup": "initat300__vs__15kat30",
+    "a": "init@300",
+    "b": "15k@30",
+    "mean_bb_per_100": -189.96069431304932,
+    "se_bb_per_100": 67.64809423035004,
+    "num_games": 4096,
+    "num_pairs": 2048,
+    "seconds": 179.57546401023865,
+    "hands_per_second": 22.809352171666742,
+    "records": "eval_runs/ladder_v1/initat300__vs__15kat30.jsonl"
+  },
+  {
+    "matchup": "initat300__vs__15kat100",
+    "a": "init@300",
+    "b": "15k@100",
+    "mean_bb_per_100": -278.8032293319702,
+    "se_bb_per_100": 80.34630748395475,
+    "num_games": 4096,
+    "num_pairs": 2048,
+    "seconds": 212.63434624671936,
+    "hands_per_second": 19.263115636301844,
+    "records": "eval_runs/ladder_v1/initat300__vs__15kat100.jsonl"
+  },
+  {
+    "matchup": "initat300__vs__15kat300",
+    "a": "init@300",
+    "b": "15k@300",
+    "mean_bb_per_100": -495.47457695007324,
+    "se_bb_per_100": 97.94546586421234,
+    "num_games": 4096,
+    "num_pairs": 2048,
+    "seconds": 299.1715564727783,
+    "hands_per_second": 13.691141124148599,
+    "records": "eval_runs/ladder_v1/initat300__vs__15kat300.jsonl"
+  },
+  {
+    "matchup": "10kat300__vs__15kat10",
+    "a": "10k@300",
+    "b": "15k@10",
+    "mean_bb_per_100": 38.459235429763794,
+    "se_bb_per_100": 46.94285219943964,
+    "num_games": 4096,
+    "num_pairs": 2048,
+    "seconds": 346.11378622055054,
+    "hands_per_second": 11.834258452189905,
+    "records": "eval_runs/ladder_v1/10kat300__vs__15kat10.jsonl"
+  }
+]
