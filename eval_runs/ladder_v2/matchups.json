@@ -1,0 +1,38 @@
+[
+  {
+    "matchup": "initat300__vs__10kat300",
+    "a": "init@300",
+    "b": "10k@300",
+    "mean_bb_per_100": -344.549822807312,
+    "se_bb_per_100": 79.22613135139996,
+    "num_games": 6144,
+    "num_pairs": 3072,
+    "seconds": 439.4871971607208,
+    "hands_per_second": 13.979929426142382,
+    "records": "eval_runs/ladder_v2/initat300__vs__10kat300.jsonl"
+  },
+  {
+    "matchup": "initat300__vs__15kat10",
+    "a": "init@300",
+    "b": "15k@10",
+    "mean_bb_per_100": -418.09749603271484,
+    "se_bb_per_100": 69.35079862822388,
+    "num_games": 6144,
+    "num_pairs": 3072,
+    "seconds": 216.6159119606018,
+    "hands_per_second": 28.363567313178145,
+    "records": "eval_runs/ladder_v2/initat300__vs__15kat10.jsonl"
+  },
+  {
+    "matchup": "initat300__vs__15kat30",
+    "a": "init@300",
+    "b": "15k@30",
+    "mean_bb_per_100": -265.6627655029297,
+    "se_bb_per_100": 59.74520686505071,
+    "num_games": 6144,
+    "num_pairs": 3072,
+    "seconds": 235.7852168083191,
+    "hands_per_second": 26.0576132938595,
+    "records": "eval_runs/ladder_v2/initat300__vs__15kat30.jsonl"
+  }
+]
