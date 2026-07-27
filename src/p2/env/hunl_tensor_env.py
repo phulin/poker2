@@ -1033,6 +1033,13 @@ class HUNLTensorEnv:
         # Handle different actions.
         # Fold: immediate terminal, award pot to opp
         action_idx = torch.where(is_fold)[0]
+        # Record the fold on the acting seat. Heads-up, a fold is terminal
+        # (done + winner below), so nothing in this env needs has_folded to
+        # decide who is live -- but the field is part of the public state that
+        # from_proto and subgame construction copy onward, and a field that
+        # silently reads False everywhere is how the leaf-value corruption in
+        # 585a243f went unnoticed. Keep it truthful at the source.
+        self.has_folded[action_idx, actor_idx[action_idx]] = True
         # Winner is opp
         rewards[action_idx] = self.finish_and_assign_rewards(
             action_idx, other_idx[action_idx]

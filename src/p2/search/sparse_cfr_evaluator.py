@@ -311,6 +311,18 @@ class SparseCFREvaluator(CFREvaluator):
                 action_bins,
             )
             rewards, _, _ = env_next.step_bins(action_bins)
+            if self.num_players == 2:
+                # Heads-up children inherit the parent's has_folded: a fold is
+                # terminal via done/winner, so HU tree nodes keep it False. That
+                # is the convention the fused constructor encodes by inheriting
+                # rather than setting it (subgame_constructor_triton, 585a243f),
+                # and step_bins marking the folder would make the two
+                # constructors disagree on a field that both
+                # _postprocess_model_leaf_values and the loss live-player mask
+                # read. Multiway is the opposite case -- a fold there leaves the
+                # hand live, so the stepped value is the correct one and must
+                # not be overwritten.
+                env_next.has_folded.copy_(parent_env.has_folded[parent_local_indices])
             env_levels.append(env_next)
             parent_index_levels.append(parent_indices_level)
             action_levels.append(action_bins)

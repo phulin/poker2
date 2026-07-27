@@ -1773,3 +1773,32 @@ def test_deck_reset_forced_cards_on_env_subset():
     for row in range(4):
         assert torch.unique(env.deck[row, :9]).numel() == 9
     assert torch.equal(env.deck[:2], untouched), "reset leaked into untouched envs"
+
+
+def test_fold_sets_has_folded_on_the_acting_seat():
+    """A fold marks the folder, leaves the opponent live, and clears on reset.
+
+    Heads-up a fold is terminal, so nothing in this env needs has_folded to
+    decide who is live. But the field is copied onward by from_proto and by
+    subgame construction, and 585a243f showed what an unwritten has_folded
+    costs downstream: model leaf values were silently overridden by the stack
+    fold baseline wherever uninitialized bytes read True.
+    """
+    env = _make_env(N=4, sb=5, bb=10)
+    env.reset(force_button=torch.zeros(4, dtype=torch.long, device=env.device))
+    assert not env.has_folded.any(), "reset must clear has_folded"
+
+    actor = env.to_act.clone()
+    folders = torch.tensor([0, 2], device=env.device)
+    callers = torch.tensor([1, 3], device=env.device)
+    env.step_bins(torch.tensor([0, 1, 0, 1], device=env.device))
+
+    assert env.has_folded[folders, actor[folders]].all(), "folder not marked"
+    assert not env.has_folded[folders, 1 - actor[folders]].any(), (
+        "opponent of a folder must stay live"
+    )
+    assert not env.has_folded[callers].any(), "check/call must not mark a fold"
+    assert env.done[folders].all(), "a heads-up fold is terminal"
+
+    env.reset_done()
+    assert not env.has_folded.any(), "reset_done must clear has_folded"

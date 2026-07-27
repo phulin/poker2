@@ -2039,3 +2039,100 @@ def test_fused_deep_beliefs_matches_pytorch() -> None:
         root_index=root_index.contiguous(),
     )
     torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fused_and_sparse_constructors_agree_on_has_folded() -> None:
+    """Both subgame constructors must produce identical ``has_folded``.
+
+    They arrive at it by different mechanisms: the fused Triton writer
+    *inherits* the parent's value, while ``SparseCFREvaluator`` builds children
+    by stepping the env, which marks the folder. Heads-up those must agree --
+    a fold is terminal via done/winner, so HU tree nodes keep ``has_folded``
+    False -- because ``_postprocess_model_leaf_values`` substitutes the stack
+    fold baseline for model leaf values wherever it reads True, and the ReBeL
+    loss masks non-live players off the same field. A disagreement means the
+    two paths train on different data. See 585a243f for what that costs.
+    """
+    pytest.importorskip("triton")
+    from hydra import compose, initialize_config_dir
+
+    from p2.core.structured_config import Config
+    from p2.env.hunl_tensor_env import HUNLTensorEnv
+    from p2.models.mlp.rebel_ffn import RebelFFN
+    from p2.search.fused_sparse_cfr_evaluator import FusedSparseCFREvaluator
+    from p2.search.sparse_cfr_evaluator import SparseCFREvaluator
+
+    conf_dir = str(
+        (__import__("pathlib").Path(__file__).parent.parent / "conf").resolve()
+    )
+    with initialize_config_dir(config_dir=conf_dir, version_base=None):
+        dcfg = compose(
+            config_name="config_rebel_cfr",
+            overrides=[
+                "num_envs=4",
+                "search.depth=3",
+                "search.iterations=2",
+                "search.warm_start_iterations=0",
+                "model.hidden_dim=32",
+                "model.ffn_dim=32",
+                "model.num_hidden_layers=1",
+                "model.num_value_layers=1",
+                "model.num_policy_layers=1",
+                "use_wandb=false",
+            ],
+        )
+    cfg = Config.from_dict_config(dcfg)
+    device = torch.device("cuda")
+
+    def make_env() -> HUNLTensorEnv:
+        torch.manual_seed(7)
+        env = HUNLTensorEnv(
+            num_envs=cfg.num_envs,
+            starting_stack=cfg.env.stack,
+            sb=cfg.env.sb,
+            bb=cfg.env.bb,
+            default_bet_bins=cfg.env.bet_bins,
+            device=device,
+            float_dtype=torch.float32,
+            flop_showdown=cfg.env.flop_showdown,
+        )
+        env.reset()
+        env.has_folded.zero_()  # live roots: nobody has folded
+        return env
+
+    def make_model() -> RebelFFN:
+        torch.manual_seed(11)
+        return RebelFFN(
+            input_dim=cfg.model.input_dim,
+            num_actions=cfg.model.num_actions,
+            hidden_dim=cfg.model.hidden_dim,
+            num_hidden_layers=cfg.model.num_hidden_layers,
+            detach_value_head=cfg.model.detach_value_head,
+            num_players=2,
+        ).to(device)
+
+    root_indices = torch.arange(cfg.num_envs, dtype=torch.long, device=device)
+
+    fused = FusedSparseCFREvaluator(
+        model=make_model(), device=device, cfg=cfg, compile_model=False
+    )
+    fused.initialize_subgame(make_env(), root_indices)
+    torch.cuda.synchronize()
+
+    sparse = SparseCFREvaluator(model=make_model(), device=device, cfg=cfg)
+    sparse.initialize_subgame(make_env(), root_indices)
+
+    assert fused.total_nodes == sparse.total_nodes, "trees must have the same shape"
+    assert fused.total_nodes > fused.root_nodes, "expected child nodes"
+
+    fused_folded = fused.env.has_folded[: fused.total_nodes]
+    sparse_folded = sparse.env.has_folded[: sparse.total_nodes]
+    assert torch.equal(fused_folded, sparse_folded), (
+        "fused and sparse constructors disagree on has_folded: "
+        f"fused={int(fused_folded.any(dim=1).sum())} folded nodes, "
+        f"sparse={int(sparse_folded.any(dim=1).sum())}"
+    )
+    assert not bool(sparse_folded.any()), (
+        "heads-up tree nodes must keep has_folded False (a fold is terminal)"
+    )
