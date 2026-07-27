@@ -262,31 +262,7 @@ def gate_self_play(result: MatchResult, detail: str, sigma: float = 3.0) -> Gate
 # --------------------------------------------------------------- match pooling
 
 
-def pool_results(parts: Sequence[MatchResult]) -> MatchResult:
-    """Concatenate several matches into one result.
-
-    Search matches are run in small batches so GPU memory stays bounded while a
-    training job holds most of the card; the pair statistic is i.i.d. across
-    batches (each batch has its own seed), so pooling is just concatenation.
-    """
-    if len(parts) == 1:
-        return parts[0]
-    pair_diff = torch.cat([p.pair_diff_bb for p in parts])
-    reward = torch.cat([p.reward_bb for p in parts])
-    num_pairs = int(pair_diff.numel())
-    mean = float(pair_diff.mean().item())
-    std = float(pair_diff.std(unbiased=True).item()) if num_pairs > 1 else float("nan")
-    return MatchResult(
-        num_pairs=num_pairs,
-        num_games=int(reward.numel()),
-        pair_diff_bb=pair_diff,
-        pair_diff_stacks=torch.cat([p.pair_diff_stacks for p in parts]),
-        reward_bb=reward,
-        reward_stacks=torch.cat([p.reward_stacks for p in parts]),
-        mean_bb_per_100=100.0 * mean,
-        se_bb_per_100=100.0 * std / math.sqrt(num_pairs),
-        records=[r for p in parts for r in p.records],
-    )
+# `pool_results` lives in the package so non-gate runners share it.
 
 
 def run_batched_match(

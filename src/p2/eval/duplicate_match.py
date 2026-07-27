@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import torch
 
@@ -364,3 +364,32 @@ def match_manifest(
     if extra:
         manifest["extra"] = extra
     return manifest
+
+
+def pool_results(parts: Sequence[MatchResult]) -> MatchResult:
+    """Concatenate several matches into one result.
+
+    Long matches are run in batches so GPU memory stays bounded. The pair
+    statistic is i.i.d. across batches (each batch has its own seed), so pooling
+    is just concatenation -- but it has to be done on the pair differences, not
+    by averaging per-batch means, or unequal batch sizes would bias the mean and
+    the standard error would be computed from the wrong population.
+    """
+    if len(parts) == 1:
+        return parts[0]
+    pair_diff = torch.cat([p.pair_diff_bb for p in parts])
+    reward = torch.cat([p.reward_bb for p in parts])
+    num_pairs = int(pair_diff.numel())
+    mean = float(pair_diff.mean().item())
+    std = float(pair_diff.std(unbiased=True).item()) if num_pairs > 1 else float("nan")
+    return MatchResult(
+        num_pairs=num_pairs,
+        num_games=int(reward.numel()),
+        pair_diff_bb=pair_diff,
+        pair_diff_stacks=torch.cat([p.pair_diff_stacks for p in parts]),
+        reward_bb=reward,
+        reward_stacks=torch.cat([p.reward_stacks for p in parts]),
+        mean_bb_per_100=100.0 * mean,
+        se_bb_per_100=100.0 * std / math.sqrt(num_pairs),
+        records=[r for p in parts for r in p.records],
+    )
