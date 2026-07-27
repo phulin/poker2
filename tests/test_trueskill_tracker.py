@@ -1,3 +1,4 @@
+import inspect
 from types import SimpleNamespace
 
 import torch
@@ -249,13 +250,6 @@ class _FakeCompactShowdownEvaluator(_FakeShowdownEvaluator):
         return torch.stack((hero_values, -hero_values), dim=1)
 
 
-def _abs_belief(child_belief: torch.Tensor, last_actor: int) -> torch.Tensor:
-    belief = torch.empty_like(child_belief)
-    belief[1 - last_actor] = child_belief[0]
-    belief[last_actor] = child_belief[1]
-    return belief
-
-
 def _scalar_showdown_payoff(
     ev: _FakeShowdownEvaluator,
     child: torch.Tensor,
@@ -275,7 +269,6 @@ def test_two_prior_river_payoffs_batches_scalar_showdown_reference() -> None:
     ev_b = _FakeShowdownEvaluator([3, 5, 8], scale=1.7)
     a_children = torch.tensor([2, 7, 4], dtype=torch.long)
     b_children = torch.tensor([8, 3, 5], dtype=torch.long)
-    last_actor = torch.tensor([0, 1, 0], dtype=torch.long)
 
     raw = torch.arange(3 * 2 * NUM_HANDS, dtype=torch.float32).reshape(3, 2, NUM_HANDS)
     bel_a_post = (raw.remainder(23) + 1.0) / 1000.0
@@ -288,23 +281,16 @@ def test_two_prior_river_payoffs_batches_scalar_showdown_reference() -> None:
         b_children,
         bel_a_post,
         bel_b_post,
-        last_actor,
     )
 
+    # Evaluator beliefs are already in absolute (p0, p1) seat order, so the
+    # reference feeds them to the scalar showdown helper unpermuted.
     expected = torch.stack(
         [
             0.5
             * (
-                _scalar_showdown_payoff(
-                    ev_a,
-                    a_children[i],
-                    _abs_belief(bel_a_post[i], int(last_actor[i])),
-                )
-                + _scalar_showdown_payoff(
-                    ev_b,
-                    b_children[i],
-                    _abs_belief(bel_b_post[i], int(last_actor[i])),
-                )
+                _scalar_showdown_payoff(ev_a, a_children[i], bel_a_post[i])
+                + _scalar_showdown_payoff(ev_b, b_children[i], bel_b_post[i])
             )
             for i in range(a_children.numel())
         ]
@@ -330,7 +316,6 @@ def test_two_prior_river_payoffs_uses_fused_compact_showdown_path() -> None:
     ev_b = _FakeCompactShowdownEvaluator([3, 5, 8], scale=1.7)
     a_children = torch.tensor([2, 7, 4], dtype=torch.long)
     b_children = torch.tensor([8, 3, 5], dtype=torch.long)
-    last_actor = torch.tensor([0, 1, 0], dtype=torch.long)
 
     raw = torch.arange(3 * 2 * NUM_HANDS, dtype=torch.float32).reshape(3, 2, NUM_HANDS)
     bel_a_post = (raw.remainder(23) + 1.0) / 1000.0
@@ -343,23 +328,14 @@ def test_two_prior_river_payoffs_uses_fused_compact_showdown_path() -> None:
         b_children,
         bel_a_post,
         bel_b_post,
-        last_actor,
     )
 
     expected = torch.stack(
         [
             0.5
             * (
-                _compact_fake_showdown_payoff(
-                    ev_a,
-                    a_children[i],
-                    _abs_belief(bel_a_post[i], int(last_actor[i])),
-                )
-                + _compact_fake_showdown_payoff(
-                    ev_b,
-                    b_children[i],
-                    _abs_belief(bel_b_post[i], int(last_actor[i])),
-                )
+                _compact_fake_showdown_payoff(ev_a, a_children[i], bel_a_post[i])
+                + _compact_fake_showdown_payoff(ev_b, b_children[i], bel_b_post[i])
             )
             for i in range(a_children.numel())
         ]
@@ -368,3 +344,49 @@ def test_two_prior_river_payoffs_uses_fused_compact_showdown_path() -> None:
     assert ev_a.used_showdown_value_both
     assert ev_b.used_showdown_value_both
     assert_close(batched, expected)
+
+
+def test_two_prior_river_payoffs_uses_absolute_seat_beliefs() -> None:
+    """River payoffs must depend only on the absolute (p0, p1) ranges.
+
+    ``evaluator.beliefs`` is ``[node, player, hand]`` with ``player`` an
+    absolute seat index, so the payoff cannot depend on which seat acted last.
+    A regression that permutes the child beliefs by ``last_actor`` silently
+    swaps hero/villain ranges on roughly half of all river showdowns.
+    """
+    ev_a = _FakeShowdownEvaluator([2, 4, 7], scale=1.0)
+    ev_b = _FakeShowdownEvaluator([3, 5, 8], scale=1.7)
+    a_children = torch.tensor([2], dtype=torch.long)
+    b_children = torch.tensor([3], dtype=torch.long)
+
+    # Clearly distinguishable seat ranges: p0 sits on the low hands, p1 on the
+    # high hands, so a seat swap must change the hero-0 payoff.
+    p0_range = torch.zeros(NUM_HANDS)
+    p0_range[: NUM_HANDS // 2] = 2.0 / NUM_HANDS
+    p1_range = torch.zeros(NUM_HANDS)
+    p1_range[NUM_HANDS // 2 :] = 6.0 / NUM_HANDS
+
+    bel_post = torch.stack((p0_range, p1_range)).unsqueeze(0)  # [1, 2, NH]
+    swapped = bel_post.flip(1).contiguous()
+
+    payoff = _two_prior_river_payoffs(
+        ev_a, ev_b, a_children, b_children, bel_post, bel_post
+    )
+    payoff_swapped = _two_prior_river_payoffs(
+        ev_a, ev_b, a_children, b_children, swapped, swapped
+    )
+
+    # The implementation must consume the beliefs as absolute seats.
+    expected = 0.5 * (
+        _scalar_showdown_payoff(ev_a, a_children[0], bel_post[0])
+        + _scalar_showdown_payoff(ev_b, b_children[0], bel_post[0])
+    )
+    assert_close(payoff, expected.reshape(1))
+
+    # Sanity: the fixture really does distinguish the two seats, so a
+    # last-actor-dependent permutation would be observable.
+    assert not torch.allclose(payoff, payoff_swapped)
+
+    # The payoff has no last-actor input at all: any seat permutation keyed on
+    # the acting player would have to reappear in the signature.
+    assert "last_actor" not in inspect.signature(_two_prior_river_payoffs).parameters

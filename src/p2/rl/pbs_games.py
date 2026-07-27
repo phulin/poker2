@@ -46,18 +46,6 @@ def _build_action_to_child(ev, num_roots: int) -> torch.Tensor:
     return a2c
 
 
-def _beliefs_to_absolute(
-    child_beliefs: torch.Tensor,
-    last_actor: torch.Tensor,
-) -> torch.Tensor:
-    """Reorder child beliefs from (acting, other) to absolute (p0, p1)."""
-    abs_beliefs = torch.empty_like(child_beliefs)
-    rows = torch.arange(child_beliefs.shape[0], device=child_beliefs.device)
-    abs_beliefs[rows, 1 - last_actor] = child_beliefs[:, 0]
-    abs_beliefs[rows, last_actor] = child_beliefs[:, 1]
-    return abs_beliefs
-
-
 def _showdown_rows_for_children(
     ev, children: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -130,13 +118,16 @@ def _two_prior_river_payoffs(
     b_children: torch.Tensor,
     bel_a_post: torch.Tensor,  # [R, 2, NH] post-action belief in eval A's tree
     bel_b_post: torch.Tensor,  # [R, 2, NH] post-action belief in eval B's tree
-    last_actor: torch.Tensor,
 ) -> torch.Tensor:
-    """Compute candidate-perspective two-prior showdown payoffs in one batch."""
-    bel_a = _beliefs_to_absolute(bel_a_post, last_actor)
-    bel_b = _beliefs_to_absolute(bel_b_post, last_actor)
-    payoff_a = _showdown_range_payoffs(ev_a, a_children, bel_a)
-    payoff_b = _showdown_range_payoffs(ev_b, b_children, bel_b)
+    """Compute candidate-perspective two-prior showdown payoffs in one batch.
+
+    Evaluator beliefs are ``[node, player, hand]`` with ``player`` an absolute
+    seat index (see ``prev_actor = env.to_act[parent]`` in the sparse
+    evaluator), so the child beliefs are already in absolute (p0, p1) order
+    and must not be permuted by the last actor.
+    """
+    payoff_a = _showdown_range_payoffs(ev_a, a_children, bel_a_post)
+    payoff_b = _showdown_range_payoffs(ev_b, b_children, bel_b_post)
     return 0.5 * (payoff_a + payoff_b)
 
 
@@ -301,7 +292,6 @@ def play_public_belief_games(
                     b_child_active[river_pos],
                     post_belief_a[river_pos],
                     post_belief_b[river_pos],
-                    to_act_active[river_pos],
                 )
 
             # Drop done games from the active set and the propagated beliefs.
