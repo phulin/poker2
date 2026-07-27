@@ -389,7 +389,7 @@ def test_pregenerated_rebel_data_source_can_sample_directly_from_dataset(tmp_pat
     assert policy_buffer.sample_calls == 0
 
 
-def test_bootstrap_pregenerated_value_stages_into_live_replay_buffer(tmp_path):
+def test_bootstrap_pregenerated_value_keeps_resident_prefix(tmp_path):
     write_rebel_solved_dataset(
         tmp_path,
         value_batches=[_batch("value", 0, 5)],
@@ -434,16 +434,17 @@ def test_bootstrap_pregenerated_value_stages_into_live_replay_buffer(tmp_path):
 
     assert fresh is not None
     assert len(fresh) == 2
-    assert len(value_buffer) == 2
+    # The finite bootstrap value stream is held resident and replayed directly;
+    # it is never staged through the live replay buffer.
+    assert source._resident_value is not None
+    assert len(value_buffer) == 0
     assert source.bootstrap_value_available() == 2
     assert source.bootstrap_value_remaining() == 3
-    assert source._resident_value is None
 
     source.ensure_min_value_samples(4)
 
-    assert len(value_buffer) == 4
     assert source.bootstrap_value_available() == 4
     assert source.bootstrap_value_remaining() == 1
     sampled = source.sample_value(2, stratify_streets=None)
     assert len(sampled) == 2
-    assert int(value_buffer.sample_count.sum().item()) == 2
+    assert int(value_buffer.sample_count.sum().item()) == 0

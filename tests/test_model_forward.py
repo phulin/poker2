@@ -550,13 +550,15 @@ def test_compile_forward_modes_can_leave_policy_eager_with_static_values(monkeyp
     assert model.value_model._compiled_forward_value_static_base_dynamic_batch is False
 
 
-def test_dynamic_batch_marking_uses_strict_mark_dynamic(monkeypatch):
+def test_dynamic_batch_marking_uses_hint_maybe_mark_dynamic(monkeypatch):
+    # The batch dim is a hint, not a hard constraint: a rare shape must be
+    # allowed to recompile instead of raising ConstraintViolationError.
     calls = []
 
-    def fake_mark_dynamic(tensor, dim):
+    def fake_maybe_mark_dynamic(tensor, dim):
         calls.append((tensor.shape, dim))
 
-    monkeypatch.setattr(torch._dynamo, "mark_dynamic", fake_mark_dynamic)
+    monkeypatch.setattr(torch._dynamo, "maybe_mark_dynamic", fake_maybe_mark_dynamic)
 
     BaseMLPModel._mark_dynamic_batch(torch.zeros(3, 2))
 

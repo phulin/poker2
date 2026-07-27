@@ -240,6 +240,9 @@ def test_cfr_train_step_logs_schedule_and_cfr_iterations():
     trainer._apply_schedules = lambda step: None
     trainer._update_model = lambda step: {"loss": 0.0}
     trainer.model = nn.Module()
+    # Not a bootstrap-pregenerated source, so train_step takes the normal
+    # _update_model path.
+    trainer.data_source = None
     trainer.optimizer = type("_Opt", (), {})()
     trainer.optimizer.param_groups = [{"lr": 1e-3}]
     trainer.cfr_evaluator = type("_Evaluator", (), {"cfr_iterations": 400})()

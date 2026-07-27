@@ -1216,6 +1216,7 @@ class RebelSupervisedLoss(nn.Module):
 
     def _forward_compact_value(
         self,
+        output: ModelOutput,
         hand_values: torch.Tensor,
         value_targets: torch.Tensor,
         batch: RebelBatch,
@@ -1254,6 +1255,13 @@ class RebelSupervisedLoss(nn.Module):
             "entropy": zero,
             "permutation_loss": zero,
         }
+        # No board is dealt preflop, so every compact 169 class is playable.
+        allowed_hands_float = torch.ones(
+            hand_values.shape[0],
+            PREFLOP_HANDS,
+            dtype=hand_values.dtype,
+            device=device,
+        )
         self._add_aux_value_losses(
             result,
             output,
@@ -1534,7 +1542,9 @@ class RebelSupervisedLoss(nn.Module):
         device = hand_values.device
         value_targets = batch.value_targets.to(dtype=hand_values.dtype)
         if hand_values.shape[-1] == PREFLOP_HANDS:
-            return self._forward_compact_value(hand_values, value_targets, batch)
+            return self._forward_compact_value(
+                output, hand_values, value_targets, batch
+            )
         _, allowed_hands_float, unblocked_mass = self._base_weights(batch)
 
         value_weights = self._value_weights(

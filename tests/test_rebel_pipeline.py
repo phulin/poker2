@@ -459,12 +459,14 @@ def test_rebel_cfr_trainer_bootstrap_pregenerated_samples_replay_buffer(
     metrics = trainer.train_step(0)
 
     assert captured_batches
-    assert trainer.value_buffer is not None
-    assert len(trainer.value_buffer) >= cfg.train.batch_size
-    assert int(trainer.value_buffer.sample_count.sum().item()) >= cfg.train.batch_size
-    assert trainer.data_source._resident_value is None
+    # Bootstrap value data stays resident in the data source (it is finite and
+    # replayed directly), so it is sampled from there, not the live replay buffer.
+    assert trainer.data_source._resident_value is not None
+    assert all(len(batch) == cfg.train.batch_size for batch in captured_batches)
+    available = trainer.data_source.bootstrap_value_available()
+    assert available >= cfg.train.batch_size
     assert metrics["bootstrap_pregenerated_value_only"] == 1.0
-    assert metrics["value_buffer_size"] == len(trainer.value_buffer)
+    assert metrics["value_buffer_size"] == available
 
 
 def test_rebel_cfr_trainer_pregenerated_resume_matches_uninterrupted(tmp_path):

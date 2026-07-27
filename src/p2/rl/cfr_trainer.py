@@ -966,14 +966,33 @@ class RebelCFRTrainer:
             nonlinearity=cfg.model.nonlinearity,
         )
         if int(cfg.model.preflop_hand_dim) == 169:
-            if preflop_context_in_dim is not None:
-                common["context_in_dim"] = int(preflop_context_in_dim)
+            # The compact 169-hand trunks are boardless, so they take only the
+            # architecture options below; every board/street-conditioned option
+            # in `common` is postflop-only and unsupported there.
+            compact_common = {
+                key: common[key]
+                for key in (
+                    "hidden_dim",
+                    "range_hidden_dim",
+                    "ffn_dim",
+                    "num_hidden_layers",
+                    "num_policy_layers",
+                    "num_value_layers",
+                    "num_players",
+                    "shared_trunk",
+                    "enforce_zero_sum",
+                    "board_interaction_dim",
+                    "policy_rank",
+                    "policy_hand_bias_rank",
+                    "nonlinearity",
+                )
+            }
             if cfg.model.preflop_model_type in {
                 PreflopModelType.transformer,
                 PreflopModelType.gated_token_mixer,
             }:
                 token_common = dict(
-                    common,
+                    compact_common,
                     transformer_heads=int(cfg.model.preflop_transformer_heads),
                     range_slot_moment_slots=int(
                         cfg.model.preflop_range_slot_moment_slots
@@ -1000,14 +1019,16 @@ class RebelCFRTrainer:
                         **token_common,
                     ),
                 )
+            if preflop_context_in_dim is not None:
+                compact_common["context_in_dim"] = int(preflop_context_in_dim)
             return BetterSplitFFN(
                 policy_model=BetterPreflopPolicyFFN(
-                    num_actions=model_num_actions, **common
+                    num_actions=model_num_actions, **compact_common
                 ),
                 value_model=BetterPreflopValueFFN(
                     num_actions=1,
                     value_heads=cfg.model.street_value_heads,
-                    **common,
+                    **compact_common,
                 ),
             )
         return BetterSplitFFN(
