@@ -172,3 +172,6 @@ profile_output*.txt
 /profiler_logs/
 /website/.wrangler/
 spots.pt
+
+# Hardlinked checkpoint anchors for offline evaluation (large binaries).
+/eval_anchors/
