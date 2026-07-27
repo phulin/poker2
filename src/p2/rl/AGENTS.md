@@ -6,7 +6,7 @@ Reinforcement learning and ReBeL training support: PPO losses, replay buffers, o
 - `agent_snapshot.py`: Snapshot wrapper for frozen agents.
 - `cfr_trainer.py`: ReBeL CFR supervised trainer.
 - `checkpoint_io.py`: Shared ReBeL checkpoint helpers.
-- `rebel_loop.py`: Shared ReBeL training loop runner.
+- `rebel_loop.py`: Shared ReBeL training loop runner, plus the checkpoint retention policy (`checkpoints_to_delete` / `cleanup_old_checkpoints`) that keeps periodic eval anchors.
 - `losses.py`: PPO, CFR distillation, and ReBeL supervised losses.
 - `optimizers.py`: Optimizer construction helpers.
 - `self_play.py`: SelfPlayTrainer and model-history support.

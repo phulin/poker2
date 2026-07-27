@@ -29,6 +29,7 @@ Reusable profiling, benchmark, data-prep, and diagnostic scripts. ReBeL Hydra sc
 - `eturn_distill_lr_sweep.py`: Runs fixed E-turn distillation learning-rate sweeps.
 - `eflop_distill_lr_sweep.py`: Runs E-flop distillation learning-rate sweeps.
 - `eturn_distill_mab_search.py`: Runs E-turn distillation bandit searches.
+- `eval_calibration_gates.py`: Runs the calibration gates for the real-hand duplicate eval harness (fold-bot exactness, self-play symmetry, duplicate-coupling measurement, known-gap sanity) and prints a pass/fail table.
 - `evaluate_rebel_value_loss.py`: Evaluates value loss for ReBeL checkpoints.
 - `evaluate_rebel_value_loss_from_resolved.py`: Evaluates value loss for ReBeL checkpoints using a run's saved `resolved_config.json` to reconstruct the exact model/config.
 - `extract_preflop_street_closed_states.py`: Extracts preflop street-closed public states.

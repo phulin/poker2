@@ -13,6 +13,7 @@ Python unit and integration tests for environments, rules, models, training util
 - `test_bins_configurable.py`: Configurable bet-bin tests.
 - `test_card_utils.py`: Card and combo utility tests.
 - `test_cfr_manager.py`: CFR manager tests.
+- `test_checkpoint_retention.py`: Checkpoint deletion/eval-anchor retention policy tests.
 - `test_chance_node_helper.py`: Chance-node helper tests.
 - `test_dcfr.py`: DCFR utility tests.
 - `test_dred_pool.py`: DReD opponent-pool tests.
@@ -24,6 +25,8 @@ Python unit and integration tests for environments, rules, models, training util
 - `test_env_helpers.py`: Environment helper tests.
 - `test_env_rewards.py`: Environment reward tests.
 - `test_env_round_closure.py`: Environment round-closure tests.
+- `test_eval_calibration_gates.py`: Model-free calibration-gate tests for `scripts/eval_calibration_gates.py` (fold-bot exactness, self-play symmetry, coupling report, batch pooling); the checkpoint/GPU gates skip without CUDA or `eval_anchors/`.
+- `test_eval_duplicate_match.py`: CPU-only tests for `p2.eval` — scripted match agents, mirrored deck construction, duplicate pair math, and per-game record round-trip.
 - `test_evaluate_rebel_value_loss.py`: Value-loss evaluator tests.
 - `test_fused_cfr_triton.py`: Fused CFR Triton tests.
 - `test_high_exploitability_save.py`: High-exploitability artifact tests.

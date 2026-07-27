@@ -12,6 +12,7 @@ This is the main Python package for P2. It contains the HUNL environments, neura
 - `core/`: Shared interfaces and structured configuration dataclasses/enums.
 - `encoding/`: Action-bin encoding and legal-action mask helpers.
 - `env/`: HUNL game state, tensorized environments, hand rules, and analysis helpers.
+- `eval/`: Real-hand, real-chip duplicate (mirrored) match evaluation with per-game JSONL outcome records.
 - `models/`: Shared model utilities plus CNN, MLP/TRM, and transformer model families.
 - `rl/`: PPO/self-play, ReBeL training buffers, opponent pools, losses, and rating helpers.
 - `search/`: CFR/DCFR evaluators, public belief states, chance handling, and Triton fused kernels.
