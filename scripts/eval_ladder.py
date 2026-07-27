@@ -22,6 +22,24 @@ Every game is written to JSONL so ratings can be refit offline without
 replaying poker. Matchups are resumable: a completed matchup is skipped on a
 re-run, so this can be interrupted.
 
+Measured throughput (A100, 10k@300 vs 15k@300, steady-state marginal rate
+excluding agent load), which is what the defaults are set from:
+
+    num_envs   256 -> 5.2 hands/s
+    num_envs   512 -> 6.2 hands/s
+    num_envs  1024 -> 6.3 hands/s
+
+Returns are flat past 512 and the card is nowhere near full, so this is not
+memory-bound. ``torch.compile`` was measured too: with ``dynamic=True`` it
+recompiles only a handful of times and breaks no graphs, but it changes the
+steady-state rate by nothing and costs ~160s of warmup *per matchup*. The leaf
+model forward is simply not the bottleneck -- the fused Triton CFR kernels are.
+Leave ``--compile off`` unless that changes.
+
+Throughput is strongly matchup-dependent: matches involving the untrained
+control run far faster because those games end sooner, so never compare rates
+across different matchups.
+
 Usage:
     uv run python scripts/eval_ladder.py --out-dir eval_runs/ladder_v1 --batches 8
 """
