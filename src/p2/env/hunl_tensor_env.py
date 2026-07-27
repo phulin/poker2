@@ -321,6 +321,7 @@ class HUNLTensorEnv:
         env_indices: Optional[torch.Tensor] = None,
         force_button: Optional[torch.Tensor] = None,
         force_deck: Optional[torch.Tensor] = None,
+        force_starting_stacks: Optional[torch.Tensor] = None,
     ) -> None:
         """Reset the environment.
 
@@ -329,6 +330,11 @@ class HUNLTensorEnv:
             force_button: Optional[torch.Tensor] - Force button for each environment.
             force_deck: Optional[torch.Tensor] - Force deck for each environment.
                 Shape: [num_reset, 1-9]. If shorter than 9, the rest of the deck is shuffled.
+            force_starting_stacks: Optional[torch.Tensor] - Force per-seat starting
+                stacks (before blinds). Shape: [num_reset, 2]. When omitted the
+                stacks are sampled from the configured stack mode as usual. Used by
+                duplicate (mirrored) evaluation, which needs both halves of a pair
+                to share the exact same chip configuration.
         """
         if self.debug_step_table:
             print("=" * 49 + " RESET " + "=" * 49)
@@ -358,17 +364,25 @@ class HUNLTensorEnv:
         p_bb = 1 - button
 
         if force_deck is not None:
-            # guarantees swaps only go forward in deck. sorted has sorted[i] >= i.
-            force_deck_sorted = force_deck.sort(dim=1)[0]
-            for i in range(forced):
-                decks[ids, i] = decks[ids, force_deck_sorted[:, i]]
-                decks[ids, force_deck_sorted[:, i]] = decks[ids, i]
-            # now unsort the forced portion.
-            decks[ids, :forced] = force_deck
+            # Rebuild each row as [forced cards, every other card exactly once].
+            # The forced cards must be distinct within a row; a repeat would
+            # leave one of the trailing cards free to collide with the prefix.
+            #
+            # Indexing here is row-local: `decks` has one row per *reset* env,
+            # not one row per env id, so `ids` must not be used to index it.
+            rows = torch.arange(num_reset, device=self.device)
+            used = torch.zeros(num_reset, 52, dtype=torch.bool, device=self.device)
+            used[rows[:, None], force_deck] = True
+            # A stable argsort of the 0/1 mask lists the unused cards first, in
+            # ascending order, then the used ones. Shapes stay static, so this
+            # costs no host sync (unlike boolean-mask indexing).
+            unused_first = used.to(torch.uint8).argsort(dim=1, stable=True)
+            decks = torch.cat((force_deck, unused_first[:, : 52 - forced]), dim=1)
 
         # Pick enough of the remaining cards to get to 9 cards.
         assert forced <= 9
         left_to_shuffle = 9 - forced
+        # NB: must stay a view -- the shuffle below writes back through it.
         decks_left = decks[:, forced:]
         if left_to_shuffle > 0:
             random_vals = torch.rand(
@@ -391,7 +405,17 @@ class HUNLTensorEnv:
         _c1_2 = cards[:, 3]
 
         # Sample and store starting stacks for the environments being reset
-        starting_stacks = self._sample_starting_stacks(num_reset)
+        if force_starting_stacks is not None:
+            if tuple(force_starting_stacks.shape) != (num_reset, 2):
+                raise ValueError(
+                    "force_starting_stacks must have shape [num_reset, 2], got "
+                    f"{tuple(force_starting_stacks.shape)}"
+                )
+            starting_stacks = force_starting_stacks.to(
+                device=self.device, dtype=torch.long
+            )
+        else:
+            starting_stacks = self._sample_starting_stacks(num_reset)
         self.starting_stacks[ids] = starting_stacks
         self.scale[ids] = starting_stacks.min(dim=1).values.to(self.float_dtype)
 

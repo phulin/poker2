@@ -1707,5 +1707,69 @@ def test_deck_reset_forced_cards():
                 f"Environment {i}: Invalid card values in deck {deck.tolist()}"
             )
 
+    assert duplicates_found == 0, (
+        f"{duplicates_found}/1024 dealt decks contain a duplicate card"
+    )
+
     # Check that we still have every possible card
     assert torch.unique(env.deck.flatten()).numel() == 52
+
+
+def test_deck_reset_partial_forcing_never_duplicates():
+    """Forcing fewer than 9 cards must still deal 9 distinct cards.
+
+    Regression: the old implementation's "swap" wrote the source value twice
+    (the second line re-read what the first had just written), so the card at
+    the destination position was destroyed and the source card was left
+    duplicated further down the deck. Forcing all 9 cards hid it because the
+    prefix was overwritten wholesale; forcing 5 produced an illegal deal --
+    a hole card also appearing on the board -- about 37% of the time.
+    """
+    env = _make_env(N=8, seed=7)
+    generator = torch.Generator(device="cpu").manual_seed(11)
+
+    for forced in range(10):
+        for _ in range(25):
+            if forced == 0:
+                env.reset()
+            else:
+                force_deck = torch.stack(
+                    [
+                        torch.randperm(52, generator=generator)[:forced]
+                        for _ in range(env.N)
+                    ]
+                ).to(env.device)
+                env.reset(force_deck=force_deck)
+
+            for row in range(env.N):
+                deal = env.deck[row, :9]
+                assert torch.unique(deal).numel() == 9, (
+                    f"forced={forced}: duplicate card in deal {deal.tolist()}"
+                )
+                assert torch.all((deal >= 0) & (deal < 52))
+                if forced:
+                    assert torch.equal(deal[:forced], force_deck[row]), (
+                        f"forced={forced}: prefix {deal[:forced].tolist()} != "
+                        f"{force_deck[row].tolist()}"
+                    )
+
+
+def test_deck_reset_forced_cards_on_env_subset():
+    """force_deck with env_indices must address rows, not env ids.
+
+    Regression: the forcing block indexed `decks` (one row per *reset* env)
+    with global env ids, which silently touched the wrong rows -- or raised --
+    whenever a subset of envs was reset with a forced deck.
+    """
+    env = _make_env(N=4, seed=3)
+    env.reset()
+    untouched = env.deck[:2].clone()
+
+    force_deck = torch.tensor([[40, 41, 42], [43, 44, 45]], device=env.device)
+    env.reset(env_indices=torch.tensor([2, 3], device=env.device), force_deck=force_deck)
+
+    assert torch.equal(env.deck[2, :3], force_deck[0])
+    assert torch.equal(env.deck[3, :3], force_deck[1])
+    for row in range(4):
+        assert torch.unique(env.deck[row, :9]).numel() == 9
+    assert torch.equal(env.deck[:2], untouched), "reset leaked into untouched envs"
