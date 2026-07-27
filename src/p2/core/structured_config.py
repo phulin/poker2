@@ -693,6 +693,10 @@ class Config:
     min_step_diff: int = 300
     k_factor: float = 1.0  # ELO K-factor for rating changes
     checkpoint_interval: int = 50
+    # Every Nth step checkpoint is kept forever as a fixed evaluation anchor
+    # (0 disables anchoring: only the newest step checkpoint is retained).
+    # Checkpoints are ~52MB, so a 15000-step run at 2000 keeps ~8 files (~400MB).
+    checkpoint_anchor_interval: int = 2000
     log_interval: int = 1
     eval_interval: int = 100
     checkpoint_dir: str = "checkpoints"
@@ -736,6 +740,20 @@ class Config:
     def __post_init__(self):
         if self.wandb_tags is None:
             self.wandb_tags = ["kbest", "poker", "ppo"]
+        # Anchors are matched by exact step number, so an anchor interval that
+        # is not a multiple of the save interval silently retains nothing.
+        if (
+            self.checkpoint_anchor_interval > 0
+            and self.checkpoint_interval > 0
+            and self.checkpoint_anchor_interval % self.checkpoint_interval != 0
+        ):
+            print(
+                "Warning: checkpoint_anchor_interval="
+                f"{self.checkpoint_anchor_interval} is not a multiple of "
+                f"checkpoint_interval={self.checkpoint_interval}; no step "
+                "checkpoint will ever land on an anchor boundary and no "
+                "evaluation anchors will be retained."
+            )
         # Derive action space size directly from the search schedule so search,
         # env, and model stay aligned on one global action id space.
         apply_action_schedule_to_config(self)

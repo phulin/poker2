@@ -3,7 +3,7 @@ from __future__ import annotations
 import glob
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import torch
@@ -14,46 +14,93 @@ from p2.rl.validation_set import RebelValueValidationSetEvaluator
 from p2.utils.training_utils import print_preflop_range_grid
 
 
-def cleanup_old_checkpoints(checkpoint_dir: str, current_path: str) -> None:
-    """Clean up old checkpoints, keeping only best_model.pt and latest checkpoint."""
-    actual_current_path = os.path.realpath(current_path)
+DEFAULT_CHECKPOINT_KEEP_NAMES = ("latest_model.pt", "best_model.pt")
 
+
+def _step_from_checkpoint_name(filename: str) -> int | None:
+    """Parse N out of ``rebel_step_<N>.pt``; return None for anything else."""
+    if not (filename.startswith("rebel_step_") and filename.endswith(".pt")):
+        return None
+    try:
+        return int(filename[11:-3])
+    except ValueError:
+        return None
+
+
+def checkpoints_to_delete(
+    checkpoint_paths: Iterable[str],
+    current_path: str,
+    anchor_interval: int = 0,
+    keep_names: Iterable[str] = DEFAULT_CHECKPOINT_KEEP_NAMES,
+) -> list[str]:
+    """Return the ``rebel_step_*.pt`` paths that economized cleanup should delete.
+
+    Pure function (no filesystem access) so the retention policy is testable.
+    Retention rule:
+      - ``rebel_step_<N>.pt`` with ``anchor_interval > 0 and N % anchor_interval == 0``
+        is a permanent evaluation anchor and is never deleted.
+      - the highest-numbered step checkpoint is kept (newest model).
+      - ``current_path`` and anything named in ``keep_names`` are always kept.
+      - malformed names (unparseable step numbers) are never deleted.
+      - ``anchor_interval == 0`` disables anchoring and reproduces the historical
+        "keep only the newest step checkpoint" behavior.
+
+    Disk cost: checkpoints are ~52MB each, so a 15000-step run at the default
+    interval of 2000 retains ~8 anchors (~400MB).
+    """
+    paths = list(checkpoint_paths)
+    protected_names = set(keep_names)
+    protected_names.add(os.path.basename(current_path))
+
+    steps: dict[str, int] = {}
+    for path in paths:
+        step = _step_from_checkpoint_name(os.path.basename(path))
+        if step is not None:
+            steps[path] = step
+
+    newest_path = max(steps, key=lambda path: steps[path], default=None)
+
+    to_delete = []
+    for path in paths:
+        if path == current_path or os.path.basename(path) in protected_names:
+            continue
+        if path == newest_path:
+            continue
+        step = steps.get(path)
+        if step is None:
+            # Unparseable name: leave it alone rather than guessing.
+            continue
+        if anchor_interval > 0 and step % anchor_interval == 0:
+            continue
+        to_delete.append(path)
+    return to_delete
+
+
+def cleanup_old_checkpoints(
+    checkpoint_dir: str,
+    current_path: str,
+    anchor_interval: int = 0,
+) -> None:
+    """Delete superseded step checkpoints, keeping best/latest/current and anchors.
+
+    See :func:`checkpoints_to_delete` for the retention rule and disk cost.
+    """
     if not os.path.exists(checkpoint_dir):
         return
 
     checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "rebel_step_*.pt"))
 
-    files_to_keep = {
-        os.path.join(checkpoint_dir, "latest_model.pt"),
-        os.path.join(checkpoint_dir, "best_model.pt"),
-        actual_current_path,
-    }
-
-    if checkpoint_files:
-        latest_step = -1
-        latest_checkpoint = None
-        for file_path in checkpoint_files:
-            filename = os.path.basename(file_path)
-            if filename.startswith("rebel_step_") and filename.endswith(".pt"):
-                try:
-                    step_num = int(filename[11:-3])
-                    if step_num > latest_step:
-                        latest_step = step_num
-                        latest_checkpoint = file_path
-                except ValueError:
-                    continue
-
-        if latest_checkpoint:
-            files_to_keep.add(latest_checkpoint)
-
     deleted_count = 0
-    for file_path in checkpoint_files:
-        if file_path not in files_to_keep:
-            try:
-                os.remove(file_path)
-                deleted_count += 1
-            except OSError as exc:
-                print(f"Warning: Could not delete {file_path}: {exc}")
+    for file_path in checkpoints_to_delete(
+        checkpoint_files,
+        os.path.realpath(current_path),
+        anchor_interval=anchor_interval,
+    ):
+        try:
+            os.remove(file_path)
+            deleted_count += 1
+        except OSError as exc:
+            print(f"Warning: Could not delete {file_path}: {exc}")
 
     if deleted_count > 0:
         print(f"Cleaned up {deleted_count} old checkpoint(s)")
@@ -134,7 +181,11 @@ def save_rebel_checkpoint_pair(
     )
 
     if cfg.economize_checkpoints:
-        cleanup_old_checkpoints(cfg.checkpoint_dir, ckpt_path)
+        cleanup_old_checkpoints(
+            cfg.checkpoint_dir,
+            ckpt_path,
+            anchor_interval=cfg.checkpoint_anchor_interval,
+        )
 
     print(f"Checkpoint saved at step {step + 1} -> {ckpt_path}")
     return ckpt_path
@@ -286,6 +337,7 @@ def run_training_loop(
 
 
 __all__ = [
+    "checkpoints_to_delete",
     "cleanup_old_checkpoints",
     "print_rebel_training_stats",
     "run_training_loop",
