@@ -18,6 +18,10 @@ more or less than a CFR iteration? If search budget dominates, then the
 exploitability of a depth-limited search agent is mostly a measurement of its
 iteration count, not of the value net underneath it.
 
+The default ladder is now the training-time axis over the full v3 lineage --
+init, 10k, 15k, 22k, every one of them at 300 CFR iterations. The search-budget
+rungs remain available by name via ``--rungs`` for the attribution question.
+
 Every game is written to JSONL so ratings can be refit offline without
 replaying poker. Matchups are resumable: a completed matchup is skipped on a
 re-run, so this can be interrupted.
@@ -69,6 +73,7 @@ RESOLVED_CONFIG = ANCHORS / "v3_resolved_config.json"
 CKPT_INIT = ANCHORS / "v3_init_seed0.pt"
 CKPT_10K = ANCHORS / "checkpoints-rebel-hu-context-v3@rebel_step_10000.pt"
 CKPT_15K = ANCHORS / "checkpoints-rebel-hu-context-v3-to15k@rebel_step_15000.pt"
+CKPT_22K = ANCHORS / "checkpoints-rebel-hu-context-v3-to22k@rebel_step_22000.pt"
 
 # The terminal training fidelity of this lineage; the reference iteration count.
 TERMINAL_ITERS = 300
@@ -83,24 +88,47 @@ class Rung:
     cfr_iterations: int
 
     def fidelity(self) -> SearchFidelity:
-        # warm_start must stay below the iteration count or the evaluator clamps
-        # it, which would silently change what the low-K rungs measure.
+        # Keep the lineage's training values (warm start 10, DCFR+ delay 80)
+        # whenever they fit under the iteration count -- that is what "fidelity"
+        # means here, and a rung at the terminal budget must reproduce training
+        # exactly. Only the deliberately-starved low-K rungs scale down, and
+        # they must: a delay at or above K would disable DCFR+ entirely and a
+        # warm start above K gets clamped by the evaluator, either of which
+        # would silently change what those rungs measure.
+        iters = self.cfr_iterations
         return SearchFidelity(
-            cfr_iterations=self.cfr_iterations,
-            warm_start_iterations=min(10, max(1, self.cfr_iterations // 4)),
-            dcfr_delay=min(80, max(1, self.cfr_iterations // 4)),
+            cfr_iterations=iters,
+            warm_start_iterations=10 if iters > 40 else max(1, iters // 4),
+            dcfr_delay=80 if iters > 160 else max(1, iters // 4),
         )
 
 
-def default_rungs() -> list[Rung]:
+def all_rungs() -> list[Rung]:
+    """Every rung this script knows about, on both axes.
+
+    The training-time rungs all sit at ``TERMINAL_ITERS`` so that a match
+    between two of them varies only the value net. The search-budget rungs all
+    share one checkpoint so that a match between two of *them* varies only the
+    iteration count. Mixing the two axes in a single match is legitimate but
+    confounded, and the reported number should be read accordingly.
+    """
     return [
+        # Training-time axis (fixed search budget).
         Rung("init@300", CKPT_INIT, TERMINAL_ITERS),
         Rung("10k@300", CKPT_10K, TERMINAL_ITERS),
+        Rung("15k@300", CKPT_15K, TERMINAL_ITERS),
+        Rung("22k@300", CKPT_22K, TERMINAL_ITERS),
+        # Search-budget axis (fixed checkpoint).
         Rung("15k@10", CKPT_15K, 10),
         Rung("15k@30", CKPT_15K, 30),
         Rung("15k@100", CKPT_15K, 100),
-        Rung("15k@300", CKPT_15K, TERMINAL_ITERS),
     ]
+
+
+def default_rungs() -> list[Rung]:
+    """The training-time ladder: init -> 10k -> 15k -> 22k, all at 300 iters."""
+    keep = {"init@300", "10k@300", "15k@300", "22k@300"}
+    return [rung for rung in all_rungs() if rung.name in keep]
 
 
 @contextlib.contextmanager
@@ -240,7 +268,10 @@ def main(argv: list[str] | None = None) -> int:
         "--rungs",
         nargs="+",
         default=None,
-        help="restrict the ladder to these rung names (default: all)",
+        help=(
+            "rung names to play round-robin, overriding the default "
+            "training-time ladder; see all_rungs() for the full set"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -258,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rungs = default_rungs()
     if args.rungs:
-        by_name = {rung.name: rung for rung in rungs}
+        by_name = {rung.name: rung for rung in all_rungs()}
         unknown = sorted(set(args.rungs) - by_name.keys())
         if unknown:
             raise SystemExit(f"unknown rungs {unknown}; have {sorted(by_name)}")
